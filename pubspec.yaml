@@ -1,0 +1,25 @@
+name: oracledb
+description: A pure Dart Oracle Database driver implementing thin-mode TNS/TTC wire protocol. No Oracle Client required.
+version: 0.1.0
+repository: https://github.com/example/oracledb
+issue_tracker: https://github.com/example/oracledb/issues
+documentation: https://github.com/example/oracledb#readme
+
+environment:
+  sdk: ^3.0.0
+
+dependencies:
+  # Cryptography for authentication protocols (O5LOGON/O8LOGON)
+  pointycastle: ^4.0.0
+  # For arbitrary precision NUMBER support
+  decimal: ^3.0.2
+  # Collection utilities
+  collection: ^1.18.0
+  # Logging
+  logging: ^1.2.0
+  # For typed data and byte manipulation
+  typed_data: ^1.3.2
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.0

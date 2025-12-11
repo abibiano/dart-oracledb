@@ -1,0 +1,34 @@
+# Dart/Flutter
+.dart_tool/
+.packages
+build/
+pubspec.lock
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Coverage
+coverage/
+*.lcov
+
+# Generated
+*.g.dart
+*.freezed.dart
+*.mocks.dart
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+test/.test_coverage.dart
+
+# Local configuration
+*.local
+.env
+.env.*
+
+# Documentation
+doc/api/
