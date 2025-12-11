@@ -83,6 +83,13 @@ class TtcBuffer {
     _buffer[_writePos++] = value & 0xFF;
   }
 
+  /// Write a 16-bit unsigned integer (little-endian)
+  void writeUint16LE(int value) {
+    _ensureCapacity(2);
+    _buffer[_writePos++] = value & 0xFF;
+    _buffer[_writePos++] = (value >> 8) & 0xFF;
+  }
+
   /// Write a 32-bit unsigned integer (big-endian)
   void writeUint32(int value) {
     _ensureCapacity(4);

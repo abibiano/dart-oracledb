@@ -196,8 +196,11 @@ abstract final class TnsConstants {
   /// Protocol version for thin mode (Oracle 8.1+)
   static const int protocolVersion = 6;
 
-  /// TNS version for connect packet
-  static const int tnsVersion = 0x0136; // v310
+  /// TNS version for connect packet (matches python-oracledb reference)
+  static const int tnsVersion = 319; // TNS_VERSION_DESIRED
+
+  /// Minimum compatible TNS version
+  static const int tnsVersionMinimum = 300; // TNS_VERSION_MINIMUM
 }
 
 /// CLR (Chunked Long Raw) encoding constants.

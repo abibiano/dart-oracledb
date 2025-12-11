@@ -145,11 +145,9 @@ class OracleConnection {
         sid: sid,
       );
 
-      // Perform TTC protocol negotiation
-      await protocol.negotiate();
-
-      // Authenticate
-      await protocol.authenticate(
+      // Perform TTC protocol negotiation and authentication
+      // Uses Fast Auth for Oracle 23+ or traditional multi-step for older
+      await protocol.negotiateAndAuthenticate(
         user: user,
         password: password,
       );
