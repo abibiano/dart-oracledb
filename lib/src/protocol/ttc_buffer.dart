@@ -175,6 +175,77 @@ class TtcBuffer {
     writeUint8(ClrConstants.nullMarker);
   }
 
+  /// Write an unsigned integer in variable-length UB4 format.
+  ///
+  /// TTC UB4 encoding:
+  /// - value == 0: single byte 0
+  /// - value <= 0xFF: byte 1 + 1 byte value
+  /// - value <= 0xFFFF: byte 2 + 2 bytes big-endian
+  /// - value > 0xFFFF: byte 4 + 4 bytes big-endian
+  void writeUB4(int value) {
+    if (value == 0) {
+      writeUint8(0);
+    } else if (value <= 0xFF) {
+      writeUint8(1);
+      writeUint8(value);
+    } else if (value <= 0xFFFF) {
+      writeUint8(2);
+      writeUint16(value);
+    } else {
+      writeUint8(4);
+      writeUint32(value);
+    }
+  }
+
+  /// Write bytes with a length prefix.
+  ///
+  /// If length <= 252: single length byte + data
+  /// If length > 252: 0xFE marker, then chunks with UB4 lengths, terminated by UB4(0)
+  void writeBytesWithLength(Uint8List data) {
+    const tnsMaxShortLength = 252;
+    const tnsLongLengthIndicator = 0xFE;
+    const bufferChunkSize = 65536;
+
+    final numBytes = data.length;
+
+    if (numBytes <= tnsMaxShortLength) {
+      writeUint8(numBytes);
+      if (numBytes > 0) {
+        writeBytes(data);
+      }
+    } else {
+      // Long format: 0xFE marker, then chunked data
+      writeUint8(tnsLongLengthIndicator);
+      var start = 0;
+      var remaining = numBytes;
+      while (remaining > 0) {
+        final chunkLen =
+            remaining < bufferChunkSize ? remaining : bufferChunkSize;
+        writeUB4(chunkLen);
+        writeBytes(Uint8List.sublistView(data, start, start + chunkLen));
+        remaining -= chunkLen;
+        start += chunkLen;
+      }
+      writeUB4(0); // Terminator
+    }
+  }
+
+  /// Write a key-value pair in TTC format.
+  ///
+  /// Format: UB4(keyLen) + bytesWithLength(key) + UB4(valLen) + [bytesWithLength(val)] + UB4(flags)
+  void writeKeyValue(String key, String value, [int flags = 0]) {
+    final keyBytes = Uint8List.fromList(utf8.encode(key));
+    final valBytes = Uint8List.fromList(utf8.encode(value));
+
+    writeUB4(keyBytes.length);
+    writeBytesWithLength(keyBytes);
+    writeUB4(valBytes.length);
+    if (valBytes.isNotEmpty) {
+      writeBytesWithLength(valBytes);
+    }
+    writeUB4(flags);
+  }
+
   // =========================================================================
   // Read methods
   // =========================================================================

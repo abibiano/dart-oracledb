@@ -40,24 +40,29 @@ lib/
     │   ├── transport.dart
     │   ├── socket.dart
     │   └── tls.dart
-    ├── protocol/              # Wire protocol
-    │   ├── protocol.dart
+    ├── protocol/              # Wire protocol (matches node-oracledb structure)
+    │   ├── buffer.dart        # BaseBuffer, GrowableBuffer
+    │   ├── packet.dart        # ReadPacket, WritePacket
+    │   ├── protocol.dart      # Protocol class
+    │   ├── capabilities.dart  # Capabilities negotiation
+    │   ├── constants.dart     # Protocol constants
+    │   ├── utils.dart         # Utility functions
+    │   ├── encrypt_decrypt.dart # AES encryption
     │   ├── tns_packet.dart    # TNS packet encoding/decoding
-    │   ├── ttc_buffer.dart    # TTC data buffer
-    │   └── capabilities.dart
-    ├── messages/              # TTC message types
-    │   ├── message.dart       # Base message class
-    │   ├── auth_message.dart
-    │   ├── execute_message.dart
-    │   ├── fetch_message.dart
-    │   └── ...
+    │   └── messages/          # TTC message types
+    │       ├── base.dart      # Base Message class
+    │       ├── with_data.dart # MessageWithData (row handling)
+    │       ├── auth.dart      # Authentication
+    │       ├── fast_auth.dart # Fast Auth (Oracle 23+)
+    │       ├── execute.dart   # SQL execution
+    │       ├── fetch.dart     # Row fetching
+    │       └── ...
     └── crypto/                # Authentication crypto
         ├── auth.dart          # O5/O7/O8 LOGON protocols
         ├── verifier.dart
         └── session_key.dart
 
-reference/                     # Git submodules for protocol reference
-├── python-oracledb/           # Oracle's Python driver (src/oracledb/impl/thin/)
+reference/                     # Git submodule for protocol reference
 └── node-oracledb/             # Oracle's Node.js driver (lib/thin/)
 ```
 
@@ -138,18 +143,27 @@ Supported Oracle versions:
 - Oracle XE (21c, 18c)
 - Oracle Database (11g+)
 
-## Reference Implementations
+## Reference Implementation
 
-When implementing protocol features, consult:
+When implementing protocol features, consult **node-oracledb** (`reference/node-oracledb/lib/thin/`):
 
-1. **Python**: `reference/python-oracledb/src/oracledb/impl/thin/`
-   - `protocol.pyx` - Main protocol handling
-   - `messages.pyx` - TTC message implementations
-   - `crypto.pyx` - Authentication crypto
-
-2. **Node.js**: `reference/node-oracledb/lib/thin/`
-   - `protocol/` - Protocol implementation
-   - `messages/` - Message handlers
+- `protocol/constants.js` - Protocol constants (~870 lines, 400+ constants)
+- `protocol/capabilities.js` - Capabilities negotiation
+- `protocol/packet.js` - ReadPacket/WritePacket buffer classes
+- `protocol/protocol.js` - Main protocol class
+- `protocol/utils.js` - Utility functions (encodeRowID, obfuscation)
+- `protocol/encryptDecrypt.js` - AES encryption for authentication
+- `protocol/messages/` - All message classes:
+  - `base.js` - Base Message class
+  - `withData.js` - MessageWithData (row handling)
+  - `auth.js` - Authentication (OSESSKEY/OAUTH)
+  - `fastAuth.js` - Fast Auth (Oracle 23+)
+  - `protocol.js` - Protocol negotiation
+  - `dataType.js` - Data type negotiation
+  - `execute.js`, `fetch.js` - SQL execution
+  - `commit.js`, `rollback.js`, `ping.js`, `logOff.js` - Basic operations
+  - `lobOp.js` - LOB operations
+- `impl/datahandlers/buffer.js` - BaseBuffer with all read/write methods
 
 ## Common Tasks
 

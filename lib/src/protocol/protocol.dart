@@ -2,9 +2,9 @@
 library;
 
 import 'dart:async';
-import 'dart:typed_data';
-
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import '../constants.dart';
 import '../crypto/auth.dart';
@@ -195,10 +195,12 @@ class Protocol {
     _ttc.writeUint8(0); // Flag 2
 
     // Embedded Protocol message
+    // Per node-oracledb protocol.js: msg type, version, array terminator, driver name (length-prefixed), null
     _ttc.writeUint8(TtcMessageType.protocol.value); // 0x01
     _ttc.writeUint8(6); // Protocol version (8.1+)
     _ttc.writeUint8(0); // Array terminator
-    _ttc.writeBytes(Uint8List.fromList(utf8.encode('dart-oracledb')));
+    _ttc.writeBytesWithLength(
+        Uint8List.fromList(utf8.encode('dart-oracledb'))); // Driver name
     _ttc.writeUint8(0); // NULL terminator
 
     // Charset placeholders (unused by server but required)
@@ -219,7 +221,9 @@ class Protocol {
     print('Fast Auth message (${msgBytes.length} bytes):');
     print(msgBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' '));
 
-    await _sendDataMessage(msgBytes);
+    // Fast Auth requires End of RPC flag (0x0800) in data flags
+    const fastAuthEndOfRpc = 0x0800;
+    await _sendDataMessage(msgBytes, dataFlags: fastAuthEndOfRpc);
 
     // Process Fast Auth response (contains protocol, data types, and auth responses)
     await _processFastAuthResponse(user, password);
@@ -243,15 +247,13 @@ class Protocol {
     // Encoding flags
     _ttc.writeUint8(tnsEncodingMultiByte | tnsEncodingConvLength);
 
-    // Compile capabilities with length prefix
+    // Compile capabilities with length prefix (using writeBytesWithLength for consistency)
     final compileCaps = _buildCompileCapabilities();
-    _ttc.writeUint8(compileCaps.length);
-    _ttc.writeBytes(compileCaps);
+    _ttc.writeBytesWithLength(compileCaps);
 
-    // Runtime capabilities with length prefix
+    // Runtime capabilities with length prefix (using writeBytesWithLength for consistency)
     final runtimeCaps = _buildRuntimeCapabilities();
-    _ttc.writeUint8(runtimeCaps.length);
-    _ttc.writeBytes(runtimeCaps);
+    _ttc.writeBytesWithLength(runtimeCaps);
 
     // Data type definitions - full list per node-oracledb/python-oracledb
     // Each entry: [dataType, convDataType, representation, 0]
@@ -590,12 +592,30 @@ class Protocol {
   ];
 
   /// Build compile capabilities byte array.
+  /// Per node-oracledb capabilities.js initializeClientCaps()
   Uint8List _buildCompileCapabilities() {
-    // Simplified compile caps per python-oracledb
-    const tnsCcapMax = 53;
+    // Capability indices
     const tnsCcapSqlVersion = 0;
     const tnsCcapLogonTypes = 4;
     const tnsCcapFieldVersion = 7;
+    const tnsCcapServerDefineConv = 8;
+    const tnsCcapTtc1 = 9;
+    const tnsCcapTtc2 = 10;
+    const tnsCcapTtc3 = 11;
+    const tnsCcapTtc4 = 12;
+    const tnsCcapTtc5 = 13;
+    const tnsCcapOci1 = 15;
+    const tnsCcapTdsVersion = 16;
+    const tnsCcapRpcVersion = 17;
+    const tnsCcapRpcSig = 18;
+    const tnsCcapDbfVersion = 19;
+    const tnsCcapLob = 20;
+    const tnsCcapUb2Dty = 21;
+    const tnsCcapLob2 = 22;
+    const tnsCcapTtc6 = 30;
+    const tnsCcapMax = 53;
+
+    // Capability values
     const tnsCcapSqlVersionMax = 6;
     const tnsCcapFieldVersionMax = 24;
     const tnsCcapO5logon = 8;
@@ -604,38 +624,124 @@ class Protocol {
     const tnsCcapO8logonLongId = 64;
     const tnsCcapO9logonLongPw = 0x80;
 
+    // LOB capability flags
+    const tnsCcapLobUb8Size = 1;
+    const tnsCcapLobEncs = 2;
+    const tnsCcapLobPrefetchLength = 4;
+    const tnsCcapLobTempSize = 8;
+    const tnsCcapLob12c = 16;
+    const tnsCcapLobPrefetchData = 32;
+    const tnsCcapLob2Quasi = 1;
+    const tnsCcapLob22gbPrefetch = 4;
+
     final caps = Uint8List(tnsCcapMax);
     caps[tnsCcapSqlVersion] = tnsCcapSqlVersionMax;
-    caps[tnsCcapLogonTypes] = tnsCcapO5logon |
-        tnsCcapO5logonNp |
+    caps[tnsCcapLogonTypes] = tnsCcapO5logonNp |
+        tnsCcapO5logon |
         tnsCcapO7logon |
         tnsCcapO8logonLongId |
         tnsCcapO9logonLongPw;
     caps[tnsCcapFieldVersion] = tnsCcapFieldVersionMax;
+    caps[tnsCcapServerDefineConv] = 1;
+    caps[tnsCcapTtc1] = 5;
+    caps[tnsCcapTtc2] = 5;
+    caps[tnsCcapTtc3] = 5;
+    caps[tnsCcapTtc4] = 5;
+    caps[tnsCcapTtc5] = 5;
+    caps[tnsCcapOci1] = 3;
+    caps[tnsCcapTdsVersion] = 3;
+    caps[tnsCcapRpcVersion] = 8;
+    caps[tnsCcapRpcSig] = 3;
+    caps[tnsCcapDbfVersion] = 1;
+    caps[tnsCcapLob] = tnsCcapLobUb8Size |
+        tnsCcapLobEncs |
+        tnsCcapLobPrefetchLength |
+        tnsCcapLobTempSize |
+        tnsCcapLob12c |
+        tnsCcapLobPrefetchData;
+    caps[tnsCcapUb2Dty] = 1;
+    caps[tnsCcapLob2] = tnsCcapLob2Quasi | tnsCcapLob22gbPrefetch;
+    caps[tnsCcapTtc6] = 1;
     return caps;
   }
 
   /// Build runtime capabilities byte array.
+  /// Per node-oracledb capabilities.js initializeClientCaps()
   Uint8List _buildRuntimeCapabilities() {
-    // Simplified runtime caps
-    const tnsRcapMax = 11;
     const tnsRcapCompat = 0;
+    const tnsRcapTtc = 6;
+    const tnsRcapMax = 11;
+
+    // Capability values
     const tnsRcapCompat81 = 2;
+    const tnsRcapTtcZeroCopy = 1;
+    const tnsRcapTtc32k = 4;
 
     final caps = Uint8List(tnsRcapMax);
     caps[tnsRcapCompat] = tnsRcapCompat81;
+    caps[tnsRcapTtc] = tnsRcapTtcZeroCopy | tnsRcapTtc32k;
     return caps;
   }
 
-  /// Write Auth message for session key request.
+  /// Sequence number for TTC messages
+  int _sequenceNumber = 1;
+
+  /// Write Auth message for session key request (Phase 1 - OSESSKEY).
+  ///
+  /// Per node-oracledb auth.js encode() method.
   void _writeAuthMessage(String user) {
-    // This writes an OSESSKEY request embedded in Fast Auth
+    // Auth mode constants
+    const tnsAuthModeLogon = 0x01;
+    const tnsAuthModeWithPassword = 0x100;
+    const authMode = tnsAuthModeLogon | tnsAuthModeWithPassword; // 0x101
+
+    // Get client info for key-value pairs
+    final terminal = Platform.environment['TERM'] ?? 'unknown';
+    final program = Platform.executable;
+    final machine = Platform.localHostname;
+    final processId = pid.toString(); // pid is from dart:io
+    final osUser = Platform.environment['USER'] ??
+        Platform.environment['USERNAME'] ??
+        'unknown';
+
+    // Username bytes
+    final userBytes = Uint8List.fromList(utf8.encode(user.toUpperCase()));
+    final userByteLen = userBytes.length;
+
+    // Function header
     _ttc.writeUint8(TtcMessageType.function.value); // 0x03
     _ttc.writeUint8(OpiFunction.sessionKey.value); // 0x76
-    // User as length-prefixed string
-    final userBytes = utf8.encode(user.toUpperCase());
-    _ttc.writeUint8(userBytes.length);
-    _ttc.writeBytes(Uint8List.fromList(userBytes));
+    _ttc.writeUint8(_sequenceNumber); // Sequence number
+    _sequenceNumber = (_sequenceNumber + 1) % 256;
+
+    // User present flag
+    if (userByteLen > 0) {
+      _ttc.writeUint8(1);
+    } else {
+      _ttc.writeUint8(0);
+    }
+
+    // User length and auth mode
+    _ttc.writeUB4(userByteLen);
+    _ttc.writeUB4(authMode);
+
+    // Phase 1 specific fields
+    _ttc.writeUint8(1); // Flag
+    _ttc.writeUB4(5); // 5 key-value pairs
+    _ttc.writeUint8(0); // Flag
+    _ttc.writeUint8(1); // Flag
+
+    // Username with length prefix
+    if (userByteLen > 0) {
+      _ttc.writeBytesWithLength(userBytes);
+    }
+
+    // Key-value pairs for client identification
+    _ttc.writeKeyValue('AUTH_TERMINAL', terminal);
+    _ttc.writeKeyValue('AUTH_PROGRAM_NM', program);
+    _ttc.writeKeyValue('AUTH_MACHINE', machine);
+    _ttc.writeKeyValue('AUTH_PID', processId);
+    _ttc.writeKeyValue('AUTH_SID', osUser);
   }
 
   /// Process Fast Auth response.
@@ -1037,8 +1143,8 @@ class Protocol {
     }
   }
 
-  Future<void> _sendDataMessage(Uint8List data) async {
-    await _tns.sendData(data);
+  Future<void> _sendDataMessage(Uint8List data, {int dataFlags = 0}) async {
+    await _tns.sendData(data, dataFlags: dataFlags);
   }
 
   Future<Uint8List> _receiveDataMessage() async {

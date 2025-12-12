@@ -1,137 +1,151 @@
 /// Client and server capability negotiation.
+///
+/// Ported from node-oracledb lib/thin/protocol/capabilities.js
 library;
 
-/// Client capabilities for protocol negotiation.
-class ClientCapabilities {
-  ClientCapabilities();
+import 'dart:typed_data';
 
-  /// Protocol version
-  int protocolVersion = 6;
+import 'constants.dart';
 
-  /// Character set (UTF-8)
-  int charsetId = 873; // AL32UTF8
-
-  /// National character set (UTF-16)
-  int ncharsetId = 2000; // AL16UTF16
-
-  /// Supported TTC versions
-  List<int> ttcVersions = [6, 5, 4, 3, 2, 1, 0];
-
-  /// Client program name
-  String programName = 'dart-oracledb';
-
-  /// Client machine name
-  String machineName = 'dart';
-
-  /// Client process ID
-  int processId = 0;
-
-  /// Support for LOB operations
-  bool supportsLob = true;
-
-  /// Support for scrollable cursors
-  bool supportsScrollable = false;
-
-  /// Support for batch operations
-  bool supportsBatch = true;
-
-  /// Support for two-phase commit
-  bool supportsTwoPhase = true;
-
-  /// Support for Oracle Objects
-  bool supportsObjects = true;
-
-  /// Support for JSON type
-  bool supportsJson = true;
-
-  /// Support for VECTOR type (23ai)
-  bool supportsVector = true;
-
-  /// Encode capabilities for protocol negotiation
-  List<int> encode() {
-    // Capabilities are encoded as bit flags
-    var flags = 0;
-    if (supportsLob) flags |= 0x0001;
-    if (supportsScrollable) flags |= 0x0002;
-    if (supportsBatch) flags |= 0x0004;
-    if (supportsTwoPhase) flags |= 0x0008;
-    if (supportsObjects) flags |= 0x0010;
-    if (supportsJson) flags |= 0x0020;
-    if (supportsVector) flags |= 0x0040;
-
-    return [
-      (flags >> 24) & 0xFF,
-      (flags >> 16) & 0xFF,
-      (flags >> 8) & 0xFF,
-      flags & 0xFF,
-    ];
-  }
-}
-
-/// Server capabilities received during negotiation.
-class ServerCapabilities {
-  ServerCapabilities();
-
-  /// Server protocol version
+/// Negotiates compile-time and runtime capabilities with the Oracle server.
+class Capabilities {
+  /// Protocol version from connection attributes
   int protocolVersion = 0;
 
-  /// Server character set
-  int charsetId = 0;
+  /// TTC field version for capability negotiation
+  int ttcFieldVersion = tnsCcapFieldVersionMax;
 
-  /// Server national character set
-  int ncharsetId = 0;
+  /// Whether 12c logon is supported
+  bool supports12cLogon = true;
 
-  /// Server database version
-  String databaseVersion = '';
+  /// Whether out-of-band data is supported
+  bool supportsOob = false;
 
-  /// Server banner
-  String serverBanner = '';
+  /// National character set ID
+  int nCharsetId = tnsCharsetUtf16;
 
-  /// Maximum number of cursors
-  int maxCursors = 0;
+  /// Database character set ID
+  int charsetId = tnsCharsetUtf8;
 
-  /// Maximum SDU size
-  int maxSdu = 0;
+  /// Maximum string size (4000 or 32767)
+  int maxStringSize = 0;
 
-  /// Maximum TDU size
-  int maxTdu = 0;
+  /// Compile-time capabilities (53 bytes)
+  late Uint8List compileCaps;
 
-  /// Server byte order (true = big-endian)
-  bool bigEndian = true;
+  /// Runtime capabilities (7 bytes)
+  late Uint8List runtimeCaps;
 
-  /// Support for LOB operations
-  bool supportsLob = false;
-
-  /// Support for batch operations
-  bool supportsBatch = false;
-
-  /// Support for two-phase commit
-  bool supportsTwoPhase = false;
-
-  /// Support for Oracle Objects
-  bool supportsObjects = false;
-
-  /// Support for JSON type
-  bool supportsJson = false;
-
-  /// Support for VECTOR type
-  bool supportsVector = false;
-
-  /// Decode capabilities from protocol negotiation response
-  void decode(List<int> data) {
-    if (data.length < 4) return;
-
-    final flags = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3];
-
-    supportsLob = (flags & 0x0001) != 0;
-    supportsBatch = (flags & 0x0004) != 0;
-    supportsTwoPhase = (flags & 0x0008) != 0;
-    supportsObjects = (flags & 0x0010) != 0;
-    supportsJson = (flags & 0x0020) != 0;
-    supportsVector = (flags & 0x0040) != 0;
+  /// Creates capabilities from connection attributes.
+  Capabilities({int? version, bool endOfRequestSupport = false}) {
+    protocolVersion = version ?? 0;
+    compileCaps = Uint8List(tnsCcapMax);
+    runtimeCaps = Uint8List(tnsRcapMax);
+    initCompileCaps(endOfRequestSupport: endOfRequestSupport);
+    initRuntimeCaps();
   }
 
-  @override
-  String toString() => 'ServerCapabilities(version: $databaseVersion, '
-      'charset: $charsetId, lob: $supportsLob, json: $supportsJson)';
+  /// Adjusts capabilities based on server compile-time capabilities.
+  void adjustForServerCompileCaps(
+    Uint8List serverCaps, {
+    required bool endOfRequestSupport,
+    required void Function(bool) setEndOfRequestSupport,
+  }) {
+    if (serverCaps[tnsCcapFieldVersion] < ttcFieldVersion) {
+      ttcFieldVersion = serverCaps[tnsCcapFieldVersion];
+      compileCaps[tnsCcapFieldVersion] = ttcFieldVersion;
+    }
+
+    // endOfRequestSupport used only from 23.4 onwards and not for 23.3
+    if (ttcFieldVersion < tnsCcapFieldVersion234 && endOfRequestSupport) {
+      compileCaps[tnsCcapTtc4] ^= tnsCcapEndOfRequest;
+      setEndOfRequestSupport(false);
+    }
+  }
+
+  /// Adjusts capabilities based on server runtime capabilities.
+  void adjustForServerRuntimeCaps(Uint8List serverCaps) {
+    if ((serverCaps[tnsRcapTtc] & tnsRcapTtc32k) != 0) {
+      maxStringSize = 32767;
+    } else {
+      maxStringSize = 4000;
+    }
+  }
+
+  /// Initializes compile-time capabilities.
+  void initCompileCaps({bool endOfRequestSupport = false}) {
+    compileCaps[tnsCcapSqlVersion] = tnsCcapSqlVersionMax;
+
+    compileCaps[tnsCcapLogonTypes] = tnsCcapO5logon |
+        tnsCcapO5logonNp |
+        tnsCcapO7logon |
+        tnsCcapO8logonLongIdentifier |
+        tnsCcapO9logonLongPassword;
+
+    compileCaps[tnsCcapFieldVersion] = ttcFieldVersion;
+    compileCaps[tnsCcapServerDefineConv] = 1;
+    compileCaps[tnsCcapDequeueWithSelector] = 1;
+
+    compileCaps[tnsCcapTtc1] =
+        tnsCcapFastBvec | tnsCcapEndOfCallStatus | tnsCcapIndRcd;
+
+    compileCaps[tnsCcapOci1] =
+        tnsCcapFastSessionPropagate | tnsCcapAppCtxPiggyback;
+
+    compileCaps[tnsCcapTdsVersion] = tnsCcapTdsVersionMax;
+    compileCaps[tnsCcapRpcVersion] = tnsCcapRpcVersionMax;
+    compileCaps[tnsCcapRpcSig] = tnsCcapRpcSigValue;
+    compileCaps[tnsCcapDbfVersion] = tnsCcapDbfVersionMax;
+
+    compileCaps[tnsCcapLob] = tnsCcapLobUb8Size |
+        tnsCcapLobEncs |
+        tnsCcapLobPrefetch |
+        tnsCcapLobTempSize |
+        tnsCcapLob12c |
+        tnsCcapLobPrefetchData;
+
+    compileCaps[tnsCcapUb2Dty] = 1;
+
+    compileCaps[tnsCcapLob2] = tnsCcapLob2Quasi | tnsCcapLob22gbPrefetch;
+
+    compileCaps[tnsCcapTtc3] = tnsCcapImplicitResults |
+        tnsCcapBigChunkClr |
+        tnsCcapKeepOutOrder |
+        tnsCcapLtxid;
+
+    compileCaps[tnsCcapOci3] = tnsCcapOci3Ocssync;
+    compileCaps[tnsCcapTtc2] = tnsCcapZlnp;
+    compileCaps[tnsCcapOci2] = tnsCcapDrcp;
+    compileCaps[tnsCcapClientFn] = tnsCcapClientFnMax;
+    compileCaps[tnsCcapSessSignatureVersion] = tnsCcapFieldVersion122;
+
+    compileCaps[tnsCcapTtc4] = tnsCcapInbandNotification;
+    if (endOfRequestSupport) {
+      compileCaps[tnsCcapTtc4] |= tnsCcapEndOfRequest;
+    }
+
+    compileCaps[tnsCcapCtbFeatureBackport] =
+        tnsCcapCtbImplicitPool | tnsCcapCtbOauthMsgOnErr;
+
+    compileCaps[tnsCcapTtc5] = tnsCcapVectorSupport | tnsCcapTtc5SessionlessTxns;
+
+    compileCaps[tnsCcapVectorFeatures] =
+        tnsCcapVectorFeatureBinary | tnsCcapVectorFeatureSparse;
+  }
+
+  /// Initializes runtime capabilities.
+  void initRuntimeCaps() {
+    runtimeCaps[tnsRcapCompat] = tnsRcapCompat81;
+    runtimeCaps[tnsRcapTtc] = tnsRcapTtcZeroCopy | tnsRcapTtc32k;
+  }
+
+  /// Checks that the national character set is UTF-16.
+  void checkNCharsetId() {
+    if (nCharsetId != tnsCharsetUtf16) {
+      throw UnsupportedError(
+        'National character set $nCharsetId is not supported. '
+        'Only UTF-16 ($tnsCharsetUtf16) is supported.',
+      );
+    }
+  }
 }
