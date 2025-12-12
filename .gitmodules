@@ -1,6 +1,3 @@
-[submodule "reference/python-oracledb"]
-	path = reference/python-oracledb
-	url = https://github.com/oracle/python-oracledb.git
 [submodule "reference/node-oracledb"]
 	path = reference/node-oracledb
 	url = https://github.com/oracle/node-oracledb.git
