@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:test/test.dart';
 
+import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
@@ -88,6 +89,173 @@ void main() {
     test('default options is 0', () {
       final request = ExecuteRequest(sql: 'SELECT 1');
       expect(request.options, equals(0));
+    });
+
+    group('bind parameter encoding', () {
+      test('encodes bind count as 2-byte big-endian after SQL', () {
+        final request = ExecuteRequest(
+          sql: 'SELECT :1 FROM dual',
+          bindValues: ['hello'],
+        );
+        final bytes = request.toBytes();
+
+        // Find SQL end position
+        const sql = 'SELECT :1 FROM dual';
+        final sqlBytes = utf8.encode(sql);
+        final bindCountOffset = 1 + 4 + 1 + 4 + sqlBytes.length; // func + cursor + opts + sqlLen + sql
+
+        // Bind count = 1 (2 bytes BE)
+        expect(bytes[bindCountOffset], equals(0));
+        expect(bytes[bindCountOffset + 1], equals(1));
+      });
+
+      test('encodes zero bind count when no binds provided', () {
+        final request = ExecuteRequest(sql: 'SELECT * FROM dual');
+        final bytes = request.toBytes();
+
+        const sql = 'SELECT * FROM dual';
+        final sqlBytes = utf8.encode(sql);
+        final bindCountOffset = 1 + 4 + 1 + 4 + sqlBytes.length;
+
+        expect(bytes[bindCountOffset], equals(0));
+        expect(bytes[bindCountOffset + 1], equals(0));
+      });
+
+      test('encodes String bind value as VARCHAR2', () {
+        final request = ExecuteRequest(
+          sql: 'SELECT :1 FROM dual',
+          bindValues: ['test'],
+        );
+        final bytes = request.toBytes();
+
+        const sql = 'SELECT :1 FROM dual';
+        final sqlBytes = utf8.encode(sql);
+        final bindDataOffset = 1 + 4 + 1 + 4 + sqlBytes.length + 2; // after bind count
+
+        // Non-null indicator (0x00)
+        expect(bytes[bindDataOffset], equals(0x00));
+        // Type indicator (oraTypeVarchar2 = 9)
+        expect(bytes[bindDataOffset + 1], equals(oraTypeVarchar2));
+        // Length (2 bytes BE)
+        expect(bytes[bindDataOffset + 2], equals(0));
+        expect(bytes[bindDataOffset + 3], equals(4)); // "test" = 4 bytes
+        // Value
+        expect(bytes[bindDataOffset + 4], equals(0x74)); // 't'
+        expect(bytes[bindDataOffset + 5], equals(0x65)); // 'e'
+        expect(bytes[bindDataOffset + 6], equals(0x73)); // 's'
+        expect(bytes[bindDataOffset + 7], equals(0x74)); // 't'
+      });
+
+      test('encodes int bind value as NUMBER', () {
+        final request = ExecuteRequest(
+          sql: 'SELECT :1 FROM dual',
+          bindValues: [123],
+        );
+        final bytes = request.toBytes();
+
+        const sql = 'SELECT :1 FROM dual';
+        final sqlBytes = utf8.encode(sql);
+        final bindDataOffset = 1 + 4 + 1 + 4 + sqlBytes.length + 2;
+
+        // Non-null indicator
+        expect(bytes[bindDataOffset], equals(0x00));
+        // Type indicator (oraTypeNumber = 2)
+        expect(bytes[bindDataOffset + 1], equals(oraTypeNumber));
+      });
+
+      test('encodes null bind value with NULL indicator', () {
+        final request = ExecuteRequest(
+          sql: 'SELECT :1 FROM dual',
+          bindValues: [null],
+        );
+        final bytes = request.toBytes();
+
+        const sql = 'SELECT :1 FROM dual';
+        final sqlBytes = utf8.encode(sql);
+        final bindDataOffset = 1 + 4 + 1 + 4 + sqlBytes.length + 2;
+
+        // NULL indicator (0xFF)
+        expect(bytes[bindDataOffset], equals(0xFF));
+      });
+
+      test('encodes multiple bind values', () {
+        final request = ExecuteRequest(
+          sql: 'SELECT :1, :2 FROM dual',
+          bindValues: ['a', 'b'],
+        );
+        final bytes = request.toBytes();
+
+        const sql = 'SELECT :1, :2 FROM dual';
+        final sqlBytes = utf8.encode(sql);
+        final bindCountOffset = 1 + 4 + 1 + 4 + sqlBytes.length;
+
+        // Bind count = 2
+        expect(bytes[bindCountOffset], equals(0));
+        expect(bytes[bindCountOffset + 1], equals(2));
+      });
+
+      test('encodes DateTime bind value as DATE', () {
+        final dt = DateTime(2025, 12, 15, 10, 30, 45);
+        final request = ExecuteRequest(
+          sql: 'SELECT :1 FROM dual',
+          bindValues: [dt],
+        );
+        final bytes = request.toBytes();
+
+        const sql = 'SELECT :1 FROM dual';
+        final sqlBytes = utf8.encode(sql);
+        final bindDataOffset = 1 + 4 + 1 + 4 + sqlBytes.length + 2;
+
+        // Non-null indicator
+        expect(bytes[bindDataOffset], equals(0x00));
+        // Type indicator (oraTypeDate = 12)
+        expect(bytes[bindDataOffset + 1], equals(oraTypeDate));
+      });
+
+      test('encodes Uint8List bind value as RAW', () {
+        final data = Uint8List.fromList([0x01, 0x02, 0x03]);
+        final request = ExecuteRequest(
+          sql: 'SELECT :1 FROM dual',
+          bindValues: [data],
+        );
+        final bytes = request.toBytes();
+
+        const sql = 'SELECT :1 FROM dual';
+        final sqlBytes = utf8.encode(sql);
+        final bindDataOffset = 1 + 4 + 1 + 4 + sqlBytes.length + 2;
+
+        // Non-null indicator
+        expect(bytes[bindDataOffset], equals(0x00));
+        // Type indicator (oraTypeRaw = 23)
+        expect(bytes[bindDataOffset + 1], equals(oraTypeRaw));
+      });
+
+      test('throws on unsupported bind value type', () {
+        final request = ExecuteRequest(
+          sql: 'SELECT :1 FROM dual',
+          bindValues: [<String, dynamic>{}], // Map is not a valid bind value
+        );
+
+        expect(
+          () => request.toBytes(),
+          throwsA(isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraBindTypeError,
+          )),
+        );
+      });
+
+      test('stores bind names for named binds', () {
+        final request = ExecuteRequest(
+          sql: 'SELECT :name FROM dual',
+          bindValues: ['test'],
+          bindNames: ['name'],
+        );
+
+        expect(request.bindNames, equals(['name']));
+        expect(request.bindValues, equals(['test']));
+      });
     });
   });
 

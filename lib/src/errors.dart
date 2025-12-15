@@ -13,6 +13,10 @@ const int oraTlsCertificateError = 28862; // ORA-28862: SSL cert verify failed
 const int oraConnectionClosed =
     3113; // ORA-03113: end-of-file on communication channel
 
+/// Bind parameter error codes
+const int oraBindMismatch = 1008; // ORA-01008: Not all variables bound
+const int oraBindTypeError = 6502; // ORA-06502: PL/SQL: numeric or value error
+
 /// Authentication error codes (ORA-01017, ORA-28000, etc.)
 const int oraInvalidCredentials = 1017; // ORA-01017: invalid username/password
 const int oraAccountLocked = 28000; // ORA-28000: account is locked

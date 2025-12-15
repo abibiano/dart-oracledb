@@ -2,3 +2,4 @@ tags:
   integration:
     # Integration tests require external Oracle database
     # Run with: RUN_INTEGRATION_TESTS=true dart test
+    skip: "Requires Oracle database (set RUN_INTEGRATION_TESTS=true)"

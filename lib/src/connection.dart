@@ -5,6 +5,7 @@ import 'package:logging/logging.dart';
 
 import 'crypto/auth.dart';
 import 'errors.dart';
+import 'protocol/bind_parser.dart';
 import 'result.dart';
 import 'transport/connect_string.dart';
 import 'transport/tls.dart';
@@ -69,7 +70,7 @@ class OracleConnection {
     }
   }
 
-  /// Executes a SQL statement and returns the result.
+  /// Executes a SQL statement with optional bind parameters.
   ///
   /// For SELECT queries, the result contains rows that can be iterated:
   /// ```dart
@@ -77,6 +78,22 @@ class OracleConnection {
   /// for (final row in result.rows) {
   ///   print('${row['NAME']}: ${row['SALARY']}');
   /// }
+  /// ```
+  ///
+  /// For queries with named bind parameters (`:name`), pass a Map:
+  /// ```dart
+  /// final result = await connection.execute(
+  ///   'SELECT * FROM emp WHERE dept_id = :dept AND salary > :sal',
+  ///   {'dept': 10, 'sal': 50000},
+  /// );
+  /// ```
+  ///
+  /// For queries with positional bind parameters (`:1`, `:2`), pass a List:
+  /// ```dart
+  /// final result = await connection.execute(
+  ///   'SELECT * FROM emp WHERE dept_id = :1 AND salary > :2',
+  ///   [10, 50000],
+  /// );
   /// ```
   ///
   /// For DML queries (INSERT, UPDATE, DELETE), check [OracleResult.rowsAffected]:
@@ -87,15 +104,70 @@ class OracleConnection {
   /// print('Updated ${result.rowsAffected} rows');
   /// ```
   ///
-  /// Throws [OracleException] if execution fails.
-  Future<OracleResult> execute(String sql) async {
+  /// Throws [OracleException] if:
+  /// - Bind value count doesn't match placeholder count (ORA-01008)
+  /// - Unsupported bind value type (ORA-06502)
+  /// - Query execution fails
+  Future<OracleResult> execute(String sql, [Object? bindValues]) async {
     _ensureOpen();
 
     _log.fine(
         'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}');
 
+    // Validate and prepare bind values
+    List<dynamic>? bindList;
+    List<String>? bindNames;
+
+    if (bindValues != null) {
+      if (bindValues is Map<String, dynamic>) {
+        // Named binds - parseNamedBinds returns names in SQL order,
+        // including duplicates (e.g., `:a + :a` returns ['a', 'a'])
+        bindNames = BindParser.parseNamedBinds(sql);
+        final uniqueNames = bindNames.toSet();
+        if (uniqueNames.length != bindValues.length) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message:
+                'Bind parameter count mismatch: SQL has ${uniqueNames.length} '
+                'unique placeholders but ${bindValues.length} values provided',
+          );
+        }
+        // Order values by their appearance in SQL
+        bindList = bindNames.map((name) {
+          if (!bindValues.containsKey(name)) {
+            throw OracleException(
+              errorCode: oraBindMismatch,
+              message: 'Missing bind value for parameter ":$name"',
+            );
+          }
+          return bindValues[name];
+        }).toList();
+      } else if (bindValues is List) {
+        // Positional binds
+        final placeholderCount = BindParser.parsePositionalBinds(sql);
+        if (placeholderCount != bindValues.length) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message: 'Bind parameter count mismatch: SQL has $placeholderCount '
+                'placeholders but ${bindValues.length} values provided',
+          );
+        }
+        bindList = bindValues;
+      } else {
+        throw OracleException(
+          errorCode: oraBindTypeError,
+          message: 'Bind values must be Map<String, dynamic> for named binds '
+              'or List for positional binds. Got: ${bindValues.runtimeType}',
+        );
+      }
+    }
+
     try {
-      final response = await _transport.sendExecute(sql);
+      final response = await _transport.sendExecute(
+        sql,
+        bindValues: bindList,
+        bindNames: bindNames,
+      );
 
       if (!response.isSuccess) {
         throw OracleException(

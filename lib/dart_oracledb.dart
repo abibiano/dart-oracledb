@@ -16,7 +16,10 @@ export 'src/errors.dart'
         oraProtocolError,
         oraInvalidCredentials,
         oraTlsHandshakeFailed,
-        oraTlsCertificateError;
+        oraTlsCertificateError,
+        // Bind parameter error codes (Story 2.3)
+        oraBindMismatch,
+        oraBindTypeError;
 
 // Protocol error codes (from TTC layer)
 export 'src/protocol/constants.dart'

@@ -177,17 +177,27 @@ class Transport {
   /// Creates an EXECUTE request message, sends it to the database,
   /// and decodes the response.
   ///
+  /// For queries with bind parameters, provide [bindValues] as a List
+  /// containing the values in order. For named binds, also provide
+  /// [bindNames] with the parameter names in SQL order.
+  ///
   /// The [timeout] parameter specifies how long to wait for a response.
   /// Defaults to 2 minutes. Set to `null` for no timeout.
   ///
   /// Throws [OracleException] if execution fails, times out, or protocol error occurs.
   Future<ExecuteResponse> sendExecute(
     String sql, {
+    List<dynamic>? bindValues,
+    List<String>? bindNames,
     Duration? timeout = const Duration(minutes: 2),
   }) async {
     _log.fine('Sending execute request...');
 
-    final request = ExecuteRequest(sql: sql);
+    final request = ExecuteRequest(
+      sql: sql,
+      bindValues: bindValues,
+      bindNames: bindNames,
+    );
     final requestData = request.toBytes();
 
     final packet = TnsPacket(type: tnsPacketData, payload: requestData);

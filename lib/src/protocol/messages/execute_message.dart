@@ -13,7 +13,8 @@ import 'base.dart';
 
 /// TTC EXECUTE request message (function code 0x03).
 ///
-/// Sends a SQL statement to the database for execution.
+/// Sends a SQL statement to the database for execution with optional
+/// bind parameters.
 ///
 /// **Sequence Numbers:** Unlike auth messages, execute messages typically
 /// don't require explicit sequence management for simple queries. The
@@ -22,8 +23,14 @@ import 'base.dart';
 /// fetch loops) may need sequence tracking in Story 2.2.
 class ExecuteRequest extends Message {
   /// Creates an EXECUTE request for the given SQL statement.
+  ///
+  /// For queries with bind parameters, provide [bindValues] as a List
+  /// containing the values in order. For named binds, also provide
+  /// [bindNames] with the parameter names in SQL order.
   ExecuteRequest({
     required this.sql,
+    this.bindValues,
+    this.bindNames,
     this.cursorId = 0,
     this.options = 0,
     super.sequence,
@@ -31,6 +38,12 @@ class ExecuteRequest extends Message {
 
   /// The SQL statement to execute.
   final String sql;
+
+  /// Bind values - List of values for positional or named binds.
+  final List<dynamic>? bindValues;
+
+  /// Bind names for named parameters (in SQL order).
+  final List<String>? bindNames;
 
   /// Cursor ID (0 for new cursor).
   final int cursorId;
@@ -53,6 +66,109 @@ class ExecuteRequest extends Message {
     final sqlBytes = utf8.encode(sql);
     buffer.writeUint32BE(sqlBytes.length);
     buffer.writeBytes(Uint8List.fromList(sqlBytes));
+
+    // Bind parameter count (2 bytes, big-endian)
+    final bindCount = bindValues?.length ?? 0;
+    buffer.writeUint16BE(bindCount);
+
+    // Encode each bind value
+    if (bindValues != null) {
+      for (final value in bindValues!) {
+        _encodeBindValue(buffer, value);
+      }
+    }
+  }
+
+  /// Encodes a single bind value to the buffer.
+  void _encodeBindValue(WriteBuffer buffer, dynamic value) {
+    if (value == null) {
+      // NULL indicator
+      buffer.writeUint8(0xFF);
+      return;
+    }
+
+    // Non-null indicator
+    buffer.writeUint8(0x00);
+
+    if (value is String) {
+      buffer.writeUint8(oraTypeVarchar2);
+      final bytes = utf8.encode(value);
+      buffer.writeUint16BE(bytes.length);
+      buffer.writeBytes(Uint8List.fromList(bytes));
+    } else if (value is int) {
+      buffer.writeUint8(oraTypeNumber);
+      _encodeOracleNumber(buffer, value);
+    } else if (value is double) {
+      buffer.writeUint8(oraTypeNumber);
+      _encodeOracleNumber(buffer, value);
+    } else if (value is DateTime) {
+      buffer.writeUint8(oraTypeDate);
+      _encodeOracleDate(buffer, value);
+    } else if (value is Uint8List) {
+      buffer.writeUint8(oraTypeRaw);
+      buffer.writeUint16BE(value.length);
+      buffer.writeBytes(value);
+    } else {
+      throw OracleException(
+        errorCode: oraBindTypeError,
+        message: 'Unsupported bind value type: ${value.runtimeType}. '
+            'Supported types: String, int, double, DateTime, Uint8List, null',
+      );
+    }
+  }
+
+  /// Encodes a number value in Oracle NUMBER format.
+  void _encodeOracleNumber(WriteBuffer buffer, num value) {
+    if (value == 0) {
+      buffer.writeUint8(1); // Length
+      buffer.writeUint8(0x80); // Zero exponent
+      return;
+    }
+
+    // For positive integers, use base-100 encoding
+    if (value is int && value > 0) {
+      final digits = <int>[];
+      var remaining = value;
+      while (remaining > 0) {
+        digits.insert(0, (remaining % 100) + 1);
+        remaining ~/= 100;
+      }
+
+      final exponent = 0xC0 + digits.length;
+      buffer.writeUint8(digits.length + 1); // Length
+      buffer.writeUint8(exponent);
+      for (final digit in digits) {
+        buffer.writeUint8(digit);
+      }
+      return;
+    }
+
+    // For negative integers and decimals - basic support
+    // Full implementation in Story 2.6
+    throw const OracleException(
+      errorCode: oraDataTypeNotSupported,
+      message: 'Complex NUMBER encoding (negative/decimal) not yet supported. '
+          'See Story 2.6 for full data type mapping.',
+    );
+  }
+
+  /// Encodes a DateTime value in Oracle DATE format.
+  void _encodeOracleDate(WriteBuffer buffer, DateTime value) {
+    // Oracle DATE: 7 bytes
+    // Byte 0-1: Century and year (offset by 100)
+    // Byte 2: Month
+    // Byte 3: Day
+    // Byte 4: Hour + 1
+    // Byte 5: Minute + 1
+    // Byte 6: Second + 1
+    buffer.writeUint8(7); // Length
+    buffer.writeUint8((value.year ~/ 100) + 100);
+    buffer.writeUint8((value.year % 100) + 100);
+    buffer.writeUint8(value.month);
+    buffer.writeUint8(value.day);
+    buffer.writeUint8(value.hour + 1);
+    buffer.writeUint8(value.minute + 1);
+    buffer.writeUint8(value.second + 1);
   }
 }
 
