@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:logging/logging.dart';
 
 import '../errors.dart';
+import '../protocol/messages/execute_message.dart';
 import '../protocol/messages/ping_message.dart';
 import 'packet.dart';
 import 'socket.dart';
@@ -170,6 +171,49 @@ class Transport {
 
   /// Maximum number of RESEND retries before giving up.
   static const int _maxResendRetries = 3;
+
+  /// Sends a SQL statement for execution and returns the response.
+  ///
+  /// Creates an EXECUTE request message, sends it to the database,
+  /// and decodes the response.
+  ///
+  /// The [timeout] parameter specifies how long to wait for a response.
+  /// Defaults to 2 minutes. Set to `null` for no timeout.
+  ///
+  /// Throws [OracleException] if execution fails, times out, or protocol error occurs.
+  Future<ExecuteResponse> sendExecute(
+    String sql, {
+    Duration? timeout = const Duration(minutes: 2),
+  }) async {
+    _log.fine('Sending execute request...');
+
+    final request = ExecuteRequest(sql: sql);
+    final requestData = request.toBytes();
+
+    final packet = TnsPacket(type: tnsPacketData, payload: requestData);
+    await send(packet);
+
+    // Receive response with optional timeout
+    final Future<TnsPacket> receiveFuture = receive();
+    final response = timeout != null
+        ? await receiveFuture.timeout(
+            timeout,
+            onTimeout: () => throw OracleException(
+              errorCode: oraConnectTimeout,
+              message: 'Query timeout after ${timeout.inSeconds}s',
+            ),
+          )
+        : await receiveFuture;
+
+    if (response.type != tnsPacketData) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'Unexpected response type: ${response.type}',
+      );
+    }
+
+    return ExecuteResponse.decode(response.payload);
+  }
 
   /// Sends a TTC PING message to verify connection health.
   ///

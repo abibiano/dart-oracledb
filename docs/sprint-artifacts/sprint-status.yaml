@@ -52,7 +52,7 @@ development_status:
 
   # Epic 2: Query Execution & Transactions
   epic-2: in-progress
-  2-1-execute-message-basic-query: ready-for-dev
+  2-1-execute-message-basic-query: dev-complete
   2-2-result-set-handling: backlog
   2-3-bind-parameters: backlog
   2-4-dml-operations-insert-update-delete: backlog

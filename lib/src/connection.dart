@@ -5,6 +5,7 @@ import 'package:logging/logging.dart';
 
 import 'crypto/auth.dart';
 import 'errors.dart';
+import 'result.dart';
 import 'transport/connect_string.dart';
 import 'transport/tls.dart';
 import 'transport/transport.dart';
@@ -59,17 +60,61 @@ class OracleConnection {
   ///
   /// This guard method is called by operations that require an open connection
   /// (execute, query, etc.) to provide consistent "connection closed" errors.
-  ///
-  /// Note: This method is intentionally unused in Story 1.7 - it will be
-  /// called by execute() and other query operations added in Epic 2.
-  /// See AC3: "Given a closed connection, when any subsequent operation is
-  /// attempted, then a 'connection closed' error is thrown"
-  // ignore: unused_element
   void _ensureOpen() {
     if (_isClosed) {
       throw const OracleException(
         errorCode: oraConnectionClosed,
         message: 'Connection is closed',
+      );
+    }
+  }
+
+  /// Executes a SQL statement and returns the result.
+  ///
+  /// For SELECT queries, the result contains rows that can be iterated:
+  /// ```dart
+  /// final result = await connection.execute('SELECT * FROM employees');
+  /// for (final row in result.rows) {
+  ///   print('${row['NAME']}: ${row['SALARY']}');
+  /// }
+  /// ```
+  ///
+  /// For DML queries (INSERT, UPDATE, DELETE), check [OracleResult.rowsAffected]:
+  /// ```dart
+  /// final result = await connection.execute(
+  ///   "UPDATE employees SET salary = 50000 WHERE id = 1"
+  /// );
+  /// print('Updated ${result.rowsAffected} rows');
+  /// ```
+  ///
+  /// Throws [OracleException] if execution fails.
+  Future<OracleResult> execute(String sql) async {
+    _ensureOpen();
+
+    _log.fine(
+        'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}');
+
+    try {
+      final response = await _transport.sendExecute(sql);
+
+      if (!response.isSuccess) {
+        throw OracleException(
+          errorCode: response.errorCode ?? oraProtocolError,
+          message: response.errorMessage ?? 'Query execution failed',
+        );
+      }
+
+      return OracleResult(
+        columnMetadata: response.columnMetadata ?? [],
+        rowData: response.rows ?? [],
+        rowsAffected: response.rowsAffected,
+      );
+    } catch (e) {
+      if (e is OracleException) rethrow;
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'Query execution failed',
+        cause: e,
       );
     }
   }

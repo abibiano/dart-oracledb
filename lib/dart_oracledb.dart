@@ -29,9 +29,9 @@ export 'src/protocol/constants.dart'
 // Connection API
 export 'src/connection.dart' show OracleConnection;
 
+// Query Results
+export 'src/result.dart' show OracleResult, OracleRow;
+export 'src/protocol/messages/execute_message.dart' show ColumnMetadata;
+
 // TLS/SSL Configuration
 export 'src/transport/tls.dart' show TlsConfig;
-
-// Public API exports will be added as implementation progresses
-// export 'src/pool.dart' show OraclePool;
-// export 'src/result.dart' show OracleResult, OracleRow;
