@@ -1,0 +1,86 @@
+# generated: 2025-12-15
+# project: dart-oracledb
+# tracking_system: file-system
+# story_location: docs/sprint-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - drafted: Story file created in stories folder
+#   - ready-for-dev: Draft approved and story context created
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - completed: Retrospective has been done
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically drafts next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2025-12-15
+project: dart-oracledb
+tracking_system: file-system
+story_location: docs/sprint-artifacts
+
+development_status:
+  # Epic 1: Core Connection & Authentication
+  epic-1: in-progress
+  1-1-project-initialization-structure: review
+  1-2-tns-transport-layer: backlog
+  1-3-ttc-protocol-foundation: backlog
+  1-4-authentication-implementation: backlog
+  1-5-connection-api-error-handling: backlog
+  1-6-tls-ssl-support: backlog
+  1-7-connection-lifecycle-management: backlog
+  epic-1-retrospective: optional
+
+  # Epic 2: Query Execution & Transactions
+  epic-2: backlog
+  2-1-execute-message-basic-query: backlog
+  2-2-result-set-handling: backlog
+  2-3-bind-parameters: backlog
+  2-4-dml-operations-insert-update-delete: backlog
+  2-5-transaction-management: backlog
+  2-6-basic-data-type-mapping: backlog
+  2-7-statement-caching: backlog
+  2-8-query-error-handling: backlog
+  epic-2-retrospective: optional
+
+  # Epic 3: PL/SQL Execution
+  epic-3: backlog
+  3-1-call-stored-procedures: backlog
+  3-2-call-functions-with-return-values: backlog
+  3-3-out-and-in-out-parameters: backlog
+  epic-3-retrospective: optional
+
+  # Epic 4: Advanced Data Types (LOB, RAW, JSON)
+  epic-4: backlog
+  4-1-clob-support: backlog
+  4-2-blob-support: backlog
+  4-3-raw-data-type: backlog
+  4-4-json-data-type: backlog
+  epic-4-retrospective: optional
+
+  # Epic 5: Connection Pooling
+  epic-5: backlog
+  5-1-create-connection-pool: backlog
+  5-2-acquire-and-release-connections: backlog
+  5-3-pool-timeout-and-cleanup: backlog
+  5-4-session-tagging: backlog
+  epic-5-retrospective: optional
