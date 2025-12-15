@@ -48,7 +48,7 @@ development_status:
   1-5-connection-api-error-handling: done
   1-6-tls-ssl-support: done
   1-7-connection-lifecycle-management: done
-  epic-1-retrospective: optional
+  epic-1-retrospective: completed
 
   # Epic 2: Query Execution & Transactions
   epic-2: backlog
