@@ -4,8 +4,17 @@
 /// without requiring Oracle Client installation.
 library;
 
+// Errors
+export 'src/errors.dart'
+    show
+        OracleException,
+        oraNetworkError,
+        oraConnectTimeout,
+        oraHostUnreachable,
+        oraConnectionRefused,
+        oraProtocolError;
+
 // Public API exports will be added as implementation progresses
 // export 'src/connection.dart' show OracleConnection;
 // export 'src/pool.dart' show OraclePool;
 // export 'src/result.dart' show OracleResult, OracleRow;
-// export 'src/errors.dart' show OracleException;
