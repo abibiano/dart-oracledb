@@ -102,7 +102,11 @@ void main() {
         // Find SQL end position
         const sql = 'SELECT :1 FROM dual';
         final sqlBytes = utf8.encode(sql);
-        final bindCountOffset = 1 + 4 + 1 + 4 + sqlBytes.length; // func + cursor + opts + sqlLen + sql
+        final bindCountOffset = 1 +
+            4 +
+            1 +
+            4 +
+            sqlBytes.length; // func + cursor + opts + sqlLen + sql
 
         // Bind count = 1 (2 bytes BE)
         expect(bytes[bindCountOffset], equals(0));
@@ -130,7 +134,8 @@ void main() {
 
         const sql = 'SELECT :1 FROM dual';
         final sqlBytes = utf8.encode(sql);
-        final bindDataOffset = 1 + 4 + 1 + 4 + sqlBytes.length + 2; // after bind count
+        final bindDataOffset =
+            1 + 4 + 1 + 4 + sqlBytes.length + 2; // after bind count
 
         // Non-null indicator (0x00)
         expect(bytes[bindDataOffset], equals(0x00));
@@ -368,6 +373,63 @@ void main() {
 
       expect(response.isSuccess, isTrue);
       expect(response.rows, isEmpty);
+    });
+
+    group('DML response (columnCount = 0)', () {
+      test('decodes DML response with rowsAffected = 1', () {
+        final bytes = _buildDmlResponse(cursorId: 0, rowsAffected: 1);
+
+        final response = ExecuteResponse.decode(bytes);
+
+        expect(response.isSuccess, isTrue);
+        expect(response.rowsAffected, equals(1));
+        expect(response.rows, isEmpty);
+        expect(response.columnMetadata, isEmpty);
+      });
+
+      test('decodes DML response with rowsAffected = 0', () {
+        final bytes = _buildDmlResponse(cursorId: 0, rowsAffected: 0);
+
+        final response = ExecuteResponse.decode(bytes);
+
+        expect(response.isSuccess, isTrue);
+        expect(response.rowsAffected, equals(0));
+      });
+
+      test('decodes DML response with multiple rows affected', () {
+        final bytes = _buildDmlResponse(cursorId: 0, rowsAffected: 42);
+
+        final response = ExecuteResponse.decode(bytes);
+
+        expect(response.isSuccess, isTrue);
+        expect(response.rowsAffected, equals(42));
+      });
+
+      test('decodes DML response with large rowsAffected', () {
+        // Test large count (65536 = 0x00010000)
+        final bytes = _buildDmlResponse(cursorId: 0, rowsAffected: 65536);
+
+        final response = ExecuteResponse.decode(bytes);
+
+        expect(response.isSuccess, isTrue);
+        expect(response.rowsAffected, equals(65536));
+      });
+    });
+
+    test('SELECT response has null rowsAffected', () {
+      final bytes = _buildSuccessResponse(
+        cursorId: 1,
+        columns: [_TestColumn('DUMMY', oraTypeVarchar, 1)],
+        rows: [
+          ['X']
+        ],
+      );
+
+      final response = ExecuteResponse.decode(bytes);
+
+      expect(response.isSuccess, isTrue);
+      expect(response.rowsAffected, isNull);
+      expect(response.rows, hasLength(1));
     });
 
     group('NUMBER decoding', () {
@@ -609,6 +671,37 @@ Uint8List _buildColumnMetadataBytes(
   buffer.addByte(maxLength & 0xFF);
   buffer.addByte(precision);
   buffer.addByte(scale);
+
+  return buffer.toBytes();
+}
+
+/// Builds a mock DML response (INSERT/UPDATE/DELETE) for testing.
+///
+/// DML responses have columnCount = 0 and include rowsAffected instead of row data.
+Uint8List _buildDmlResponse({
+  required int cursorId,
+  required int rowsAffected,
+}) {
+  final buffer = BytesBuilder();
+
+  // Status byte (0 = success)
+  buffer.addByte(0);
+
+  // Cursor ID (4 bytes BE)
+  buffer.addByte((cursorId >> 24) & 0xFF);
+  buffer.addByte((cursorId >> 16) & 0xFF);
+  buffer.addByte((cursorId >> 8) & 0xFF);
+  buffer.addByte(cursorId & 0xFF);
+
+  // Column count = 0 (2 bytes BE) - indicates DML response
+  buffer.addByte(0);
+  buffer.addByte(0);
+
+  // Rows affected (4 bytes BE)
+  buffer.addByte((rowsAffected >> 24) & 0xFF);
+  buffer.addByte((rowsAffected >> 16) & 0xFF);
+  buffer.addByte((rowsAffected >> 8) & 0xFF);
+  buffer.addByte(rowsAffected & 0xFF);
 
   return buffer.toBytes();
 }

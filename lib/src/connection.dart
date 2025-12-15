@@ -8,6 +8,7 @@ import 'errors.dart';
 import 'protocol/bind_parser.dart';
 import 'result.dart';
 import 'transport/connect_string.dart';
+import 'transport/packet.dart';
 import 'transport/tls.dart';
 import 'transport/transport.dart';
 
@@ -372,18 +373,23 @@ class OracleConnection {
     }
   }
 
-  /// Builds the TNS CONNECT packet data.
+  /// Builds the TNS CONNECT packet body with proper protocol structure.
   ///
   /// If [useTls] is true, uses TCPS protocol indicator; otherwise uses TCP.
+  /// Returns the complete CONNECT packet body including version info,
+  /// SDU/TDU sizes, and the connect descriptor at the proper offset.
   static Uint8List _buildConnectData(ConnectionInfo info,
       {bool useTls = false}) {
-    // Build TNS connect string with service name
+    // Build TNS connect descriptor string
     // Format: (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP|TCPS)(HOST=host)(PORT=port))(CONNECT_DATA=(SERVICE_NAME=service)))
     final protocol = useTls ? 'TCPS' : 'TCP';
-    final tnsString = '(DESCRIPTION='
+    final tnsDescriptor = '(DESCRIPTION='
         '(ADDRESS=(PROTOCOL=$protocol)(HOST=${info.host})(PORT=${info.port}))'
         '(CONNECT_DATA=(SERVICE_NAME=${info.serviceName})))';
-    return Uint8List.fromList(utf8.encode(tnsString));
+    final descriptorBytes = Uint8List.fromList(utf8.encode(tnsDescriptor));
+
+    // Build proper CONNECT packet body with protocol header + descriptor
+    return buildConnectPacketBody(descriptorBytes);
   }
 
   /// Closes the connection to the database.

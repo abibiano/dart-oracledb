@@ -6,7 +6,8 @@ void main() {
   group('BindParser', () {
     group('parseNamedBinds', () {
       test('parses single named bind', () {
-        final binds = BindParser.parseNamedBinds('SELECT * FROM emp WHERE dept = :dept');
+        final binds =
+            BindParser.parseNamedBinds('SELECT * FROM emp WHERE dept = :dept');
         expect(binds, equals(['dept']));
       });
 
@@ -23,8 +24,8 @@ void main() {
       });
 
       test('parses bind with numbers in name', () {
-        final binds = BindParser.parseNamedBinds(
-            'SELECT * FROM emp WHERE val = :val1');
+        final binds =
+            BindParser.parseNamedBinds('SELECT * FROM emp WHERE val = :val1');
         expect(binds, equals(['val1']));
       });
 

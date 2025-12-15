@@ -20,6 +20,28 @@ const int tnsPacketAttention = 13; // Attention request
 /// The size of the TNS packet header in bytes.
 const int tnsHeaderSize = 8;
 
+// TNS CONNECT packet body offsets (relative to payload start, not packet start)
+// These map to node-oracledb constants minus 8 (header size)
+
+/// TNS protocol version constants
+const int tnsVersionDesired = 319;
+const int tnsVersionMinimum = 300;
+
+/// Default SDU (Session Data Unit) size
+const int tnsDefaultSdu = 8192;
+
+/// Default TDU (Transfer Data Unit) size
+const int tnsDefaultTdu = 32767;
+
+/// Connect option: don't care about half/full duplex
+const int tnsOptionDontCare = 0x0001;
+
+/// Connect flag: NA (Network Authentication) disabled
+const int tnsConnectFlagNaDisabled = 0x04;
+
+/// Offset where connect data starts in CONNECT packet body
+const int tnsConnectDataOffset = 66; // NSPCNDAT(74) - tnsHeaderSize(8)
+
 /// Exception thrown when TNS packet operations fail.
 class TnsPacketException implements Exception {
   /// Creates a TNS packet exception with the given message.
@@ -141,4 +163,86 @@ class TnsPacket {
   @override
   String toString() =>
       'TnsPacket(type: $type, length: $length, payload: ${payload.length} bytes)';
+}
+
+/// Builds a TNS CONNECT packet body with proper protocol structure.
+///
+/// The CONNECT packet body contains version info, SDU/TDU sizes,
+/// and the connect descriptor string at a specific offset.
+///
+/// Structure (offsets relative to payload start):
+/// ```
+/// 0:   Version Desired (2 bytes BE)
+/// 2:   Version Minimum (2 bytes BE)
+/// 4:   Options (2 bytes BE)
+/// 6:   SDU (2 bytes BE)
+/// 8:   TDU (2 bytes BE)
+/// 10:  NT Characteristics (2 bytes BE)
+/// 12:  Line Turnaround (2 bytes BE)
+/// 14:  Endianness marker (2 bytes BE) - value 1
+/// 16:  Connect Data Length (2 bytes BE)
+/// 18:  Connect Data Offset (2 bytes BE)
+/// 20:  Max Connect Data (2 bytes BE)
+/// 22-31: Reserved/flags
+/// 32:  Connect flags byte 0
+/// 33:  Connect flags byte 1
+/// 34-65: Reserved
+/// 66+: Connect Data (descriptor string)
+/// ```
+Uint8List buildConnectPacketBody(Uint8List connectData) {
+  final buffer = WriteBuffer();
+
+  // Offset 0: Version Desired (2 bytes BE)
+  buffer.writeUint16BE(tnsVersionDesired);
+
+  // Offset 2: Version Minimum (2 bytes BE)
+  buffer.writeUint16BE(tnsVersionMinimum);
+
+  // Offset 4: Options (2 bytes BE)
+  buffer.writeUint16BE(tnsOptionDontCare);
+
+  // Offset 6: SDU (2 bytes BE)
+  buffer.writeUint16BE(tnsDefaultSdu);
+
+  // Offset 8: TDU (2 bytes BE)
+  buffer.writeUint16BE(tnsDefaultTdu);
+
+  // Offset 10: NT Characteristics (2 bytes BE)
+  buffer.writeUint16BE(0);
+
+  // Offset 12: Line Turnaround (2 bytes BE)
+  buffer.writeUint16BE(0);
+
+  // Offset 14: Endianness marker - value 1 in native byte order (2 bytes BE)
+  buffer.writeUint16BE(1);
+
+  // Offset 16: Connect Data Length (2 bytes BE)
+  buffer.writeUint16BE(connectData.length);
+
+  // Offset 18: Connect Data Offset (2 bytes BE) - offset from packet start
+  // Connect data starts at offset 74 from packet start (66 + 8 header)
+  buffer.writeUint16BE(tnsConnectDataOffset + tnsHeaderSize);
+
+  // Offset 20: Max Connect Data (2 bytes BE)
+  buffer.writeUint16BE(230);
+
+  // Offset 22-23: Reserved (2 bytes)
+  buffer.writeUint16BE(0);
+
+  // Offset 24: Connect flags byte 0 - NA disabled
+  buffer.writeUint8(tnsConnectFlagNaDisabled);
+
+  // Offset 25: Connect flags byte 1
+  buffer.writeUint8(0);
+
+  // Offset 26-65: Reserved padding to reach connect data offset
+  // Need 66 - 26 = 40 bytes of padding
+  for (var i = 0; i < 40; i++) {
+    buffer.writeUint8(0);
+  }
+
+  // Offset 66+: Connect Data (descriptor string)
+  buffer.writeBytes(connectData);
+
+  return buffer.toBytes();
 }

@@ -237,6 +237,20 @@ class ExecuteResponse {
       final cursorId = buffer.readUint32BE();
       final columnCount = buffer.readUint16BE();
 
+      // DML response (INSERT/UPDATE/DELETE): columnCount = 0
+      if (columnCount == 0) {
+        // For DML operations, Oracle returns rowsAffected instead of row data
+        final rowsAffected = buffer.readUint32BE();
+        return ExecuteResponse(
+          isSuccess: true,
+          cursorId: cursorId,
+          columnMetadata: const [],
+          rows: const [],
+          rowsAffected: rowsAffected,
+        );
+      }
+
+      // SELECT response: columnCount > 0
       // Parse column metadata
       final columns = <ColumnMetadata>[];
       for (var i = 0; i < columnCount; i++) {

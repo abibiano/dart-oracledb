@@ -55,7 +55,7 @@ development_status:
   2-1-execute-message-basic-query: dev-complete
   2-2-result-set-handling: done  # Implemented as part of Story 2-1 (OracleResult/OracleRow)
   2-3-bind-parameters: done
-  2-4-dml-operations-insert-update-delete: backlog
+  2-4-dml-operations-insert-update-delete: review
   2-5-transaction-management: backlog
   2-6-basic-data-type-mapping: backlog
   2-7-statement-caching: backlog
