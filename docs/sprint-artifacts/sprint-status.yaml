@@ -45,8 +45,8 @@ development_status:
   1-2-tns-transport-layer: done
   1-3-ttc-protocol-foundation: done
   1-4-authentication-implementation: done
-  1-5-connection-api-error-handling: backlog
-  1-6-tls-ssl-support: backlog
+  1-5-connection-api-error-handling: done
+  1-6-tls-ssl-support: done
   1-7-connection-lifecycle-management: backlog
   epic-1-retrospective: optional
 

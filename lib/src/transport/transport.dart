@@ -5,6 +5,7 @@ import 'package:logging/logging.dart';
 import '../errors.dart';
 import 'packet.dart';
 import 'socket.dart';
+import 'tls.dart';
 
 final _log = Logger('Transport');
 
@@ -39,15 +40,30 @@ class Transport {
 
   /// Connects to an Oracle database at the specified host and port.
   ///
+  /// If [tlsConfig] is provided and enabled, the connection will be upgraded
+  /// to TLS after the initial TCP connection but BEFORE the TNS handshake.
+  ///
   /// Throws [OracleException] if the connection fails.
   Future<void> connect(
     String host,
     int port, {
     Duration timeout = const Duration(seconds: 60),
+    TlsConfig? tlsConfig,
   }) async {
     _log.info('Connecting transport to $host:$port');
     await _socket.connect(host, port, timeout: timeout);
     _log.info('Transport connected');
+
+    // Upgrade to TLS if enabled (BEFORE TNS handshake)
+    if (tlsConfig != null && tlsConfig.enabled) {
+      _log.info('Upgrading to TLS');
+      await _socket.upgradeToTls(
+        host: host,
+        verifyCertificate: tlsConfig.verifyCertificate,
+        securityContext: tlsConfig.securityContext,
+      );
+      _log.info('TLS upgrade complete');
+    }
   }
 
   /// Disconnects from the database.

@@ -5,6 +5,10 @@ const int oraHostUnreachable = 12541; // TNS:no listener
 const int oraConnectionRefused = 12514; // TNS:listener does not know of service
 const int oraProtocolError = 12547; // TNS:lost contact
 
+/// TLS/SSL error codes
+const int oraTlsHandshakeFailed = 28860; // ORA-28860: Fatal SSL error
+const int oraTlsCertificateError = 28862; // ORA-28862: SSL cert verify failed
+
 /// Authentication error codes (ORA-01017, ORA-28000, etc.)
 const int oraInvalidCredentials = 1017; // ORA-01017: invalid username/password
 const int oraAccountLocked = 28000; // ORA-28000: account is locked

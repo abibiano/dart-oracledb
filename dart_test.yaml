@@ -1,0 +1,4 @@
+tags:
+  integration:
+    # Integration tests require external Oracle database
+    # Run with: RUN_INTEGRATION_TESTS=true dart test

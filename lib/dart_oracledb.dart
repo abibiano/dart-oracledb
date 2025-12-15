@@ -12,7 +12,10 @@ export 'src/errors.dart'
         oraConnectTimeout,
         oraHostUnreachable,
         oraConnectionRefused,
-        oraProtocolError;
+        oraProtocolError,
+        oraInvalidCredentials,
+        oraTlsHandshakeFailed,
+        oraTlsCertificateError;
 
 // Protocol error codes (from TTC layer)
 export 'src/protocol/constants.dart'
@@ -22,7 +25,12 @@ export 'src/protocol/constants.dart'
         oraUnsupportedType,
         oraDataTypeNotSupported;
 
+// Connection API
+export 'src/connection.dart' show OracleConnection;
+
+// TLS/SSL Configuration
+export 'src/transport/tls.dart' show TlsConfig;
+
 // Public API exports will be added as implementation progresses
-// export 'src/connection.dart' show OracleConnection;
 // export 'src/pool.dart' show OraclePool;
 // export 'src/result.dart' show OracleResult, OracleRow;

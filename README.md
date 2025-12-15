@@ -9,6 +9,7 @@ A pure Dart Oracle Database driver implementing thin-mode TNS/TTC wire protocol.
 
 - **Pure Dart** - No native dependencies or Oracle Client installation required
 - **Thin mode protocol** - Direct TNS/TTC wire protocol implementation
+- **TLS/SSL support** - Encrypted connections with certificate validation
 - **Connection pooling** - Built-in connection pool with health checks
 - **Full type support** - NUMBER, DATE, TIMESTAMP, VARCHAR2, CLOB, BLOB, JSON, and more
 - **Transactions** - Commit, rollback, and savepoint support
@@ -68,16 +69,46 @@ void main() async {
 
 ```dart
 final connection = await OracleConnection.connect(
-  host: 'dbhost.example.com',
-  port: 1521,                          // Default Oracle port
-  serviceName: 'ORCL',                 // Or use sid: 'ORCL'
+  'dbhost.example.com:1521/ORCL',   // EZ Connect format: host:port/service
   user: 'username',
   password: 'password',
-  connectTimeout: Duration(seconds: 30),
-  useTls: true,                        // Enable TLS
-  walletPath: '/path/to/wallet',       // For TLS certificates
+  timeout: Duration(seconds: 30),
 );
 ```
+
+### TLS/SSL Connections
+
+Enable TLS encryption for secure connections (typically port 2484):
+
+```dart
+import 'package:oracledb/dart_oracledb.dart';
+
+// Production: TLS with certificate validation (recommended)
+final secureConnection = await OracleConnection.connect(
+  'dbhost.example.com:2484/ORCL',
+  user: 'username',
+  password: 'password',
+  tls: TlsConfig.enabled(),
+);
+
+// Development: TLS with self-signed certificates
+final devConnection = await OracleConnection.connect(
+  'localhost:2484/FREEPDB1',
+  user: 'system',
+  password: 'password',
+  tls: TlsConfig.enabled(verifyCertificate: false),
+);
+
+// Custom CA certificates (enterprise PKI)
+final customCaConnection = await OracleConnection.connect(
+  'dbhost.example.com:2484/ORCL',
+  user: 'username',
+  password: 'password',
+  tls: TlsConfig.enabled(securityContext: mySecurityContext),
+);
+```
+
+**Note:** TLS is disabled by default for backward compatibility. Oracle typically uses port 2484 for TLS connections.
 
 ### Parameterized Queries
 

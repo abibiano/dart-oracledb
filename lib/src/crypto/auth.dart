@@ -272,7 +272,8 @@ class AuthFlow {
     final phaseOneResponse =
         AuthPhaseOneResponse.decode(phaseOneResponsePacket.payload);
     final verifierParams = phaseOneResponse.toVerifierParams();
-    _log.fine('Received verifier params: type=0x${verifierParams.verifierType.toRadixString(16)}, '
+    _log.fine(
+        'Received verifier params: type=0x${verifierParams.verifierType.toRadixString(16)}, '
         'iterations=${verifierParams.iterations}');
 
     // Step 4: Generate password proof using crypto layer

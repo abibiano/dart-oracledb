@@ -182,6 +182,100 @@ class OracleSocket {
   /// Returns the number of bytes available for reading.
   int get available => _pendingData.length;
 
+  /// Upgrades the current TCP connection to TLS.
+  ///
+  /// This must be called BEFORE any TNS protocol communication.
+  /// The upgrade replaces the underlying socket with a SecureSocket.
+  ///
+  /// The [host] parameter is used for certificate hostname verification.
+  /// Set [verifyCertificate] to `false` only for development with self-signed
+  /// certificates. NEVER disable in production.
+  /// Use [securityContext] to specify custom CA certificates for enterprise PKI.
+  ///
+  /// Throws [OracleException] if TLS handshake fails.
+  Future<void> upgradeToTls({
+    required String host,
+    bool verifyCertificate = true,
+    SecurityContext? securityContext,
+  }) async {
+    if (!isConnected) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message: 'Cannot upgrade to TLS: socket is not connected',
+      );
+    }
+
+    _log.fine('Upgrading connection to TLS');
+
+    try {
+      // Cancel existing subscription before upgrade
+      await _subscription?.cancel();
+      _subscription = null;
+
+      // Upgrade to TLS - assign directly to _socket so close() can clean it up
+      _socket = await SecureSocket.secure(
+        _socket!,
+        host: host,
+        context: securityContext,
+        onBadCertificate: verifyCertificate
+            ? null
+            : (X509Certificate cert) {
+                _log.warning(
+                    'Accepting unverified certificate: ${cert.subject}');
+                return true;
+              },
+      );
+      _log.info('TLS upgrade successful');
+
+      // Re-establish data listener on secure socket
+      _subscription = _socket!.listen(
+        (Uint8List data) {
+          _log.fine('Received ${data.length} bytes (TLS)');
+          _pendingData.addAll(data);
+          if (_dataAvailable != null && !_dataAvailable!.isCompleted) {
+            _dataAvailable!.complete();
+          }
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          _log.warning('TLS socket error', error, stackTrace);
+          _handleError(error);
+        },
+        onDone: () {
+          _log.fine('TLS socket closed by remote');
+          _cleanup();
+        },
+      );
+    } on HandshakeException catch (e) {
+      _log.warning('TLS handshake failed: $e');
+      await close(); // Clean up socket on failure
+      throw OracleException(
+        errorCode: oraTlsHandshakeFailed,
+        message: 'TLS handshake failed: ${e.message}',
+        cause: e,
+      );
+    } on CertificateException catch (e) {
+      _log.warning('TLS certificate error: $e');
+      await close(); // Clean up socket on failure
+      throw OracleException(
+        errorCode: oraTlsCertificateError,
+        message: 'TLS certificate verification failed: ${e.message}',
+        cause: e,
+      );
+    } catch (e) {
+      if (e is OracleException) {
+        await close(); // Clean up socket on failure
+        rethrow;
+      }
+      _log.severe('Unexpected TLS error', e);
+      await close(); // Clean up socket on failure
+      throw OracleException(
+        errorCode: oraTlsHandshakeFailed,
+        message: 'Failed to establish TLS connection: $e',
+        cause: e,
+      );
+    }
+  }
+
   /// Closes the socket connection.
   ///
   /// This method is safe to call on an already closed or unconnected socket.
