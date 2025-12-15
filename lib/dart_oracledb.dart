@@ -12,6 +12,7 @@ export 'src/errors.dart'
         oraConnectTimeout,
         oraHostUnreachable,
         oraConnectionRefused,
+        oraConnectionClosed,
         oraProtocolError,
         oraInvalidCredentials,
         oraTlsHandshakeFailed,

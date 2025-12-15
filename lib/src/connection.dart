@@ -32,13 +32,47 @@ class OracleConnection {
     required Transport transport,
     required ConnectionInfo connectionInfo,
   })  : _transport = transport,
-        _connectionInfo = connectionInfo;
+        _connectionInfo = connectionInfo,
+        _isClosed = false;
 
   final Transport _transport;
   final ConnectionInfo _connectionInfo;
+  bool _isClosed;
 
-  /// Whether the connection is currently open.
-  bool get isConnected => _transport.isConnected;
+  /// Whether the connection is currently open and usable.
+  ///
+  /// Returns `false` if the connection has been closed or if the
+  /// underlying transport is disconnected.
+  bool get isConnected => !_isClosed && _transport.isConnected;
+
+  /// Quick health check based on connection state.
+  ///
+  /// Returns `false` if the connection has been closed or if the
+  /// underlying transport is disconnected. This is a synchronous check
+  /// that does not send network traffic.
+  ///
+  /// For a more thorough check that sends a ping message to the server,
+  /// use [ping()] instead.
+  bool get isHealthy => isConnected;
+
+  /// Throws [OracleException] if connection is closed.
+  ///
+  /// This guard method is called by operations that require an open connection
+  /// (execute, query, etc.) to provide consistent "connection closed" errors.
+  ///
+  /// Note: This method is intentionally unused in Story 1.7 - it will be
+  /// called by execute() and other query operations added in Epic 2.
+  /// See AC3: "Given a closed connection, when any subsequent operation is
+  /// attempted, then a 'connection closed' error is thrown"
+  // ignore: unused_element
+  void _ensureOpen() {
+    if (_isClosed) {
+      throw const OracleException(
+        errorCode: oraConnectionClosed,
+        message: 'Connection is closed',
+      );
+    }
+  }
 
   /// The database server hostname.
   String get host => _connectionInfo.host;
@@ -48,6 +82,35 @@ class OracleConnection {
 
   /// The Oracle service name.
   String get serviceName => _connectionInfo.serviceName;
+
+  /// Pings the database to verify the connection is alive.
+  ///
+  /// Returns `true` if the connection responds to ping.
+  /// Returns `false` if the connection is closed, broken, or unresponsive.
+  ///
+  /// This method does NOT throw exceptions - it returns `false` on failure
+  /// to make health checking easy and safe.
+  ///
+  /// Example:
+  /// ```dart
+  /// if (!await connection.ping()) {
+  ///   // Reconnect or handle broken connection
+  /// }
+  /// ```
+  Future<bool> ping({Duration timeout = const Duration(seconds: 5)}) async {
+    if (_isClosed) {
+      _log.fine('Ping called on closed connection, returning false');
+      return false;
+    }
+
+    try {
+      await _transport.sendPing(timeout: timeout);
+      return true;
+    } catch (e) {
+      _log.warning('Ping failed: $e');
+      return false;
+    }
+  }
 
   /// Connects to an Oracle database using an EZ Connect string.
   ///
@@ -150,6 +213,48 @@ class OracleConnection {
     );
   }
 
+  /// Executes a callback with an automatically managed connection.
+  ///
+  /// The connection is opened before the callback and automatically
+  /// closed when the callback completes, even if an exception is thrown.
+  ///
+  /// Returns the result of the callback.
+  ///
+  /// Example:
+  /// ```dart
+  /// final result = await OracleConnection.withConnection(
+  ///   'localhost:1521/FREEPDB1',
+  ///   user: 'system',
+  ///   password: 'oracle',
+  ///   (connection) async {
+  ///     // Use connection for queries...
+  ///     return someResult;
+  ///   },
+  /// );
+  /// ```
+  static Future<T> withConnection<T>(
+    String connectionString, {
+    required String user,
+    required String password,
+    Duration timeout = const Duration(seconds: 60),
+    TlsConfig? tls,
+    required Future<T> Function(OracleConnection connection) callback,
+  }) async {
+    final connection = await connect(
+      connectionString,
+      user: user,
+      password: password,
+      timeout: timeout,
+      tls: tls,
+    );
+
+    try {
+      return await callback(connection);
+    } finally {
+      await connection.close();
+    }
+  }
+
   /// Builds the TNS CONNECT packet data.
   ///
   /// If [useTls] is true, uses TCPS protocol indicator; otherwise uses TCP.
@@ -166,10 +271,18 @@ class OracleConnection {
 
   /// Closes the connection to the database.
   ///
-  /// Safe to call multiple times. After closing, the connection
-  /// cannot be used for further operations.
+  /// Safe to call multiple times (idempotent). After closing, the connection
+  /// cannot be used for further operations and will throw [OracleException]
+  /// with code ORA-03113.
   Future<void> close() async {
+    if (_isClosed) {
+      _log.fine('Connection already closed, ignoring close()');
+      return; // Idempotent - safe to call multiple times
+    }
+
     _log.info('Closing connection');
+    _isClosed = true;
     await _transport.disconnect();
+    _log.fine('Connection closed successfully');
   }
 }

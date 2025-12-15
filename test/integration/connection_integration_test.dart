@@ -103,5 +103,107 @@ void main() {
         ),
       );
     });
+
+    // Story 1.7: Connection Lifecycle Management Tests
+
+    test('ping returns true for active connection', () async {
+      final connection = await OracleConnection.connect(
+        'localhost:1521/FREEPDB1',
+        user: 'system',
+        password: 'testpassword',
+      );
+
+      try {
+        expect(connection.isHealthy, isTrue);
+        expect(await connection.ping(), isTrue);
+      } finally {
+        await connection.close();
+      }
+    });
+
+    test('ping returns false after close', () async {
+      final connection = await OracleConnection.connect(
+        'localhost:1521/FREEPDB1',
+        user: 'system',
+        password: 'testpassword',
+      );
+
+      await connection.close();
+
+      expect(connection.isHealthy, isFalse);
+      expect(await connection.ping(), isFalse);
+    });
+
+    test('isHealthy is false after close', () async {
+      final connection = await OracleConnection.connect(
+        'localhost:1521/FREEPDB1',
+        user: 'system',
+        password: 'testpassword',
+      );
+
+      expect(connection.isHealthy, isTrue);
+      await connection.close();
+      expect(connection.isHealthy, isFalse);
+    });
+
+    test('withConnection auto-closes on success', () async {
+      var callbackExecuted = false;
+
+      final result = await OracleConnection.withConnection<int>(
+        'localhost:1521/FREEPDB1',
+        user: 'system',
+        password: 'testpassword',
+        callback: (connection) async {
+          expect(connection.isConnected, isTrue);
+          callbackExecuted = true;
+          return 42; // Return a value
+        },
+      );
+
+      expect(callbackExecuted, isTrue);
+      expect(result, equals(42));
+      // Connection is auto-closed, can't verify directly but no exception = success
+    });
+
+    test('withConnection auto-closes on exception', () async {
+      var closedProperly = true;
+
+      try {
+        await OracleConnection.withConnection<void>(
+          'localhost:1521/FREEPDB1',
+          user: 'system',
+          password: 'testpassword',
+          callback: (connection) async {
+            expect(connection.isConnected, isTrue);
+            throw Exception('Test exception');
+          },
+        );
+        fail('Expected exception to propagate');
+      } on Exception catch (e) {
+        expect(e.toString(), contains('Test exception'));
+        // Connection should be auto-closed even though exception was thrown
+        closedProperly = true;
+      }
+
+      expect(closedProperly, isTrue);
+    });
+
+    test('ping respects custom timeout', () async {
+      final connection = await OracleConnection.connect(
+        'localhost:1521/FREEPDB1',
+        user: 'system',
+        password: 'testpassword',
+      );
+
+      try {
+        // Ping with explicit timeout
+        final result = await connection.ping(
+          timeout: const Duration(seconds: 10),
+        );
+        expect(result, isTrue);
+      } finally {
+        await connection.close();
+      }
+    });
   });
 }

@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
 
 import '../errors.dart';
+import '../protocol/messages/ping_message.dart';
 import 'packet.dart';
 import 'socket.dart';
 import 'tls.dart';
@@ -168,6 +170,32 @@ class Transport {
 
   /// Maximum number of RESEND retries before giving up.
   static const int _maxResendRetries = 3;
+
+  /// Sends a TTC PING message to verify connection health.
+  ///
+  /// Throws [OracleException] if ping fails or times out.
+  Future<void> sendPing({Duration timeout = const Duration(seconds: 5)}) async {
+    _log.fine('Sending ping...');
+
+    final pingMessage = PingMessage();
+    final pingData = pingMessage.toBytes();
+
+    final packet = TnsPacket(type: tnsPacketData, payload: pingData);
+    await send(packet);
+
+    // Wait for response with timeout
+    // Note: onTimeout callback throws OracleException directly, no need
+    // to catch TimeoutException separately
+    final response = await receive().timeout(
+      timeout,
+      onTimeout: () => throw OracleException(
+        errorCode: oraConnectTimeout,
+        message:
+            'Ping timeout after ${timeout.inSeconds}s - connection may be broken',
+      ),
+    );
+    _log.fine('Ping response received: type=${response.type}');
+  }
 
   /// Sends a TNS CONNECT packet and waits for an ACCEPT response.
   ///

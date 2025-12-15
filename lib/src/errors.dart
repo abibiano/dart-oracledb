@@ -9,6 +9,10 @@ const int oraProtocolError = 12547; // TNS:lost contact
 const int oraTlsHandshakeFailed = 28860; // ORA-28860: Fatal SSL error
 const int oraTlsCertificateError = 28862; // ORA-28862: SSL cert verify failed
 
+/// Connection lifecycle error codes
+const int oraConnectionClosed =
+    3113; // ORA-03113: end-of-file on communication channel
+
 /// Authentication error codes (ORA-01017, ORA-28000, etc.)
 const int oraInvalidCredentials = 1017; // ORA-01017: invalid username/password
 const int oraAccountLocked = 28000; // ORA-28000: account is locked
