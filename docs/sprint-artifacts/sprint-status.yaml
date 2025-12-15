@@ -41,7 +41,7 @@ story_location: docs/sprint-artifacts
 development_status:
   # Epic 1: Core Connection & Authentication
   epic-1: in-progress
-  1-1-project-initialization-structure: review
+  1-1-project-initialization-structure: done
   1-2-tns-transport-layer: backlog
   1-3-ttc-protocol-foundation: backlog
   1-4-authentication-implementation: backlog

@@ -1,6 +1,6 @@
 # Story 1.1: Project Initialization & Structure
 
-Status: Ready for Review
+Status: done
 
 ## Story
 
@@ -213,16 +213,28 @@ N/A - structural story
 ### Change Log
 
 - 2025-12-15: Story implementation completed - all tasks done, all ACs satisfied
+- 2025-12-15: Code Review (AI) - Fixed 2 HIGH, 1 MEDIUM issues:
+  - Added missing .gitkeep files to lib/src/ subdirectories (transport, protocol, protocol/messages, crypto)
+  - Documented .markdownlint.json deletion in File List
+  - Fixed status terminology to match sprint-status.yaml
+  - Note: Task 1.1 "sqlnet rename" - no git evidence of prior sqlnet directory; directories created fresh per architecture spec
 
 ### File List
 
 **Files created:**
 - `lib/dart_oracledb.dart`
+- `lib/src/transport/.gitkeep`
+- `lib/src/protocol/.gitkeep`
+- `lib/src/protocol/messages/.gitkeep`
+- `lib/src/crypto/.gitkeep`
 - `test/src/.gitkeep`
 - `test/src/transport/.gitkeep`
 - `test/src/protocol/.gitkeep`
 - `test/src/protocol/messages/.gitkeep`
 - `test/src/crypto/.gitkeep`
+
+**Files deleted:**
+- `.markdownlint.json` (removed - not needed for this project)
 
 **Directories created:**
 - `lib/src/protocol/`
