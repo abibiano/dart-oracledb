@@ -200,7 +200,8 @@ class Transport {
               message: 'Server requested too many resends ($resendCount)',
             );
           }
-          _log.fine('Server requested resend (attempt $resendCount/$_maxResendRetries)');
+          _log.fine(
+              'Server requested resend (attempt $resendCount/$_maxResendRetries)');
           await send(connectPacket);
           continue; // Loop to receive next response
 

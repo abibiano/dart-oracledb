@@ -117,8 +117,7 @@ class TtcProtocol {
       );
       throw OracleException(
         errorCode: oraProtocolError,
-        message:
-            'Protocol error: cannot complete negotiation in state $_state',
+        message: 'Protocol error: cannot complete negotiation in state $_state',
       );
     }
     _capabilities = capabilities;

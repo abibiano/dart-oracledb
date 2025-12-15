@@ -5,6 +5,15 @@ const int oraHostUnreachable = 12541; // TNS:no listener
 const int oraConnectionRefused = 12514; // TNS:listener does not know of service
 const int oraProtocolError = 12547; // TNS:lost contact
 
+/// Authentication error codes (ORA-01017, ORA-28000, etc.)
+const int oraInvalidCredentials = 1017; // ORA-01017: invalid username/password
+const int oraAccountLocked = 28000; // ORA-28000: account is locked
+const int oraPasswordExpired = 28001; // ORA-28001: password has expired
+const int oraPasswordGracePeriod = 28002; // ORA-28002: password will expire
+const int oraAuthProtocolError = 3134; // ORA-03134: auth protocol failure
+const int oraConnectionNotAllowed =
+    28003; // ORA-28003: password verification failed
+
 /// Exception thrown when Oracle database operations fail.
 ///
 /// This exception wraps Oracle error codes (ORA-XXXXX) and provides

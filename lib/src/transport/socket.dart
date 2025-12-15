@@ -133,7 +133,8 @@ class OracleSocket {
   /// or the socket is closed.
   ///
   /// Throws [OracleException] if the socket is closed before enough data arrives.
-  Future<Uint8List> read(int length, {Duration timeout = const Duration(seconds: 30)}) async {
+  Future<Uint8List> read(int length,
+      {Duration timeout = const Duration(seconds: 30)}) async {
     final deadline = DateTime.now().add(timeout);
 
     while (_pendingData.length < length) {
@@ -151,7 +152,8 @@ class OracleSocket {
       if (remaining.isNegative) {
         throw OracleException(
           errorCode: oraConnectTimeout,
-          message: 'Timeout waiting for data: need $length bytes, have ${_pendingData.length}',
+          message:
+              'Timeout waiting for data: need $length bytes, have ${_pendingData.length}',
         );
       }
 
@@ -163,7 +165,8 @@ class OracleSocket {
       } on TimeoutException {
         throw OracleException(
           errorCode: oraConnectTimeout,
-          message: 'Timeout waiting for data: need $length bytes, have ${_pendingData.length}',
+          message:
+              'Timeout waiting for data: need $length bytes, have ${_pendingData.length}',
         );
       }
     }

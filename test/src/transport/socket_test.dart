@@ -20,8 +20,8 @@ void main() {
 
         // Try to connect to a port that should not be listening
         expect(
-          () =>
-              socket.connect('127.0.0.1', 59999, timeout: const Duration(seconds: 1)),
+          () => socket.connect('127.0.0.1', 59999,
+              timeout: const Duration(seconds: 1)),
           throwsA(isA<OracleException>()),
         );
       });
@@ -126,7 +126,8 @@ void main() {
         }
 
         final socket = OracleSocket();
-        await socket.connect('localhost', 1521, timeout: const Duration(seconds: 10));
+        await socket.connect('localhost', 1521,
+            timeout: const Duration(seconds: 10));
         expect(socket.isConnected, isTrue);
         await socket.close();
         expect(socket.isConnected, isFalse);

@@ -1,0 +1,29 @@
+# Docker Compose for Oracle 23ai Free for integration testing
+#
+# Usage:
+#   docker-compose up -d
+#   RUN_INTEGRATION_TESTS=true dart test test/integration/
+#   docker-compose down
+#
+# Note: Oracle 23ai Free requires accepting the license agreement
+# and may take several minutes to initialize on first run.
+
+services:
+  oracle:
+    image: container-registry.oracle.com/database/free:latest
+    container_name: oracle23ai
+    ports:
+      - "1521:1521"
+    environment:
+      - ORACLE_PWD=testpassword
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD", "sqlplus", "-L", "system/testpassword@//localhost:1521/FREEPDB1", "AS", "SYSDBA", "@/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+
+volumes:
+  oracle-data:

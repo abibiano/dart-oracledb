@@ -122,7 +122,8 @@ void main() {
 
       test('readPacketType throws on header too short', () {
         final transport = Transport();
-        final header = Uint8List.fromList([0x00, 0x08, 0x00, 0x00]); // Only 4 bytes
+        final header =
+            Uint8List.fromList([0x00, 0x08, 0x00, 0x00]); // Only 4 bytes
 
         expect(
           () => transport.readPacketType(header),
