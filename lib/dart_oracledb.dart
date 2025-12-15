@@ -4,7 +4,7 @@
 /// without requiring Oracle Client installation.
 library;
 
-// Errors
+// Errors and error codes
 export 'src/errors.dart'
     show
         OracleException,
@@ -13,6 +13,14 @@ export 'src/errors.dart'
         oraHostUnreachable,
         oraConnectionRefused,
         oraProtocolError;
+
+// Protocol error codes (from TTC layer)
+export 'src/protocol/constants.dart'
+    show
+        oraMalformedPacket,
+        oraProtocolViolation,
+        oraUnsupportedType,
+        oraDataTypeNotSupported;
 
 // Public API exports will be added as implementation progresses
 // export 'src/connection.dart' show OracleConnection;
