@@ -70,19 +70,32 @@ workflow_status:
       name: "System Architecture"
       agent: "architect"
       command: "/bmad:bmm:workflows:create-architecture"
-      status: "required"
+      status: "completed"
+      selected: true
+      completed_date: "2025-12-15"
+      outputs:
+        - "docs/architecture.md"
+        - "docs/project_context.md"
 
     - id: "create-epics-and-stories"
       name: "Epics & Stories"
       agent: "pm"
       command: "/bmad:bmm:workflows:create-epics-stories"
-      status: "required"
+      status: "completed"
+      selected: true
+      completed_date: "2025-12-15"
+      outputs:
+        - "docs/epics.md"
 
     - id: "test-design"
       name: "Test Design"
       agent: "tea"
       command: "/bmad:bmm:workflows:testarch-test-design"
-      status: "recommended"
+      status: "completed"
+      selected: true
+      completed_date: "2025-12-15"
+      outputs:
+        - "docs/test-design-system.md"
 
     - id: "validate-architecture"
       name: "Validate Architecture"
