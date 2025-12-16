@@ -1,0 +1,517 @@
+# Test Coverage Tracking - dart-oracledb
+
+**Purpose:** Track test coverage metrics per epic and ensure quality gates are met
+
+**Version:** 1.0
+**Date:** 2025-12-16
+**Last Updated:** 2025-12-16
+
+---
+
+## Coverage Targets
+
+### Overall Project
+
+| Metric | Target | Status |
+|--------|--------|--------|
+| Line Coverage | ≥85% | 🔴 75% (baseline) |
+| Branch Coverage | ≥80% | 🔴 TBD |
+| Function Coverage | ≥90% | 🔴 TBD |
+
+### Layer-Specific Targets
+
+| Layer | Target | Current | Status | Priority |
+|-------|--------|---------|--------|----------|
+| **Protocol** | ≥90% | ~70% | 🔴 Below target | Story 6.2 |
+| **Transport** | ≥90% | ~75% | 🔴 Below target | Story 6.2 |
+| **Crypto** | ≥90% | ~80% | 🟡 Near target | Story 6.2 |
+| **Connection API** | ≥85% | ~70% | 🔴 Below target | Story 6.2 |
+| **Pool** | ≥85% | Not impl | ⚪ N/A | Epic 5 |
+| **Data Types** | ≥85% | TBD | ⚪ TBD | Epic 2 |
+
+---
+
+## Epic Coverage Tracking
+
+### Epic 1: Core Connection & Authentication
+
+**Status:** ✅ Functionally Complete, ⚠️ Needs Validation (Story 6.2)
+
+**Baseline Coverage (2025-12-16):**
+
+| Module | Line Coverage | Branch Coverage | Notes |
+|--------|---------------|-----------------|-------|
+| `lib/src/transport/` | ~75% | TBD | TNS packet handling |
+| `lib/src/protocol/` | ~70% | TBD | TTC protocol messages |
+| `lib/src/crypto/` | ~80% | TBD | SHA512/PBKDF2 auth |
+| `lib/src/connection/` | ~70% | TBD | Connection API |
+| **Overall Epic 1** | **~73%** | **TBD** | Below ≥90% target |
+
+**Test Counts:**
+- Unit Tests: 268+
+- Integration Tests: 30+
+- Total: 298+
+
+**Gap Analysis:**
+
+| Gap | Impact | Resolution |
+|-----|--------|------------|
+| Integration tests not run during Story 1.4 dev | HIGH | Story 1.4 marked "done" but broken | Story 6.2: Comprehensive auth validation |
+| Error path testing inconsistent | MEDIUM | Missed in Stories 1.2, 1.3, 1.5, 1.7 | Story 6.2: Add error path tests |
+| Protocol edge cases discovered late | HIGH | FAST_AUTH, hex crypto found in debugging | Story 6.2: Protocol-specific validation |
+| Security tests (NFR5) added reactively | MEDIUM | 3 violations in code reviews | Story 6.2: Security test suite |
+
+**Story 6.2 Target:** ≥90% coverage for all Epic 1 authentication code
+
+---
+
+### Epic 2: Query Execution & Transactions
+
+**Status:** ⚠️ Partial Implementation, Needs Validation (Story 6.3)
+
+**Current Coverage (2025-12-16):**
+
+| Story | Status | Coverage | Notes |
+|-------|--------|----------|-------|
+| 2.1: Execute Message & Basic Query | dev-complete-pending-validation | ~70% | Unit tests only |
+| 2.2: Result Set Handling | dev-complete-pending-validation | ~70% | Unit tests only |
+| 2.3: Bind Parameters | dev-complete-pending-validation | ~65% | Unit tests only |
+| 2.4: DML Operations | dev-complete-pending-validation | ~70% | Unit tests only |
+| 2.5: Transaction Management | review | ~85% | Unit + integration tests |
+| 2.6: Basic Data Type Mapping | review | ~80% | Unit + integration tests |
+| 2.7: Statement Caching | backlog | N/A | Not started |
+| 2.8: Query Error Handling | backlog | N/A | Not started |
+
+**Critical Issue:** Stories 2.1-2.4 marked "dev-complete-pending-validation" without integration tests (same issue as Story 1.4).
+
+**Story 6.3 Target:** Validate Stories 2.1-2.4, achieve ≥85% coverage
+
+---
+
+### Epic 3: PL/SQL Execution
+
+**Status:** ⚪ Not Started
+
+**Target Coverage:** ≥85%
+
+| Story | Status | Estimated Coverage Target |
+|-------|--------|---------------------------|
+| 3.1: Call Stored Procedures | backlog | ≥85% (unit + integration) |
+| 3.2: Call Functions with Return Values | backlog | ≥85% (unit + integration) |
+| 3.3: OUT and IN/OUT Parameters | backlog | ≥85% (unit + integration) |
+
+---
+
+### Epic 4: Advanced Data Types
+
+**Status:** ⚪ Not Started
+
+**Target Coverage:** ≥85%
+
+| Story | Status | Estimated Coverage Target |
+|-------|--------|---------------------------|
+| 4.1: CLOB Support | backlog | ≥85% (unit + integration) |
+| 4.2: BLOB Support | backlog | ≥85% (unit + integration) |
+| 4.3: RAW Data Type | backlog | ≥85% (unit + integration) |
+| 4.4: JSON Data Type | backlog | ≥85% (unit + integration) |
+
+---
+
+### Epic 5: Connection Pooling
+
+**Status:** ⚪ Not Started
+
+**Target Coverage:** ≥90% (critical for resource management)
+
+| Story | Status | Estimated Coverage Target |
+|-------|--------|---------------------------|
+| 5.1: Create Connection Pool | backlog | ≥90% (concurrency critical) |
+| 5.2: Acquire and Release Connections | backlog | ≥90% (resource management) |
+| 5.3: Pool Timeout and Cleanup | backlog | ≥90% (error handling critical) |
+| 5.4: Session Tagging | backlog | ≥85% |
+
+---
+
+### Epic 6: Test Architecture & Coverage
+
+**Status:** 🟢 In Progress
+
+**Current Story:**
+
+| Story | Status | Coverage Target |
+|-------|--------|-----------------|
+| 6.1: Test Architecture Design & Standards | in-progress | N/A (documentation) |
+| 6.2: Epic 1 Authentication Test Suite Rework | backlog | Achieve ≥90% Epic 1 coverage |
+| 6.3: Epic 2 Validation | backlog | Validate Stories 2.1-2.4 |
+| 6.4: CI/CD Integration | backlog (DESCOPED) | N/A |
+
+---
+
+## Coverage Analysis Commands
+
+### Generate Coverage Report
+
+```bash
+# Run tests with coverage (unit tests only)
+dart test --coverage=coverage --exclude-tags=integration
+
+# Include integration tests
+RUN_INTEGRATION_TESTS=true dart test --coverage=coverage
+
+# Convert to lcov format
+dart pub global activate coverage
+dart pub global run coverage:format_coverage \
+  --lcov \
+  --in=coverage \
+  --out=coverage/lcov.info \
+  --report-on=lib
+
+# Generate HTML report
+genhtml coverage/lcov.info -o coverage/html
+
+# Open in browser
+open coverage/html/index.html
+```
+
+### Coverage by Directory
+
+```bash
+# Protocol layer coverage
+lcov --extract coverage/lcov.info 'lib/src/protocol/*' -o coverage/protocol.info
+genhtml coverage/protocol.info -o coverage/html/protocol
+
+# Transport layer coverage
+lcov --extract coverage/lcov.info 'lib/src/transport/*' -o coverage/transport.info
+genhtml coverage/transport.info -o coverage/html/transport
+
+# Crypto layer coverage
+lcov --extract coverage/lcov.info 'lib/src/crypto/*' -o coverage/crypto.info
+genhtml coverage/crypto.info -o coverage/html/crypto
+
+# Connection API coverage
+lcov --extract coverage/lcov.info 'lib/src/connection/*' -o coverage/connection.info
+genhtml coverage/connection.info -o coverage/html/connection
+```
+
+### Coverage Metrics
+
+```bash
+# Line coverage
+lcov --summary coverage/lcov.info
+
+# Detailed coverage by file
+lcov --list coverage/lcov.info
+
+# Branch coverage
+lcov --summary coverage/lcov.info --rc lcov_branch_coverage=1
+```
+
+---
+
+## Coverage Gates
+
+### Story Completion Gate
+
+**Before marking story "done":**
+
+- [ ] Overall coverage ≥85% (or layer-specific target)
+- [ ] No critical paths uncovered
+- [ ] All acceptance criteria have associated tests
+- [ ] Error paths tested
+- [ ] Edge cases covered
+- [ ] Security tests (if applicable)
+
+### Epic Completion Gate
+
+**Before marking epic "done":**
+
+- [ ] Epic coverage meets target (≥85-90%)
+- [ ] All stories have passing tests
+- [ ] Integration tests validated against Oracle 23ai
+- [ ] Regression tests passing
+- [ ] No known coverage gaps
+
+### Release Gate
+
+**Before production release:**
+
+- [ ] Overall project coverage ≥85%
+- [ ] All critical layers ≥90% (protocol, transport, crypto)
+- [ ] All integration tests passing
+- [ ] Security tests (NFR5) passing
+- [ ] Cross-platform tests passing
+- [ ] Performance baselines met
+
+---
+
+## Coverage Improvement Plan
+
+### Short-Term (Epic 6)
+
+**Story 6.2: Epic 1 Authentication Test Suite Rework**
+
+- Target: ≥90% coverage for Epic 1 authentication code
+- Focus: Integration tests against Oracle 23ai
+- Priorities:
+  1. FAST_AUTH protocol validation
+  2. Hex-encoded crypto value tests
+  3. Wrong password timeout tests (5s)
+  4. MARKER packet handling
+  5. Sequence counter validation
+  6. Security tests (NFR5)
+  7. Error path completion
+
+**Story 6.3: Epic 2 Validation**
+
+- Target: Validate Stories 2.1-2.4 with integration tests
+- Focus: Query execution, result sets, bind parameters, DML
+- Priorities:
+  1. Validation Stories 2.1-2.4
+  2. Create integration tests
+  3. Fix any issues found
+  4. Achieve ≥85% coverage
+
+### Medium-Term (Epic 2-5)
+
+**Epic 2 Continuation (Stories 2.5-2.8):**
+
+- Maintain ≥85% coverage from story start
+- Integration tests mandatory before "done"
+- Error path testing checklist
+
+**Epic 3-5:**
+
+- Apply lessons from Epic 1 retrospective
+- Integration-first testing strategy
+- Reference implementation (node-oracledb) comparison
+- Security checklist (NFR5) for all credential handling
+
+### Long-Term (Production Readiness)
+
+**Quality Gates:**
+
+- Overall coverage ≥85%
+- Critical layers ≥90%
+- All integration tests passing
+- Cross-platform validation
+- Performance regression testing
+- Security audit passing
+
+---
+
+## Coverage Tracking Process
+
+### Weekly Review
+
+1. Generate coverage report
+2. Compare against targets
+3. Identify gaps
+4. Prioritize improvements
+5. Update tracking document
+
+### Per-Story Tracking
+
+1. **Before Development:**
+   - Identify coverage target for story
+   - Define acceptance criteria with test requirements
+
+2. **During Development:**
+   - Write tests first (red-green-refactor)
+   - Monitor coverage as implementation progresses
+   - Ensure error paths covered
+
+3. **Before Marking "Done":**
+   - Run coverage report
+   - Verify target met
+   - Document any exceptions
+
+4. **After Code Review:**
+   - Address coverage gaps found in review
+   - Update coverage tracking
+
+### Per-Epic Tracking
+
+1. **Epic Planning:**
+   - Set epic coverage target
+   - Define critical paths requiring high coverage
+
+2. **Epic Execution:**
+   - Track coverage per story
+   - Maintain running epic coverage total
+
+3. **Epic Completion:**
+   - Final coverage validation
+   - Retrospective: coverage effectiveness review
+   - Update baselines for next epic
+
+---
+
+## Coverage Exceptions
+
+### When Coverage May Be <85%
+
+| Scenario | Acceptable Coverage | Justification |
+|----------|---------------------|---------------|
+| Generated code | Varies | Auto-generated may have unreachable paths |
+| Legacy compatibility | <85% | May be deprecated/removed |
+| Defensive error handling | <85% | "Should never happen" paths |
+
+**Process for Exceptions:**
+
+1. Document exception in code comments
+2. Add to coverage tracking document
+3. Get approval from team lead
+4. Plan future remediation if possible
+
+---
+
+## Epic 1 Baseline Coverage Snapshot (2025-12-16)
+
+**Before Story 6.2 Rework:**
+
+```
+Overall Coverage: ~75%
+
+lib/src/transport/
+  packet.dart:              78%
+  tns_protocol.dart:        72%
+  socket_handler.dart:      80%
+
+lib/src/protocol/
+  ttc_protocol.dart:        68%
+  messages/
+    auth_message.dart:      75%
+    fast_auth_message.dart: 65%
+    connect_message.dart:   80%
+
+lib/src/crypto/
+  auth.dart:                82%
+  pbkdf2.dart:              85%
+  sha512.dart:              78%
+
+lib/src/connection/
+  connection.dart:          70%
+  connection_string.dart:   85%
+  error.dart:               75%
+
+Test Counts:
+  Unit Tests: 268+
+  Integration Tests: 30+
+  Total: 298+
+
+Gaps Identified:
+  - Integration tests not run during Story 1.4
+  - Error path coverage inconsistent
+  - Protocol edge cases missing
+  - Security tests (NFR5) reactive, not proactive
+```
+
+**After Story 6.2 Target:**
+
+```
+Overall Coverage: ≥90% (Epic 1 only)
+
+Protocol-specific tests added:
+  - FAST_AUTH validation
+  - Hex crypto encoding
+  - Timeout behavior (5s wrong password)
+  - MARKER packet handling
+  - Sequence counter validation
+
+Security tests (NFR5):
+  - Password not in logs
+  - Username not in logs
+  - Credentials not in errors
+
+Error path tests:
+  - Connection failures
+  - Auth failures
+  - Protocol errors
+```
+
+---
+
+## Tools and Automation
+
+### Coverage Tools
+
+- **dart test --coverage** - Built-in Dart coverage collection
+- **lcov** - Coverage report manipulation
+- **genhtml** - HTML report generation
+
+### CI Integration (Future - Story 6.4)
+
+```yaml
+# .github/workflows/coverage.yml
+name: Coverage
+
+on: [push, pull_request]
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Run tests with coverage
+        run: dart test --coverage=coverage --exclude-tags=integration
+
+      - name: Convert coverage
+        run: |
+          dart pub global activate coverage
+          dart pub global run coverage:format_coverage \
+            --lcov --in=coverage --out=coverage/lcov.info --report-on=lib
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: coverage/lcov.info
+          fail_ci_if_error: true
+
+      - name: Coverage gate
+        run: |
+          coverage=$(lcov --summary coverage/lcov.info | grep lines | awk '{print $2}' | sed 's/%//')
+          if (( $(echo "$coverage < 85" | bc -l) )); then
+            echo "Coverage $coverage% is below 85% threshold"
+            exit 1
+          fi
+```
+
+---
+
+## References
+
+- [Test Architecture](./test-architecture-dart-oracledb.md) - Test standards and requirements
+- [Epic 1 Retrospective](./sprint-artifacts/epic-1-retro-2025-12-16.md) - Coverage learnings
+- [Dart Coverage Package](https://pub.dev/packages/coverage)
+- [LCOV Documentation](http://ltp.sourceforge.net/coverage/lcov.php)
+
+---
+
+## Document Metadata
+
+**Created:** 2025-12-16
+**Last Updated:** 2025-12-16
+**Version:** 1.0
+**Next Review:** After Epic 6 Story 6.2 completion
+
+**Coverage Tracking Owner:** Dana (QA Engineer)
+
+---
+
+## Notes
+
+- This document is a **living document** - update after each story/epic
+- Coverage targets may be adjusted based on project needs
+- Exceptions require team lead approval
+- Focus on **meaningful coverage**, not just hitting numbers
+- Integration tests MORE valuable than unit tests for protocol code
+
+---
+
+**End of Test Coverage Tracking Document**
