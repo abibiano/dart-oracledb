@@ -462,3 +462,4 @@ The MVP scope defined in Product Scope section has been validated:
 - NFR12: Package must work on macOS (Apple Silicon and Intel), Windows, and Linux
 - NFR13: Package must support Oracle 23ai with modern authentication
 - NFR14: Package must compile and run in both JIT (development) and AOT (production) modes
+- NFR15: Test suite must comprehensively validate Oracle 23ai protocol-specific behaviors including FAST_AUTH protocol, hex-encoded cryptographic values, and edge cases (wrong password handling, connection failures). Integration tests must run against Oracle 23ai to catch protocol deviations.

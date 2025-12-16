@@ -174,7 +174,10 @@ Then reorganize to match the custom structure defined below.
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| **Testing strategy** | Integration-first against Oracle 23ai Docker | Real database validation over mocks |
+| **Testing strategy** | Integration-first against Oracle 23ai Docker + Comprehensive unit tests | Real database validation over mocks, with protocol-layer unit tests |
+| **Test architecture** | Epic 6: Test Architecture & Coverage | Dedicated epic establishes test standards, validates Epic 1 authentication protocol, ensures Epic 2+ foundation |
+| **Test coverage requirements** | Unit tests for protocol layers (transport, TTC, crypto), Integration tests covering Oracle 23ai-specific behaviors (FAST_AUTH, hex crypto, edge cases) | Validates discovered protocol details from Stories 1-4-FIX and 1-8-FIX |
+| **CI/CD integration** | Automated integration tests against Oracle 23ai in CI pipeline | Continuous validation of protocol compatibility |
 | **Documentation** | README + dartdoc | Standard Dart: quickstart in README, API via dartdoc |
 
 ### Decision Dependencies

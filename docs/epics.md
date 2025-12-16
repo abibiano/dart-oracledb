@@ -180,6 +180,10 @@ This document provides the complete epic and story breakdown for dart-oracledb, 
 
 ## Epic List
 
+**Epic Execution Sequence:** Epic 1 → **Epic 6** → Epic 2 → Epic 3 → Epic 4 → Epic 5
+
+**Note:** Epic 6 (Test Architecture & Coverage) must complete BEFORE Epic 2 Story 2.5+ can proceed. Epic 6 validates Epic 1 authentication implementation and Epic 2 stories 2.1-2.4.
+
 ## Epic 1: Core Connection & Authentication
 
 Developer can connect to Oracle database securely using an EZ Connect string, authenticate with modern SHA512/PBKDF2 verifiers, establish TLS/SSL encrypted connections, and verify connection health.
@@ -846,3 +850,197 @@ So that **I can maintain session state across acquire/release cycles** (FR12).
 **When** acquiring with a tag
 **Then** any available connection is returned
 **And** the caller can set the new tag
+
+## Epic 6: Test Architecture & Coverage
+
+Developer has comprehensive test coverage validating Oracle 23ai protocol-specific behaviors, with unit tests for protocol layers and integration tests covering authentication edge cases discovered during Epic 1 implementation.
+
+**FRs covered:** All FRs validated through comprehensive test suite (NFR15)
+
+**Technical notes:** This epic addresses test coverage gaps identified after Stories 1-4-FIX and 1-8-FIX revealed Oracle 23ai authentication protocol details (FAST_AUTH, hex-encoded crypto, wrong password timeout). Establishes test-first foundation for Epic 2+ work.
+
+**Epic Sequence:** Epic 6 must complete BEFORE Epic 2 Story 2.5+ can proceed. Epic 2 stories 2.1-2.4 validation is part of Epic 6.
+
+### Story 6.1: Test Architecture Design & Standards
+
+As a **developer contributing to dart-oracledb**,
+I want **comprehensive test architecture standards established**,
+So that **all future epics have consistent, high-quality test coverage**.
+
+**Acceptance Criteria:**
+
+**Given** the need for systematic test coverage
+**When** designing test architecture
+**Then** test standards document is created covering:
+- Unit test structure and organization
+- Integration test requirements (Oracle 23ai Docker)
+- Test coverage expectations per epic
+- Naming conventions and patterns
+- CI/CD integration requirements
+
+**Given** Epic 1 authentication protocol discoveries (FAST_AUTH, hex crypto, timeouts)
+**When** defining test standards
+**Then** protocol-specific test patterns are documented
+**And** edge case testing requirements are defined
+
+**Given** test architecture design is complete
+**When** reviewed by team
+**Then** standards are approved and ready for implementation
+
+### Story 6.2: Epic 1 Authentication Test Suite Rework
+
+As a **developer maintaining dart-oracledb**,
+I want **Epic 1 authentication tests reworked to validate discovered protocol behaviors**,
+So that **authentication implementation has comprehensive, accurate test coverage**.
+
+**Acceptance Criteria:**
+
+**AC1: FAST_AUTH Protocol Tests**
+**Given** Story 1-4-FIX implemented FAST_AUTH protocol
+**When** unit tests are written for FAST_AUTH message encoding
+**Then** tests validate:
+- Protocol negotiation embedding (without message type bytes)
+- DataTypes negotiation embedding (without message type bytes)
+- AUTH_PHASE_ONE embedding (with full function header)
+- Sequence counter handling (sequence=1 for FAST_AUTH)
+- Complete message structure (~2780 TTC bytes)
+
+**AC2: Hex-Encoded Crypto Value Tests**
+**Given** Story 1-4-FIX discovered hex-encoded crypto format requirement
+**When** unit tests are written for crypto operations
+**Then** tests validate:
+- AUTH_SESSKEY hex encoding (64 hex chars = 32 bytes)
+- AUTH_PBKDF2_SPEEDY_KEY hex encoding (160 hex chars = 80 bytes)
+- AUTH_PASSWORD hex encoding with random salt prefix
+- Uppercase hex format enforcement
+- UTF-8 string byte storage (not raw bytes)
+
+**AC3: Wrong Password Timeout Tests**
+**Given** Story 1-8-FIX implemented 5-second timeout for wrong password
+**When** integration tests are written for authentication failure
+**Then** tests validate:
+- Wrong password detected within 5 seconds
+- OracleException thrown with errorCode 1017
+- Error message: "Authentication failed: invalid username or password"
+- Password never exposed in error messages (NFR5)
+- Valid credentials unaffected by timeout logic
+
+**AC4: Integration Tests Against Oracle 23ai**
+**Given** all unit tests pass
+**When** integration tests run against Oracle 23ai Docker
+**Then** tests validate:
+- Successful authentication with valid credentials
+- Wrong password detection and timeout
+- Connection lifecycle (connect, authenticate, close)
+- MARKER packet handling during authentication
+- Sequence counter progression across messages
+
+**AC5: Test Coverage Metrics**
+**Given** Epic 1 test suite rework is complete
+**When** running test coverage analysis
+**Then** authentication code coverage is ≥ 90%
+**And** all protocol edge cases have explicit tests
+
+### Story 6.3: Epic 2 Validation - Review Existing "Pending-Validation" Stories
+
+As a **developer maintaining dart-oracledb**,
+I want **Epic 2 stories 2.1-2.4 (marked "dev-complete-pending-validation") properly validated**,
+So that **Epic 2 foundation is confirmed solid before proceeding to Story 2.5+**.
+
+**Acceptance Criteria:**
+
+**AC1: Review Story 2.1 - Execute Message & Basic Query**
+**Given** Story 2.1 is marked "dev-complete-pending-validation"
+**When** reviewing implementation and tests
+**Then** validate:
+- TTC EXECUTE message encoding is correct
+- Response parsing handles Oracle 23ai format
+- OracleResult object is properly constructed
+- Integration test executes `SELECT * FROM dual` successfully
+**And** document any gaps or issues found
+
+**AC2: Review Story 2.2 - Result Set Handling**
+**Given** Story 2.2 is marked "dev-complete-pending-validation"
+**When** reviewing implementation and tests
+**Then** validate:
+- Row iteration works correctly (`for (final row in result.rows)`)
+- Column access by name (`row['column_name']`) works
+- Column access by index (`row[0]`) works
+- rowCount property returns correct value
+- Integration tests cover multiple rows and data types
+**And** document any gaps or issues found
+
+**AC3: Review Story 2.3 - Bind Parameters**
+**Given** Story 2.3 is marked "dev-complete-pending-validation"
+**When** reviewing implementation and tests
+**Then** validate:
+- Named bind parameters work (`:dept` with Map)
+- Positional bind parameters work (`:1` with List)
+- Multiple bind parameters handled correctly
+- NULL bind values encoded properly
+- Integration tests cover all bind scenarios
+**And** document any gaps or issues found
+
+**AC4: Review Story 2.4 - DML Operations**
+**Given** Story 2.4 is marked "dev-complete-pending-validation"
+**When** reviewing implementation and tests
+**Then** validate:
+- INSERT statements work with bind parameters
+- UPDATE statements work and return rowsAffected
+- DELETE statements work and return rowsAffected
+- Integration tests cover all DML operations
+**And** document any gaps or issues found
+
+**AC5: Gap Remediation**
+**Given** validation review identified gaps or issues
+**When** gaps are prioritized
+**Then** critical gaps are fixed before Epic 6 completion
+**And** minor gaps are documented for future improvement
+**And** all Epic 2 stories 2.1-2.4 are confirmed ready for production use
+
+**AC6: Update Story Status**
+**Given** Epic 2 stories 2.1-2.4 validation is complete
+**When** all tests pass and gaps are addressed
+**Then** stories are marked "done" (no longer "pending-validation")
+**And** Epic 2 is ready to proceed to Story 2.5+
+
+### Story 6.4: CI/CD Integration Test Automation
+
+As a **developer maintaining dart-oracledb**,
+I want **integration tests automated in CI/CD pipeline**,
+So that **every commit is validated against Oracle 23ai automatically**.
+
+**Acceptance Criteria:**
+
+**AC1: Oracle 23ai Docker Setup**
+**Given** CI/CD pipeline needs Oracle database
+**When** configuring CI environment
+**Then** Oracle 23ai Free Docker container is set up
+**And** database is accessible on port 1521
+**And** test schema/users are created automatically
+
+**AC2: Integration Test Execution**
+**Given** Oracle 23ai is running in CI
+**When** CI pipeline executes
+**Then** integration tests run against Oracle 23ai
+**And** test results are reported clearly
+**And** failures block PR merges
+
+**AC3: Test Coverage Reporting**
+**Given** tests execute in CI
+**When** test run completes
+**Then** coverage report is generated
+**And** coverage metrics are displayed (aim: ≥80% overall)
+**And** coverage trends are tracked over time
+
+**AC4: Cross-Platform Validation**
+**Given** dart-oracledb must work on macOS, Windows, Linux
+**When** CI pipeline runs
+**Then** tests execute on all three platforms
+**And** platform-specific issues are caught early
+
+**AC5: CI Performance**
+**Given** CI pipeline includes Docker + integration tests
+**When** optimizing pipeline
+**Then** full CI run completes in < 15 minutes
+**And** test parallelization is used where possible
