@@ -459,7 +459,7 @@ class Transport {
     buffer.writeUint16LE(873);
 
     // Encoding flags
-    buffer.writeUint8(0x01 | 0x20); // MULTI_BYTE | CONV_LENGTH
+    buffer.writeUint8(0x01 | 0x02); // MULTI_BYTE | CONV_LENGTH
 
     // Compile caps (length-prefixed)
     buffer.writeUint8(compileCaps.length);

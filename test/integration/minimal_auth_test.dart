@@ -51,7 +51,7 @@ void main() {
       // Function header
       buffer.writeUint8(ttcMsgTypeFunction); // Message type (3)
       buffer.writeUint8(ttcAuthPhaseOne); // Function code (0x76)
-      buffer.writeUint8(0); // Sequence number
+      buffer.writeUint8(1); // Sequence number (node-oracledb uses 1)
 
       // Token number for Oracle 23ai+ (TEST: try without it!)
       if (includeTokenNumber) {
@@ -67,9 +67,9 @@ void main() {
       buffer.writeUB4(usernameBytes.length);
       buffer.writeUB4(authMode);
 
-      // MINIMAL phase one parameters - Try with 1 key-value pair
+      // Phase one parameters - Match node-oracledb format
       buffer.writeUint8(1); // Unknown flag
-      buffer.writeUB4(1); // Number of key-value pairs = 1 (TEST!)
+      buffer.writeUB4(5); // Number of key-value pairs = 5 (matching node-oracledb)
       buffer.writeUint8(0); // Unknown
       buffer.writeUint8(1); // Unknown
 
@@ -78,8 +78,12 @@ void main() {
         buffer.writeBytesWithLength(usernameBytes);
       }
 
-      // Write ONE minimal key-value pair to test
-      buffer.writeKeyValue('AUTH_TERMINAL', 'test');
+      // Write key-value pairs matching node-oracledb
+      buffer.writeKeyValue('AUTH_TERMINAL', 'unknown');
+      buffer.writeKeyValue('AUTH_PROGRAM_NM', 'dart');
+      buffer.writeKeyValue('AUTH_MACHINE', 'localhost');
+      buffer.writeKeyValue('AUTH_PID', '12345');
+      buffer.writeKeyValue('AUTH_SID', 'testuser');
 
       return buffer.toBytes();
     }
@@ -104,10 +108,11 @@ void main() {
       // ignore: avoid_print
       print('\n=== Testing MINIMAL AUTH_PHASE_ONE (no client info) ===');
 
-      // Build minimal auth message - TEST WITHOUT token number!
+      // Build minimal auth message - NO token number for AUTH_PHASE_ONE!
+      // Analysis shows node-oracledb does NOT write token for auth messages.
       final authBytes = buildMinimalAuthPhaseOne(
         username: username,
-        includeTokenNumber: false, // Try without token number!
+        includeTokenNumber: false, // Token NOT written for AUTH_PHASE_ONE
       );
 
       // ignore: avoid_print

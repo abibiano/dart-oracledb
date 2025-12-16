@@ -242,13 +242,13 @@ class AuthFlow {
     _log.fine('Generated client nonce (${clientNonce.length} bytes)');
 
     // Step 2: Send AUTH_PHASE_ONE using sendData (includes data flags)
-    // Note: Sequence starts at 0 (node-oracledb writtenSeqNum=0 initially)
+    // Note: node-oracledb uses sequence 1 for AUTH_PHASE_ONE
     // Protocol and DataTypes messages don't use sequence numbers
     updateState(AuthState.phaseOneSent);
     final phaseOneRequest = AuthPhaseOneRequest(
       username: username,
       clientNonce: clientNonce,
-      sequence: 0,
+      sequence: 1, // node-oracledb uses sequence 1 for AUTH_PHASE_ONE
     );
 
     // Write token number if ttcFieldVersion >= 18 (TNS_CCAP_FIELD_VERSION_23_1_EXT_1)

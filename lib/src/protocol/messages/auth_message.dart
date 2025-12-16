@@ -34,12 +34,12 @@ class ClientInfo {
 class AuthPhaseOneRequest {
   /// Creates an AUTH_PHASE_ONE request.
   AuthPhaseOneRequest({
-    required String username,
+    required this.username,
     required this.clientNonce,
     this.sequence = 0,
-  }) : username = username.toUpperCase();
+  });
 
-  /// The username (uppercased).
+  /// The username (sent as-is, not uppercased).
   final String username;
 
   /// The client-generated random nonce (not used in phase one message itself).
@@ -50,8 +50,9 @@ class AuthPhaseOneRequest {
 
   /// Converts this request to bytes for transmission.
   ///
-  /// If [use23aiFormat] is true, includes the 8-byte token number field
-  /// required by Oracle 23.1+.
+  /// Note: The [use23aiFormat] parameter is kept for compatibility but currently
+  /// unused for AUTH_PHASE_ONE. Analysis shows token numbers are not written
+  /// for authentication messages.
   Uint8List toBytes({bool use23aiFormat = true}) {
     final buffer = WriteBuffer();
 
@@ -60,10 +61,9 @@ class AuthPhaseOneRequest {
     buffer.writeUint8(ttcAuthPhaseOne); // Function code (0x76)
     buffer.writeUint8(sequence & 0xFF); // Sequence number
 
-    // Token number for Oracle 23.1+ (8-byte variable length = 0 for auth)
-    if (use23aiFormat) {
-      buffer.writeUB8(0);
-    }
+    // NOTE: Token number is NOT written for AUTH_PHASE_ONE
+    // Analysis of node-oracledb shows it does not write token for auth phase one,
+    // even though field version >= 18. Token is only for other function messages.
 
     // Authentication mode flags
     const authMode = ttcAuthModeLogon | ttcAuthModeWithPassword;

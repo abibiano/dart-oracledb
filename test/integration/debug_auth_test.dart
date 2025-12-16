@@ -21,7 +21,7 @@ void main() {
 
   const host = 'localhost';
   const port = 1521;
-  const username = 'SYSTEM';
+  const username = 'system'; // Lowercase to match node-oracledb format
   const password = 'testpassword';
   const serviceName = 'FREEPDB1';
 

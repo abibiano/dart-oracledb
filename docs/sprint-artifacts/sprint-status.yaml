@@ -50,7 +50,7 @@ development_status:
   1-2-tns-transport-layer: done
   1-3-ttc-protocol-foundation: done
   1-4-authentication-implementation: in-progress  # REOPENED - fixing protocol issue
-  1-4-fix-authentication-protocol-debugging: in-progress  # NEW - active debugging sprint
+  1-4-fix-authentication-protocol-debugging: in-progress  # 3 bugs fixed (token, encoding, sequence), 1 blocker remains - see findings doc
   1-5-connection-api-error-handling: pending-validation  # Cannot validate until auth works
   1-6-tls-ssl-support: done
   1-7-connection-lifecycle-management: done
