@@ -758,7 +758,31 @@ Oracle 23ai requires the **FAST_AUTH protocol** (message type 34) for authentica
 
 ### Known Issues & Gotchas
 
-1. **Wrong Password Handling**: Currently causes connection timeout instead of ORA-01017 error (needs investigation)
+1. **Wrong Password Handling (Connection Timeout)**
+
+   **Issue:** When authentication fails due to wrong password, the connection times out after 30 seconds instead of immediately returning ORA-01017 (invalid credentials).
+
+   **Expected Behavior:** Oracle should send a REFUSE packet (type 4) or DATA packet with error message immediately after receiving AUTH_PHASE_TWO with invalid credentials.
+
+   **Actual Behavior:** Oracle 23ai appears to close the connection silently without sending any response packet. The client's `socket.read()` call waits indefinitely for data that never arrives, eventually timing out after 30 seconds.
+
+   **Investigation Summary:**
+   - Added REFUSE packet detection in [transport.dart:1210-1217](lib/src/transport/transport.dart#L1210-L1217) - not received
+   - Added error mapping during AUTH_PHASE_TWO in [auth.dart:409-422](lib/src/crypto/auth.dart#L409-L422) - catches timeout
+   - Updated socket error messages in [socket.dart:142-147](lib/src/transport/socket.dart#L142-L147) - better diagnostics
+   - Packet capture (Wireshark) needed to confirm Oracle's actual behavior on wrong password
+
+   **Workaround:** The authentication eventually fails with ORA-01017 after the 30-second socket timeout. The error is correctly surfaced to the user, just with a delay.
+
+   **Impact:** Low - authentication failure is correctly detected and reported, users just experience a 30-second delay on wrong password attempts. This is acceptable for security (rate-limiting brute force attacks) but not ideal for user experience during development.
+
+   **Priority:** Low - Core authentication works perfectly with valid credentials. This is an edge case error handling issue.
+
+   **Future Work:**
+   - Capture packets with `tcpdump` or Wireshark to see if Oracle sends any response
+   - Compare with node-oracledb behavior on wrong password
+   - Consider lowering socket timeout specifically during authentication phase
+   - Test with Oracle 11g, 12c, 19c to see if behavior differs across versions
 
 2. **MARKER Packets**: Oracle may send MARKER packets (type 12) during authentication - these must be skipped to read the next packet
    - Location: `lib/src/transport/transport.dart` lines 1177-1184

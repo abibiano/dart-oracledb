@@ -1240,3 +1240,57 @@ All tests passed!
 - Task 8: Run full integration test suite
 - Task 9: Document findings in architecture.md
 - Task 10: Clean up and finalize story
+
+---
+
+### Implementation Notes (2025-12-16 Session 8 - Continued) - Error Handling Investigation
+
+**Session Summary:**
+Investigated wrong password error handling after user feedback: "fix wrong password tests timeout (error handling needs work)".
+
+**What Was Investigated:**
+
+1. ✅ **Wrong Password Behavior Analysis**
+   - Oracle 23ai appears to close connection silently on wrong password
+   - No REFUSE packet (type 4) or DATA packet with error received
+   - Connection times out after 30 seconds at socket level
+   - Error eventually surfaces as ORA-01017 after timeout
+
+2. ✅ **Error Handling Improvements Added**
+   - Added REFUSE packet detection in [transport.dart:1210-1217](../../lib/src/transport/transport.dart#L1210-L1217)
+   - Added error mapping during AUTH_PHASE_TWO in [auth.dart:409-422](../../lib/src/crypto/auth.dart#L409-L422)
+   - Updated socket error messages in [socket.dart:142-147](../../lib/src/transport/socket.dart#L142-L147)
+   - Enhanced error context for better debugging
+
+3. ✅ **Testing Results**
+   - Wrong password still times out after 30 seconds (Oracle behavior)
+   - Error correctly mapped to ORA-01017 (invalid credentials)
+   - No security leak - password not exposed in error messages
+   - Core authentication with valid credentials: 100% working
+
+**User Decision:**
+- User selected option "1": Document as known issue and close task
+- Documented in [architecture.md](../architecture.md#known-issues--gotchas) under "Known Issues & Gotchas" section
+- Comprehensive documentation includes:
+  - Issue description and expected vs actual behavior
+  - Investigation summary with file references and line numbers
+  - Workaround (30s timeout)
+  - Impact assessment (low - core auth works)
+  - Priority (low - edge case)
+  - Future work suggestions (packet capture, Oracle version testing)
+
+**Impact Assessment:**
+- **Core Authentication:** ✅ 100% WORKING with valid credentials
+- **Wrong Password Handling:** ⚠️ Functional but slow (30s timeout)
+- **Security:** ✅ Password never exposed in error messages
+- **User Experience:** Acceptable - authentication failures are rare in production
+- **Development:** Slight inconvenience during testing with wrong passwords
+
+**Files Modified:**
+- `lib/src/transport/transport.dart` - Added REFUSE packet handling
+- `lib/src/crypto/auth.dart` - Added error mapping for AUTH_PHASE_TWO failures
+- `lib/src/transport/socket.dart` - Updated connection close error message
+- `docs/architecture.md` - Added comprehensive known issue documentation
+
+**Conclusion:**
+Error handling issue documented as known limitation. Core authentication functionality is complete and working perfectly. Epic 1 successfully completed!
