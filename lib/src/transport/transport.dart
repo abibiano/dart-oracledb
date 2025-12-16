@@ -7,6 +7,7 @@ import 'package:logging/logging.dart';
 import '../errors.dart';
 import '../protocol/buffer.dart';
 import '../protocol/messages/execute_message.dart';
+import '../protocol/messages/fast_auth_message.dart';
 import '../protocol/messages/ping_message.dart';
 import '../protocol/messages/protocol_message.dart';
 import 'packet.dart';
@@ -404,48 +405,37 @@ class Transport {
     return protocolResponse;
   }
 
-  /// Sends protocol negotiation, data types negotiation, and AUTH_PHASE_ONE
-  /// in a single batched TNS DATA packet (Oracle 23ai requirement).
+  /// Sends FAST_AUTH message containing protocol negotiation, data types
+  /// negotiation, and AUTH_PHASE_ONE in a single optimized message.
   ///
-  /// This is required for Oracle 23ai which expects these three messages
-  /// to be sent together in one packet, not as separate packets.
-  Future<ProtocolResponse> sendBatchedProtocolAndAuth(
-      Uint8List authPhaseOneBytes) async {
-    _log.info('Starting batched protocol negotiation with AUTH_PHASE_ONE');
+  /// This is Oracle 23ai's Fast Authentication protocol that reduces round trips
+  /// by combining three separate messages into one FAST_AUTH envelope.
+  Future<ProtocolResponse> sendFastAuth({
+    required String username,
+    required Uint8List clientNonce,
+  }) async {
+    _log.info('Starting FAST_AUTH protocol with username: $username');
 
-    // Build protocol negotiation TTC message
-    final protocolRequest = ProtocolRequest();
-    final protocolBytes = protocolRequest.toBytes();
-    _log.fine('Protocol message: ${protocolBytes.length} bytes');
+    // Build compile and runtime capabilities
+    final compileCaps = _buildCompileCapabilities();
+    final runtimeCaps = _buildRuntimeCapabilities();
 
-    // Build data types negotiation TTC message
-    final dataTypesBytes = _buildDataTypesMessage();
-    _log.fine('Data types message: ${dataTypesBytes.length} bytes');
-    _log.fine('AUTH_PHASE_ONE message: ${authPhaseOneBytes.length} bytes');
+    // Create FAST_AUTH message
+    final fastAuthRequest = FastAuthRequest(
+      username: username,
+      clientNonce: clientNonce,
+      compileCaps: compileCaps,
+      runtimeCaps: runtimeCaps,
+      dataTypes: _dataTypes,
+      ttcFieldVersion: _ttcFieldVersion,
+      sequence: 1, // AUTH_PHASE_ONE uses sequence 1
+    );
 
-    // Concatenate all three TTC messages
-    final batchedTtc = Uint8List(protocolBytes.length +
-        dataTypesBytes.length +
-        authPhaseOneBytes.length);
-    var offset = 0;
-    batchedTtc.setRange(offset, offset + protocolBytes.length, protocolBytes);
-    offset += protocolBytes.length;
-    batchedTtc.setRange(offset, offset + dataTypesBytes.length, dataTypesBytes);
-    offset += dataTypesBytes.length;
-    batchedTtc.setRange(
-        offset, offset + authPhaseOneBytes.length, authPhaseOneBytes);
+    final fastAuthBytes = fastAuthRequest.toBytes();
+    _log.info('Sending FAST_AUTH message: ${fastAuthBytes.length} bytes');
 
-    _log.info('Sending batched handshake: ${batchedTtc.length} bytes total');
-
-    // DEBUG: Save TTC batch to file for comparison with node-oracledb
-    try {
-      await _saveTtcBatchForDebug(batchedTtc);
-    } catch (e) {
-      _log.warning('Failed to save debug TTC batch: $e');
-    }
-
-    // Send batched message in single TNS DATA packet
-    await sendData(batchedTtc);
+    // Send FAST_AUTH message in single TNS DATA packet
+    await sendData(fastAuthBytes);
 
     // Receive protocol response
     final protocolResponseData = await receiveData();
@@ -464,6 +454,14 @@ class Transport {
 
     // Auth response will be handled by auth module
     return protocolResponse;
+  }
+
+  /// Legacy method - deprecated in favor of sendFastAuth.
+  @Deprecated('Use sendFastAuth for Oracle 23ai compatibility')
+  Future<ProtocolResponse> sendBatchedProtocolAndAuth(
+      Uint8List authPhaseOneBytes) async {
+    throw UnsupportedError(
+        'Manual batching is deprecated. Use sendFastAuth instead.');
   }
 
   /// Builds the data types negotiation TTC message without sending it.

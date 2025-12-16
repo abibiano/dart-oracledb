@@ -102,26 +102,20 @@ void main() {
       await transport.disconnect();
     });
 
-    test('minimal auth phase one (batched with protocol negotiation)', () async {
+    test('fast auth protocol (FAST_AUTH message type 15)', () async {
       // ignore: avoid_print
-      print('\n=== Testing BATCHED Protocol + DataTypes + AUTH_PHASE_ONE ===');
+      print('\n=== Testing FAST_AUTH Protocol (Oracle 23ai) ===');
 
-      // Build minimal auth message - NO token number for AUTH_PHASE_ONE!
-      // Analysis shows node-oracledb does NOT write token for auth messages.
-      final authBytes = buildMinimalAuthPhaseOne(
-        username: username,
-        includeTokenNumber: false, // Token NOT written for AUTH_PHASE_ONE
-      );
-
-      // ignore: avoid_print
-      print('AUTH_PHASE_ONE: ${authBytes.length} bytes');
-      // ignore: avoid_print
-      print('Hex: ${authBytes.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
+      // Generate client nonce for authentication
+      final clientNonce = Uint8List(16); // Zeros for deterministic test
 
       try {
-        // Send batched handshake: Protocol + DataTypes + AUTH_PHASE_ONE in ONE packet
-        // This matches node-oracledb behavior which Oracle 23ai expects
-        await transport.sendBatchedProtocolAndAuth(authBytes);
+        // Send FAST_AUTH message: combines Protocol + DataTypes + AUTH_PHASE_ONE
+        // This is Oracle 23ai's official Fast Authentication protocol
+        await transport.sendFastAuth(
+          username: username,
+          clientNonce: clientNonce,
+        );
 
         // Try to receive AUTH_PHASE_ONE response
         final response = await transport.receiveData();

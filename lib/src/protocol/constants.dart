@@ -163,6 +163,10 @@ const int ttcMsgTypeStatus = 9;
 /// Warning message type.
 const int ttcMsgTypeWarning = 15;
 
+/// Fast authentication message type (Oracle 23ai optimization).
+/// Combines protocol negotiation, data types, and AUTH_PHASE_ONE in a single message.
+const int ttcMsgTypeFastAuth = 34;
+
 // ============================================================================
 // TTC Authentication Mode Flags
 // ============================================================================
