@@ -17,6 +17,11 @@ import '../constants.dart';
 
 final _log = Logger('AuthMessage');
 
+/// Helper to convert bytes to hex string for debugging.
+String _bytesToHex(Uint8List bytes) {
+  return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+}
+
 /// Client information for authentication messages.
 class ClientInfo {
   static final String terminal = Platform.environment['TERM'] ?? 'unknown';
@@ -135,6 +140,7 @@ class AuthPhaseOneResponse {
       final numParams = buffer.readUB2();
       _log.fine('Number of parameters: $numParams');
       _log.fine('Buffer position after numParams: ${buffer.position}, remaining: ${buffer.remaining}');
+      _log.fine('First 32 bytes of buffer: ${_bytesToHex(data.sublist(0, data.length > 32 ? 32 : data.length))}');
 
       for (var i = 0; i < numParams; i++) {
         _log.fine('Processing parameter $i of $numParams');
@@ -182,9 +188,14 @@ class AuthPhaseOneResponse {
 
   /// Converts this response to [VerifierParams] for use with [AuthFlow].
   VerifierParams toVerifierParams() {
+    // DEBUG: Log entire sessionData map
+    _log.fine('sessionData keys: ${sessionData.keys.toList()}');
+    _log.fine('sessionData entries: ${sessionData.entries.map((e) => '${e.key}=${e.value.length}b').toList()}');
+
     // Parse AUTH_VFR_DATA which contains salt and iterations
     final vfrData = sessionData['AUTH_VFR_DATA'] ?? '';
     final serverNonceHex = sessionData['AUTH_SESSKEY'] ?? '';
+    _log.fine('vfrData length: ${vfrData.length}, serverNonceHex length: ${serverNonceHex.length}');
 
     // Decode hex-encoded salt from AUTH_VFR_DATA
     Uint8List salt;
@@ -231,12 +242,40 @@ class AuthPhaseOneResponse {
       serverNonce = Uint8List(16);
     }
 
+    // Extract mixing salt and iterations for comboKey derivation (12c only)
+    Uint8List? mixingSalt;
+    int? mixingIterations;
+
+    final mixingSaltHex = sessionData['AUTH_PBKDF2_CSK_SALT'] ?? '';
+    if (mixingSaltHex.isNotEmpty) {
+      try {
+        mixingSalt = _hexDecode(mixingSaltHex);
+        _log.fine('Extracted mixing salt (${mixingSalt.length} bytes)');
+      } catch (e) {
+        _log.warning('Failed to parse AUTH_PBKDF2_CSK_SALT: $e');
+      }
+    }
+
+    final mixingIterationsStr = sessionData['AUTH_PBKDF2_SDER_COUNT'] ?? '';
+    if (mixingIterationsStr.isNotEmpty) {
+      try {
+        // The value is already a decoded string (e.g., "3"), parse directly
+        mixingIterations = int.tryParse(mixingIterationsStr) ?? 1;
+        _log.fine('Extracted mixing iterations: $mixingIterations');
+      } catch (e) {
+        _log.warning('Failed to parse AUTH_PBKDF2_SDER_COUNT: $e');
+        mixingIterations = 1; // Default
+      }
+    }
+
     return VerifierParams(
       verifierType: verifierType,
       salt: salt,
       iterations: iterations,
       serverNonce: serverNonce,
       authPasswordMode: 0,
+      mixingSalt: mixingSalt,
+      mixingIterations: mixingIterations,
     );
   }
 
@@ -259,6 +298,7 @@ class AuthPhaseTwoRequest {
   AuthPhaseTwoRequest({
     required this.encryptedProof,
     required this.sessionKey,
+    this.speedyKey,
     this.username = '',
     this.sequence = 0,
     this.verifierType = ttcVerifierType12c,
@@ -269,6 +309,9 @@ class AuthPhaseTwoRequest {
 
   /// The derived session key (hex-encoded for transmission).
   final Uint8List sessionKey;
+
+  /// The speedy key (AUTH_PBKDF2_SPEEDY_KEY) for 12c verifier.
+  final Uint8List? speedyKey;
 
   /// Username for the session.
   final String username;
@@ -334,14 +377,15 @@ class AuthPhaseTwoRequest {
     final sessionKeyHex = _hexEncode(sessionKey);
     buffer.writeKeyValue('AUTH_SESSKEY', sessionKeyHex, flags: 1);
 
-    if (is12c) {
-      // PBKDF2 speedy key (empty for now)
-      buffer.writeKeyValue('AUTH_PBKDF2_SPEEDY_KEY', '');
+    if (is12c && speedyKey != null) {
+      // PBKDF2 speedy key (hex-encoded)
+      final speedyKeyHex = _hexEncode(speedyKey!);
+      buffer.writeKeyValue('AUTH_PBKDF2_SPEEDY_KEY', speedyKeyHex);
     }
 
     buffer.writeKeyValue('SESSION_CLIENT_CHARSET', '873'); // UTF-8
-    buffer.writeKeyValue('SESSION_CLIENT_DRIVER_NAME', 'dart-oracledb thn');
-    buffer.writeKeyValue('SESSION_CLIENT_VERSION', '0');
+    buffer.writeKeyValue('SESSION_CLIENT_DRIVER_NAME', 'dart-oracledb : 0.1.0 thn'); // Match node-oracledb format
+    buffer.writeKeyValue('SESSION_CLIENT_VERSION', '111149056'); // Oracle 11.1 client version format
 
     // Timezone alter session
     final tzStatement = _getAlterTimezoneStatement();

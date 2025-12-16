@@ -1025,3 +1025,135 @@ Evidence:
 - Node-oracledb auth.js: AUTH_PHASE_TWO encoding (lines 202-336)
 - Node-oracledb base.js: writeFunctionHeader with token (lines 82-90)
 - Node-oracledb networkSession.js: MARKER handling (lines 399-401)
+### Implementation Notes (2025-12-16 Session 7) - Protocol Fixes + Sequence Counter + Crypto Bug
+
+**Session Summary:**
+Fixed multiple protocol issues including sequence counter, CLIENT_VERSION, mixing iterations parsing. AUTH_PHASE_ONE response parsing from Session 6 is NOW WORKING. Protocol structure now matches node-oracledb exactly (571 bytes), but authentication still fails - likely remaining crypto implementation bug.
+
+**What Was Completed:**
+
+1. ✅ **Verified AUTH_PHASE_ONE Response Parsing is Working**
+   - Session 6 bug was already fixed in previous work
+   - Response now correctly extracts: AUTH_SESSKEY (64b), AUTH_VFR_DATA (32b), AUTH_PBKDF2_CSK_SALT (32b), AUTH_PBKDF2_VGEN_COUNT (4b), AUTH_PBKDF2_SDER_COUNT (1b)
+   - Salt and server nonce are non-zero and correct ✓
+
+2. ✅ **Implemented Sequence Counter** (Task 7, addressing user feedback)
+   - Added `_sequence` field to Transport class [transport.dart:63-73](../../lib/src/transport/transport.dart#L63-L73)
+   - Implemented `nextSequence()` method for auto-incrementing sequence (mod 256)
+   - Starts at 1 (not 0) to match node-oracledb behavior
+   - Updated FAST_AUTH to use `nextSequence()` [transport.dart:447](../../lib/src/transport/transport.dart#L447)
+   - Updated AUTH_PHASE_TWO to use `transport.nextSequence()` [auth.dart:343](../../lib/src/crypto/auth.dart#L343)
+   - Pattern: FAST_AUTH seq=1, AUTH_PHASE_TWO seq=2 ✓
+
+3. ✅ **Fixed Username Case Mismatch**
+   - Removed `.toUpperCase()` from AUTH_PHASE_TWO [auth.dart:342](../../lib/src/crypto/auth.dart#L342)
+   - Both AUTH_PHASE_ONE and AUTH_PHASE_TWO now send username in same case (lowercase)
+   - Oracle validates username match between phases ✓
+
+4. ✅ **Added Data Flags 0x0800 for AUTH_PHASE_TWO**
+   - Updated sendData call to include dataFlags parameter [auth.dart:352](../../lib/src/crypto/auth.dart#L352)
+   - node-oracledb uses dataFlags=0x0800 (END_OF_REQUEST marker) for AUTH_PHASE_TWO
+   - We were using 0x0000 (default) ✓
+
+5. ✅ **Fixed CLIENT_VERSION and DRIVER_NAME** (16-byte size difference)
+   - Changed SESSION_CLIENT_VERSION from '0' to '111149056' [auth_message.dart:390](../../lib/src/protocol/messages/auth_message.dart#L390)
+   - Changed SESSION_CLIENT_DRIVER_NAME to 'dart-oracledb : 0.1.0 thn' format [auth_message.dart:389](../../lib/src/protocol/messages/auth_message.dart#L389)
+   - AUTH_PHASE_TWO now 571 bytes (exact match with node-oracledb) ✓
+
+6. ✅ **Fixed Mixing Iterations Parsing Bug** 🔥
+   - AUTH_PBKDF2_SDER_COUNT was being hex-decoded when already a plain string [auth_message.dart:259-269](../../lib/src/protocol/messages/auth_message.dart#L259-L269)
+   - Changed from `_hexDecode(mixingIterationsStr)` → direct `int.tryParse(mixingIterationsStr)`
+   - Mixing iterations now correctly parsed as 3 (was defaulting to 1) ✓
+   - This was a CRITICAL bug affecting password proof generation
+
+**Current Status:**
+
+✅ Protocol structure: CORRECT (571 bytes, matches node-oracledb)
+✅ Sequence numbers: CORRECT (1, 2, 3...)
+✅ Data flags: CORRECT (0x0800)
+✅ AUTH_PHASE_ONE parsing: CORRECT (all values extracted)
+✅ Mixing iterations: CORRECT (3, not 1)
+❌ Authentication: STILL FAILING
+
+**Current Blocker:**
+
+🚨 **Oracle Rejects AUTH_PHASE_TWO Despite Correct Protocol**
+
+Symptoms:
+- Oracle sends 2 MARKER packets after AUTH_PHASE_TWO
+- Oracle then closes connection
+- No error message, just connection close (ORA-12547)
+
+Evidence that protocol is correct:
+- Byte size exactly matches node-oracledb (571 bytes)
+- Structure verified byte-by-byte
+- All field values correct (version, driver name, etc.)
+- Test with correct password (verified node-oracledb can auth with same creds)
+
+**Root Cause Analysis:**
+
+The 2 MARKER packets + connection close pattern indicates Oracle is REJECTING the authentication, not a protocol error. Since protocol structure is correct, the issue must be in the **cryptographic values**:
+
+Suspects:
+1. AUTH_SESSKEY (encrypted client session key) - incorrect derivation?
+2. AUTH_PBKDF2_SPEEDY_KEY (speedy key for 12c) - wrong algorithm?
+3. AUTH_PASSWORD (encrypted password proof) - wrong crypto steps?
+
+Likely issue: Password proof generation or session key derivation has a subtle bug that causes Oracle to reject as invalid credentials (but doesn't send ORA-01017, just closes connection).
+
+**Comparison Tool Created:**
+- [compare_auth_phase_two.cjs](../../compare_auth_phase_two.cjs) - Captures node-oracledb AUTH_PHASE_TWO packets
+- Successfully captured node's AUTH_PHASE_TWO: 571 bytes, sequence=2, dataFlags=0x0800
+- Used for byte-by-byte comparison to identify protocol differences
+
+**Next Steps (for next session):**
+
+1. **Deep Dive into Crypto Implementation** (HIGH PRIORITY)
+   - Compare our password proof generation with node-oracledb line-by-line
+   - Verify PBKDF2 parameters: iterations, key length, algorithm (SHA512 vs SHA256?)
+   - Check session key derivation steps
+   - Verify AES encryption parameters (key, IV, mode)
+   - Add extensive logging to crypto functions with hex dumps
+
+2. **Test with Intentionally Wrong Password**
+   - See if we get ORA-01017 or still get connection close
+   - If ORA-01017: protocol works, just wrong crypto values
+   - If connection close: something else fundamentally wrong
+
+3. **Check Oracle Server Logs**
+   - Look for actual error Oracle is generating
+   - May provide clue about what's rejecting
+
+4. **Consider Crypto Library Verification**
+   - Verify our PBKDF2 implementation matches test vectors
+   - Verify AES-256-CBC encryption correctness
+   - Check if byte order matters (endianness)
+
+**Files Modified This Session:**
+- `lib/src/transport/transport.dart` - Added sequence counter, nextSequence()
+- `lib/src/crypto/auth.dart` - Use nextSequence(), remove .toUpperCase(), add dataFlags
+- `lib/src/protocol/messages/auth_message.dart` - Fix CLIENT_VERSION, DRIVER_NAME, mixing iterations parsing
+- `compare_auth_phase_two.cjs` - Created node-oracledb packet capture tool
+- `test/integration/test_wrong_password.dart` - Created test for wrong password scenario
+
+**Technical Notes:**
+
+- Sequence counter wraps at 256 (mod 256) per Oracle protocol
+- UB4 encoding for small values (< 0xFB): 1-byte length indicator + value bytes
+- AUTH_PBKDF2_SDER_COUNT value is already decoded ASCII string, not hex
+- node-oracledb uses very specific CLIENT_VERSION format: "111149056" (Oracle client version encoding)
+- Data flags 0x0800 appears to be mandatory for AUTH_PHASE_TWO in Oracle 23ai
+
+**Key Insights:**
+
+1. User guidance was invaluable - hints about "different send data for auth phase one" led to discovering data flags issue
+2. User reminder about incremental sequence counter (like node reference) prevented hardcoded values
+3. Detailed byte-by-byte comparison revealed the 16-byte CLIENT_VERSION/DRIVER_NAME size difference
+4. Mixing iterations bug was subtle - value looked correct in logs but was defaulting to 1 due to failed hex decode
+
+**Remaining Mystery:**
+
+Why does Oracle send 2 MARKER packets specifically? What do they signify?
+- 1 MARKER packet = warning/status?
+- 2 MARKER packets = rejection/failure?
+- Need to understand MARKER packet semantics better

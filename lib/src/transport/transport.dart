@@ -60,9 +60,17 @@ class Transport {
   /// TNS_CCAP_FIELD_VERSION_23_1_EXT_1 = 18 is threshold for token numbers.
   int _ttcFieldVersion = 24; // TNS_CCAP_FIELD_VERSION_MAX
 
+  /// TTC function message sequence number.
+  /// Incremented for each TTC function message sent (1, 2, 3, ...).
+  /// Starts at 1 to match node-oracledb behavior.
+  int _sequence = 1;
+
   /// Returns true if auth messages should include token numbers.
   /// Token numbers are written when ttcFieldVersion >= 18.
   bool get shouldWriteTokenNumber => _ttcFieldVersion >= 18;
+
+  /// Gets and increments the sequence number for the next TTC function message.
+  int nextSequence() => _sequence++;
 
   /// Whether the transport is currently connected.
   bool get isConnected => _socket.isConnected;
@@ -436,7 +444,7 @@ class Transport {
       runtimeCaps: runtimeCaps,
       dataTypes: _dataTypes,
       ttcFieldVersion: _ttcFieldVersion,
-      sequence: 1, // AUTH_PHASE_ONE uses sequence 1
+      sequence: nextSequence(), // Get next sequence number
     );
 
     final fastAuthBytes = fastAuthRequest.toBytes();
@@ -497,28 +505,83 @@ class Transport {
     }
 
     final protocolEndPos = tempBuffer.position;
+    _log.fine('DEBUG: protocolEndPos=$protocolEndPos, total responseData=${responseData.length} bytes');
 
     // Parse DataTypes response from remaining bytes
     int dataTypesEndPos = protocolEndPos;
     if (protocolEndPos < responseData.length) {
       final dataTypesData = Uint8List.sublistView(responseData, protocolEndPos);
+      _log.fine('DEBUG: dataTypesData starts at byte $protocolEndPos, first byte: ${dataTypesData[0]}');
       DataTypesResponse.decode(dataTypesData);
       _log.info('Data types negotiation complete');
 
       // Track DataTypes end position by parsing its structure
       final dtBuffer = ReadBuffer(dataTypesData);
       dtBuffer.readUint8(); // type
-      final compileLen = dtBuffer.readUint8();
-      if (compileLen > 0) dtBuffer.skip(compileLen);
-      final runtimeLen = dtBuffer.readUint8();
-      if (runtimeLen > 0) dtBuffer.skip(runtimeLen);
-      dataTypesEndPos = protocolEndPos + dtBuffer.position;
+
+      // Skip charset fields (4 bytes) + encoding flags (1 byte)
+      if (dtBuffer.remaining >= 5) {
+        dtBuffer.skip(5); // charset (2 bytes) + nCharset (2 bytes) + flags (1 byte)
+      }
+
+      // Skip compile caps (length-prefixed)
+      if (dtBuffer.hasRemaining) {
+        final compileLen = dtBuffer.readUint8();
+        if (compileLen > 0) dtBuffer.skip(compileLen);
+      }
+
+      // Skip runtime caps (length-prefixed)
+      if (dtBuffer.hasRemaining) {
+        final runtimeLen = dtBuffer.readUint8();
+        if (runtimeLen > 0) dtBuffer.skip(runtimeLen);
+      }
+
+      // Skip data type mappings until terminator (0x0000)
+      // Format: [dataType(2), convType(2), repType(2), 0(2)] each as UInt16BE
+      while (dtBuffer.hasRemaining) {
+        final dataType = dtBuffer.readUint16BE();
+        if (dataType == 0) break; // Terminator found
+        dtBuffer.readUint16BE(); // conv type
+        if (dtBuffer.hasRemaining) {
+          final repType = dtBuffer.readUint16BE();
+          if (repType != 0 && dtBuffer.remaining >= 4) {
+            dtBuffer.skip(4); // Additional bytes for non-zero repType
+          }
+        }
+      }
+
+      // Skip padding bytes after terminator and find AUTH message start
+      // AUTH message should start with type 8 (parameter) or 3 (function)
+      while (dtBuffer.hasRemaining) {
+        final currentPos = dtBuffer.position;
+        final b = dtBuffer.readUint8();
+
+        // Check if this is the start of AUTH message (type 8 = parameter)
+        if (b == 8) {
+          // Found AUTH message start - back up one byte
+          dataTypesEndPos = protocolEndPos + currentPos;
+          _log.fine('DEBUG: Found AUTH parameter message at byte $currentPos (absolute: $dataTypesEndPos)');
+          break;
+        }
+
+        // If we've skipped more than 50 bytes of padding, something is wrong
+        if (dtBuffer.position - (protocolEndPos + dtBuffer.position) > 50) {
+          _log.warning('Scanned >50 bytes looking for AUTH message, stopping');
+          break;
+        }
+      }
+
+      if (dataTypesEndPos == protocolEndPos) {
+        dataTypesEndPos = protocolEndPos + dtBuffer.position;
+      }
+      _log.fine('DEBUG: dataTypesEndPos=$dataTypesEndPos, dtBuffer.position=${dtBuffer.position}');
     }
 
     // Buffer the AUTH response (remaining bytes) for next receiveData() call
     if (dataTypesEndPos < responseData.length) {
       _bufferedAuthResponse = Uint8List.sublistView(responseData, dataTypesEndPos);
-      _log.fine('Buffered AUTH response: ${_bufferedAuthResponse!.length} bytes');
+      _log.fine('Buffered AUTH response: ${_bufferedAuthResponse!.length} bytes, starts with byte: ${_bufferedAuthResponse![0]}');
+      _log.fine('First 32 bytes of AUTH response: ${_bufferedAuthResponse!.sublist(0, _bufferedAuthResponse!.length > 32 ? 32 : _bufferedAuthResponse!.length).map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
     }
 
     // Auth response will be handled by auth module via receiveData()

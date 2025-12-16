@@ -48,25 +48,33 @@ class VerifierParams {
     required this.iterations,
     required this.serverNonce,
     required this.authPasswordMode,
+    this.mixingSalt,
+    this.mixingIterations,
   });
 
   /// The verifier type (SHA512 = 0x939, PBKDF2 = 0xB92).
   final int verifierType;
 
-  /// Salt for key derivation.
+  /// Salt for key derivation (AUTH_VFR_DATA).
   final Uint8List salt;
 
-  /// Number of PBKDF2 iterations (for PBKDF2 verifier).
+  /// Number of PBKDF2 iterations (AUTH_PBKDF2_VGEN_COUNT).
   final int iterations;
 
-  /// Server-generated nonce.
+  /// Server-generated nonce (AUTH_SESSKEY).
   final Uint8List serverNonce;
 
   /// Authentication password mode.
   final int authPasswordMode;
 
-  /// Returns true if this uses the PBKDF2 verifier.
-  bool get isPbkdf2 => verifierType == verifierTypePbkdf2;
+  /// Mixing salt for comboKey derivation (AUTH_PBKDF2_CSK_SALT).
+  final Uint8List? mixingSalt;
+
+  /// Mixing iterations for comboKey derivation (AUTH_PBKDF2_SDER_COUNT).
+  final int? mixingIterations;
+
+  /// Returns true if this uses the PBKDF2 verifier (includes 12c).
+  bool get isPbkdf2 => verifierType == verifierTypePbkdf2 || verifierType == 0x4815; // 0x4815 = Oracle 12c
 
   /// Returns true if this uses the SHA512 verifier.
   bool get isSha512 => verifierType == verifierTypeSha512;
@@ -116,6 +124,12 @@ class AuthFlow {
   /// Gets the session key (available after successful key derivation).
   Uint8List? get sessionKey => _sessionKey;
 
+  /// Speedy key for AUTH_PBKDF2_SPEEDY_KEY.
+  Uint8List? _speedyKey;
+
+  /// Gets the speedy key (available after key derivation).
+  Uint8List? get speedyKey => _speedyKey;
+
   /// Generates a random 16-byte client nonce.
   ///
   /// This nonce is sent in AUTH_PHASE_ONE and used in key derivation.
@@ -148,63 +162,113 @@ class AuthFlow {
     final uppercasePassword = password.toUpperCase();
     final passwordBytes = Uint8List.fromList(utf8.encode(uppercasePassword));
 
-    // Derive password hash based on verifier type
+    // Derive password key and hash based on verifier type (Oracle 12c protocol)
+    Uint8List passwordKey;
     Uint8List passwordHash;
-    if (params.isPbkdf2) {
-      // PBKDF2-SHA512: salt is combined with server nonce
-      final combinedSalt =
-          Uint8List(params.salt.length + params.serverNonce.length);
-      combinedSalt.setRange(0, params.salt.length, params.salt);
-      combinedSalt.setRange(
-          params.salt.length, combinedSalt.length, params.serverNonce);
 
-      passwordHash = pbkdf2Sha512(
+    _log.fine('DEBUG: params.isPbkdf2=${params.isPbkdf2}, verifierType=0x${params.verifierType.toRadixString(16)}');
+    if (params.isPbkdf2) {
+      // Step 1: PBKDF2 to derive password key
+      // Salt = AUTH_VFR_DATA + "AUTH_PBKDF2_SPEEDY_KEY" (as bytes)
+      final speedyKeySalt = Uint8List.fromList(utf8.encode('AUTH_PBKDF2_SPEEDY_KEY'));
+      final combinedSalt = Uint8List(params.salt.length + speedyKeySalt.length);
+      combinedSalt.setRange(0, params.salt.length, params.salt);
+      combinedSalt.setRange(params.salt.length, combinedSalt.length, speedyKeySalt);
+
+      passwordKey = pbkdf2Sha512(
         password: passwordBytes,
         salt: combinedSalt,
         iterations: params.iterations,
         keyLength: 64,
       );
-      _log.fine(
-          'PBKDF2 key derivation complete (${params.iterations} iterations)');
+      _log.fine('PBKDF2 key derivation complete (${params.iterations} iterations)');
+
+      // Step 2: Hash passwordKey with AUTH_VFR_DATA to get passwordHash
+      // passwordHash = SHA512(passwordKey + AUTH_VFR_DATA)[0:32]
+      final hashInput = Uint8List(passwordKey.length + params.salt.length);
+      hashInput.setRange(0, passwordKey.length, passwordKey);
+      hashInput.setRange(passwordKey.length, hashInput.length, params.salt);
+      final fullHash = sha512Hash(hashInput);
+      passwordHash = Uint8List.fromList(fullHash.sublist(0, 32)); // First 32 bytes for AES-256
+      _log.fine('Password hash derived (${passwordHash.length} bytes from ${fullHash.length} byte hash)');
     } else {
-      // SHA512: simple hash of password + salt
-      final saltedPassword =
-          Uint8List(passwordBytes.length + params.salt.length);
+      // 11g verifier: SHA512 simple hash
+      final saltedPassword = Uint8List(passwordBytes.length + params.salt.length);
       saltedPassword.setRange(0, passwordBytes.length, passwordBytes);
-      saltedPassword.setRange(
-          passwordBytes.length, saltedPassword.length, params.salt);
+      saltedPassword.setRange(passwordBytes.length, saltedPassword.length, params.salt);
       passwordHash = sha512Hash(saltedPassword);
+      passwordKey = passwordHash; // For 11g, they're the same
       _log.fine('SHA512 hash complete');
     }
 
-    // Derive session key from password hash and nonces
-    _sessionKey = deriveSessionKey(
-      passwordHash: passwordHash,
-      clientNonce: clientNonce,
-      serverNonce: params.serverNonce,
+    // Step 3: Decrypt server's AUTH_SESSKEY with passwordHash to get sessionKeyParta
+    final encodedServerKey = params.serverNonce; // AUTH_SESSKEY from server
+    _log.fine('DEBUG: passwordHash.length=${passwordHash.length}, encodedServerKey.length=${encodedServerKey.length}');
+    final sessionKeyParta = aes256CbcDecrypt(
+      key: passwordHash,
+      iv: Uint8List(16), // IV is zeros for session key decryption
+      data: encodedServerKey,
     );
-    _log.fine('Session key derived');
+    _log.fine('Decrypted server session key (${sessionKeyParta.length} bytes)');
 
-    // Create password verifier (hash of password hash + client nonce)
-    final verifierInput = Uint8List(passwordHash.length + clientNonce.length);
-    verifierInput.setRange(0, passwordHash.length, passwordHash);
-    verifierInput.setRange(
-        passwordHash.length, verifierInput.length, clientNonce);
-    final passwordVerifier = sha512Hash(verifierInput);
+    // Step 4: Generate random sessionKeyPartb
+    final sessionKeyPartb = generateNonce(32); // 32 bytes random
+    _log.fine('Generated client session key part (${sessionKeyPartb.length} bytes)');
 
-    // Extract AES key and IV from session key
-    final aesKey = _sessionKey!.sublist(0, 32); // First 256 bits
-    final aesIv = _sessionKey!.sublist(32, 48); // Next 128 bits
+    // Step 5: Encrypt sessionKeyPartb with passwordHash to get client's AUTH_SESSKEY
+    final encodedClientKey = aes256CbcEncrypt(
+      key: passwordHash,
+      iv: Uint8List(16), // IV is zeros
+      data: sessionKeyPartb,
+    );
+    _sessionKey = encodedClientKey; // This becomes AUTH_SESSKEY in AUTH_PHASE_TWO
+    _log.fine('Encrypted client session key (${_sessionKey!.length} bytes)');
 
-    // Encrypt password verifier
-    final encryptedProof = aes256CbcEncrypt(
-      key: aesKey,
-      iv: aesIv,
-      data: passwordVerifier,
+    // Step 6: Derive comboKey from mixing sessionKeyParta and sessionKeyPartb
+    // Mix the keys using AUTH_PBKDF2_CSK_SALT
+    final keyLen = 32; // AES-256
+    final partABKey = Uint8List(keyLen * 2);
+    partABKey.setRange(0, keyLen, sessionKeyPartb.sublist(0, keyLen));
+    partABKey.setRange(keyLen, keyLen * 2, sessionKeyParta.sublist(0, keyLen));
+
+    // Convert to hex string (uppercase) then to bytes for PBKDF2
+    final partABKeyHex = partABKey.map((b) => b.toRadixString(16).padLeft(2, '0')).join().toUpperCase();
+    final partABKeyBuffer = Uint8List.fromList(utf8.encode(partABKeyHex));
+
+    // Get mixing salt and iterations from params
+    final mixingSalt = params.mixingSalt ?? Uint8List(16); // AUTH_PBKDF2_CSK_SALT
+    final mixingIterations = params.mixingIterations ?? 1; // AUTH_PBKDF2_SDER_COUNT
+
+    final comboKey = pbkdf2Sha512(
+      password: partABKeyBuffer,
+      salt: mixingSalt,
+      iterations: mixingIterations,
+      keyLength: keyLen,
+    );
+    _log.fine('Derived comboKey (${comboKey.length} bytes)');
+
+    // Step 7: Generate speedy key
+    final speedyKeySalt = generateNonce(16);
+    final speedyKeyInput = Uint8List(16 + passwordKey.length);
+    speedyKeyInput.setRange(0, 16, speedyKeySalt);
+    speedyKeyInput.setRange(16, speedyKeyInput.length, passwordKey);
+    final speedyKeyEncrypted = aes256CbcEncrypt(
+      key: comboKey,
+      iv: Uint8List(16), // IV is zeros
+      data: speedyKeyInput,
+    );
+    _speedyKey = speedyKeyEncrypted.sublist(0, 80); // First 80 bytes
+    _log.fine('Generated speedy key (${_speedyKey!.length} bytes)');
+
+    // Step 8: Encrypt password with comboKey (Oracle 12c protocol)
+    final encryptedPassword = aes256CbcEncrypt(
+      key: comboKey,
+      iv: Uint8List(16), // IV is zeros
+      data: passwordBytes,
     );
 
-    _log.fine('Password proof encrypted (${encryptedProof.length} bytes)');
-    return encryptedProof;
+    _log.fine('Password encrypted (${encryptedPassword.length} bytes)');
+    return encryptedPassword;
   }
 
   /// Updates the authentication state.
@@ -269,13 +333,14 @@ class AuthFlow {
     );
 
     // Step 5: Send AUTH_PHASE_TWO using sendData
-    // Sequence 1 (continues from AUTH_PHASE_ONE which was 0)
+    // Use auto-incrementing sequence number from transport
     updateState(AuthState.phaseTwoSent);
     final phaseTwoRequest = AuthPhaseTwoRequest(
       encryptedProof: encryptedProof,
       sessionKey: _sessionKey!,
-      username: username.toUpperCase(),
-      sequence: 1,
+      speedyKey: _speedyKey,
+      username: username, // Use same case as AUTH_PHASE_ONE - Oracle validates match
+      sequence: transport.nextSequence(), // Auto-increment from transport
       verifierType: verifierParams.verifierType,
     );
 
@@ -283,7 +348,8 @@ class AuthFlow {
     final use23aiFormat = transport.shouldWriteTokenNumber;
     final phaseTwoBytes = phaseTwoRequest.toBytes(use23aiFormat: use23aiFormat);
     _log.fine('Sending AUTH_PHASE_TWO request (${phaseTwoBytes.length} bytes)');
-    await transport.sendData(phaseTwoBytes);
+    // AUTH_PHASE_TWO requires data flags 0x0800 (END_OF_REQUEST marker)
+    await transport.sendData(phaseTwoBytes, dataFlags: 0x0800);
 
     // Step 6: Receive AUTH_PHASE_TWO response and verify success
     final phaseTwoResponseData = await transport.receiveData();
