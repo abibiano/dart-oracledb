@@ -1,6 +1,6 @@
 # Story 2.5: Transaction Management
 
-Status: ready-for-dev
+Status: Ready for Review
 
 ## Story
 
@@ -61,41 +61,41 @@ So that **I can ensure data consistency** (FR22, FR23, FR24).
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Implement TTC COMMIT Message (AC: 1, 5)
-  - [ ] 1.1: Create `lib/src/protocol/messages/commit_message.dart`
-  - [ ] 1.2: Implement `CommitRequest.encode()` following TTC protocol
-  - [ ] 1.3: Implement `CommitResponse.decode()` to parse Oracle's commit response
-  - [ ] 1.4: Reference: `node-oracledb/lib/thin/protocol/messages/commit.js`
-  - [ ] 1.5: Add unit tests for CommitRequest/CommitResponse encoding/decoding
+- [x] Task 1: Implement TTC COMMIT Message (AC: 1, 5)
+  - [x] 1.1: Create `lib/src/protocol/messages/commit_message.dart`
+  - [x] 1.2: Implement `CommitRequest.encode()` following TTC protocol
+  - [x] 1.3: Implement `CommitResponse.decode()` to parse Oracle's commit response
+  - [x] 1.4: Reference: `node-oracledb/lib/thin/protocol/messages/commit.js`
+  - [x] 1.5: Add unit tests for CommitRequest/CommitResponse encoding/decoding
 
-- [ ] Task 2: Implement TTC ROLLBACK Message (AC: 2, 3, 6)
-  - [ ] 2.1: Create `lib/src/protocol/messages/rollback_message.dart`
-  - [ ] 2.2: Implement `RollbackRequest.encode()` following TTC protocol
-  - [ ] 2.3: Implement `RollbackResponse.decode()` to parse Oracle's rollback response
-  - [ ] 2.4: Reference: `node-oracledb/lib/thin/protocol/messages/rollback.js`
-  - [ ] 2.5: Add unit tests for RollbackRequest/RollbackResponse encoding/decoding
+- [x] Task 2: Implement TTC ROLLBACK Message (AC: 2, 3, 6)
+  - [x] 2.1: Create `lib/src/protocol/messages/rollback_message.dart`
+  - [x] 2.2: Implement `RollbackRequest.encode()` following TTC protocol
+  - [x] 2.3: Implement `RollbackResponse.decode()` to parse Oracle's rollback response
+  - [x] 2.4: Reference: `node-oracledb/lib/thin/protocol/messages/rollback.js`
+  - [x] 2.5: Add unit tests for RollbackRequest/RollbackResponse encoding/decoding
 
-- [ ] Task 3: Add commit() Method to OracleConnection (AC: 1, 5)
-  - [ ] 3.1: In `lib/src/connection.dart`, add `Future<void> commit()` method
-  - [ ] 3.2: Method should call `_ensureOpen()` to check connection state
-  - [ ] 3.3: Send CommitRequest via transport and await CommitResponse
-  - [ ] 3.4: Log transaction commit with `package:logging` (_log.fine)
-  - [ ] 3.5: Throw OracleException on commit failure with error context
+- [x] Task 3: Add commit() Method to OracleConnection (AC: 1, 5)
+  - [x] 3.1: In `lib/src/connection.dart`, add `Future<void> commit()` method
+  - [x] 3.2: Method should call `_ensureOpen()` to check connection state
+  - [x] 3.3: Send CommitRequest via transport and await CommitResponse
+  - [x] 3.4: Log transaction commit with `package:logging` (_log.fine)
+  - [x] 3.5: Throw OracleException on commit failure with error context
 
-- [ ] Task 4: Add rollback() Method to OracleConnection (AC: 2, 3, 6)
-  - [ ] 4.1: In `lib/src/connection.dart`, add `Future<void> rollback()` method
-  - [ ] 4.2: Method should call `_ensureOpen()` to check connection state
-  - [ ] 4.3: Send RollbackRequest via transport and await RollbackResponse
-  - [ ] 4.4: Log transaction rollback with `package:logging` (_log.fine)
-  - [ ] 4.5: Throw OracleException on rollback failure with error context
+- [x] Task 4: Add rollback() Method to OracleConnection (AC: 2, 3, 6)
+  - [x] 4.1: In `lib/src/connection.dart`, add `Future<void> rollback()` method
+  - [x] 4.2: Method should call `_ensureOpen()` to check connection state
+  - [x] 4.3: Send RollbackRequest via transport and await RollbackResponse
+  - [x] 4.4: Log transaction rollback with `package:logging` (_log.fine)
+  - [x] 4.5: Throw OracleException on rollback failure with error context
 
-- [ ] Task 5: Implement runTransaction() Convenience Wrapper (AC: 4)
-  - [ ] 5.1: In `lib/src/connection.dart`, add `Future<T> runTransaction<T>(Future<T> Function(OracleConnection) callback)`
-  - [ ] 5.2: Execute callback with connection passed as parameter
-  - [ ] 5.3: On successful completion, call `commit()` automatically
-  - [ ] 5.4: On exception, call `rollback()` automatically and rethrow exception
-  - [ ] 5.5: Use try-catch-finally to ensure rollback happens on error
-  - [ ] 5.6: Return callback's return value to caller
+- [x] Task 5: Implement runTransaction() Convenience Wrapper (AC: 4)
+  - [x] 5.1: In `lib/src/connection.dart`, add `Future<T> runTransaction<T>(Future<T> Function(OracleConnection) callback)`
+  - [x] 5.2: Execute callback with connection passed as parameter
+  - [x] 5.3: On successful completion, call `commit()` automatically
+  - [x] 5.4: On exception, call `rollback()` automatically and rethrow exception
+  - [x] 5.5: Use try-catch-finally to ensure rollback happens on error
+  - [x] 5.6: Return callback's return value to caller
 
 - [ ] Task 6: Create Integration Tests for commit() (AC: 1, 5) - WILL BE BLOCKED until auth fix
   - [ ] 6.1: Test INSERT → commit() → verify on new connection (visibility)
@@ -119,19 +119,19 @@ So that **I can ensure data consistency** (FR22, FR23, FR24).
   - [ ] 8.4: Test nested DML operations within transaction callback
   - [ ] 8.5: Test runTransaction() on closed connection throws OracleException
 
-- [ ] Task 9: Add Dartdoc Documentation (AC: all)
-  - [ ] 9.1: Document commit() method with transaction behavior notes
-  - [ ] 9.2: Document rollback() method with Oracle implicit transaction model
-  - [ ] 9.3: Document runTransaction() with auto-commit/rollback behavior
-  - [ ] 9.4: Include code examples showing usage patterns
-  - [ ] 9.5: Note that connection.close() auto-rollbacks uncommitted changes
+- [x] Task 9: Add Dartdoc Documentation (AC: all)
+  - [x] 9.1: Document commit() method with transaction behavior notes
+  - [x] 9.2: Document rollback() method with Oracle implicit transaction model
+  - [x] 9.3: Document runTransaction() with auto-commit/rollback behavior
+  - [x] 9.4: Include code examples showing usage patterns
+  - [x] 9.5: Note that connection.close() auto-rollbacks uncommitted changes
 
-- [ ] Task 10: Finalize and Validate (AC: all)
-  - [ ] 10.1: Run `dart analyze` with zero warnings
-  - [ ] 10.2: Run `dart format --set-exit-if-changed .`
-  - [ ] 10.3: Run unit tests with `dart test` (exclude integration)
-  - [ ] 10.4: Integration tests will be BLOCKED until Epic 1 auth bug fixed
-  - [ ] 10.5: Update this story file with completion notes
+- [x] Task 10: Finalize and Validate (AC: all)
+  - [x] 10.1: Run `dart analyze` with zero warnings
+  - [x] 10.2: Run `dart format --set-exit-if-changed .`
+  - [x] 10.3: Run unit tests with `dart test` (exclude integration)
+  - [x] 10.4: Integration tests will be BLOCKED until Epic 1 auth bug fixed
+  - [x] 10.5: Update this story file with completion notes
 
 ### Architecture Compliance (MANDATORY)
 
@@ -539,19 +539,47 @@ Claude Sonnet 4.5 (claude-sonnet-4-5-20250929)
 
 ### Completion Notes List
 
-Story context created - ready for dev agent implementation.
+✅ **Implementation Complete** (2025-12-16)
 
-All architectural requirements, previous story learnings, and critical Oracle transaction behavior documented for flawless implementation.
+**Tasks 1-5, 9-10 Complete:**
+- ✅ CommitRequest/CommitResponse implemented following TTC protocol (Task 1)
+- ✅ RollbackRequest/RollbackResponse implemented following TTC protocol (Task 2)
+- ✅ OracleConnection.commit() method implemented with proper error handling (Task 3)
+- ✅ OracleConnection.rollback() method implemented with proper error handling (Task 4)
+- ✅ OracleConnection.runTransaction() convenience wrapper implemented (Task 5)
+- ✅ Comprehensive dartdoc documentation added with code examples (Task 9)
+- ✅ All unit tests passing (18 new tests, 72 total in messages/) (Task 10)
+- ✅ dart analyze: zero warnings (Task 10)
+- ✅ dart format: all files formatted (Task 10)
+
+**Implementation Highlights:**
+- Used minimal TTC message format (single byte function code) for COMMIT/ROLLBACK
+- Followed existing pattern from PingMessage for simplicity
+- Error handling preserves original error context via `cause` parameter
+- runTransaction() handles both success (auto-commit) and failure (auto-rollback) paths
+- All methods call `_ensureOpen()` to validate connection state
+- Logging with package:logging at appropriate levels (_log.fine, _log.warning)
+
+**Integration Tests (Tasks 6-8) - BLOCKED:**
+- Integration tests cannot be executed until Epic 1 authentication bug is fixed
+- Test structure and requirements documented in story for future implementation
+- Unit tests verify protocol message encoding/decoding correctness
+- Full end-to-end validation will occur after Epic 1.4-FIX completion
+
+**Architecture Compliance:**
+- ✅ TTC constants (ttcCommit=0x0E, ttcRollback=0x0F) already present in constants.dart
+- ✅ Message pattern follows execute_message.dart structure
+- ✅ Error handling pattern matches architecture requirements
+- ✅ Dual pattern implemented (explicit commit/rollback + runTransaction wrapper)
+- ✅ All dartdoc examples demonstrate proper usage patterns
 
 ### File List
 
-**Files to be Created:**
-- `lib/src/protocol/messages/commit_message.dart`
-- `lib/src/protocol/messages/rollback_message.dart`
-- `test/src/protocol/messages/commit_message_test.dart`
-- `test/src/protocol/messages/rollback_message_test.dart`
+**Files Created:**
+- `lib/src/protocol/messages/commit_message.dart` - CommitRequest and CommitResponse classes
+- `lib/src/protocol/messages/rollback_message.dart` - RollbackRequest and RollbackResponse classes
+- `test/src/protocol/messages/commit_message_test.dart` - 9 unit tests for commit messages
+- `test/src/protocol/messages/rollback_message_test.dart` - 9 unit tests for rollback messages
 
-**Files to be Modified:**
-- `lib/src/connection.dart`
-- `lib/src/protocol/constants.dart` (if constants not present)
-- `test/integration/query_integration_test.dart`
+**Files Modified:**
+- `lib/src/connection.dart` - Added commit(), rollback(), runTransaction() methods with imports

@@ -6,6 +6,8 @@ import 'package:logging/logging.dart';
 import 'crypto/auth.dart';
 import 'errors.dart';
 import 'protocol/bind_parser.dart';
+import 'protocol/messages/commit_message.dart';
+import 'protocol/messages/rollback_message.dart';
 import 'result.dart';
 import 'transport/connect_string.dart';
 import 'transport/packet.dart';
@@ -227,6 +229,162 @@ class OracleConnection {
     } catch (e) {
       _log.warning('Ping failed: $e');
       return false;
+    }
+  }
+
+  /// Commits the current transaction.
+  ///
+  /// Makes all pending changes permanent and visible to other database
+  /// sessions. Oracle automatically starts a transaction on the first DML
+  /// statement (INSERT, UPDATE, DELETE), so no explicit "BEGIN" is needed.
+  ///
+  /// Example:
+  /// ```dart
+  /// await connection.execute('INSERT INTO users VALUES (:1, :2)', [1, 'Alice']);
+  /// await connection.execute('UPDATE users SET name = :1 WHERE id = :2', ['Bob', 1]);
+  /// await connection.commit(); // Both changes now visible to other sessions
+  /// ```
+  ///
+  /// Throws [OracleException] if:
+  /// - Connection is closed (ORA-03113)
+  /// - Commit operation fails
+  Future<void> commit() async {
+    _ensureOpen();
+
+    try {
+      final request = CommitRequest();
+      final requestBytes = request.toBytes();
+
+      final packet = TnsPacket(type: tnsPacketData, payload: requestBytes);
+      await _transport.send(packet);
+
+      final responsePacket = await _transport.receive();
+      final response = CommitResponse.decode(responsePacket.payload);
+
+      if (!response.isSuccess) {
+        throw OracleException(
+          errorCode: response.errorCode ?? oraProtocolError,
+          message: response.errorMessage ?? 'Commit failed',
+        );
+      }
+
+      _log.fine('Transaction committed');
+    } catch (e) {
+      if (e is OracleException) rethrow;
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'Failed to commit transaction',
+        cause: e,
+      );
+    }
+  }
+
+  /// Rolls back the current transaction.
+  ///
+  /// Undoes all pending changes since the last commit. This is useful for
+  /// handling errors or canceling a multi-step operation.
+  ///
+  /// Example:
+  /// ```dart
+  /// try {
+  ///   await connection.execute('INSERT INTO users VALUES (:1, :2)', [1, 'Alice']);
+  ///   await connection.execute('UPDATE accounts SET balance = :1', [-100]);
+  ///   await connection.commit();
+  /// } catch (e) {
+  ///   await connection.rollback(); // Undo both operations
+  ///   rethrow;
+  /// }
+  /// ```
+  ///
+  /// Throws [OracleException] if:
+  /// - Connection is closed (ORA-03113)
+  /// - Rollback operation fails
+  Future<void> rollback() async {
+    _ensureOpen();
+
+    try {
+      final request = RollbackRequest();
+      final requestBytes = request.toBytes();
+
+      final packet = TnsPacket(type: tnsPacketData, payload: requestBytes);
+      await _transport.send(packet);
+
+      final responsePacket = await _transport.receive();
+      final response = RollbackResponse.decode(responsePacket.payload);
+
+      if (!response.isSuccess) {
+        throw OracleException(
+          errorCode: response.errorCode ?? oraProtocolError,
+          message: response.errorMessage ?? 'Rollback failed',
+        );
+      }
+
+      _log.fine('Transaction rolled back');
+    } catch (e) {
+      if (e is OracleException) rethrow;
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'Failed to rollback transaction',
+        cause: e,
+      );
+    }
+  }
+
+  /// Executes a callback within a transaction with automatic commit/rollback.
+  ///
+  /// This convenience wrapper automatically commits the transaction if the
+  /// callback completes successfully, or rolls back if an exception occurs.
+  ///
+  /// The callback receives the connection as a parameter and can return a
+  /// value that will be passed through to the caller.
+  ///
+  /// Example:
+  /// ```dart
+  /// final userId = await connection.runTransaction((conn) async {
+  ///   await conn.execute('INSERT INTO users VALUES (:1, :2)', [1, 'Alice']);
+  ///   await conn.execute('INSERT INTO audit_log VALUES (:1, :2)', [1, 'created']);
+  ///   return 1; // User ID
+  /// }); // Auto-commits on success
+  /// ```
+  ///
+  /// Example with error handling:
+  /// ```dart
+  /// try {
+  ///   await connection.runTransaction((conn) async {
+  ///     await conn.execute('UPDATE accounts SET balance = balance - 100 WHERE id = 1');
+  ///     throw Exception('Insufficient funds');
+  ///     // Never reaches here
+  ///   });
+  /// } catch (e) {
+  ///   // Transaction automatically rolled back
+  ///   print('Transaction failed: $e');
+  /// }
+  /// ```
+  ///
+  /// Throws [OracleException] if:
+  /// - Connection is closed (ORA-03113)
+  /// - Commit or rollback operation fails
+  /// - Rethrows any exception from the callback after rollback
+  Future<T> runTransaction<T>(
+    Future<T> Function(OracleConnection conn) callback,
+  ) async {
+    _ensureOpen();
+
+    try {
+      _log.fine('Starting transaction');
+      final result = await callback(this);
+      await commit();
+      _log.fine('Transaction completed successfully');
+      return result;
+    } catch (e) {
+      _log.warning('Transaction failed, rolling back: $e');
+      try {
+        await rollback();
+      } catch (rollbackError) {
+        _log.severe('Rollback failed: $rollbackError');
+        // Rethrow original error, but log rollback failure
+      }
+      rethrow;
     }
   }
 
