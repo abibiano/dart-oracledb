@@ -44,8 +44,8 @@ story_location: docs/sprint-artifacts
 # Details: Story 1-4-fix - Fixed 5 crypto bugs (password uppercasing, hex encoding, session key length)
 
 development_status:
-  # Epic 1: Core Connection & Authentication [COMPLETE]
-  epic-1: done  # Authentication working! 🎉
+  # Epic 1: Core Connection & Authentication [IN-PROGRESS - Story 1-8 added]
+  epic-1: in-progress  # Story 1-8 added for wrong password handling improvement
   1-1-project-initialization-structure: done
   1-2-tns-transport-layer: done
   1-3-ttc-protocol-foundation: done
@@ -54,6 +54,7 @@ development_status:
   1-5-connection-api-error-handling: pending-validation  # Can validate now, deferred to later
   1-6-tls-ssl-support: done
   1-7-connection-lifecycle-management: done
+  1-8-fix-wrong-password-error: ready-for-dev  # Improve error handling for invalid credentials
   epic-1-retrospective: optional  # Can be done later
 
   # Epic 2: Query Execution & Transactions [READY]
