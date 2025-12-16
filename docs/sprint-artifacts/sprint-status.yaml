@@ -93,8 +93,8 @@ development_status:
   epic-5-retrospective: optional
 
   # Epic 6: Test Architecture & Coverage [CRITICAL - Blocks Epic 2.5+]
-  epic-6: in-progress  # Story 6.1 ready for review
-  6-1-test-architecture-design-standards: review
+  epic-6: in-progress  # Story 6.1 done - Standards ready for Stories 6.2, 6.3, 6.4
+  6-1-test-architecture-design-standards: done  # Code review passed with fixes applied
   6-2-epic-1-authentication-test-suite-rework: backlog
   6-3-epic-2-validation-pending-validation-stories: backlog
   6-4-ci-cd-integration-test-automation: backlog

@@ -93,6 +93,25 @@ test/
 @Tags(['protocol'])     // Protocol-specific validation
 ```
 
+**Configuring Tags in dart_test.yaml:**
+
+To eliminate tag warnings, register all custom tags in `dart_test.yaml`:
+
+```yaml
+# dart_test.yaml
+tags:
+  integration:
+    description: Integration tests requiring Oracle 23ai
+  security:
+    description: NFR5 credential protection tests
+  slow:
+    description: Tests taking >5 seconds
+  performance:
+    description: Performance benchmarks (NFR1-4)
+  protocol:
+    description: Protocol-specific validation tests
+```
+
 **Running Tests by Tag:**
 
 ```bash

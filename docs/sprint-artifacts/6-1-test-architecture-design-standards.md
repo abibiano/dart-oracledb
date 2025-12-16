@@ -1,6 +1,6 @@
 # Story 6.1: Test Architecture Design & Standards
 
-Status: Ready for Review
+Status: Done
 
 ## Story
 
@@ -676,6 +676,21 @@ Claude Sonnet 4.5 (claude-sonnet-4-5-20250929)
 - .bmad/bmm/docs/test-architecture.md
 
 ### Change Log
+
+**2025-12-16 (Code Review Fixes):** Code review issues addressed
+- Fixed test template syntax errors (HIGH severity)
+  - integration-test-template.dart: Fixed block comment placeholders, tearDown syntax
+  - unit-test-template.dart: Fixed block comment placeholders, expect() calls
+  - Replaced `/* comments */` with valid Dart placeholders
+- Added dart_test.yaml tag configuration documentation (HIGH severity)
+  - Added "Configuring Tags in dart_test.yaml" section to test-architecture-dart-oracledb.md
+  - Documents how to register custom tags to eliminate warnings
+- Updated files:
+  - docs/test-templates/integration-test-template.dart
+  - docs/test-templates/unit-test-template.dart
+  - docs/test-architecture-dart-oracledb.md
+  - docs/sprint-artifacts/6-1-test-architecture-design-standards.md (this file)
+- Status: Review Complete → Done
 
 **2025-12-16:** Story 6.1 completed
 - Created comprehensive test architecture document (docs/test-architecture-dart-oracledb.md)

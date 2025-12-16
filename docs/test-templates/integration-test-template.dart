@@ -81,13 +81,13 @@ void main() {
 
     test('{test description - what Oracle behavior is validated}', () async {
       // Arrange: Prepare test data
-      final testData = /* test data */;
+      final testData = '<REPLACE_WITH_TEST_DATA>'; // TODO: Add actual test data
 
       // Act: Execute against Oracle
-      final result = await conn.execute(/* SQL */);
+      final result = await conn.execute('SELECT 1 FROM dual'); // TODO: Replace with actual SQL
 
       // Assert: Verify Oracle behavior
-      expect(result, /* expected outcome */);
+      expect(result, isNotNull); // TODO: Add specific assertion
     });
 
     // ===================================================================
@@ -98,11 +98,11 @@ void main() {
     group('error paths', () {
       test('handles {error scenario}', () async {
         await expectLater(
-          () => conn.execute(/* invalid SQL */),
+          () => conn.execute('SELECT * FROM nonexistent_table'), // TODO: Replace with actual error scenario
           throwsA(isA<OracleException>().having(
             (e) => e.message,
             'message',
-            contains('expected error message'),
+            contains('expected error message'), // TODO: Replace with expected error
           )),
         );
       });
@@ -170,7 +170,7 @@ void main() {
       ''');
     });
 
-    tearDown() async {
+    tearDown(() async {
       await conn.execute('DROP TABLE $tableName');
       await conn.close();
     });
