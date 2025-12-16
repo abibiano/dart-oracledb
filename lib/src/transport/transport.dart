@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
@@ -122,8 +123,7 @@ class Transport {
     _log.fine('Received header: ${header.length} bytes');
 
     // Extract total packet length from header (uses large SDU if enabled)
-    final packetLength =
-        readTnsPacketLength(header, useLargeSdu: _useLargeSdu);
+    final packetLength = readTnsPacketLength(header, useLargeSdu: _useLargeSdu);
     final payloadLength = packetLength - tnsHeaderSize;
 
     _log.fine('Packet length: $packetLength, payload: $payloadLength bytes');
@@ -424,8 +424,9 @@ class Transport {
     _log.fine('AUTH_PHASE_ONE message: ${authPhaseOneBytes.length} bytes');
 
     // Concatenate all three TTC messages
-    final batchedTtc = Uint8List(
-        protocolBytes.length + dataTypesBytes.length + authPhaseOneBytes.length);
+    final batchedTtc = Uint8List(protocolBytes.length +
+        dataTypesBytes.length +
+        authPhaseOneBytes.length);
     var offset = 0;
     batchedTtc.setRange(offset, offset + protocolBytes.length, protocolBytes);
     offset += protocolBytes.length;
@@ -435,6 +436,13 @@ class Transport {
         offset, offset + authPhaseOneBytes.length, authPhaseOneBytes);
 
     _log.info('Sending batched handshake: ${batchedTtc.length} bytes total');
+
+    // DEBUG: Save TTC batch to file for comparison with node-oracledb
+    try {
+      await _saveTtcBatchForDebug(batchedTtc);
+    } catch (e) {
+      _log.warning('Failed to save debug TTC batch: $e');
+    }
 
     // Send batched message in single TNS DATA packet
     await sendData(batchedTtc);
@@ -1105,5 +1113,20 @@ class Transport {
       return response.payload;
     }
     return response.payload.sublist(2);
+  }
+
+  /// DEBUG: Saves TTC batch to file for byte-by-byte comparison with node-oracledb.
+  Future<void> _saveTtcBatchForDebug(Uint8List ttcBatch) async {
+    final file = File('dart_ttc_batch.bin');
+    await file.writeAsBytes(ttcBatch);
+    _log.info(
+        'DEBUG: Saved TTC batch to ${file.path} (${ttcBatch.length} bytes)');
+
+    // Also log first 100 bytes as hex for quick comparison
+    final hexPreview = ttcBatch
+        .sublist(0, ttcBatch.length < 100 ? ttcBatch.length : 100)
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join(' ');
+    _log.fine('First 100 bytes: $hexPreview');
   }
 }

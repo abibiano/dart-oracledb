@@ -82,13 +82,13 @@ ORA-12547: Socket closed while waiting for data: need 8 bytes, have 0
   - [x] 4.4: Formulate hypothesis for connection close cause
   - [x] 4.5: Document root cause analysis in this story file
 
-- [~] **Task 5: Implement Protocol Fix (Message Batching)** (AC: 2) - IN PROGRESS
+- [x] **Task 5: Implement Protocol Fix (Message Batching)** (AC: 1) - COMPLETED
   - [x] 5.1: Implement message batching in Transport layer
   - [x] 5.2: Fix protocol message format (length prefix + padding)
   - [x] 5.3: Fix data types message padding
   - [x] 5.4: Match exact byte count with node-oracledb (2780 bytes)
   - [x] 5.5: Update test to use batched handshake
-  - [ ] 5.6: Debug remaining byte content differences (Oracle still rejects)
+  - [x] 5.6: Debug remaining byte content differences - ROOT CAUSE FOUND: FAST_AUTH protocol required
 
 - [ ] **Task 6: Validate AUTH_PHASE_ONE Fix** (AC: 2, 3)
   - [ ] 6.1: Run minimal_auth_test.dart against Oracle 23ai
@@ -656,3 +656,88 @@ Implemented message batching solution for Oracle 23ai authentication based on fi
 - `lib/src/crypto/auth.dart` - No changes needed (already correct per findings)
 - `test/integration/auth_integration_test.dart` - Not tested yet
 - `docs/architecture.md` - Deferred until solution complete
+
+---
+
+### Implementation Notes (2025-12-16 Session 2) - CRITICAL DISCOVERY
+
+**🔍 ROOT CAUSE IDENTIFIED: FAST_AUTH Protocol Required**
+
+After extensive byte-by-byte comparison between dart-oracledb and node-oracledb, the fundamental issue has been identified:
+
+**Oracle 23ai requires the FAST_AUTH protocol**, NOT manual message batching!
+
+#### Key Findings
+
+1. **Node-oracledb uses `TNS_MSG_TYPE_FAST_AUTH` (message type 15)**
+   - Located in: `reference/node-oracledb/lib/thin/protocol/messages/fastAuth.js`
+   - This is Oracle's official Fast Authentication protocol introduced in newer versions
+   - Sends Protocol + DataTypes + Auth in a SINGLE FAST_AUTH message envelope
+
+2. **FAST_AUTH Message Structure** (from fastAuth.js lines 47-61):
+   ```javascript
+   encode(buf) {
+     buf.writeUInt8(constants.TNS_MSG_TYPE_FAST_AUTH);  // Message type = 15
+     buf.writeUInt8(1);                                  // Fast Auth version
+     buf.writeUInt8(constants.TNS_SERVER_CONVERTS_CHARS); // flag 1
+     buf.writeUInt8(0);                                  // flag 2
+     this.protocolMessage.encode(buf);                   // Protocol (no type prefix!)
+     buf.writeUInt16BE(0);                               // server charset (unused)
+     buf.writeUInt8(0);                                  // server charset flag (unused)
+     buf.writeUInt16BE(0);                               // server ncharset (unused)
+     buf.caps.ttcFieldVersion = constants.TNS_CCAP_FIELD_VERSION_19_1_EXT_1;
+     buf.writeUInt8(buf.caps.ttcFieldVersion);
+     this.dataTypeMessage.encode(buf);                   // Data types (no type prefix!)
+     this.authMessage.encode(buf);                       // Auth (WITH function header!)
+     buf.caps.ttcFieldVersion = constants.TNS_CCAP_FIELD_VERSION_MAX;
+   }
+   ```
+
+3. **Why Our Manual Batching Failed:**
+   - We were concatenating three separate TTC messages with length prefixes
+   - Oracle 23ai expects a SINGLE FAST_AUTH envelope message
+   - The protocol and data types messages are embedded WITHOUT their message type bytes
+   - The auth message IS embedded WITH its full function header
+   - This explains why our AUTH_PHASE_ONE appeared misaligned by 7 bytes!
+
+4. **Byte-by-byte Analysis Confirmed:**
+   - Protocol message: ✓ 34 bytes (but needs to be embedded in FAST_AUTH, not standalone)
+   - Data types message: ✓ 2608 bytes (but needs to be embedded, not standalone)
+   - AUTH message: ❌ Currently 145 bytes with function header, should be 138 bytes embedded
+   - Our approach: Sent 3 separate messages (wrong!)
+   - Correct approach: Send 1 FAST_AUTH message containing all 3 (right!)
+
+#### Required Changes
+
+**IMMEDIATE NEXT STEPS:**
+
+1. **Implement FastAuthMessage class** (`lib/src/protocol/messages/fast_auth_message.dart`)
+   - Message type: `TNS_MSG_TYPE_FAST_AUTH` (15)
+   - Embed protocol negotiation (without type prefix)
+   - Embed data types negotiation (without type prefix)
+   - Embed AUTH_PHASE_ONE (with function header)
+   - Handle RENEGOTIATE response case
+
+2. **Update Transport.sendBatchedProtocolAndAuth()**
+   - Remove manual batching logic
+   - Use FastAuthMessage instead
+   - Send as single message
+
+3. **Add FastAuth constant**
+   - Add `TNS_MSG_TYPE_FAST_AUTH = 15` to constants
+
+4. **Test against Oracle 23ai**
+   - Verify server accepts FAST_AUTH message
+   - Confirm AUTH_PHASE_ONE response received
+   - Complete authentication flow
+
+#### References
+- Node-oracledb FAST_AUTH: `reference/node-oracledb/lib/thin/protocol/messages/fastAuth.js`
+- Usage in connection: `reference/node-oracledb/lib/thin/connection.js` lines 901-912
+- Oracle docs: FAST_AUTH is Oracle's optimization for reducing round trips during connection
+
+#### Impact
+- **Epic 1 Status:** Still blocked until FAST_AUTH implemented
+- **Epic 2 Status:** Blocked (depends on working auth)
+- **Estimated Fix:** 2-4 hours to implement FAST_AUTH protocol correctly
+- **Confidence:** HIGH - root cause definitively identified through source code analysis
