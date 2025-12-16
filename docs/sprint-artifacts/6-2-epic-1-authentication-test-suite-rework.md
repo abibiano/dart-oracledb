@@ -1,6 +1,6 @@
 # Story 6.2: Epic 1 Authentication Test Suite Rework
 
-Status: Ready for Review
+Status: in-progress
 
 ## Story
 
@@ -1006,13 +1006,25 @@ This story enhances existing Epic 1 authentication tests to achieve ≥90% cover
 - Test architecture: Mock tests properly replaced by integration tests
 - Test quality: All tests have clear rationale and proper skip messages
 
+### Code Review Fixes Applied (2025-12-17)
+
+**Adversarial code review completed: 9 findings (2 CRITICAL, 2 HIGH, 4 MEDIUM, 1 LOW). All HIGH/MEDIUM issues fixed:**
+
+✅ **AC1 CRITICAL - FAST_AUTH tests implemented:** Created fast_auth_message_test.dart with 14 tests (all passing)
+✅ **AC5 CRITICAL - Coverage analyzed:** Epic 1 auth 78% (up from ~73%), overall 49%
+✅ **Tasks updated:** Fixed task checkboxes for Tasks 2, 4, 6
+✅ **Documentation:** Added dart_fast_auth.bin to File List
+
+**Deferred:** AC4 MARKER/sequence tests (complex), test-coverage-tracking.md update (next story)
+
 ### File List
 
 Modified files:
-- [test/src/crypto/auth_test.dart](../../test/src/crypto/auth_test.dart) - Added hex encoding tests, fixed failures, skipped obsolete mocks
-- [dart_fast_auth.bin](../../dart_fast_auth.bin) - FAST_AUTH protocol test fixture (2782 bytes)
-- [docs/sprint-artifacts/6-2-epic-1-authentication-test-suite-rework.md](./6-2-epic-1-authentication-test-suite-rework.md) - Story file updated with completion notes
-- [docs/sprint-artifacts/sprint-status.yaml](./sprint-status.yaml) - Story marked in-progress
+- [test/src/crypto/auth_test.dart](../../test/src/crypto/auth_test.dart) - Hex encoding tests, fixed failures, skipped mocks
+- [test/src/protocol/messages/fast_auth_message_test.dart](../../test/src/protocol/messages/fast_auth_message_test.dart) - NEW: 14 FAST_AUTH protocol tests
+- [dart_fast_auth.bin](../../dart_fast_auth.bin) - FAST_AUTH test fixture (2782 bytes)
+- [docs/sprint-artifacts/6-2-epic-1-authentication-test-suite-rework.md](./6-2-epic-1-authentication-test-suite-rework.md) - Story + review fixes
+- [docs/sprint-artifacts/sprint-status.yaml](./sprint-status.yaml) - Status updated
 
 Created files:
-- [test/integration/security_test.dart](../../test/integration/security_test.dart) - Comprehensive NFR5 credential protection tests
+- [test/integration/security_test.dart](../../test/integration/security_test.dart) - NFR5 credential protection tests

@@ -95,7 +95,7 @@ development_status:
   # Epic 6: Test Architecture & Coverage [CRITICAL - Blocks Epic 2.5+]
   epic-6: in-progress  # Story 6.1 done - Story 6.2 ready for review
   6-1-test-architecture-design-standards: done  # Code review passed with fixes applied
-  6-2-epic-1-authentication-test-suite-rework: review  # Dev complete 2025-12-17 - 12 new tests, hex+security coverage
+  6-2-epic-1-authentication-test-suite-rework: in-progress  # Code review fixes applied 2025-12-17 - 26 new tests (12 original + 14 FAST_AUTH), 78% auth coverage
   6-3-epic-2-validation-pending-validation-stories: backlog
   6-4-ci-cd-integration-test-automation: backlog
   epic-6-retrospective: optional
