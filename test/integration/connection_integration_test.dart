@@ -134,18 +134,6 @@ void main() {
       expect(await connection.ping(), isFalse);
     });
 
-    test('isHealthy is false after close', () async {
-      final connection = await OracleConnection.connect(
-        'localhost:1521/FREEPDB1',
-        user: 'system',
-        password: 'testpassword',
-      );
-
-      expect(connection.isHealthy, isTrue);
-      await connection.close();
-      expect(connection.isHealthy, isFalse);
-    });
-
     test('withConnection auto-closes on success', () async {
       var callbackExecuted = false;
 

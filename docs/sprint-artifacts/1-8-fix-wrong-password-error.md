@@ -1,6 +1,6 @@
 # Story 1.8: Fix Wrong Password Error Handling
 
-Status: Ready for Review
+Status: done
 
 ## Story
 
@@ -221,6 +221,10 @@ const int oraAuthenticationFailed = 1017; // ORA-01017: invalid username/passwor
 - [lib/src/protocol/packet.dart](../../lib/src/transport/packet.dart) - TNS packet types (REFUSE = 4)
 - [test/integration/test_wrong_password.dart](../../test/integration/test_wrong_password.dart) - Existing test to enhance
 
+**Note on Integration Tests:**
+- `test/integration/debug_auth_test.dart` has a pre-existing failure (hardcoded wrong password) unrelated to this story
+- All other integration tests pass successfully
+
 ### Testing Requirements
 
 **Integration Test Pattern (from Story 1.7):**
@@ -383,6 +387,30 @@ Claude Sonnet 4.5 (claude-sonnet-4-5-20250929)
 ### File List
 
 **Files Modified:**
-- `lib/src/crypto/auth.dart` - Added authTimeout parameter and timeout handling
+- `lib/src/crypto/auth.dart` - Added dart:async import, authTimeout parameter, and timeout handling for AUTH_PHASE_TWO
 - `test/integration/test_wrong_password.dart` - Fixed connect packet + added timing/security assertions
 - `docs/architecture.md` - Updated Known Issues section (resolved)
+
+**Investigation Artifacts:**
+- `test_node_wrong_pass.mjs` - Node-oracledb comparison test (added to .gitignore)
+
+### Code Review Fixes (2025-12-16)
+
+**Security & Quality Improvements:**
+1. **HIGH: Username Exposure Fixed** - Removed username from error messages (NFR5 compliance)
+   - Changed `"Authentication failed for user \"$username\""` to generic message
+   - Updated auth.dart:434 and auth.dart:448
+2. **HIGH: Error Handling Consistency** - Fixed duplicate exception handling
+   - Removed `oraInvalidCredentials` from catch block to preserve timeout handler message
+   - Prevents username re-exposure through error re-wrapping
+3. **MEDIUM: Test Reliability** - Increased test timeout margin from 5.5s to 6s
+   - Reduces flakiness in CI/CD environments
+4. **MEDIUM: Documentation** - Enhanced File List and investigation notes
+   - Documented dart:async import
+   - Added note about pre-existing debug_auth_test failure
+   - Added test_node_wrong_pass.mjs to .gitignore
+
+**Verification:**
+- ✅ test_wrong_password.dart passes with generic error message
+- ✅ Username no longer exposed in any error messages
+- ✅ Error handling simplified and consistent

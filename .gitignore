@@ -198,6 +198,9 @@ test/.test_coverage.dart
 test_driver/.dart_tool/
 .test_runner/
 
+# Investigation artifacts (node-oracledb comparison tests)
+test_node_wrong_pass.mjs
+
 # =============================================================================
 # Build & Dependencies
 # =============================================================================

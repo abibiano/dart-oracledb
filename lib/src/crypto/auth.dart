@@ -247,7 +247,7 @@ class AuthFlow {
 
     // Step 6: Derive comboKey from mixing sessionKeyParta and sessionKeyPartb
     // Mix the keys using AUTH_PBKDF2_CSK_SALT
-    final keyLen = 32; // AES-256
+    const keyLen = 32; // AES-256
     final partABKey = Uint8List(keyLen * 2);
     partABKey.setRange(0, keyLen, sessionKeyPartb.sublist(0, keyLen));
     partABKey.setRange(keyLen, keyLen * 2, sessionKeyParta.sublist(0, keyLen));
@@ -423,15 +423,14 @@ class AuthFlow {
       _log.fine(
           'Received AUTH_PHASE_TWO response (${phaseTwoResponseData.length} bytes)');
     } on OracleException catch (e) {
-      // If connection closes or we get invalid credentials during AUTH_PHASE_TWO,
-      // treat it as authentication failure (Oracle closes connection on wrong password)
-      if (e.errorCode == oraNetworkError ||
-          e.errorCode == oraInvalidCredentials ||
-          e.errorCode == oraProtocolError) {
+      // If connection closes during AUTH_PHASE_TWO, treat it as authentication failure
+      // (Oracle closes connection on wrong password)
+      // Note: Don't catch oraInvalidCredentials - let timeout handler message through
+      if (e.errorCode == oraNetworkError || e.errorCode == oraProtocolError) {
         updateState(AuthState.failed);
-        throw OracleException(
+        throw const OracleException(
           errorCode: oraInvalidCredentials,
-          message: 'Authentication failed for user "$username"',
+          message: 'Authentication failed: invalid username or password',
         );
       }
       rethrow;
@@ -441,11 +440,11 @@ class AuthFlow {
 
     if (!phaseTwoResponse.isSuccess) {
       updateState(AuthState.failed);
-      // Map Oracle error codes - never include password in error message
+      // Map Oracle error codes - never include password or username in error message
       final errorCode = phaseTwoResponse.errorCode ?? oraInvalidCredentials;
       throw OracleException(
         errorCode: errorCode,
-        message: 'Authentication failed for user "$username"',
+        message: 'Authentication failed: invalid username or password',
       );
     }
 

@@ -11,8 +11,6 @@ import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
 import 'package:oracledb/src/crypto/auth.dart';
-import 'package:oracledb/src/protocol/buffer.dart';
-import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
@@ -34,60 +32,11 @@ void main() {
 
     /// Builds the TNS CONNECT packet body.
     Uint8List buildConnectData() {
-      final tnsDescriptor = '(DESCRIPTION='
+      const tnsDescriptor = '(DESCRIPTION='
           '(ADDRESS=(PROTOCOL=TCP)(HOST=$host)(PORT=$port))'
           '(CONNECT_DATA=(SERVICE_NAME=$serviceName)))';
       final descriptorBytes = Uint8List.fromList(utf8.encode(tnsDescriptor));
       return buildConnectPacketBody(descriptorBytes);
-    }
-
-    /// Creates MINIMAL AUTH_PHASE_ONE message (no key-value pairs).
-    Uint8List buildMinimalAuthPhaseOne({
-      required String username,
-      required bool includeTokenNumber,
-    }) {
-      final buffer = WriteBuffer();
-
-      // Function header
-      buffer.writeUint8(ttcMsgTypeFunction); // Message type (3)
-      buffer.writeUint8(ttcAuthPhaseOne); // Function code (0x76)
-      buffer.writeUint8(1); // Sequence number (node-oracledb uses 1)
-
-      // Token number for Oracle 23ai+ (TEST: try without it!)
-      if (includeTokenNumber) {
-        buffer.writeUB8(0);
-      }
-
-      // Authentication mode flags
-      const authMode = ttcAuthModeLogon | ttcAuthModeWithPassword;
-
-      // Username presence and length
-      final usernameBytes =
-          Uint8List.fromList(utf8.encode(username)); // Send as-is (lowercase)
-      buffer.writeUint8(usernameBytes.isNotEmpty ? 1 : 0);
-      buffer.writeUB4(usernameBytes.length);
-      buffer.writeUB4(authMode);
-
-      // Phase one parameters - Match node-oracledb format
-      buffer.writeUint8(1); // Unknown flag
-      buffer.writeUB4(
-          5); // Number of key-value pairs = 5 (matching node-oracledb)
-      buffer.writeUint8(0); // Unknown
-      buffer.writeUint8(1); // Unknown
-
-      // Write username with length
-      if (usernameBytes.isNotEmpty) {
-        buffer.writeBytesWithLength(usernameBytes);
-      }
-
-      // Write key-value pairs matching node-oracledb
-      buffer.writeKeyValue('AUTH_TERMINAL', 'unknown');
-      buffer.writeKeyValue('AUTH_PROGRAM_NM', 'dart');
-      buffer.writeKeyValue('AUTH_MACHINE', 'localhost');
-      buffer.writeKeyValue('AUTH_PID', '12345');
-      buffer.writeKeyValue('AUTH_SID', 'testuser');
-
-      return buffer.toBytes();
     }
 
     setUp(() async {
