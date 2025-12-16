@@ -51,7 +51,7 @@ development_status:
   1-3-ttc-protocol-foundation: done
   1-4-authentication-implementation: done  # Fixed with crypto format corrections
   1-4-fix-authentication-protocol-debugging: done  # RESOLVED - Crypto values needed hex encoding
-  1-5-connection-api-error-handling: pending-validation  # Can validate now, deferred to later
+  1-5-connection-api-error-handling: done  # Validated 2025-12-16 - removed obsolete protocol negotiation
   1-6-tls-ssl-support: done
   1-7-connection-lifecycle-management: done
   1-8-fix-wrong-password-error: ready-for-dev  # Improve error handling for invalid credentials
