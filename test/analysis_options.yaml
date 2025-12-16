@@ -1,0 +1,8 @@
+# Test-specific analysis options
+# Inherits from root, overrides rules for test code
+
+include: ../analysis_options.yaml
+
+linter:
+  rules:
+    avoid_print: false  # Print is acceptable in tests for debugging/diagnostics

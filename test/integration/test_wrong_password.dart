@@ -15,7 +15,6 @@ import 'package:test/test.dart';
 void main() {
   Logger.root.level = Level.INFO;
   Logger.root.onRecord.listen((record) {
-    // ignore: avoid_print
     print('${record.level.name}: ${record.loggerName}: ${record.message}');
   });
 
@@ -42,7 +41,6 @@ void main() {
       final connectData = buildConnectData();
       await transport.sendConnectReceiveAccept(connectData);
 
-      // ignore: avoid_print
       print('\n=== Testing with WRONG Password ===');
 
       final authFlow = AuthFlow();
@@ -52,16 +50,13 @@ void main() {
         password: password, // WRONG!
       );
 
-      // ignore: avoid_print
       print('ERROR: Authentication should have failed!');
       fail('Should have thrown ORA-01017');
     } catch (e) {
       stopwatch.stop();
       final elapsedMs = stopwatch.elapsedMilliseconds;
 
-      // ignore: avoid_print
       print('\nCaught error: $e');
-      // ignore: avoid_print
       print(
           'Time elapsed: ${elapsedMs}ms (${(elapsedMs / 1000).toStringAsFixed(1)}s)');
 
@@ -83,10 +78,8 @@ void main() {
       // AC3 + NFR5: Verify password not in error
       expect(oraErr.message, isNot(contains(password)));
 
-      // ignore: avoid_print
       print(
           '✓ PASS: Fast failure in ${(elapsedMs / 1000).toStringAsFixed(1)}s with ORA-${oraErr.errorCode}');
-      // ignore: avoid_print
       print('✓ PASS: Password not exposed in error message');
     } finally {
       await transport.disconnect();

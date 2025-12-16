@@ -18,7 +18,6 @@ import 'package:test/test.dart';
 void main() {
   Logger.root.level = Level.FINE;
   Logger.root.onRecord.listen((record) {
-    // ignore: avoid_print
     print('${record.level.name}: ${record.loggerName}: ${record.message}');
   });
 
@@ -54,7 +53,6 @@ void main() {
     });
 
     test('fast auth protocol (FAST_AUTH message type 15)', () async {
-      // ignore: avoid_print
       print('\n=== Testing FAST_AUTH Protocol (Oracle 23ai) ===');
 
       // Generate client nonce for authentication
@@ -70,17 +68,14 @@ void main() {
 
         // Try to receive AUTH_PHASE_ONE response
         final response = await transport.receiveData();
-        // ignore: avoid_print
         print(
             'SUCCESS! Received AUTH_PHASE_ONE response: ${response.length} bytes');
-        // ignore: avoid_print
         print(
             'Response hex: ${response.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
 
         // Verify it's an AUTH_PHASE_ONE response (should contain verifier data)
         expect(response.length, greaterThan(0));
       } catch (e) {
-        // ignore: avoid_print
         print('FAILED: $e');
         rethrow;
       }
@@ -88,7 +83,6 @@ void main() {
 
     test('complete authentication flow (AUTH_PHASE_ONE + AUTH_PHASE_TWO)',
         () async {
-      // ignore: avoid_print
       print('\n=== Testing Complete Authentication Flow ===');
 
       try {
@@ -101,13 +95,11 @@ void main() {
           password: password,
         );
 
-        // ignore: avoid_print
         print('SUCCESS! Authentication completed');
         expect(authFlow.state, equals(AuthState.authenticated));
         expect(authFlow.sessionKey, isNotNull);
         expect(authFlow.sessionKey!.length, greaterThan(0));
       } catch (e) {
-        // ignore: avoid_print
         print('FAILED: $e');
         rethrow;
       }
