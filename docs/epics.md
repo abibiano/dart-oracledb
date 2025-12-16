@@ -1,13 +1,12 @@
 ---
-stepsCompleted: [1, 2, 3, 4]
-status: 'complete'
-completedAt: '2025-12-15'
+stepsCompleted: [1, 2, 3]
 inputDocuments:
   - 'docs/prd.md'
   - 'docs/architecture.md'
+  - 'docs/sprint-change-proposal-2025-12-16.md'
 project_name: 'dart-oracledb'
 user_name: 'Alex'
-date: '2025-12-15'
+date: '2025-12-16'
 ---
 
 # dart-oracledb - Epic Breakdown
@@ -189,6 +188,8 @@ Developer can connect to Oracle database securely using an EZ Connect string, au
 
 **Technical notes:** This epic includes project initialization, transport layer (TNS), protocol layer (TTC authentication), and crypto layer - all required to deliver the first working connection.
 
+**Current Status (2025-12-16):** ⚠️ Epic 1 partially complete - Stories 1.1-1.3 working, Story 1.4 broken (AUTH_PHASE_ONE fails), Story 1.4-FIX in progress. Epic marked as IN-PROGRESS until authentication is fixed. See [sprint-change-proposal-2025-12-16.md](sprint-change-proposal-2025-12-16.md) for details.
+
 ### Story 1.1: Project Initialization & Structure
 
 As a **developer contributing to dart-oracledb**,
@@ -268,6 +269,46 @@ So that **I can authenticate securely with Oracle 23ai databases**.
 **When** authentication is attempted
 **Then** an `OracleException` is thrown with ORA-01017 (invalid username/password)
 **And** the password is NOT included in error message or logs (NFR5)
+
+**Current Status:** ⚠️ Implementation exists but authentication is **BROKEN** - Oracle closes connection at AUTH_PHASE_ONE with ORA-12547. See Story 1.4-FIX below.
+
+### Story 1.4-FIX: Authentication Protocol Debugging
+
+As a **developer maintaining dart-oracledb**,
+I want **to identify and fix the authentication protocol bug**,
+So that **Story 1.4 authentication implementation actually works with Oracle 23ai**.
+
+**Context:** Story 1.4 implementation is complete but broken. Oracle closes the connection immediately after receiving AUTH_PHASE_ONE message, indicating a protocol mismatch. This story focuses on debugging and fixing the protocol issue.
+
+**Acceptance Criteria:**
+
+**AC1: Identify exact protocol mismatch**
+**Given** the current AUTH_PHASE_ONE implementation
+**When** comparing byte-by-byte with working node-oracledb via Wireshark or packet capture
+**Then** the exact protocol difference causing Oracle to close connection is identified
+**And** root cause is documented (capability flag, sequence number, token, or format issue)
+
+**AC2: Implement fix for AUTH_PHASE_ONE**
+**Given** the identified protocol mismatch
+**When** the AUTH_PHASE_ONE message encoding is corrected
+**Then** Oracle accepts the message and responds (does not close connection)
+**And** AUTH_PHASE_TWO can proceed
+
+**AC3: All integration tests pass**
+**Given** the authentication fix is implemented
+**When** running integration tests against Oracle 23ai Docker
+**Then** authentication succeeds (no ORA-12547 errors)
+**And** connection is established successfully
+**And** basic queries can be executed (validates Story 2.1 foundation)
+
+**AC4: Document findings**
+**Given** the bug is fixed
+**When** documenting the root cause
+**Then** findings are added to architecture.md or technical notes
+**And** protocol comparison details are documented for future reference
+**And** any Oracle 23ai-specific protocol requirements are noted
+
+**Priority:** 🔥 CRITICAL - Blocks all Epic 2+ work
 
 ### Story 1.5: Connection API & Error Handling
 
