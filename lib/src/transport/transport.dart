@@ -404,6 +404,103 @@ class Transport {
     return protocolResponse;
   }
 
+  /// Sends protocol negotiation, data types negotiation, and AUTH_PHASE_ONE
+  /// in a single batched TNS DATA packet (Oracle 23ai requirement).
+  ///
+  /// This is required for Oracle 23ai which expects these three messages
+  /// to be sent together in one packet, not as separate packets.
+  Future<ProtocolResponse> sendBatchedProtocolAndAuth(
+      Uint8List authPhaseOneBytes) async {
+    _log.info('Starting batched protocol negotiation with AUTH_PHASE_ONE');
+
+    // Build protocol negotiation TTC message
+    final protocolRequest = ProtocolRequest();
+    final protocolBytes = protocolRequest.toBytes();
+    _log.fine('Protocol message: ${protocolBytes.length} bytes');
+
+    // Build data types negotiation TTC message
+    final dataTypesBytes = _buildDataTypesMessage();
+    _log.fine('Data types message: ${dataTypesBytes.length} bytes');
+    _log.fine('AUTH_PHASE_ONE message: ${authPhaseOneBytes.length} bytes');
+
+    // Concatenate all three TTC messages
+    final batchedTtc = Uint8List(
+        protocolBytes.length + dataTypesBytes.length + authPhaseOneBytes.length);
+    var offset = 0;
+    batchedTtc.setRange(offset, offset + protocolBytes.length, protocolBytes);
+    offset += protocolBytes.length;
+    batchedTtc.setRange(offset, offset + dataTypesBytes.length, dataTypesBytes);
+    offset += dataTypesBytes.length;
+    batchedTtc.setRange(
+        offset, offset + authPhaseOneBytes.length, authPhaseOneBytes);
+
+    _log.info('Sending batched handshake: ${batchedTtc.length} bytes total');
+
+    // Send batched message in single TNS DATA packet
+    await sendData(batchedTtc);
+
+    // Receive protocol response
+    final protocolResponseData = await receiveData();
+    final protocolResponse = ProtocolResponse.decode(protocolResponseData);
+    _log.info('Protocol negotiation complete: '
+        'serverVersion=${protocolResponse.serverVersion}');
+
+    // Adjust ttcFieldVersion based on server compile caps
+    _adjustFieldVersion(protocolResponse.compileCaps);
+
+    // Receive data types response
+    final dataTypesResponseData = await receiveData();
+    _log.fine(
+        'Received data types response: ${dataTypesResponseData.length} bytes');
+    _log.info('Data types negotiation complete');
+
+    // Auth response will be handled by auth module
+    return protocolResponse;
+  }
+
+  /// Builds the data types negotiation TTC message without sending it.
+  Uint8List _buildDataTypesMessage() {
+    // Build client capabilities
+    final compileCaps = _buildCompileCapabilities();
+    final runtimeCaps = _buildRuntimeCapabilities();
+
+    // Build data types message
+    final buffer = WriteBuffer();
+
+    // Message type
+    buffer.writeUint8(2); // TNS_MSG_TYPE_DATA_TYPES
+
+    // Character set (UTF-8 = 873)
+    buffer.writeUint16LE(873);
+    buffer.writeUint16LE(873);
+
+    // Encoding flags
+    buffer.writeUint8(0x01 | 0x02); // MULTI_BYTE | CONV_LENGTH
+
+    // Compile caps (length-prefixed)
+    buffer.writeUint8(compileCaps.length);
+    buffer.writeBytes(compileCaps);
+
+    // Runtime caps (length-prefixed)
+    buffer.writeUint8(runtimeCaps.length);
+    buffer.writeBytes(runtimeCaps);
+
+    // Data type mappings (matching node-oracledb format)
+    for (final dt in _dataTypes) {
+      _writeDataTypeMapping(buffer, dt[0], dt[1], dt[2]);
+    }
+
+    // Terminator + padding (node-oracledb has extra padding)
+    buffer.writeUint16BE(0); // Terminator (2 bytes)
+    buffer.writeUint16BE(0x007f); // Padding (2 bytes)
+    buffer.writeUint16BE(0x007f); // Padding (2 bytes)
+    buffer.writeUint16BE(0x0001); // Padding (2 bytes)
+    buffer.writeUint16BE(0); // Padding (2 bytes)
+    buffer.writeUint16BE(0); // Additional padding (2 bytes) to match node
+
+    return buffer.toBytes();
+  }
+
   /// Adjusts the TTC field version based on server compile capabilities.
   void _adjustFieldVersion(Uint8List? serverCompileCaps) {
     if (serverCompileCaps != null &&

@@ -36,22 +36,38 @@ class ProtocolRequest extends Message {
 
   @override
   void encode(WriteBuffer buffer) {
+    // Calculate message length for prefix (matches node-oracledb format)
+    // Format: length(1) + msgType(1) + unknown(5) + driver + null + padding(6)
+    final driverBytes = utf8.encode(driverName);
+    final messageLength = 1 + 1 + 5 + driverBytes.length + 1 + 6;
+
+    // Length prefix (node-oracledb uses this for batched messages)
+    buffer.writeUint8(messageLength);
+
     // Message type
     buffer.writeUint8(messageType);
 
-    // Protocol version (6 for Oracle 8.1+)
-    buffer.writeUint8(ttcProtocolVersion);
-
-    // Array terminator
+    // Unknown 5-byte sequence (matches node-oracledb: 01 00 01 06 00)
+    buffer.writeUint8(1);
+    buffer.writeUint8(0);
+    buffer.writeUint8(1);
+    buffer.writeUint8(ttcProtocolVersion); // 6
     buffer.writeUint8(0);
 
     // Driver name (null-terminated string)
-    final nameBytes = utf8.encode(driverName);
-    buffer.writeBytes(Uint8List.fromList(nameBytes));
+    buffer.writeBytes(Uint8List.fromList(driverBytes));
     buffer.writeUint8(0); // Null terminator
 
+    // Padding (matches node-oracledb: 00 00 00 00 00 0d)
+    buffer.writeUint8(0);
+    buffer.writeUint8(0);
+    buffer.writeUint8(0);
+    buffer.writeUint8(0);
+    buffer.writeUint8(0);
+    buffer.writeUint8(0x0d);
+
     _log.fine('Encoded protocol request: version=$ttcProtocolVersion, '
-        'driver=$driverName');
+        'driver=$driverName, length=$messageLength');
   }
 }
 

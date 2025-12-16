@@ -29,7 +29,7 @@ void main() {
     const host = 'localhost';
     const port = 1521;
     const serviceName = 'FREEPDB1';
-    const username = 'SYSTEM';
+    const username = 'system'; // Lowercase to match node-oracledb
     const password = 'testpassword';
 
     /// Builds the TNS CONNECT packet body.
@@ -62,7 +62,7 @@ void main() {
       const authMode = ttcAuthModeLogon | ttcAuthModeWithPassword;
 
       // Username presence and length
-      final usernameBytes = Uint8List.fromList(utf8.encode(username.toUpperCase()));
+      final usernameBytes = Uint8List.fromList(utf8.encode(username)); // Send as-is (lowercase)
       buffer.writeUint8(usernameBytes.isNotEmpty ? 1 : 0);
       buffer.writeUB4(usernameBytes.length);
       buffer.writeUB4(authMode);
@@ -92,21 +92,19 @@ void main() {
       transport = Transport();
       await transport.connect(host, port);
 
-      // Perform TNS CONNECT/ACCEPT handshake
+      // Perform TNS CONNECT/ACCEPT handshake only
+      // Protocol negotiation will be batched with AUTH_PHASE_ONE
       final connectData = buildConnectData();
       await transport.sendConnectReceiveAccept(connectData);
-
-      // Perform TTC protocol negotiation
-      await transport.sendProtocolNegotiation();
     });
 
     tearDown(() async {
       await transport.disconnect();
     });
 
-    test('minimal auth phase one (no key-value pairs)', () async {
+    test('minimal auth phase one (batched with protocol negotiation)', () async {
       // ignore: avoid_print
-      print('\n=== Testing MINIMAL AUTH_PHASE_ONE (no client info) ===');
+      print('\n=== Testing BATCHED Protocol + DataTypes + AUTH_PHASE_ONE ===');
 
       // Build minimal auth message - NO token number for AUTH_PHASE_ONE!
       // Analysis shows node-oracledb does NOT write token for auth messages.
@@ -116,20 +114,24 @@ void main() {
       );
 
       // ignore: avoid_print
-      print('Minimal AUTH_PHASE_ONE: ${authBytes.length} bytes');
+      print('AUTH_PHASE_ONE: ${authBytes.length} bytes');
       // ignore: avoid_print
       print('Hex: ${authBytes.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
 
       try {
-        // Send AUTH_PHASE_ONE
-        await transport.sendData(authBytes);
+        // Send batched handshake: Protocol + DataTypes + AUTH_PHASE_ONE in ONE packet
+        // This matches node-oracledb behavior which Oracle 23ai expects
+        await transport.sendBatchedProtocolAndAuth(authBytes);
 
-        // Try to receive response
+        // Try to receive AUTH_PHASE_ONE response
         final response = await transport.receiveData();
         // ignore: avoid_print
-        print('SUCCESS! Received response: ${response.length} bytes');
+        print('SUCCESS! Received AUTH_PHASE_ONE response: ${response.length} bytes');
         // ignore: avoid_print
         print('Response hex: ${response.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
+
+        // Verify it's an AUTH_PHASE_ONE response (should contain verifier data)
+        expect(response.length, greaterThan(0));
       } catch (e) {
         // ignore: avoid_print
         print('FAILED: $e');
