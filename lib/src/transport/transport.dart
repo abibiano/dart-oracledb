@@ -1174,7 +1174,14 @@ class Transport {
       return buffered;
     }
 
-    final response = await receive();
+    var response = await receive();
+
+    // Handle MARKER packets - Oracle may send these during authentication
+    // Simply skip them and read the next packet
+    while (response.type == tnsPacketMarker) {
+      _log.fine('Received MARKER packet (${response.payload.length} bytes), reading next packet');
+      response = await receive();
+    }
 
     if (response.type != tnsPacketData) {
       throw OracleException(

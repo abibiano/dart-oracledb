@@ -132,5 +132,31 @@ void main() {
         rethrow;
       }
     });
+
+    test('complete authentication flow (AUTH_PHASE_ONE + AUTH_PHASE_TWO)', () async {
+      // ignore: avoid_print
+      print('\n=== Testing Complete Authentication Flow ===');
+
+      try {
+        // Use AuthFlow to perform complete authentication
+        final authFlow = AuthFlow();
+
+        await authFlow.authenticate(
+          transport: transport,
+          username: username,
+          password: password,
+        );
+
+        // ignore: avoid_print
+        print('SUCCESS! Authentication completed');
+        expect(authFlow.state, equals(AuthState.authenticated));
+        expect(authFlow.sessionKey, isNotNull);
+        expect(authFlow.sessionKey!.length, greaterThan(0));
+      } catch (e) {
+        // ignore: avoid_print
+        print('FAILED: $e');
+        rethrow;
+      }
+    });
   });
 }

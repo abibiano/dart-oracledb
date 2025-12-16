@@ -134,15 +134,19 @@ class AuthPhaseOneResponse {
       // Parameter message - contains key-value pairs
       final numParams = buffer.readUB2();
       _log.fine('Number of parameters: $numParams');
+      _log.fine('Buffer position after numParams: ${buffer.position}, remaining: ${buffer.remaining}');
 
       for (var i = 0; i < numParams; i++) {
+        _log.fine('Processing parameter $i of $numParams');
         buffer.readUB4(); // Skip unknown field
 
         // Read key
         final key = buffer.readStringWithLength();
+        _log.fine('  Key: $key');
 
         // Read value
         final valueLen = buffer.readUB4();
+        _log.fine('  Value length: $valueLen');
         String value = '';
         if (valueLen > 0) {
           value = buffer.readStringWithLength();
@@ -150,6 +154,7 @@ class AuthPhaseOneResponse {
 
         // Read flags - for AUTH_VFR_DATA, flags contain verifier type
         final flags = buffer.readUB4();
+        _log.fine('  Flags: 0x${flags.toRadixString(16)}');
 
         if (key == 'AUTH_VFR_DATA') {
           verifierType = flags;

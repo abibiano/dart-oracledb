@@ -650,21 +650,26 @@ Implemented message batching solution for Oracle 23ai authentication based on fi
 
 ### File List
 
-**Modified:**
+**Modified (Session 1-5):**
 - `lib/src/transport/transport.dart` - Added `sendBatchedProtocolAndAuth()`, `_buildDataTypesMessage()` methods
 - `lib/src/protocol/messages/protocol_message.dart` - Fixed `ProtocolRequest.encode()` format
 - `test/integration/minimal_auth_test.dart` - Updated to use batched handshake, fixed username case
 
-**Created:**
+**Modified (Session 6):**
+- `lib/src/crypto/auth.dart` - Use FAST_AUTH instead of standalone AUTH_PHASE_ONE, fixed session
+- `lib/src/transport/transport.dart` - Added MARKER packet handling (skip and read next)
+- `lib/src/protocol/messages/auth_message.dart` - Enhanced debug logging in decode()
+- `test/integration/minimal_auth_test.dart` - Added complete authentication flow test
+- `test/integration/debug_auth_phase_two.dart` - Created (debug utility for AUTH_PHASE_TWO inspection)
+
+**Created (Session 1-5):**
 - `compare_auth_bytes.js` - Node.js debugging tool
 - `compare_batched_bytes.js` - Node.js packet capture tool
 - `node_batched.bin` - Reference binary data
 - `node_ttc_batch.bin` - Reference TTC data
 
 **Not Modified (from expected list):**
-- `lib/src/protocol/messages/auth_message.dart` - No changes needed (already correct per findings)
-- `lib/src/crypto/auth.dart` - No changes needed (already correct per findings)
-- `test/integration/auth_integration_test.dart` - Not tested yet
+- `test/integration/auth_integration_test.dart` - Not tested yet (waiting on AUTH_PHASE_ONE fix)
 - `docs/architecture.md` - Deferred until solution complete
 
 ---
@@ -909,3 +914,114 @@ The exact size match and minimal content differences indicate the **FAST_AUTH pa
 - `compare_fast_auth_bytes.cjs` - Node.js packet capture
 - `dart_fast_auth.bin` - Dart packet for analysis (2780 bytes)
 - `node_fast_auth.bin` - Node packet reference (2780 bytes)
+
+---
+
+### Implementation Notes (2025-12-16 Session 6) - AUTH_PHASE_TWO + Critical Bug Discovery
+
+**Session Summary:**
+Implemented AUTH_PHASE_TWO flow and discovered critical bug in AUTH_PHASE_ONE response parsing. FAST_AUTH works correctly, but authentication fails due to empty salt/server nonce extraction.
+
+**What Was Completed:**
+
+1. ✅ **Verified AUTH_PHASE_TWO Message Encoding** (Task 7.1)
+   - Compared with node-oracledb reference implementation
+   - Confirmed AUTH_PHASE_TWO includes token number for Oracle 23ai (ttcFieldVersion >= 18)
+   - Function header format: type(3) + function(0x73) + sequence(1) + token(0)
+   - Key-value pairs match node-oracledb exactly
+
+2. ✅ **Fixed AuthFlow to Use FAST_AUTH** (Task 7.2-7.3)
+   - Modified [auth.dart:244-251](../../lib/src/crypto/auth.dart#L244-L251) to use `transport.sendFastAuth()` instead of standalone AUTH_PHASE_ONE
+   - Oracle 23ai requires FAST_AUTH protocol (combines Protocol + DataTypes + AUTH_PHASE_ONE)
+   - Standalone AUTH_PHASE_ONE causes connection close (ORA-12547)
+
+3. ✅ **Implemented MARKER Packet Handling** (Task 7.3)
+   - Added MARKER packet (type 12) skip logic in [transport.dart:1177-1184](../../lib/src/transport/transport.dart#L1177-L1184)
+   - Oracle may send MARKER packets during authentication - must be skipped to read next packet
+   - Uses while loop to skip consecutive MARKER packets
+
+4. ✅ **Created Complete Authentication Test**
+   - Added test in [minimal_auth_test.dart:136-160](../../test/integration/minimal_auth_test.dart#L136-L160)
+   - Tests full flow: FAST_AUTH → AUTH_PHASE_ONE response → AUTH_PHASE_TWO → verify authenticated
+   - Created debug test [debug_auth_phase_two.dart](../../test/integration/debug_auth_phase_two.dart) for message inspection
+
+**Current Blocker - CRITICAL BUG IDENTIFIED:**
+
+🚨 **AUTH_PHASE_ONE Response Parsing Returns Empty Values**
+
+Test output reveals:
+- Salt: `00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00` ❌ (should be random)
+- Server nonce: `00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00` ❌ (should be random)
+- Session key: `00 00 00 00 00 00 00 00...` ❌ (derived from zeros)
+- Verifier type: `0x4815` ✓ (correct - this is ttcVerifierType12c)
+
+**Impact:**
+- AUTH_PHASE_TWO sent with incorrect session key and password proof
+- Oracle rejects authentication by sending 2 MARKER packets then closing connection
+- Authentication fails with timeout after Oracle stops responding
+
+**Root Cause Analysis:**
+
+Location: [auth_message.dart:123-176](../../lib/src/protocol/messages/auth_message.dart#L123-L176) `AuthPhaseOneResponse.decode()`
+
+Issue: The `sessionData` map is not being populated with AUTH_VFR_DATA and AUTH_SESSKEY values from the 3094-byte AUTH_PHASE_ONE response.
+
+Evidence:
+1. Message type is correctly identified as `1` (ttcMsgTypeParameter)
+2. Response is 3094 bytes (substantial)
+3. No "Session param" log lines appear (loop not executing or failing silently)
+4. Added debug logging in lines 137-165 but logs not appearing in test output
+
+**Investigation Added:**
+- Enhanced logging in `decode()` to track:
+  - Number of parameters
+  - Buffer position after reading numParams
+  - Each parameter: key, value length, flags
+- Debug test created to inspect raw AUTH_PHASE_ONE response
+
+**Next Steps (for next session):**
+
+1. **Debug AUTH_PHASE_ONE Response Parsing** (HIGH PRIORITY)
+   - Add hex dump of first 100 bytes of AUTH_PHASE_ONE response
+   - Verify FAST_AUTH response splitting is correct (Protocol, DataTypes, AUTH)
+   - Check if `buffer.readUB2()` for numParams returns 0 or throws
+   - Compare response format with node-oracledb expectations
+   - Investigate why enhanced debug logs aren't appearing
+
+2. **Fix Response Parsing**
+   - Correct the parameter parsing logic once root cause identified
+   - Ensure AUTH_VFR_DATA and AUTH_SESSKEY are extracted
+   - Verify salt and server nonce are non-zero
+
+3. **Validate Complete Authentication**
+   - Re-run complete auth flow test
+   - Verify AUTH_PHASE_TWO succeeds
+   - Confirm no MARKER packets / connection close
+   - Mark Task 7 complete
+
+4. **Integration Test Suite** (Task 8)
+   - Run all auth integration tests
+   - Test invalid credentials (should get ORA-01017, not connection close)
+   - Test query execution after successful auth
+
+**Files Modified This Session:**
+- `lib/src/crypto/auth.dart` - Use FAST_AUTH, fixed session
+- `lib/src/transport/transport.dart` - Handle MARKER packets
+- `lib/src/protocol/messages/auth_message.dart` - Enhanced debug logging
+- `test/integration/minimal_auth_test.dart` - Added complete auth flow test
+- `test/integration/debug_auth_phase_two.dart` - Created debug utility
+
+**Technical Notes:**
+
+- FAST_AUTH (message type 34) successfully negotiates protocol and data types
+- AUTH_PHASE_ONE embedded in FAST_AUTH does NOT include token number (correct)
+- AUTH_PHASE_TWO standalone DOES include token number (correct per node-oracledb)
+- MARKER packets (type 12) can appear anytime and must be skipped
+- Oracle 23ai uses 12C verifier (0x4815) = PBKDF2-SHA512
+- Session key derivation requires: password hash + client nonce + server nonce
+- Password proof = AES-256-CBC encrypted(SHA512(password_hash + client_nonce))
+
+**References:**
+- Node-oracledb auth.js: AUTH_PHASE_TWO encoding (lines 202-336)
+- Node-oracledb base.js: writeFunctionHeader with token (lines 82-90)
+- Node-oracledb networkSession.js: MARKER handling (lines 399-401)

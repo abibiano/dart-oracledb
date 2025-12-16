@@ -241,22 +241,14 @@ class AuthFlow {
     final clientNonce = generateClientNonce();
     _log.fine('Generated client nonce (${clientNonce.length} bytes)');
 
-    // Step 2: Send AUTH_PHASE_ONE using sendData (includes data flags)
-    // Note: node-oracledb uses sequence 1 for AUTH_PHASE_ONE
-    // Protocol and DataTypes messages don't use sequence numbers
+    // Step 2: Send FAST_AUTH (Protocol + DataTypes + AUTH_PHASE_ONE)
+    // Oracle 23ai requires FAST_AUTH protocol for authentication
     updateState(AuthState.phaseOneSent);
-    final phaseOneRequest = AuthPhaseOneRequest(
+    _log.fine('Sending FAST_AUTH with AUTH_PHASE_ONE');
+    await transport.sendFastAuth(
       username: username,
       clientNonce: clientNonce,
-      sequence: 1, // node-oracledb uses sequence 1 for AUTH_PHASE_ONE
     );
-
-    // Write token number if ttcFieldVersion >= 18 (TNS_CCAP_FIELD_VERSION_23_1_EXT_1)
-    final use23aiFormat = transport.shouldWriteTokenNumber;
-    final phaseOneBytes = phaseOneRequest.toBytes(use23aiFormat: use23aiFormat);
-    _log.fine('Sending AUTH_PHASE_ONE request (${phaseOneBytes.length} bytes)');
-    _log.fine('AUTH_PHASE_ONE hex: ${phaseOneBytes.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
-    await transport.sendData(phaseOneBytes);
 
     // Step 3: Receive AUTH_PHASE_ONE response (strips data flags)
     final phaseOneResponseData = await transport.receiveData();
@@ -287,7 +279,8 @@ class AuthFlow {
       verifierType: verifierParams.verifierType,
     );
 
-    // Write token number if ttcFieldVersion >= 18 (same as AUTH_PHASE_ONE)
+    // Write token number if ttcFieldVersion >= 18 (TNS_CCAP_FIELD_VERSION_23_1_EXT_1)
+    final use23aiFormat = transport.shouldWriteTokenNumber;
     final phaseTwoBytes = phaseTwoRequest.toBytes(use23aiFormat: use23aiFormat);
     _log.fine('Sending AUTH_PHASE_TWO request (${phaseTwoBytes.length} bytes)');
     await transport.sendData(phaseTwoBytes);
