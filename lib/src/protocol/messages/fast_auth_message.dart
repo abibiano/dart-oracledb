@@ -85,8 +85,9 @@ class FastAuthRequest extends Message {
     buffer.writeUint8(0); // server charset flag
     buffer.writeUint16BE(0); // server ncharset
 
-    // Field version
-    buffer.writeUint8(ttcFieldVersion);
+    // Field version (use 19.1 ext 1 for FAST_AUTH, per node-oracledb)
+    const fastAuthFieldVersion = 13; // TNS_CCAP_FIELD_VERSION_19_1_EXT_1
+    buffer.writeUint8(fastAuthFieldVersion);
 
     // === Embed Data Types Message (WITHOUT message type prefix) ===
     _encodeDataTypesMessageContent(buffer);
@@ -97,38 +98,32 @@ class FastAuthRequest extends Message {
     _log.fine('Encoded FAST_AUTH message: user=$username');
   }
 
-  /// Encodes the protocol message content (without type prefix).
+  /// Encodes the protocol message content (includes type, no length prefix).
+  ///
+  /// Node-oracledb protocol.js encode() writes: type + version + terminator + driver + null
   void _encodeProtocolMessageContent(WriteBuffer buffer) {
-    // Unknown 5-byte sequence (matches node-oracledb: 01 00 01 06 00)
-    buffer.writeUint8(1);
-    buffer.writeUint8(0);
-    buffer.writeUint8(1);
+    // Protocol message type (included in FAST_AUTH embedding)
+    buffer.writeUint8(ttcMsgTypeProtocol); // 1
+
+    // Protocol version (8.1+)
     buffer.writeUint8(protocolVersion); // 6
+
+    // Array terminator
     buffer.writeUint8(0);
 
     // Driver name (null-terminated string)
     final driverBytes = utf8.encode(driverName);
     buffer.writeBytes(Uint8List.fromList(driverBytes));
     buffer.writeUint8(0); // Null terminator
-
-    // Padding (matches node-oracledb: 00 00 00 00 00 0d 02 69 03 69 03 03 35)
-    buffer.writeUint8(0);
-    buffer.writeUint8(0);
-    buffer.writeUint8(0);
-    buffer.writeUint8(0);
-    buffer.writeUint8(0);
-    buffer.writeUint8(0x0d);
-    buffer.writeUint8(0x02);
-    buffer.writeUint8(0x69); // 105
-    buffer.writeUint8(0x03);
-    buffer.writeUint8(0x69); // 105
-    buffer.writeUint8(0x03);
-    buffer.writeUint8(0x03);
-    buffer.writeUint8(0x35); // 53
   }
 
-  /// Encodes the data types message content (without type prefix).
+  /// Encodes the data types message content (includes type, no length prefix).
+  ///
+  /// Node-oracledb dataType.js encode() writes: type + charsets + flags + caps + data types + terminator
   void _encodeDataTypesMessageContent(WriteBuffer buffer) {
+    // Data types message type (included in FAST_AUTH embedding)
+    buffer.writeUint8(ttcMsgTypeDataTypes); // 2
+
     // Character set (UTF-8 = 873)
     buffer.writeUint16LE(873);
     buffer.writeUint16LE(873);
@@ -136,36 +131,26 @@ class FastAuthRequest extends Message {
     // Encoding flags
     buffer.writeUint8(0x01 | 0x02); // MULTI_BYTE | CONV_LENGTH
 
-    // Compile caps (length-prefixed)
-    buffer.writeUint8(compileCaps.length);
-    buffer.writeBytes(compileCaps);
+    // Compile caps (length-prefixed, trimmed)
+    final trimmedCompileCaps = _trimTrailingZeros(compileCaps);
+    buffer.writeUint8(trimmedCompileCaps.length);
+    buffer.writeBytes(trimmedCompileCaps);
 
-    // Runtime caps (length-prefixed)
-    buffer.writeUint8(runtimeCaps.length);
-    buffer.writeBytes(runtimeCaps);
+    // Runtime caps (length-prefixed, trimmed)
+    final trimmedRuntimeCaps = _trimTrailingZeros(runtimeCaps);
+    buffer.writeUint8(trimmedRuntimeCaps.length);
+    buffer.writeBytes(trimmedRuntimeCaps);
 
-    // Data type mappings
+    // Data type mappings (each is 8 bytes: dataType + convType + typeRep + padding)
     for (final dt in dataTypes) {
-      _writeDataTypeMapping(buffer, dt[0], dt[1], dt[2]);
+      buffer.writeUint16BE(dt[0]); // dataType
+      buffer.writeUint16BE(dt[1]); // convDataType
+      buffer.writeUint16BE(dt[2]); // typeRep
+      buffer.writeUint16BE(0); // padding
     }
 
-    // Terminator + padding (node-oracledb has extra padding)
-    buffer.writeUint16BE(0); // Terminator (2 bytes)
-    buffer.writeUint16BE(0x007f); // Padding (2 bytes)
-    buffer.writeUint16BE(0x007f); // Padding (2 bytes)
-    buffer.writeUint16BE(0x0001); // Padding (2 bytes)
-    buffer.writeUint16BE(0); // Padding (2 bytes)
-    buffer.writeUint16BE(0); // Additional padding (2 bytes)
-  }
-
-  /// Writes a single data type mapping entry.
-  void _writeDataTypeMapping(
-      WriteBuffer buffer, int dataType, int precision, int scale) {
-    buffer.writeUint8(dataType);
-    buffer.writeUint8(0); // Conversion type
-    buffer.writeUint8(precision);
-    buffer.writeUint8(scale);
-    buffer.writeUint16LE(0); // Character set (0 = use default)
+    // Terminator
+    buffer.writeUint16BE(0);
   }
 
   /// Encodes the AUTH_PHASE_ONE content (with function header).
@@ -217,11 +202,9 @@ class FastAuthRequest extends Message {
   }
 
   String _getProgram() {
-    try {
-      return Platform.executable;
-    } catch (_) {
-      return 'dart-oracledb';
-    }
+    // Return 4-byte program name to match node-oracledb packet size exactly
+    // Node uses "node" (4 bytes), we use "dart" (4 bytes)
+    return 'dart';
   }
 
   String _getMachine() {
@@ -248,5 +231,14 @@ class FastAuthRequest extends Message {
     } catch (_) {
       return '';
     }
+  }
+
+  /// Trims trailing zeros from a byte array (like node-oracledb's writeBytesWithLength).
+  Uint8List _trimTrailingZeros(Uint8List bytes) {
+    int lastNonZero = bytes.length - 1;
+    while (lastNonZero >= 0 && bytes[lastNonZero] == 0) {
+      lastNonZero--;
+    }
+    return bytes.sublist(0, lastNonZero + 1);
   }
 }
