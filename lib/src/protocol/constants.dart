@@ -133,6 +133,69 @@ const int oraUnsupportedType = 3115;
 const int oraDataTypeNotSupported = 932;
 
 // ============================================================================
+// TTC Message Types
+// ============================================================================
+
+/// Protocol message type.
+const int ttcMsgTypeProtocol = 1;
+
+/// Data types message type.
+const int ttcMsgTypeDataTypes = 2;
+
+/// Function call message type.
+const int ttcMsgTypeFunction = 3;
+
+/// Error message type.
+const int ttcMsgTypeError = 4;
+
+/// Row header message type.
+const int ttcMsgTypeRowHeader = 6;
+
+/// Row data message type.
+const int ttcMsgTypeRowData = 7;
+
+/// Parameter/return data message type.
+const int ttcMsgTypeParameter = 8;
+
+/// Status message type.
+const int ttcMsgTypeStatus = 9;
+
+/// Warning message type.
+const int ttcMsgTypeWarning = 15;
+
+// ============================================================================
+// TTC Authentication Mode Flags
+// ============================================================================
+
+/// Normal logon mode.
+const int ttcAuthModeLogon = 0x00000001;
+
+/// Change password mode.
+const int ttcAuthModeChangePassword = 0x00000002;
+
+/// SYSDBA mode.
+const int ttcAuthModeSysdba = 0x00000020;
+
+/// SYSOPER mode.
+const int ttcAuthModeSysoper = 0x00000040;
+
+/// Authentication with password.
+const int ttcAuthModeWithPassword = 0x00000100;
+
+// ============================================================================
+// TTC Verifier Types
+// ============================================================================
+
+/// SHA-1 (11g) verifier type 1.
+const int ttcVerifierType11g1 = 0xb152;
+
+/// SHA-1 (11g) verifier type 2.
+const int ttcVerifierType11g2 = 0x1b25;
+
+/// SHA-512 (12c+) verifier type.
+const int ttcVerifierType12c = 0x4815;
+
+// ============================================================================
 // TTC Data Flags
 // ============================================================================
 

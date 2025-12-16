@@ -305,6 +305,19 @@ class OracleConnection {
       );
     }
 
+    // Perform TTC protocol negotiation (required before authentication)
+    try {
+      await transport.sendProtocolNegotiation();
+    } catch (e) {
+      await transport.disconnect();
+      if (e is OracleException) rethrow;
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'TTC protocol negotiation failed',
+        cause: e,
+      );
+    }
+
     // Authenticate
     try {
       final authFlow = AuthFlow();

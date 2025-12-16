@@ -33,29 +33,35 @@
 # - SM typically drafts next story after previous one is 'done' to incorporate learnings
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
-generated: 2025-12-15
+generated: 2025-12-16
 project: dart-oracledb
 tracking_system: file-system
 story_location: docs/sprint-artifacts
 
+# SPRINT CHANGE: 2025-12-16
+# Epic 1 REOPENED - Authentication broken (AUTH_PHASE_ONE causes connection close)
+# Epic 2 BLOCKED - Cannot validate without working connection
+# See: docs/sprint-change-proposal-2025-12-16.md
+
 development_status:
-  # Epic 1: Core Connection & Authentication
-  epic-1: done
+  # Epic 1: Core Connection & Authentication [REOPENED]
+  epic-1: in-progress  # Changed from "done" - auth broken
   1-1-project-initialization-structure: done
   1-2-tns-transport-layer: done
   1-3-ttc-protocol-foundation: done
-  1-4-authentication-implementation: done
-  1-5-connection-api-error-handling: done
+  1-4-authentication-implementation: in-progress  # REOPENED - fixing protocol issue
+  1-4-fix-auth-protocol-debugging: in-progress  # NEW - active debugging sprint
+  1-5-connection-api-error-handling: pending-validation  # Cannot validate until auth works
   1-6-tls-ssl-support: done
   1-7-connection-lifecycle-management: done
-  epic-1-retrospective: completed
+  epic-1-retrospective: pending  # Will redo after auth fix
 
-  # Epic 2: Query Execution & Transactions
-  epic-2: in-progress
-  2-1-execute-message-basic-query: dev-complete
-  2-2-result-set-handling: done  # Implemented as part of Story 2-1 (OracleResult/OracleRow)
-  2-3-bind-parameters: done
-  2-4-dml-operations-insert-update-delete: review
+  # Epic 2: Query Execution & Transactions [BLOCKED]
+  epic-2: blocked  # Blocked by Epic 1 auth issue
+  2-1-execute-message-basic-query: dev-complete-pending-validation
+  2-2-result-set-handling: dev-complete-pending-validation
+  2-3-bind-parameters: dev-complete-pending-validation
+  2-4-dml-operations-insert-update-delete: dev-complete-pending-validation
   2-5-transaction-management: backlog
   2-6-basic-data-type-mapping: backlog
   2-7-statement-caching: backlog

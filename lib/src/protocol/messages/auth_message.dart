@@ -1,10 +1,12 @@
 /// Authentication message types for Oracle TTC protocol.
 ///
-/// Implements AUTH_PHASE_ONE and AUTH_PHASE_TWO messages for the
-/// Oracle authentication protocol.
+/// Implements AUTH_PHASE_ONE (0x76) and AUTH_PHASE_TWO (0x73) messages
+/// following the proper TTC message format with function headers and
+/// key-value pairs.
 library;
 
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
@@ -12,48 +14,91 @@ import 'package:logging/logging.dart';
 import '../../crypto/auth.dart';
 import '../buffer.dart';
 import '../constants.dart';
-import 'base.dart';
 
 final _log = Logger('AuthMessage');
 
+/// Client information for authentication messages.
+class ClientInfo {
+  static final String terminal = Platform.environment['TERM'] ?? 'unknown';
+  static final String program = Platform.executable;
+  static final String machine = Platform.localHostname;
+  static final String processId = pid.toString();
+  static final String userName =
+      Platform.environment['USER'] ?? Platform.environment['USERNAME'] ?? '';
+}
+
 /// AUTH_PHASE_ONE request message (function code 0x76).
 ///
-/// Sent to initiate authentication. Contains the username and client nonce.
-/// Server responds with verifier parameters needed for key derivation.
-class AuthPhaseOneRequest extends Message {
+/// Sent to initiate authentication. Contains the username and client
+/// information as key-value pairs. Server responds with verifier parameters.
+class AuthPhaseOneRequest {
   /// Creates an AUTH_PHASE_ONE request.
-  ///
-  /// The [username] is automatically uppercased as required by Oracle.
-  /// The [clientNonce] should be a random 16-byte value.
   AuthPhaseOneRequest({
     required String username,
     required this.clientNonce,
-    super.sequence,
-  })  : username = username.toUpperCase(),
-        super(messageType: ttcAuthPhaseOne);
+    this.sequence = 0,
+  }) : username = username.toUpperCase();
 
   /// The username (uppercased).
   final String username;
 
-  /// The client-generated random nonce.
+  /// The client-generated random nonce (not used in phase one message itself).
   final Uint8List clientNonce;
 
-  @override
-  void encode(WriteBuffer buffer) {
-    // Message type
-    buffer.writeUint8(messageType);
+  /// Message sequence number.
+  final int sequence;
 
-    // Username (length-prefixed)
-    final usernameBytes = utf8.encode(username);
-    buffer.writeUint8(usernameBytes.length);
-    buffer.writeBytes(Uint8List.fromList(usernameBytes));
+  /// Converts this request to bytes for transmission.
+  ///
+  /// If [use23aiFormat] is true, includes the 8-byte token number field
+  /// required by Oracle 23.1+.
+  Uint8List toBytes({bool use23aiFormat = true}) {
+    final buffer = WriteBuffer();
 
-    // Client nonce (length-prefixed)
-    buffer.writeUint8(clientNonce.length);
-    buffer.writeBytes(clientNonce);
+    // Function header
+    buffer.writeUint8(ttcMsgTypeFunction); // Message type (3)
+    buffer.writeUint8(ttcAuthPhaseOne); // Function code (0x76)
+    buffer.writeUint8(sequence & 0xFF); // Sequence number
 
-    _log.fine('Encoded AUTH_PHASE_ONE: user=$username, '
-        'nonce=${clientNonce.length} bytes');
+    // Token number for Oracle 23.1+ (8-byte variable length = 0 for auth)
+    if (use23aiFormat) {
+      buffer.writeUB8(0);
+    }
+
+    // Authentication mode flags
+    const authMode = ttcAuthModeLogon | ttcAuthModeWithPassword;
+
+    // Username presence and length
+    final usernameBytes = Uint8List.fromList(utf8.encode(username));
+    if (usernameBytes.isNotEmpty) {
+      buffer.writeUint8(1); // Username present
+    } else {
+      buffer.writeUint8(0); // No username
+    }
+    buffer.writeUB4(usernameBytes.length); // Username byte length
+    buffer.writeUB4(authMode); // Auth mode flags
+
+    // Phase one parameters
+    buffer.writeUint8(1); // Unknown flag
+    buffer.writeUB4(5); // Number of key-value pairs
+    buffer.writeUint8(0); // Unknown
+    buffer.writeUint8(1); // Unknown
+
+    // Write username with length
+    if (usernameBytes.isNotEmpty) {
+      buffer.writeBytesWithLength(usernameBytes);
+    }
+
+    // Write key-value pairs with client info
+    buffer.writeKeyValue('AUTH_TERMINAL', ClientInfo.terminal);
+    buffer.writeKeyValue('AUTH_PROGRAM_NM', ClientInfo.program);
+    buffer.writeKeyValue('AUTH_MACHINE', ClientInfo.machine);
+    buffer.writeKeyValue('AUTH_PID', ClientInfo.processId);
+    buffer.writeKeyValue('AUTH_SID', ClientInfo.userName);
+
+    final bytes = buffer.toBytes();
+    _log.fine('Encoded AUTH_PHASE_ONE: user=$username, ${bytes.length} bytes');
+    return bytes;
   }
 }
 
@@ -64,99 +109,261 @@ class AuthPhaseOneRequest extends Message {
 class AuthPhaseOneResponse {
   /// Creates an AUTH_PHASE_ONE response.
   const AuthPhaseOneResponse({
+    required this.sessionData,
     required this.verifierType,
-    required this.salt,
-    required this.iterations,
-    required this.serverNonce,
-    required this.authPasswordMode,
   });
 
-  /// The verifier type (SHA512 = 0x939, PBKDF2 = 0xB92).
+  /// Session data key-value pairs from server.
+  final Map<String, String> sessionData;
+
+  /// Verifier type (from AUTH_VFR_DATA flags).
   final int verifierType;
-
-  /// Salt for key derivation.
-  final Uint8List salt;
-
-  /// Number of PBKDF2 iterations.
-  final int iterations;
-
-  /// Server-generated nonce.
-  final Uint8List serverNonce;
-
-  /// Authentication password mode.
-  final int authPasswordMode;
 
   /// Decodes an AUTH_PHASE_ONE response from bytes.
   static AuthPhaseOneResponse decode(Uint8List data) {
     final buffer = ReadBuffer(data);
+    final sessionData = <String, String>{};
+    int verifierType = ttcVerifierType12c; // Default to 12c
 
-    // Verifier type (2 bytes, big-endian)
-    final verifierType = buffer.readUint16BE();
+    // Read message type
+    final msgType = buffer.readUint8();
+    _log.fine('Auth response message type: $msgType');
 
-    // Salt (length-prefixed)
-    final saltLength = buffer.readUint8();
-    final salt = buffer.readBytes(saltLength);
+    // Process response based on message type
+    if (msgType == ttcMsgTypeParameter) {
+      // Parameter message - contains key-value pairs
+      final numParams = buffer.readUB2();
+      _log.fine('Number of parameters: $numParams');
 
-    // Iterations (4 bytes, big-endian)
-    final iterations = buffer.readUint32BE();
+      for (var i = 0; i < numParams; i++) {
+        buffer.readUB4(); // Skip unknown field
 
-    // Server nonce (length-prefixed)
-    final nonceLength = buffer.readUint8();
-    final serverNonce = buffer.readBytes(nonceLength);
+        // Read key
+        final key = buffer.readStringWithLength();
 
-    // Auth password mode (1 byte)
-    final authPasswordMode = buffer.readUint8();
+        // Read value
+        final valueLen = buffer.readUB4();
+        String value = '';
+        if (valueLen > 0) {
+          value = buffer.readStringWithLength();
+        }
 
-    _log.fine('Decoded AUTH_PHASE_ONE response: '
-        'verifier=0x${verifierType.toRadixString(16)}, '
-        'salt=${salt.length}b, iter=$iterations, '
-        'nonce=${serverNonce.length}b');
+        // Read flags - for AUTH_VFR_DATA, flags contain verifier type
+        final flags = buffer.readUB4();
+
+        if (key == 'AUTH_VFR_DATA') {
+          verifierType = flags;
+          _log.fine('Verifier type: 0x${verifierType.toRadixString(16)}');
+        }
+
+        sessionData[key] = value;
+        _log.fine('Session param: $key = ${value.length > 50 ? '${value.substring(0, 50)}...' : value}');
+      }
+    } else if (msgType == ttcMsgTypeError) {
+      // Error message
+      _log.warning('Received error in AUTH_PHASE_ONE response');
+      // Parse error - will be handled by caller
+    } else if (msgType == ttcMsgTypeStatus) {
+      // Status message - may have more data following
+      final status = buffer.readUB4();
+      _log.fine('Auth status: $status');
+    }
 
     return AuthPhaseOneResponse(
+      sessionData: sessionData,
       verifierType: verifierType,
-      salt: salt,
-      iterations: iterations,
-      serverNonce: serverNonce,
-      authPasswordMode: authPasswordMode,
     );
   }
 
   /// Converts this response to [VerifierParams] for use with [AuthFlow].
   VerifierParams toVerifierParams() {
+    // Parse AUTH_VFR_DATA which contains salt and iterations
+    final vfrData = sessionData['AUTH_VFR_DATA'] ?? '';
+    final serverNonceHex = sessionData['AUTH_SESSKEY'] ?? '';
+
+    // Decode hex-encoded salt from AUTH_VFR_DATA
+    Uint8List salt;
+    int iterations = 4096; // Default PBKDF2 iterations
+
+    if (vfrData.isNotEmpty) {
+      // AUTH_VFR_DATA format varies by verifier type
+      // For 12c: contains salt and iteration count
+      try {
+        final vfrBytes = _hexDecode(vfrData);
+        if (vfrBytes.length >= 16) {
+          salt = Uint8List.sublistView(vfrBytes, 0, 16);
+        } else {
+          salt = vfrBytes;
+        }
+        // Iterations might be encoded after salt
+        if (vfrBytes.length >= 20) {
+          iterations = (vfrBytes[16] << 24) |
+              (vfrBytes[17] << 16) |
+              (vfrBytes[18] << 8) |
+              vfrBytes[19];
+          if (iterations == 0 || iterations > 100000) {
+            iterations = 4096; // Sanity check
+          }
+        }
+      } catch (e) {
+        _log.warning('Failed to parse AUTH_VFR_DATA: $e');
+        salt = Uint8List(16);
+      }
+    } else {
+      salt = Uint8List(16);
+    }
+
+    // Decode server nonce from AUTH_SESSKEY
+    Uint8List serverNonce;
+    if (serverNonceHex.isNotEmpty) {
+      try {
+        serverNonce = _hexDecode(serverNonceHex);
+      } catch (e) {
+        _log.warning('Failed to parse AUTH_SESSKEY: $e');
+        serverNonce = Uint8List(16);
+      }
+    } else {
+      serverNonce = Uint8List(16);
+    }
+
     return VerifierParams(
       verifierType: verifierType,
       salt: salt,
       iterations: iterations,
       serverNonce: serverNonce,
-      authPasswordMode: authPasswordMode,
+      authPasswordMode: 0,
     );
+  }
+
+  /// Decodes a hex string to bytes.
+  static Uint8List _hexDecode(String hex) {
+    final result = Uint8List(hex.length ~/ 2);
+    for (var i = 0; i < result.length; i++) {
+      result[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+    }
+    return result;
   }
 }
 
 /// AUTH_PHASE_TWO request message (function code 0x73).
 ///
 /// Sent after deriving the session key. Contains the encrypted
-/// password proof that demonstrates knowledge of the password.
-class AuthPhaseTwoRequest extends Message {
+/// password proof and session information.
+class AuthPhaseTwoRequest {
   /// Creates an AUTH_PHASE_TWO request.
   AuthPhaseTwoRequest({
     required this.encryptedProof,
-    super.sequence,
-  }) : super(messageType: ttcAuthPhaseTwo);
+    required this.sessionKey,
+    this.username = '',
+    this.sequence = 0,
+    this.verifierType = ttcVerifierType12c,
+  });
 
   /// The encrypted password proof.
   final Uint8List encryptedProof;
 
-  @override
-  void encode(WriteBuffer buffer) {
-    // Message type
-    buffer.writeUint8(messageType);
+  /// The derived session key (hex-encoded for transmission).
+  final Uint8List sessionKey;
 
-    // Encrypted proof (length-prefixed)
-    buffer.writeUint16BE(encryptedProof.length);
-    buffer.writeBytes(encryptedProof);
+  /// Username for the session.
+  final String username;
 
-    _log.fine('Encoded AUTH_PHASE_TWO: proof=${encryptedProof.length} bytes');
+  /// Message sequence number.
+  final int sequence;
+
+  /// Verifier type being used.
+  final int verifierType;
+
+  /// Converts this request to bytes for transmission.
+  ///
+  /// If [use23aiFormat] is true, includes the 8-byte token number field
+  /// required by Oracle 23.1+.
+  Uint8List toBytes({bool use23aiFormat = true}) {
+    final buffer = WriteBuffer();
+
+    // Function header
+    buffer.writeUint8(ttcMsgTypeFunction); // Message type (3)
+    buffer.writeUint8(ttcAuthPhaseTwo); // Function code (0x73)
+    buffer.writeUint8(sequence & 0xFF); // Sequence number
+
+    // Token number for Oracle 23.1+ (8-byte variable length = 0 for auth)
+    if (use23aiFormat) {
+      buffer.writeUB8(0);
+    }
+
+    // Authentication mode flags
+    const authMode = ttcAuthModeLogon | ttcAuthModeWithPassword;
+
+    // Username presence and length
+    final usernameBytes = Uint8List.fromList(utf8.encode(username));
+    if (usernameBytes.isNotEmpty) {
+      buffer.writeUint8(1);
+    } else {
+      buffer.writeUint8(0);
+    }
+    buffer.writeUB4(usernameBytes.length);
+    buffer.writeUB4(authMode);
+
+    // Count key-value pairs
+    // Base: AUTH_SESSKEY, SESSION_CLIENT_CHARSET, SESSION_CLIENT_DRIVER_NAME,
+    //       SESSION_CLIENT_VERSION, AUTH_ALTER_SESSION, AUTH_PASSWORD
+    int numPairs = 6;
+
+    // Add extra pair for 12c verifier (AUTH_PBKDF2_SPEEDY_KEY)
+    final bool is12c = verifierType == ttcVerifierType12c;
+    if (is12c) {
+      numPairs += 1;
+    }
+
+    buffer.writeUint8(1); // Unknown
+    buffer.writeUB4(numPairs);
+    buffer.writeUint8(1); // Unknown
+    buffer.writeUint8(1); // Unknown
+
+    // Write username with length
+    if (usernameBytes.isNotEmpty) {
+      buffer.writeBytesWithLength(usernameBytes);
+    }
+
+    // Write key-value pairs
+    final sessionKeyHex = _hexEncode(sessionKey);
+    buffer.writeKeyValue('AUTH_SESSKEY', sessionKeyHex, flags: 1);
+
+    if (is12c) {
+      // PBKDF2 speedy key (empty for now)
+      buffer.writeKeyValue('AUTH_PBKDF2_SPEEDY_KEY', '');
+    }
+
+    buffer.writeKeyValue('SESSION_CLIENT_CHARSET', '873'); // UTF-8
+    buffer.writeKeyValue('SESSION_CLIENT_DRIVER_NAME', 'dart-oracledb thn');
+    buffer.writeKeyValue('SESSION_CLIENT_VERSION', '0');
+
+    // Timezone alter session
+    final tzStatement = _getAlterTimezoneStatement();
+    buffer.writeKeyValue('AUTH_ALTER_SESSION', tzStatement, flags: 1);
+
+    // Encrypted password
+    final passwordHex = _hexEncode(encryptedProof);
+    buffer.writeKeyValue('AUTH_PASSWORD', passwordHex);
+
+    final bytes = buffer.toBytes();
+    _log.fine('Encoded AUTH_PHASE_TWO: ${bytes.length} bytes');
+    return bytes;
+  }
+
+  /// Gets the ALTER SESSION statement for timezone.
+  String _getAlterTimezoneStatement() {
+    final date = DateTime.now();
+    final offset = date.timeZoneOffset;
+    final sign = offset.isNegative ? '-' : '+';
+    final hours = offset.inHours.abs().toString().padLeft(2, '0');
+    final minutes = (offset.inMinutes.abs() % 60).toString().padLeft(2, '0');
+    return "ALTER SESSION SET TIME_ZONE ='$sign$hours:$minutes'\x00";
+  }
+
+  /// Encodes bytes to hex string.
+  static String _hexEncode(Uint8List bytes) {
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 }
 
@@ -169,6 +376,7 @@ class AuthPhaseTwoResponse {
     required this.isSuccess,
     this.errorCode,
     this.errorMessage,
+    this.sessionData,
   });
 
   /// Whether authentication succeeded.
@@ -180,38 +388,91 @@ class AuthPhaseTwoResponse {
   /// Error message if authentication failed.
   final String? errorMessage;
 
+  /// Session data from successful authentication.
+  final Map<String, String>? sessionData;
+
   /// Decodes an AUTH_PHASE_TWO response from bytes.
   static AuthPhaseTwoResponse decode(Uint8List data) {
     final buffer = ReadBuffer(data);
-
-    // Status (0 = success, non-zero = failure)
-    final status = buffer.readUint8();
-    final isSuccess = status == 0;
-
+    final sessionData = <String, String>{};
+    bool isSuccess = true;
     int? errorCode;
     String? errorMessage;
 
-    if (!isSuccess) {
-      // Error code (2 bytes)
-      errorCode = buffer.readUint16BE();
+    // Process all messages in the response
+    while (buffer.hasRemaining) {
+      final msgType = buffer.readUint8();
+      _log.fine('Auth phase 2 response message type: $msgType');
 
-      // Error message (length-prefixed)
-      if (buffer.hasRemaining) {
-        final msgLength = buffer.readUint8();
-        if (msgLength > 0 && buffer.remaining >= msgLength) {
-          errorMessage = buffer.readString(msgLength);
+      if (msgType == ttcMsgTypeError) {
+        // Error response
+        isSuccess = false;
+        buffer.readUB4(); // call status
+        buffer.readUB2(); // end to end seq
+        buffer.readUB4(); // current row
+        buffer.readUB2(); // error number
+        buffer.readUB2(); // array elem error
+        buffer.readUB2(); // array elem error
+        buffer.readUB2(); // cursor id
+        buffer.readUint16BE(); // error position (signed)
+        buffer.readUint8(); // sql type
+        buffer.readUint8(); // fatal
+        buffer.readUint8(); // flags
+        buffer.readUint8(); // user cursor options
+        buffer.readUint8(); // UPI parameter
+        buffer.readUint8(); // warning flag
+
+        // Extended error info
+        errorCode = buffer.readUB4();
+        if (errorCode == 0) {
+          errorCode = 1017; // Default to invalid credentials
         }
-      }
 
-      _log.warning('AUTH_PHASE_TWO failed: ORA-$errorCode: $errorMessage');
-    } else {
-      _log.fine('AUTH_PHASE_TWO success');
+        // Try to read error message
+        if (buffer.hasRemaining) {
+          try {
+            errorMessage = buffer.readStringWithLength();
+          } catch (_) {
+            errorMessage = 'Authentication failed';
+          }
+        }
+
+        _log.warning('AUTH_PHASE_TWO error: ORA-$errorCode');
+        break;
+      } else if (msgType == ttcMsgTypeParameter) {
+        // Success - parse session data
+        final numParams = buffer.readUB2();
+        for (var i = 0; i < numParams; i++) {
+          buffer.readUB4(); // Skip
+          final key = buffer.readStringWithLength();
+          final valueLen = buffer.readUB4();
+          String value = '';
+          if (valueLen > 0) {
+            value = buffer.readStringWithLength();
+          }
+          buffer.readUB4(); // flags
+          sessionData[key] = value;
+        }
+      } else if (msgType == ttcMsgTypeStatus) {
+        // Status - check for success
+        final status = buffer.readUB4();
+        buffer.readUB2(); // end to end seq
+        if (status != 0) {
+          _log.fine('Auth status: $status');
+        }
+        break; // End of response
+      } else {
+        // Unknown message type - try to continue
+        _log.warning('Unknown message type in auth response: $msgType');
+        break;
+      }
     }
 
     return AuthPhaseTwoResponse(
       isSuccess: isSuccess,
       errorCode: errorCode,
       errorMessage: errorMessage,
+      sessionData: isSuccess ? sessionData : null,
     );
   }
 }

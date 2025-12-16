@@ -130,6 +130,67 @@ class ReadBuffer {
     }
     _position = offset;
   }
+
+  /// Reads an Oracle UB4 (variable-length unsigned 4-byte integer).
+  int readUB4() {
+    final numBytes = readUint8();
+    if (numBytes == 0) return 0;
+    if (numBytes == 1) return readUint8();
+    if (numBytes == 2) return readUint16BE();
+    if (numBytes == 4) return readUint32BE();
+    throw BufferException('Invalid UB4 length: $numBytes');
+  }
+
+  /// Reads an Oracle UB2 (variable-length unsigned 2-byte integer).
+  int readUB2() {
+    final numBytes = readUint8();
+    if (numBytes == 0) return 0;
+    if (numBytes == 1) return readUint8();
+    if (numBytes == 2) return readUint16BE();
+    throw BufferException('Invalid UB2 length: $numBytes');
+  }
+
+  /// Long length indicator for chunked encoding.
+  static const int _tnsLongLengthIndicator = 254;
+
+  /// Reads bytes with a single-byte length prefix.
+  ///
+  /// Format:
+  /// - 0 = null/empty
+  /// - 1-253, 255 = short length (read that many bytes)
+  /// - 254 = chunked encoding (TNS_LONG_LENGTH_INDICATOR)
+  Uint8List readBytesWithLength() {
+    final numBytes = readUint8();
+    if (numBytes == 0) {
+      return Uint8List(0);
+    }
+    if (numBytes != _tnsLongLengthIndicator) {
+      // Short format - numBytes is the actual length (1-253 or 255)
+      return readBytes(numBytes);
+    }
+    // Chunked encoding (numBytes == 254)
+    final chunks = <Uint8List>[];
+    while (true) {
+      final chunkSize = readUB4();
+      if (chunkSize == 0) break;
+      chunks.add(readBytes(chunkSize));
+    }
+    final totalLen = chunks.fold<int>(0, (sum, c) => sum + c.length);
+    final result = Uint8List(totalLen);
+    var offset = 0;
+    for (final chunk in chunks) {
+      result.setRange(offset, offset + chunk.length, chunk);
+      offset += chunk.length;
+    }
+    return result;
+  }
+
+  /// Reads a string with length prefix.
+  String readStringWithLength() {
+    final bytes = readBytesWithLength();
+    if (bytes.isEmpty) return '';
+    return utf8.decode(bytes);
+  }
 }
 
 /// A write buffer for building binary data with explicit endianness methods.
@@ -187,6 +248,109 @@ class WriteBuffer {
   /// Writes a string using UTF-8 encoding.
   void writeString(String value) {
     _data.add(utf8.encode(value));
+  }
+
+  /// Writes an Oracle UB4 (variable-length unsigned 4-byte integer).
+  ///
+  /// The encoding uses a length prefix:
+  /// - 0: written as single byte 0
+  /// - 1-255: written as [1, value]
+  /// - 256-65535: written as [2, high, low] (big-endian)
+  /// - >65535: written as [4, b3, b2, b1, b0] (big-endian)
+  void writeUB4(int value) {
+    if (value == 0) {
+      writeUint8(0);
+    } else if (value <= 0xFF) {
+      writeUint8(1);
+      writeUint8(value);
+    } else if (value <= 0xFFFF) {
+      writeUint8(2);
+      writeUint16BE(value);
+    } else {
+      writeUint8(4);
+      writeUint32BE(value);
+    }
+  }
+
+  /// Writes an Oracle UB2 (variable-length unsigned 2-byte integer).
+  void writeUB2(int value) {
+    if (value == 0) {
+      writeUint8(0);
+    } else if (value <= 0xFF) {
+      writeUint8(1);
+      writeUint8(value);
+    } else {
+      writeUint8(2);
+      writeUint16BE(value);
+    }
+  }
+
+  /// Writes an Oracle UB8 (variable-length unsigned 8-byte integer).
+  void writeUB8(int value) {
+    if (value == 0) {
+      writeUint8(0);
+    } else if (value <= 0xFF) {
+      writeUint8(1);
+      writeUint8(value);
+    } else if (value <= 0xFFFF) {
+      writeUint8(2);
+      writeUint16BE(value);
+    } else if (value <= 0xFFFFFFFF) {
+      writeUint8(4);
+      writeUint32BE(value);
+    } else {
+      writeUint8(8);
+      // Write 64-bit BE
+      writeUint32BE((value >> 32) & 0xFFFFFFFF);
+      writeUint32BE(value & 0xFFFFFFFF);
+    }
+  }
+
+  /// Writes bytes with a single-byte length prefix.
+  ///
+  /// For short data (<= 254 bytes), writes [length, ...data].
+  /// For longer data, uses chunked encoding.
+  void writeBytesWithLength(Uint8List bytes) {
+    final numBytes = bytes.length;
+    if (numBytes <= 254) {
+      writeUint8(numBytes);
+      if (numBytes > 0) {
+        writeBytes(bytes);
+      }
+    } else {
+      // Chunked encoding for longer data
+      writeUint8(254); // Long length indicator
+      var offset = 0;
+      while (offset < numBytes) {
+        final chunkSize =
+            (numBytes - offset > 65535) ? 65535 : numBytes - offset;
+        writeUB4(chunkSize);
+        writeBytes(Uint8List.sublistView(bytes, offset, offset + chunkSize));
+        offset += chunkSize;
+      }
+      writeUB4(0); // End of chunks
+    }
+  }
+
+  /// Writes a TTC key-value pair.
+  ///
+  /// Format:
+  /// - UB4: key length
+  /// - Key bytes with length prefix
+  /// - UB4: value length
+  /// - Value bytes with length prefix (if value length > 0)
+  /// - UB4: flags
+  void writeKeyValue(String key, String value, {int flags = 0}) {
+    final keyBytes = Uint8List.fromList(utf8.encode(key));
+    final valueBytes = Uint8List.fromList(utf8.encode(value));
+
+    writeUB4(keyBytes.length);
+    writeBytesWithLength(keyBytes);
+    writeUB4(valueBytes.length);
+    if (valueBytes.isNotEmpty) {
+      writeBytesWithLength(valueBytes);
+    }
+    writeUB4(flags);
   }
 
   /// Returns the buffer contents as a [Uint8List].

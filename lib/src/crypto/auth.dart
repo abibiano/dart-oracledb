@@ -12,7 +12,6 @@ import 'package:logging/logging.dart';
 
 import '../errors.dart';
 import '../protocol/messages/auth_message.dart';
-import '../transport/packet.dart';
 import '../transport/transport.dart';
 import 'session_key.dart';
 import 'verifier.dart';
@@ -242,35 +241,29 @@ class AuthFlow {
     final clientNonce = generateClientNonce();
     _log.fine('Generated client nonce (${clientNonce.length} bytes)');
 
-    // Step 2: Send AUTH_PHASE_ONE
+    // Step 2: Send AUTH_PHASE_ONE using sendData (includes data flags)
+    // Note: Sequence starts at 0 (node-oracledb writtenSeqNum=0 initially)
+    // Protocol and DataTypes messages don't use sequence numbers
     updateState(AuthState.phaseOneSent);
     final phaseOneRequest = AuthPhaseOneRequest(
       username: username,
       clientNonce: clientNonce,
+      sequence: 0,
     );
 
-    final phaseOneBytes = phaseOneRequest.toBytes();
-    final phaseOneTnsPacket = TnsPacket(
-      type: tnsPacketData,
-      payload: phaseOneBytes,
-    );
+    // Write token number if ttcFieldVersion >= 18 (TNS_CCAP_FIELD_VERSION_23_1_EXT_1)
+    final use23aiFormat = transport.shouldWriteTokenNumber;
+    final phaseOneBytes = phaseOneRequest.toBytes(use23aiFormat: use23aiFormat);
+    _log.fine('Sending AUTH_PHASE_ONE request (${phaseOneBytes.length} bytes)');
+    _log.fine('AUTH_PHASE_ONE hex: ${phaseOneBytes.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
+    await transport.sendData(phaseOneBytes);
 
-    _log.fine('Sending AUTH_PHASE_ONE request');
-    await transport.send(phaseOneTnsPacket);
+    // Step 3: Receive AUTH_PHASE_ONE response (strips data flags)
+    final phaseOneResponseData = await transport.receiveData();
+    _log.fine(
+        'Received AUTH_PHASE_ONE response (${phaseOneResponseData.length} bytes)');
 
-    // Step 3: Receive AUTH_PHASE_ONE response
-    final phaseOneResponsePacket = await transport.receive();
-    if (phaseOneResponsePacket.type != tnsPacketData) {
-      updateState(AuthState.failed);
-      throw OracleException(
-        errorCode: oraAuthProtocolError,
-        message: 'Expected DATA packet for AUTH_PHASE_ONE response, '
-            'got type ${phaseOneResponsePacket.type}',
-      );
-    }
-
-    final phaseOneResponse =
-        AuthPhaseOneResponse.decode(phaseOneResponsePacket.payload);
+    final phaseOneResponse = AuthPhaseOneResponse.decode(phaseOneResponseData);
     final verifierParams = phaseOneResponse.toVerifierParams();
     _log.fine(
         'Received verifier params: type=0x${verifierParams.verifierType.toRadixString(16)}, '
@@ -283,34 +276,28 @@ class AuthFlow {
       clientNonce: clientNonce,
     );
 
-    // Step 5: Send AUTH_PHASE_TWO
+    // Step 5: Send AUTH_PHASE_TWO using sendData
+    // Sequence 1 (continues from AUTH_PHASE_ONE which was 0)
     updateState(AuthState.phaseTwoSent);
     final phaseTwoRequest = AuthPhaseTwoRequest(
       encryptedProof: encryptedProof,
+      sessionKey: _sessionKey!,
+      username: username.toUpperCase(),
+      sequence: 1,
+      verifierType: verifierParams.verifierType,
     );
 
-    final phaseTwoBytes = phaseTwoRequest.toBytes();
-    final phaseTwoTnsPacket = TnsPacket(
-      type: tnsPacketData,
-      payload: phaseTwoBytes,
-    );
-
-    _log.fine('Sending AUTH_PHASE_TWO request');
-    await transport.send(phaseTwoTnsPacket);
+    // Write token number if ttcFieldVersion >= 18 (same as AUTH_PHASE_ONE)
+    final phaseTwoBytes = phaseTwoRequest.toBytes(use23aiFormat: use23aiFormat);
+    _log.fine('Sending AUTH_PHASE_TWO request (${phaseTwoBytes.length} bytes)');
+    await transport.sendData(phaseTwoBytes);
 
     // Step 6: Receive AUTH_PHASE_TWO response and verify success
-    final phaseTwoResponsePacket = await transport.receive();
-    if (phaseTwoResponsePacket.type != tnsPacketData) {
-      updateState(AuthState.failed);
-      throw OracleException(
-        errorCode: oraAuthProtocolError,
-        message: 'Expected DATA packet for AUTH_PHASE_TWO response, '
-            'got type ${phaseTwoResponsePacket.type}',
-      );
-    }
+    final phaseTwoResponseData = await transport.receiveData();
+    _log.fine(
+        'Received AUTH_PHASE_TWO response (${phaseTwoResponseData.length} bytes)');
 
-    final phaseTwoResponse =
-        AuthPhaseTwoResponse.decode(phaseTwoResponsePacket.payload);
+    final phaseTwoResponse = AuthPhaseTwoResponse.decode(phaseTwoResponseData);
 
     if (!phaseTwoResponse.isSuccess) {
       updateState(AuthState.failed);

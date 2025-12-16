@@ -11,12 +11,14 @@
 @Tags(['integration'])
 library;
 
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:oracledb/src/crypto/auth.dart';
 import 'package:oracledb/src/crypto/verifier.dart';
 import 'package:oracledb/src/errors.dart';
+import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
 
@@ -29,16 +31,31 @@ void main() {
     // Connection parameters from environment or defaults
     final host = Platform.environment['ORACLE_HOST'] ?? 'localhost';
     final port = int.parse(Platform.environment['ORACLE_PORT'] ?? '1521');
-    // ignore: unused_local_variable
     final serviceName = Platform.environment['ORACLE_SERVICE'] ?? 'FREEPDB1';
     final username = Platform.environment['ORACLE_USER'] ?? 'system';
     final password = Platform.environment['ORACLE_PASSWORD'] ?? 'testpassword';
 
     late Transport transport;
 
+    /// Builds the TNS CONNECT packet body.
+    Uint8List buildConnectData() {
+      final tnsDescriptor = '(DESCRIPTION='
+          '(ADDRESS=(PROTOCOL=TCP)(HOST=$host)(PORT=$port))'
+          '(CONNECT_DATA=(SERVICE_NAME=$serviceName)))';
+      final descriptorBytes = Uint8List.fromList(utf8.encode(tnsDescriptor));
+      return buildConnectPacketBody(descriptorBytes);
+    }
+
     setUp(() async {
       transport = Transport();
       await transport.connect(host, port);
+
+      // Perform TNS CONNECT/ACCEPT handshake (required before auth)
+      final connectData = buildConnectData();
+      await transport.sendConnectReceiveAccept(connectData);
+
+      // Perform TTC protocol negotiation (with data types - required before auth)
+      await transport.sendProtocolNegotiation();
     });
 
     tearDown(() async {
