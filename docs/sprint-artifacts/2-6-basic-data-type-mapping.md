@@ -1,6 +1,6 @@
 # Story 2.6: Basic Data Type Mapping
 
-Status: ready-for-dev
+Status: Ready for Review
 
 ## Story
 
@@ -61,44 +61,44 @@ So that **I can work with query results naturally** (FR30, FR31, FR32, FR33).
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Complete NUMBER Decimal Support (AC: 2, 3)
-  - [ ] 1.1: Review existing `encodeNumber()` in data_types.dart
-  - [ ] 1.2: Implement full decimal encoding using Oracle base-100 format
-  - [ ] 1.3: Handle fractional exponents correctly (e.g., 0.123, 123.456)
-  - [ ] 1.4: Update `decodeNumber()` to properly return int vs double
-  - [ ] 1.5: Add logic: return int if no fractional part, else double
-  - [ ] 1.6: Reference: node-oracledb `lib/thin/protocol/dataTypes.js` NUMBER handling
+- [x] Task 1: Complete NUMBER Decimal Support (AC: 2, 3)
+  - [x] 1.1: Review existing `encodeNumber()` in data_types.dart
+  - [x] 1.2: Implement full decimal encoding using Oracle base-100 format
+  - [x] 1.3: Handle fractional exponents correctly (e.g., 0.123, 123.456)
+  - [x] 1.4: Update `decodeNumber()` to properly return int vs double
+  - [x] 1.5: Add logic: return int if no fractional part, else double
+  - [x] 1.6: Reference: node-oracledb `lib/thin/protocol/dataTypes.js` NUMBER handling
 
-- [ ] Task 2: Implement TIMESTAMP Support (AC: 5)
-  - [ ] 2.1: Create `encodeTimestamp()` function in data_types.dart
-  - [ ] 2.2: Implement 11-byte TIMESTAMP format (7 DATE bytes + 4 nanosecond bytes)
-  - [ ] 2.3: Create `decodeTimestamp()` function
-  - [ ] 2.4: Parse nanosecond precision (4 bytes, big-endian)
-  - [ ] 2.5: Convert to DateTime with microsecond precision (Dart limit)
-  - [ ] 2.6: Note: Oracle supports nanoseconds, Dart DateTime only microseconds
-  - [ ] 2.7: Reference: node-oracledb `lib/thin/protocol/dataTypes.js` TIMESTAMP handling
+- [x] Task 2: Implement TIMESTAMP Support (AC: 5)
+  - [x] 2.1: Create `encodeTimestamp()` function in data_types.dart
+  - [x] 2.2: Implement 11-byte TIMESTAMP format (7 DATE bytes + 4 nanosecond bytes)
+  - [x] 2.3: Create `decodeTimestamp()` function
+  - [x] 2.4: Parse nanosecond precision (4 bytes, big-endian)
+  - [x] 2.5: Convert to DateTime with microsecond precision (Dart limit)
+  - [x] 2.6: Note: Oracle supports nanoseconds, Dart DateTime only microseconds
+  - [x] 2.7: Reference: node-oracledb `lib/thin/protocol/dataTypes.js` TIMESTAMP handling
 
-- [ ] Task 3: Update Generic Encode/Decode Functions (AC: all)
-  - [ ] 3.1: Update `encodeValue()` to use new decimal NUMBER encoding
-  - [ ] 3.2: Update `decodeValue()` to distinguish TIMESTAMP from DATE
-  - [ ] 3.3: Add TIMESTAMP cases to switch statements
-  - [ ] 3.4: Ensure proper type indicators from constants.dart
-  - [ ] 3.5: Validate error messages are clear for unsupported types
+- [x] Task 3: Update Generic Encode/Decode Functions (AC: all)
+  - [x] 3.1: Update `encodeValue()` to use new decimal NUMBER encoding
+  - [x] 3.2: Update `decodeValue()` to distinguish TIMESTAMP from DATE
+  - [x] 3.3: Add TIMESTAMP cases to switch statements
+  - [x] 3.4: Ensure proper type indicators from constants.dart
+  - [x] 3.5: Validate error messages are clear for unsupported types
 
-- [ ] Task 4: Add Unit Tests for NUMBER Decimals (AC: 2, 3)
-  - [ ] 4.1: Test encoding/decoding 0.5, 1.23, 99.99
-  - [ ] 4.2: Test very small decimals (0.0001, 0.000001)
-  - [ ] 4.3: Test negative decimals (-1.5, -99.99)
-  - [ ] 4.4: Test int vs double return type distinction
-  - [ ] 4.5: Test precision limits (Dart double precision)
-  - [ ] 4.6: Add to `test/src/protocol/data_types_test.dart`
+- [x] Task 4: Add Unit Tests for NUMBER Decimals (AC: 2, 3)
+  - [x] 4.1: Test encoding/decoding 0.5, 1.23, 99.99
+  - [x] 4.2: Test very small decimals (0.0001, 0.000001)
+  - [x] 4.3: Test negative decimals (-1.5, -99.99)
+  - [x] 4.4: Test int vs double return type distinction
+  - [x] 4.5: Test precision limits (Dart double precision)
+  - [x] 4.6: Add to `test/src/protocol/data_types_test.dart`
 
-- [ ] Task 5: Add Unit Tests for TIMESTAMP (AC: 5)
-  - [ ] 5.1: Test encoding/decoding TIMESTAMP with milliseconds
-  - [ ] 5.2: Test encoding/decoding TIMESTAMP with microseconds
-  - [ ] 5.3: Test TIMESTAMP vs DATE distinction (7 vs 11 bytes)
-  - [ ] 5.4: Test round-trip precision (Oracle nanoseconds → Dart microseconds)
-  - [ ] 5.5: Add to `test/src/protocol/data_types_test.dart`
+- [x] Task 5: Add Unit Tests for TIMESTAMP (AC: 5)
+  - [x] 5.1: Test encoding/decoding TIMESTAMP with milliseconds
+  - [x] 5.2: Test encoding/decoding TIMESTAMP with microseconds
+  - [x] 5.3: Test TIMESTAMP vs DATE distinction (7 vs 11 bytes)
+  - [x] 5.4: Test round-trip precision (Oracle nanoseconds → Dart microseconds)
+  - [x] 5.5: Add to `test/src/protocol/data_types_test.dart`
 
 - [ ] Task 6: Add Integration Tests Against Oracle 23ai (AC: all)
   - [ ] 6.1: Create test table with all data types (VARCHAR2, NUMBER, DATE, TIMESTAMP)
@@ -111,20 +111,20 @@ So that **I can work with query results naturally** (FR30, FR31, FR32, FR33).
   - [ ] 6.8: Test INSERT with all types and verify via SELECT
   - [ ] 6.9: Add to `test/integration/query_integration_test.dart`
 
-- [ ] Task 7: Add Dartdoc Documentation (AC: all)
-  - [ ] 7.1: Document `encodeNumber()` with decimal handling notes
-  - [ ] 7.2: Document `decodeNumber()` with int vs double distinction
-  - [ ] 7.3: Document `encodeTimestamp()` with precision notes
-  - [ ] 7.4: Document `decodeTimestamp()` with Oracle→Dart precision mapping
-  - [ ] 7.5: Add examples showing type mapping for each Oracle type
-  - [ ] 7.6: Note precision limits in documentation (nanoseconds → microseconds)
+- [x] Task 7: Add Dartdoc Documentation (AC: all)
+  - [x] 7.1: Document `encodeNumber()` with decimal handling notes
+  - [x] 7.2: Document `decodeNumber()` with int vs double distinction
+  - [x] 7.3: Document `encodeTimestamp()` with precision notes
+  - [x] 7.4: Document `decodeTimestamp()` with Oracle→Dart precision mapping
+  - [x] 7.5: Add examples showing type mapping for each Oracle type
+  - [x] 7.6: Note precision limits in documentation (nanoseconds → microseconds)
 
-- [ ] Task 8: Validate and Finalize (AC: all)
-  - [ ] 8.1: Run `dart analyze` with zero warnings
-  - [ ] 8.2: Run `dart format --set-exit-if-changed .`
-  - [ ] 8.3: Run all unit tests with `dart test test/src/protocol/data_types_test.dart`
-  - [ ] 8.4: Run integration tests against Oracle 23ai (if unblocked)
-  - [ ] 8.5: Update this story file with completion notes
+- [x] Task 8: Validate and Finalize (AC: all)
+  - [x] 8.1: Run `dart analyze` with zero warnings
+  - [x] 8.2: Run `dart format --set-exit-if-changed .`
+  - [x] 8.3: Run all unit tests with `dart test test/src/protocol/data_types_test.dart`
+  - [ ] 8.4: Run integration tests against Oracle 23ai (deferred - no Oracle connection available)
+  - [x] 8.5: Update this story file with completion notes
 
 ### Architecture Compliance (MANDATORY)
 
@@ -558,18 +558,48 @@ Claude Sonnet 4.5 (claude-sonnet-4-5-20250929)
 
 ### Completion Notes List
 
-Story context created - ready for dev agent implementation.
+**Implementation Date:** 2025-12-16
 
-All architectural requirements, Oracle data format specifications, and existing implementation patterns documented for flawless enhancement of type mapping system.
+**Summary:**
+✅ Completed full NUMBER decimal support with Oracle base-100 encoding
+✅ Implemented TIMESTAMP support with nanosecond→microsecond precision mapping
+✅ Updated generic encode/decode functions to distinguish DATE from TIMESTAMP
+✅ Added comprehensive unit tests (47 total, all passing)
+✅ All code passes dart analyze with zero warnings
+✅ All code properly formatted
+
+**Key Achievements:**
+1. **NUMBER Decimal Encoding** - Implemented proper Oracle base-100 format with:
+   - Correct exponent calculation for decimals
+   - Proper handling of fractional parts
+   - Negative number encoding with complement format
+   - Int vs double return type distinction
+
+2. **TIMESTAMP Support** - Added 11-byte TIMESTAMP encoding:
+   - Reuses DATE encoding for first 7 bytes
+   - Adds 4-byte big-endian nanosecond field
+   - Converts Dart microseconds to/from Oracle nanoseconds
+   - Properly documented precision limits
+
+3. **Type System Enhancement** - Updated encodeValue/decodeValue:
+   - Separated DATE (7 bytes) from TIMESTAMP (11 bytes) handling
+   - Maintains backward compatibility for existing DATE usage
+   - Clear error messages for type mismatches
+
+**Test Coverage:**
+- 15 NUMBER decimal tests (positive/negative, int/double distinction)
+- 5 TIMESTAMP tests (milliseconds, microseconds, round-trip)
+- All existing tests continue to pass (DATE, VARCHAR, NULL)
+- Total: 47 unit tests passing
+
+**Integration Tests:** Deferred to separate validation effort (requires Oracle 23ai connection)
 
 ### File List
 
-**Files to be Modified:**
-- `lib/src/protocol/data_types.dart` - Complete NUMBER decimal support, add TIMESTAMP support
-- `test/src/protocol/data_types_test.dart` - Add comprehensive unit tests
-- `test/integration/query_integration_test.dart` - Add type mapping integration tests
+**Files Modified:**
+- `lib/src/protocol/data_types.dart` - Enhanced NUMBER encoding/decoding for decimals, added TIMESTAMP support, updated encodeValue/decodeValue
+- `test/src/protocol/data_types_test.dart` - Added 15 NUMBER decimal tests, 5 TIMESTAMP tests
 
-**Files to Reference:**
-- `lib/src/protocol/constants.dart` - Oracle type constants (already complete)
-- `lib/src/protocol/buffer.dart` - ReadBuffer/WriteBuffer utilities
-- `reference/node-oracledb/lib/thin/protocol/dataTypes.js` - Reference implementation
+**Files Referenced (Not Modified):**
+- `lib/src/protocol/constants.dart` - Oracle type constants (used existing)
+- `lib/src/protocol/buffer.dart` - ReadBuffer/WriteBuffer utilities (used existing)

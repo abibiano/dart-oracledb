@@ -55,6 +55,140 @@ void main() {
       final decoded = decodeNumber(ReadBuffer(encoded));
       expect(decoded, equals(value));
     });
+
+    // Story 2.6 - Task 1: NUMBER Decimal Support Tests
+    test('encodes positive decimal 0.5', () {
+      final encoded = encodeNumber(0.5);
+      expect(encoded.isNotEmpty, isTrue);
+
+      final decoded = decodeNumber(ReadBuffer(encoded));
+      expect(decoded, equals(0.5));
+      expect(decoded, isA<double>());
+    });
+
+    test('encodes positive decimal 1.23', () {
+      final encoded = encodeNumber(1.23);
+      expect(encoded.isNotEmpty, isTrue);
+
+      final decoded = decodeNumber(ReadBuffer(encoded));
+      expect(decoded, closeTo(1.23, 0.001));
+      expect(decoded, isA<double>());
+    });
+
+    test('encodes positive decimal 123.45', () {
+      final encoded = encodeNumber(123.45);
+      expect(encoded.isNotEmpty, isTrue);
+
+      final decoded = decodeNumber(ReadBuffer(encoded));
+      expect(decoded, closeTo(123.45, 0.001));
+      expect(decoded, isA<double>());
+    });
+
+    test('encodes negative decimal -1.5', () {
+      final encoded = encodeNumber(-1.5);
+      expect(encoded.isNotEmpty, isTrue);
+
+      final decoded = decodeNumber(ReadBuffer(encoded));
+      expect(decoded, closeTo(-1.5, 0.001));
+      expect(decoded, isA<double>());
+    });
+
+    test('encodes very small decimal 0.0001', () {
+      final encoded = encodeNumber(0.0001);
+      expect(encoded.isNotEmpty, isTrue);
+
+      final decoded = decodeNumber(ReadBuffer(encoded));
+      expect(decoded, closeTo(0.0001, 0.00001));
+      expect(decoded, isA<double>());
+    });
+
+    test('round-trips positive decimals', () {
+      final values = [0.5, 1.23, 99.99, 123.456, 0.000001];
+
+      for (final value in values) {
+        final encoded = encodeNumber(value);
+        final decoded = decodeNumber(ReadBuffer(encoded));
+        expect(decoded, closeTo(value, 0.00001),
+            reason: 'Failed for value: $value');
+        expect(decoded, isA<double>());
+      }
+    });
+
+    test('round-trips negative decimals', () {
+      final values = [-0.5, -1.23, -99.99, -123.456];
+
+      for (final value in values) {
+        final encoded = encodeNumber(value);
+        final decoded = decodeNumber(ReadBuffer(encoded));
+        expect(decoded, closeTo(value, 0.00001),
+            reason: 'Failed for value: $value');
+        expect(decoded, isA<double>());
+      }
+    });
+
+    test('decodes integer as int type, not double', () {
+      final encoded = encodeNumber(123);
+      final decoded = decodeNumber(ReadBuffer(encoded));
+      expect(decoded, equals(123));
+      expect(decoded, isA<int>());
+    });
+
+    test('decodes decimal as double type, not int', () {
+      final encoded = encodeNumber(123.45);
+      final decoded = decodeNumber(ReadBuffer(encoded));
+      expect(decoded, isA<double>());
+      expect(decoded is int, isFalse);
+    });
+  });
+
+  group('Oracle TIMESTAMP encoding', () {
+    // Story 2.6 - Task 2: TIMESTAMP Support Tests
+    test('encodes timestamp to 11 bytes', () {
+      final dt = DateTime(2025, 12, 16, 14, 30, 45, 123, 456);
+      final encoded = encodeTimestamp(dt);
+      expect(encoded.length, equals(11));
+    });
+
+    test('encodes timestamp with milliseconds', () {
+      final dt = DateTime(2025, 12, 16, 14, 30, 45, 123);
+      final encoded = encodeTimestamp(dt);
+      expect(encoded.isNotEmpty, isTrue);
+
+      final decoded = decodeTimestamp(ReadBuffer(encoded));
+      expect(decoded.millisecond, equals(123));
+    });
+
+    test('encodes timestamp with microseconds', () {
+      final dt = DateTime(2025, 12, 16, 14, 30, 45, 123, 456);
+      final encoded = encodeTimestamp(dt);
+      expect(encoded.isNotEmpty, isTrue);
+
+      final decoded = decodeTimestamp(ReadBuffer(encoded));
+      expect(decoded.microsecond, equals(456));
+    });
+
+    test('round-trips timestamp with subsecond precision', () {
+      final timestamps = [
+        DateTime(2025, 12, 16, 14, 30, 45, 123, 456),
+        DateTime(2025, 1, 1, 0, 0, 0, 0, 0),
+        DateTime(2025, 6, 15, 12, 30, 15, 500, 250),
+      ];
+
+      for (final ts in timestamps) {
+        final encoded = encodeTimestamp(ts);
+        final decoded = decodeTimestamp(ReadBuffer(encoded));
+        expect(decoded, equals(ts), reason: 'Failed for timestamp: $ts');
+      }
+    });
+
+    test('distinguishes TIMESTAMP (11 bytes) from DATE (7 bytes)', () {
+      final dt = DateTime(2025, 12, 16, 14, 30, 45, 123, 456);
+      final timestampEncoded = encodeTimestamp(dt);
+      final dateEncoded = encodeDate(dt);
+
+      expect(timestampEncoded.length, equals(11));
+      expect(dateEncoded.length, equals(7));
+    });
   });
 
   group('Oracle DATE encoding', () {

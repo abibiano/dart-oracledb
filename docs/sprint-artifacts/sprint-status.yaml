@@ -64,7 +64,7 @@ development_status:
   2-3-bind-parameters: dev-complete-pending-validation
   2-4-dml-operations-insert-update-delete: dev-complete-pending-validation
   2-5-transaction-management: review
-  2-6-basic-data-type-mapping: ready-for-dev
+  2-6-basic-data-type-mapping: review
   2-7-statement-caching: backlog
   2-8-query-error-handling: backlog
   epic-2-retrospective: optional
