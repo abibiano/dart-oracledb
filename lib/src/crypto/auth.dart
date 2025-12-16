@@ -5,6 +5,7 @@
 /// multi-phase authentication exchange between client and server.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -346,6 +347,7 @@ class AuthFlow {
     required Transport transport,
     required String username,
     required String password,
+    Duration authTimeout = const Duration(seconds: 5),
   }) async {
     _log.info('Starting authentication for user: $username');
 
@@ -401,9 +403,23 @@ class AuthFlow {
     await transport.sendData(phaseTwoBytes, dataFlags: 0x0800);
 
     // Step 6: Receive AUTH_PHASE_TWO response and verify success
+    // Apply timeout to detect wrong password quickly (Oracle closes silently)
     Uint8List phaseTwoResponseData;
     try {
-      phaseTwoResponseData = await transport.receiveData();
+      phaseTwoResponseData = await transport.receiveData().timeout(
+        authTimeout,
+        onTimeout: () {
+          // Oracle 23ai closes connection silently on wrong password
+          // Timeout indicates authentication failure
+          _log.warning(
+              'AUTH_PHASE_TWO response timeout (${authTimeout.inSeconds}s) - likely invalid credentials');
+          updateState(AuthState.failed);
+          throw const OracleException(
+            errorCode: oraInvalidCredentials,
+            message: 'Authentication failed: invalid username or password',
+          );
+        },
+      );
       _log.fine(
           'Received AUTH_PHASE_TWO response (${phaseTwoResponseData.length} bytes)');
     } on OracleException catch (e) {

@@ -54,7 +54,7 @@ development_status:
   1-5-connection-api-error-handling: done  # Validated 2025-12-16 - removed obsolete protocol negotiation
   1-6-tls-ssl-support: done
   1-7-connection-lifecycle-management: done
-  1-8-fix-wrong-password-error: ready-for-dev  # Improve error handling for invalid credentials
+  1-8-fix-wrong-password-error: review  # RESOLVED - 5s timeout for wrong password (was 30s)
   epic-1-retrospective: optional  # Can be done later
 
   # Epic 2: Query Execution & Transactions [READY]
