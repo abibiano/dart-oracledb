@@ -90,11 +90,21 @@ ORA-12547: Socket closed while waiting for data: need 8 bytes, have 0
   - [x] 5.5: Update test to use batched handshake
   - [x] 5.6: Debug remaining byte content differences - ROOT CAUSE FOUND: FAST_AUTH protocol required
 
-- [ ] **Task 6: Validate AUTH_PHASE_ONE Fix** (AC: 2, 3)
-  - [ ] 6.1: Run minimal_auth_test.dart against Oracle 23ai
-  - [ ] 6.2: Verify Oracle sends AUTH_PHASE_ONE response (not connection close)
-  - [ ] 6.3: Verify response contains verifier parameters (AUTH_VFR_DATA, AUTH_SESSKEY)
-  - [ ] 6.4: Log and analyze AUTH_PHASE_ONE response structure
+- [x] **Task 6: Validate AUTH_PHASE_ONE Fix** ✅ **BREAKTHROUGH!** (AC: 2, 3)
+  - [x] 6.1: Run minimal_auth_test.dart against Oracle 23ai
+  - [x] 6.2: Verify Oracle sends AUTH_PHASE_ONE response (not connection close)
+  - [x] 6.3: Verify response contains verifier parameters (AUTH_VFR_DATA, AUTH_SESSKEY)
+  - [x] 6.4: Log and analyze AUTH_PHASE_ONE response structure
+
+**ROOT CAUSE IDENTIFIED (2025-12-16):** Oracle sends ONE TNS packet with THREE embedded TTC messages (Protocol, DataTypes, AUTH). We were calling `receiveData()` three separate times, causing timeout/connection close.
+
+**SOLUTION:** Parse all three messages from single FAST_AUTH response buffer, buffering AUTH response for subsequent `receiveData()` call.
+
+**RESULTS:**
+- ✅ FAST_AUTH accepted by Oracle 23ai
+- ✅ Received complete AUTH_PHASE_ONE response: 3094 bytes
+- ✅ Contains AUTH_SESSKEY, AUTH_VFR_DATA, PBKDF2 parameters
+- ✅ Test **PASSED**: `minimal_auth_test.dart`
 
 - [ ] **Task 7: Implement/Fix AUTH_PHASE_TWO** (AC: 3)
   - [ ] 7.1: Verify AUTH_PHASE_TWO message encoding matches node-oracledb

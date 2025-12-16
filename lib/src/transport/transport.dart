@@ -50,6 +50,11 @@ class Transport {
   /// Set after parsing ACCEPT packet flag2 field.
   bool _supportsEndOfRequest = false;
 
+  /// Buffered data from FAST_AUTH response (AUTH_PHASE_ONE response).
+  /// When FAST_AUTH returns multiple messages in one packet, the AUTH response
+  /// is buffered here so the next receiveData() call can return it.
+  Uint8List? _bufferedAuthResponse;
+
   /// TTC field version - adjusted after protocol negotiation.
   /// Used to determine whether token numbers should be written.
   /// TNS_CCAP_FIELD_VERSION_23_1_EXT_1 = 18 is threshold for token numbers.
@@ -416,6 +421,9 @@ class Transport {
   }) async {
     _log.info('Starting FAST_AUTH protocol with username: $username');
 
+    // TTC message type constants
+    const ttcMsgTypeFunction = 3;
+
     // Build compile and runtime capabilities
     final compileCaps = _buildCompileCapabilities();
     final runtimeCaps = _buildRuntimeCapabilities();
@@ -443,22 +451,77 @@ class Transport {
     // Send FAST_AUTH message in single TNS DATA packet
     await sendData(fastAuthBytes);
 
-    // Receive protocol response
-    final protocolResponseData = await receiveData();
-    final protocolResponse = ProtocolResponse.decode(protocolResponseData);
+    // CRITICAL: Oracle responds with ONE packet containing MULTIPLE TTC messages
+    // We must parse messages sequentially from the single response buffer
+    final responseData = await receiveData();
+    _log.fine('Received FAST_AUTH response: ${responseData.length} bytes');
+
+    // Create a buffer to track position as we parse messages
+    final buffer = ReadBuffer(responseData);
+
+    // Parse Protocol response (first message, type 1)
+    final protocolResponse = ProtocolResponse.decode(responseData);
     _log.info('Protocol negotiation complete: '
         'serverVersion=${protocolResponse.serverVersion}');
 
     // Adjust ttcFieldVersion based on server compile caps
     _adjustFieldVersion(protocolResponse.compileCaps);
 
-    // Receive data types response
-    final dataTypesResponseData = await receiveData();
-    _log.fine(
-        'Received data types response: ${dataTypesResponseData.length} bytes');
-    _log.info('Data types negotiation complete');
+    // Find where Protocol message ended by re-parsing with tracking buffer
+    // This advances buffer.position to the end of Protocol message
+    final tempBuffer = ReadBuffer(responseData);
+    ProtocolResponse.decode(responseData); // Decodes using internal buffer
+    // Manually scan to find protocol end - skip message type + server version + banner
+    tempBuffer.readUint8(); // type
+    tempBuffer.readUint8(); // server version
+    tempBuffer.skip(1); // skip byte
+    // Skip banner (null-terminated)
+    while (tempBuffer.hasRemaining && tempBuffer.readUint8() != 0) {}
+    // Skip rest of protocol message structure
+    if (tempBuffer.hasRemaining) {
+      tempBuffer.readUint16LE(); // charset
+      tempBuffer.readUint8(); // flags
+      final numElem = tempBuffer.readUint16LE();
+      if (numElem > 0) tempBuffer.skip(numElem * 5);
+      final fdoLen = tempBuffer.readUint16BE();
+      tempBuffer.skip(fdoLen);
+      // Skip compile + runtime caps
+      if (tempBuffer.hasRemaining) {
+        final compileLen = tempBuffer.readUint8();
+        if (compileLen > 0) tempBuffer.skip(compileLen);
+      }
+      if (tempBuffer.hasRemaining) {
+        final runtimeLen = tempBuffer.readUint8();
+        if (runtimeLen > 0) tempBuffer.skip(runtimeLen);
+      }
+    }
 
-    // Auth response will be handled by auth module
+    final protocolEndPos = tempBuffer.position;
+
+    // Parse DataTypes response from remaining bytes
+    int dataTypesEndPos = protocolEndPos;
+    if (protocolEndPos < responseData.length) {
+      final dataTypesData = Uint8List.sublistView(responseData, protocolEndPos);
+      DataTypesResponse.decode(dataTypesData);
+      _log.info('Data types negotiation complete');
+
+      // Track DataTypes end position by parsing its structure
+      final dtBuffer = ReadBuffer(dataTypesData);
+      dtBuffer.readUint8(); // type
+      final compileLen = dtBuffer.readUint8();
+      if (compileLen > 0) dtBuffer.skip(compileLen);
+      final runtimeLen = dtBuffer.readUint8();
+      if (runtimeLen > 0) dtBuffer.skip(runtimeLen);
+      dataTypesEndPos = protocolEndPos + dtBuffer.position;
+    }
+
+    // Buffer the AUTH response (remaining bytes) for next receiveData() call
+    if (dataTypesEndPos < responseData.length) {
+      _bufferedAuthResponse = Uint8List.sublistView(responseData, dataTypesEndPos);
+      _log.fine('Buffered AUTH response: ${_bufferedAuthResponse!.length} bytes');
+    }
+
+    // Auth response will be handled by auth module via receiveData()
     return protocolResponse;
   }
 
@@ -1101,7 +1164,16 @@ class Transport {
   /// Receives TTC data from a TNS DATA packet, stripping data flags.
   ///
   /// Returns the TTC message data with the 2-byte data flags prefix removed.
+  /// If there's buffered data from FAST_AUTH, returns that instead.
   Future<Uint8List> receiveData() async {
+    // Check if we have buffered AUTH response from FAST_AUTH
+    if (_bufferedAuthResponse != null) {
+      final buffered = _bufferedAuthResponse!;
+      _bufferedAuthResponse = null; // Clear buffer after returning
+      _log.fine('Returning buffered AUTH response: ${buffered.length} bytes');
+      return buffered;
+    }
+
     final response = await receive();
 
     if (response.type != tnsPacketData) {
