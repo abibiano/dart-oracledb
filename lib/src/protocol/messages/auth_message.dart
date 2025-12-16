@@ -139,8 +139,10 @@ class AuthPhaseOneResponse {
       // Parameter message - contains key-value pairs
       final numParams = buffer.readUB2();
       _log.fine('Number of parameters: $numParams');
-      _log.fine('Buffer position after numParams: ${buffer.position}, remaining: ${buffer.remaining}');
-      _log.fine('First 32 bytes of buffer: ${_bytesToHex(data.sublist(0, data.length > 32 ? 32 : data.length))}');
+      _log.fine(
+          'Buffer position after numParams: ${buffer.position}, remaining: ${buffer.remaining}');
+      _log.fine(
+          'First 32 bytes of buffer: ${_bytesToHex(data.sublist(0, data.length > 32 ? 32 : data.length))}');
 
       for (var i = 0; i < numParams; i++) {
         _log.fine('Processing parameter $i of $numParams');
@@ -168,7 +170,8 @@ class AuthPhaseOneResponse {
         }
 
         sessionData[key] = value;
-        _log.fine('Session param: $key = ${value.length > 50 ? '${value.substring(0, 50)}...' : value}');
+        _log.fine(
+            'Session param: $key = ${value.length > 50 ? '${value.substring(0, 50)}...' : value}');
       }
     } else if (msgType == ttcMsgTypeError) {
       // Error message
@@ -190,12 +193,14 @@ class AuthPhaseOneResponse {
   VerifierParams toVerifierParams() {
     // DEBUG: Log entire sessionData map
     _log.fine('sessionData keys: ${sessionData.keys.toList()}');
-    _log.fine('sessionData entries: ${sessionData.entries.map((e) => '${e.key}=${e.value.length}b').toList()}');
+    _log.fine(
+        'sessionData entries: ${sessionData.entries.map((e) => '${e.key}=${e.value.length}b').toList()}');
 
     // Parse AUTH_VFR_DATA which contains salt and iterations
     final vfrData = sessionData['AUTH_VFR_DATA'] ?? '';
     final serverNonceHex = sessionData['AUTH_SESSKEY'] ?? '';
-    _log.fine('vfrData length: ${vfrData.length}, serverNonceHex length: ${serverNonceHex.length}');
+    _log.fine(
+        'vfrData length: ${vfrData.length}, serverNonceHex length: ${serverNonceHex.length}');
 
     // Decode hex-encoded salt from AUTH_VFR_DATA
     Uint8List salt;
@@ -374,25 +379,28 @@ class AuthPhaseTwoRequest {
     }
 
     // Write key-value pairs
-    final sessionKeyHex = _hexEncode(sessionKey);
+    // sessionKey, speedyKey, and encryptedProof are already hex-encoded strings (as UTF-8 bytes)
+    final sessionKeyHex = utf8.decode(sessionKey);
     buffer.writeKeyValue('AUTH_SESSKEY', sessionKeyHex, flags: 1);
 
     if (is12c && speedyKey != null) {
-      // PBKDF2 speedy key (hex-encoded)
-      final speedyKeyHex = _hexEncode(speedyKey!);
+      // PBKDF2 speedy key (already hex-encoded)
+      final speedyKeyHex = utf8.decode(speedyKey!);
       buffer.writeKeyValue('AUTH_PBKDF2_SPEEDY_KEY', speedyKeyHex);
     }
 
     buffer.writeKeyValue('SESSION_CLIENT_CHARSET', '873'); // UTF-8
-    buffer.writeKeyValue('SESSION_CLIENT_DRIVER_NAME', 'dart-oracledb : 0.1.0 thn'); // Match node-oracledb format
-    buffer.writeKeyValue('SESSION_CLIENT_VERSION', '111149056'); // Oracle 11.1 client version format
+    buffer.writeKeyValue('SESSION_CLIENT_DRIVER_NAME',
+        'dart-oracledb : 0.1.0 thn'); // Match node-oracledb format
+    buffer.writeKeyValue('SESSION_CLIENT_VERSION',
+        '111149056'); // Oracle 11.1 client version format
 
     // Timezone alter session
     final tzStatement = _getAlterTimezoneStatement();
     buffer.writeKeyValue('AUTH_ALTER_SESSION', tzStatement, flags: 1);
 
-    // Encrypted password
-    final passwordHex = _hexEncode(encryptedProof);
+    // Encrypted password (already hex-encoded)
+    final passwordHex = utf8.decode(encryptedProof);
     buffer.writeKeyValue('AUTH_PASSWORD', passwordHex);
 
     final bytes = buffer.toBytes();
@@ -408,11 +416,6 @@ class AuthPhaseTwoRequest {
     final hours = offset.inHours.abs().toString().padLeft(2, '0');
     final minutes = (offset.inMinutes.abs() % 60).toString().padLeft(2, '0');
     return "ALTER SESSION SET TIME_ZONE ='$sign$hours:$minutes'\x00";
-  }
-
-  /// Encodes bytes to hex string.
-  static String _hexEncode(Uint8List bytes) {
-    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 }
 

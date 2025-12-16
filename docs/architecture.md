@@ -701,6 +701,101 @@ Then restructure directories to match the defined project structure.
 
 ---
 
+## Oracle 23ai Protocol Implementation Notes
+
+### FAST_AUTH Protocol (Required for Oracle 23ai)
+
+Oracle 23ai requires the **FAST_AUTH protocol** (message type 34) for authentication. This protocol combines Protocol Negotiation + Data Types Negotiation + AUTH_PHASE_ONE into a single message to reduce round trips.
+
+**Implementation:**
+- Location: `lib/src/protocol/messages/fast_auth_message.dart`
+- Used by: `lib/src/transport/transport.dart` → `sendFastAuth()`
+- Reference: node-oracledb `lib/thin/protocol/messages/fastAuth.js`
+
+**Key Differences from Standalone Auth:**
+- Protocol and DataTypes messages embedded WITHOUT their message type bytes
+- AUTH_PHASE_ONE embedded WITH its full function header
+- Single TNS DATA packet contains all three messages (typically ~2780 TTC bytes)
+
+### Oracle 12c Authentication Crypto Format
+
+**Critical Discovery:** Oracle 12c expects ALL cryptographic values as **hex-encoded STRINGS** (uppercase), not raw bytes.
+
+**Affected Values:**
+1. **AUTH_SESSKEY**: Encrypted client session key
+   - Format: 64 hex characters (= 32 bytes)
+   - Implementation: Encrypt sessionKeyPartb, convert to hex, slice to 64 chars, store as UTF-8 string bytes
+   - Location: `lib/src/crypto/auth.dart` lines 223-227
+
+2. **AUTH_PBKDF2_SPEEDY_KEY**: Speedy key for 12c verifier
+   - Format: 160 hex characters (= 80 bytes)
+   - Implementation: Encrypt speedyKeyInput, take first 80 bytes, convert to hex (160 chars), store as UTF-8
+   - Location: `lib/src/crypto/auth.dart` lines 262-266
+
+3. **AUTH_PASSWORD**: Encrypted password proof
+   - Format: Variable length hex string (uppercase)
+   - Implementation: Add 16-byte random salt prefix, encrypt, convert to hex, store as UTF-8
+   - Location: `lib/src/crypto/auth.dart` lines 268-286
+
+**Why This Matters:**
+- Sending raw bytes causes Oracle to reject AUTH_PHASE_TWO with connection close
+- Protocol structure can be byte-perfect (571 bytes) but still fail if crypto values are wrong format
+- Reference: node-oracledb `lib/thin/protocol/encryptDecrypt.js` lines 105-174
+
+### Password Handling
+
+**Oracle 12c Password Rules:**
+- ✅ **DO NOT uppercase the password** - use UTF-8 bytes as-is
+- ✅ Add 16-byte random salt prefix before encryption (security requirement)
+- ✅ Use PBKDF2-SHA512 for key derivation (4096+ iterations)
+- ❌ Do NOT use Oracle 11g behavior (uppercasing, SHA1)
+
+**Session Key Derivation:**
+- sessionKeyPartb length MUST match sessionKeyParta length (decrypted from server's AUTH_SESSKEY)
+- For Oracle 12c: typically 32 bytes
+- For Oracle 11g: typically 48 bytes
+- Implementation handles both cases based on decrypted length
+
+### Known Issues & Gotchas
+
+1. **Wrong Password Handling**: Currently causes connection timeout instead of ORA-01017 error (needs investigation)
+
+2. **MARKER Packets**: Oracle may send MARKER packets (type 12) during authentication - these must be skipped to read the next packet
+   - Location: `lib/src/transport/transport.dart` lines 1177-1184
+
+3. **Sequence Counter**: Must be auto-incrementing across all TTC messages
+   - FAST_AUTH: sequence=1
+   - AUTH_PHASE_TWO: sequence=2
+   - Implementation: `transport.nextSequence()` method
+
+4. **Data Flags for AUTH_PHASE_TWO**: Must use `dataFlags=0x0800` (END_OF_REQUEST marker)
+   - Location: `lib/src/crypto/auth.dart` line 352
+
+### Testing Against Oracle 23ai
+
+**Docker Setup:**
+```bash
+docker-compose up -d  # Starts Oracle 23ai Free container
+```
+
+**Integration Tests:**
+```bash
+RUN_INTEGRATION_TESTS=true dart test test/integration/
+```
+
+**Packet Capture for Debugging:**
+- Use Wireshark with filter: `tcp.port == 1521`
+- Compare with node-oracledb reference implementation
+- Debug utilities in project root: `compare_auth_phase_two.cjs`, etc.
+
+### References
+
+- Oracle 23ai Protocol: Documented through reverse-engineering and node-oracledb source analysis
+- node-oracledb thin driver: `reference/node-oracledb/lib/thin/`
+- Story 1.4-FIX: `docs/sprint-artifacts/1-4-fix-authentication-protocol-debugging.md` (complete implementation notes)
+
+---
+
 **Architecture Status:** READY FOR IMPLEMENTATION
 
 **Next Phase:** Begin implementation using the architectural decisions and patterns documented herein.

@@ -429,9 +429,6 @@ class Transport {
   }) async {
     _log.info('Starting FAST_AUTH protocol with username: $username');
 
-    // TTC message type constants
-    const ttcMsgTypeFunction = 3;
-
     // Build compile and runtime capabilities
     final compileCaps = _buildCompileCapabilities();
     final runtimeCaps = _buildRuntimeCapabilities();
@@ -463,9 +460,6 @@ class Transport {
     // We must parse messages sequentially from the single response buffer
     final responseData = await receiveData();
     _log.fine('Received FAST_AUTH response: ${responseData.length} bytes');
-
-    // Create a buffer to track position as we parse messages
-    final buffer = ReadBuffer(responseData);
 
     // Parse Protocol response (first message, type 1)
     final protocolResponse = ProtocolResponse.decode(responseData);
@@ -505,13 +499,15 @@ class Transport {
     }
 
     final protocolEndPos = tempBuffer.position;
-    _log.fine('DEBUG: protocolEndPos=$protocolEndPos, total responseData=${responseData.length} bytes');
+    _log.fine(
+        'DEBUG: protocolEndPos=$protocolEndPos, total responseData=${responseData.length} bytes');
 
     // Parse DataTypes response from remaining bytes
     int dataTypesEndPos = protocolEndPos;
     if (protocolEndPos < responseData.length) {
       final dataTypesData = Uint8List.sublistView(responseData, protocolEndPos);
-      _log.fine('DEBUG: dataTypesData starts at byte $protocolEndPos, first byte: ${dataTypesData[0]}');
+      _log.fine(
+          'DEBUG: dataTypesData starts at byte $protocolEndPos, first byte: ${dataTypesData[0]}');
       DataTypesResponse.decode(dataTypesData);
       _log.info('Data types negotiation complete');
 
@@ -521,7 +517,8 @@ class Transport {
 
       // Skip charset fields (4 bytes) + encoding flags (1 byte)
       if (dtBuffer.remaining >= 5) {
-        dtBuffer.skip(5); // charset (2 bytes) + nCharset (2 bytes) + flags (1 byte)
+        dtBuffer
+            .skip(5); // charset (2 bytes) + nCharset (2 bytes) + flags (1 byte)
       }
 
       // Skip compile caps (length-prefixed)
@@ -560,7 +557,8 @@ class Transport {
         if (b == 8) {
           // Found AUTH message start - back up one byte
           dataTypesEndPos = protocolEndPos + currentPos;
-          _log.fine('DEBUG: Found AUTH parameter message at byte $currentPos (absolute: $dataTypesEndPos)');
+          _log.fine(
+              'DEBUG: Found AUTH parameter message at byte $currentPos (absolute: $dataTypesEndPos)');
           break;
         }
 
@@ -574,14 +572,18 @@ class Transport {
       if (dataTypesEndPos == protocolEndPos) {
         dataTypesEndPos = protocolEndPos + dtBuffer.position;
       }
-      _log.fine('DEBUG: dataTypesEndPos=$dataTypesEndPos, dtBuffer.position=${dtBuffer.position}');
+      _log.fine(
+          'DEBUG: dataTypesEndPos=$dataTypesEndPos, dtBuffer.position=${dtBuffer.position}');
     }
 
     // Buffer the AUTH response (remaining bytes) for next receiveData() call
     if (dataTypesEndPos < responseData.length) {
-      _bufferedAuthResponse = Uint8List.sublistView(responseData, dataTypesEndPos);
-      _log.fine('Buffered AUTH response: ${_bufferedAuthResponse!.length} bytes, starts with byte: ${_bufferedAuthResponse![0]}');
-      _log.fine('First 32 bytes of AUTH response: ${_bufferedAuthResponse!.sublist(0, _bufferedAuthResponse!.length > 32 ? 32 : _bufferedAuthResponse!.length).map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
+      _bufferedAuthResponse =
+          Uint8List.sublistView(responseData, dataTypesEndPos);
+      _log.fine(
+          'Buffered AUTH response: ${_bufferedAuthResponse!.length} bytes, starts with byte: ${_bufferedAuthResponse![0]}');
+      _log.fine(
+          'First 32 bytes of AUTH response: ${_bufferedAuthResponse!.sublist(0, _bufferedAuthResponse!.length > 32 ? 32 : _bufferedAuthResponse!.length).map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
     }
 
     // Auth response will be handled by auth module via receiveData()
@@ -597,48 +599,6 @@ class Transport {
   }
 
   /// Builds the data types negotiation TTC message without sending it.
-  Uint8List _buildDataTypesMessage() {
-    // Build client capabilities
-    final compileCaps = _buildCompileCapabilities();
-    final runtimeCaps = _buildRuntimeCapabilities();
-
-    // Build data types message
-    final buffer = WriteBuffer();
-
-    // Message type
-    buffer.writeUint8(2); // TNS_MSG_TYPE_DATA_TYPES
-
-    // Character set (UTF-8 = 873)
-    buffer.writeUint16LE(873);
-    buffer.writeUint16LE(873);
-
-    // Encoding flags
-    buffer.writeUint8(0x01 | 0x02); // MULTI_BYTE | CONV_LENGTH
-
-    // Compile caps (length-prefixed)
-    buffer.writeUint8(compileCaps.length);
-    buffer.writeBytes(compileCaps);
-
-    // Runtime caps (length-prefixed)
-    buffer.writeUint8(runtimeCaps.length);
-    buffer.writeBytes(runtimeCaps);
-
-    // Data type mappings (matching node-oracledb format)
-    for (final dt in _dataTypes) {
-      _writeDataTypeMapping(buffer, dt[0], dt[1], dt[2]);
-    }
-
-    // Terminator + padding (node-oracledb has extra padding)
-    buffer.writeUint16BE(0); // Terminator (2 bytes)
-    buffer.writeUint16BE(0x007f); // Padding (2 bytes)
-    buffer.writeUint16BE(0x007f); // Padding (2 bytes)
-    buffer.writeUint16BE(0x0001); // Padding (2 bytes)
-    buffer.writeUint16BE(0); // Padding (2 bytes)
-    buffer.writeUint16BE(0); // Additional padding (2 bytes) to match node
-
-    return buffer.toBytes();
-  }
-
   /// Adjusts the TTC field version based on server compile capabilities.
   void _adjustFieldVersion(Uint8List? serverCompileCaps) {
     if (serverCompileCaps != null &&
@@ -755,322 +715,322 @@ class Transport {
   // repType: 0=NATIVE, 1=UNIVERSAL, 10=ORACLE
   // From node-oracledb dataType.js - all types needed for authentication
   static const List<List<int>> _dataTypes = [
-  [1, 1, 1], // varchar
-  [2, 2, 10], // number
-  [8, 8, 1], // long
-  [12, 12, 10], // date
-  [23, 23, 1], // raw
-  [24, 24, 1], // long_raw
-  [25, 25, 1], // ub2
-  [26, 26, 1], // ub4
-  [27, 27, 10], // sb1
-  [28, 28, 1], // sb2
-  [29, 29, 1], // sb4
-  [30, 30, 1], // sword
-  [31, 31, 1], // uword
-  [32, 32, 1], // ptrb
-  [33, 33, 1], // ptrw
-  [10, 10, 1], // tiddef
-  [11, 11, 1], // rowid
-  [40, 40, 1], // ams
-  [41, 41, 1], // brn
-  [117, 117, 1], // cwd
-  [120, 120, 1], // oac122
-  [290, 290, 1], // oer8
-  [291, 291, 1], // fun
-  [292, 292, 1], // aua
-  [293, 293, 1], // rxh7
-  [294, 294, 1], // na6
-  [298, 298, 1], // brp
-  [299, 299, 1], // brv
-  [300, 300, 1], // kva
-  [301, 301, 1], // cls
-  [302, 302, 1], // cui
-  [303, 303, 1], // dfn
-  [304, 304, 1], // dqr
-  [305, 305, 1], // dsc
-  [306, 306, 1], // exe
-  [307, 307, 1], // fch
-  [308, 308, 1], // gbv
-  [309, 309, 1], // gem
-  [310, 310, 1], // giv
-  [311, 311, 1], // okg
-  [312, 312, 1], // hmi
-  [313, 313, 1], // ino
-  [315, 315, 1], // lnf
-  [316, 316, 1], // ont
-  [317, 317, 1], // ope
-  [318, 318, 1], // osq
-  [319, 319, 1], // sfe
-  [320, 320, 1], // spf
-  [321, 321, 1], // vsn
-  [322, 322, 1], // ud7
-  [323, 323, 1], // dsa
-  [327, 327, 1], // pin
-  [328, 328, 1], // pfn
-  [329, 329, 1], // ppt
-  [331, 331, 1], // sto
-  [333, 333, 1], // arc
-  [334, 334, 1], // mrs
-  [335, 335, 1], // mrt
-  [336, 336, 1], // mrg
-  [337, 337, 1], // mrr
-  [338, 338, 1], // mrc
-  [339, 339, 1], // ver
-  [340, 340, 1], // lon2
-  [341, 341, 1], // ino2
-  [342, 342, 1], // all
-  [343, 343, 1], // udb
-  [344, 344, 1], // aqi
-  [345, 345, 1], // ulb
-  [346, 346, 1], // uld
-  [348, 348, 1], // sid
-  [349, 349, 1], // na7
-  [354, 354, 1], // al7
-  [355, 355, 1], // k2rpc
-  [359, 359, 1], // xdp
-  [363, 363, 1], // oko8
-  [380, 380, 1], // ud12
-  [381, 381, 1], // al8
-  [382, 382, 1], // lfop
-  [383, 383, 1], // fcrt
-  [384, 384, 1], // dny
-  [385, 385, 1], // opr
-  [386, 386, 1], // pls
-  [387, 387, 1], // xid
-  [388, 388, 1], // txn
-  [389, 389, 1], // dcb
-  [390, 390, 1], // cca
-  [391, 391, 1], // wrn
-  [393, 393, 1], // tlh
-  [394, 394, 1], // toh
-  [395, 395, 1], // foi
-  [396, 396, 1], // sid2
-  [397, 397, 1], // tch
-  [398, 398, 1], // pii
-  [399, 399, 1], // pfi
-  [400, 400, 1], // ppu
-  [401, 401, 1], // pte
-  [404, 404, 1], // rxh8
-  [405, 405, 1], // n12
-  [406, 406, 1], // auth
-  [407, 407, 1], // kval
-  [413, 413, 1], // fgi
-  [414, 414, 1], // dsy
-  [415, 415, 1], // dsyr8
-  [416, 416, 1], // dsyh8
-  [417, 417, 1], // dsyl
-  [418, 418, 1], // dsyt8
-  [419, 419, 1], // dsyv8
-  [420, 420, 1], // dsyp
-  [421, 421, 1], // dsyf
-  [422, 422, 1], // dsyk
-  [423, 423, 1], // dsyy
-  [424, 424, 1], // dsyq
-  [425, 425, 1], // dsyc
-  [426, 426, 1], // dsya
-  [427, 427, 1], // ot8
-  [429, 429, 1], // dsyty
-  [430, 430, 1], // aqe
-  [431, 431, 1], // kv
-  [432, 432, 1], // aqd
-  [433, 433, 1], // aq8
-  [449, 449, 1], // rfs
-  [450, 450, 1], // rxh10
-  [454, 454, 1], // kpn
-  [455, 455, 1], // kpdnr
-  [456, 456, 1], // dsyd
-  [457, 457, 1], // dsys
-  [458, 458, 1], // dsyr
-  [459, 459, 1], // dsyh
-  [460, 460, 1], // dsyt
-  [461, 461, 1], // dsyv
-  [462, 462, 1], // aqm
-  [463, 463, 1], // oer11
-  [466, 466, 1], // aql
-  [467, 467, 1], // otc
-  [468, 468, 1], // kfno
-  [469, 469, 1], // kfnp
-  [470, 470, 1], // kgt8
-  [471, 471, 1], // rasb4
-  [472, 472, 1], // raub2
-  [473, 473, 1], // raub1
-  [474, 474, 1], // ratxt
-  [475, 475, 1], // rssb4
-  [476, 476, 1], // rsub2
-  [477, 477, 1], // rsub1
-  [478, 478, 1], // rstxt
-  [479, 479, 1], // ridl
-  [480, 480, 1], // glrdd
-  [481, 481, 1], // glrdg
-  [482, 482, 1], // glrdc
-  [483, 483, 1], // oko
-  [484, 484, 1], // dpp
-  [485, 485, 1], // dpls
-  [486, 486, 1], // dpmop
-  [490, 490, 1], // stat
-  [491, 491, 1], // rfx
-  [492, 492, 1], // fal
-  [493, 493, 1], // ckv
-  [494, 494, 1], // drcx
-  [495, 495, 1], // kgh
-  [496, 496, 1], // aqo
-  [498, 498, 1], // okgt
-  [499, 499, 1], // kpfc
-  [500, 500, 1], // fe2
-  [501, 501, 1], // spfp
-  [502, 502, 1], // dpuls
-  [509, 509, 1], // aqa
-  [510, 510, 1], // kpbf
-  [513, 513, 1], // tsm
-  [514, 514, 1], // mss
-  [516, 516, 1], // kpc
-  [517, 517, 1], // crs
-  [518, 518, 1], // kks
-  [519, 519, 1], // ksp
-  [520, 520, 1], // ksptop
-  [521, 521, 1], // kspval
-  [522, 522, 1], // pss
-  [523, 523, 1], // nls
-  [524, 524, 1], // als
-  [525, 525, 1], // ksdevtval
-  [526, 526, 1], // ksdevttop
-  [527, 527, 1], // kpspp
-  [528, 528, 1], // kol
-  [529, 529, 1], // lst
-  [530, 530, 1], // acx
-  [531, 531, 1], // scs
-  [532, 532, 1], // rxh
-  [533, 533, 1], // kpdns
-  [534, 534, 1], // kpdcn
-  [535, 535, 1], // kpnns
-  [536, 536, 1], // kpncn
-  [537, 537, 1], // kps
-  [538, 538, 1], // apinf
-  [539, 539, 1], // ten
-  [540, 540, 1], // xsscs
-  [541, 541, 1], // xssso
-  [542, 542, 1], // xssao
-  [543, 543, 1], // ksrpc
-  [560, 560, 1], // kvl
-  [565, 565, 1], // xssdef
-  [572, 572, 1], // pdqcinv
-  [573, 573, 1], // pdqidc
-  [574, 574, 1], // kpdqcsta
-  [575, 575, 1], // kprs
-  [576, 576, 1], // kpdqidc
-  [578, 578, 1], // rtstrm
-  [563, 563, 1], // sessget
-  [564, 564, 1], // sessrel
-  [579, 579, 1], // sessret
-  [580, 580, 1], // scn6
-  [581, 581, 1], // kecpa
-  [582, 582, 1], // kecpp
-  [583, 583, 1], // sxa
-  [584, 584, 1], // kvarr
-  [585, 585, 1], // kpngn
-  [3, 2, 10], // binary_integer
-  [4, 2, 10], // float
-  [5, 1, 1], // str
-  [6, 2, 10], // vnu
-  [7, 2, 10], // pdn
-  [9, 1, 1], // vcs
-  [15, 1, 1], // vbi
-  [39, 39, 1], // oac9
-  [68, 2, 10], // uin
-  [91, 2, 10], // sls
-  [94, 1, 1], // lvc
-  [95, 23, 1], // lvb
-  [96, 96, 1], // char
-  [97, 96, 1], // avc
-  [100, 100, 1], // binary_float
-  [101, 101, 1], // binary_double
-  [102, 102, 1], // cursor
-  [104, 11, 1], // rdd
-  [106, 106, 1], // osl
-  [108, 109, 1], // ext_named
-  [109, 109, 1], // int_named
-  [110, 111, 1], // ext_ref
-  [111, 111, 1], // int_ref
-  [112, 112, 1], // clob
-  [113, 113, 1], // blob
-  [114, 114, 1], // bfile
-  [115, 115, 1], // cfile
-  [116, 102, 1], // rset
-  [119, 119, 1], // json
-  [198, 198, 1], // djson
-  [146, 146, 1], // clv
-  [152, 2, 10], // dtr
-  [153, 2, 10], // dun
-  [154, 2, 10], // dop
-  [155, 1, 1], // vst
-  [156, 12, 10], // odt
-  [172, 2, 10], // dol
-  [178, 178, 1], // time
-  [179, 179, 1], // time_tz
-  [180, 180, 1], // timestamp
-  [181, 181, 1], // timestamp_tz
-  [182, 182, 1], // interval_ym
-  [183, 183, 1], // interval_ds
-  [184, 12, 10], // edate
-  [185, 185, 1], // etime
-  [186, 186, 1], // ettz
-  [187, 187, 1], // estamp
-  [188, 188, 1], // estz
-  [189, 189, 1], // eiym
-  [190, 190, 1], // eids
-  [195, 112, 1], // dclob
-  [196, 113, 1], // dblob
-  [197, 114, 1], // dbfile
-  [208, 208, 1], // urowid
-  [231, 231, 1], // timestamp_ltz
-  [232, 231, 1], // esitz
-  [233, 233, 1], // ub8
-  [241, 109, 1], // pnty
-  [252, 252, 1], // boolean
-  [590, 590, 1], // xsnsop
-  [591, 591, 1], // xsattr
-  [592, 592, 1], // xsns
-  [613, 613, 1], // ub1array
-  [614, 614, 1], // sessstate
-  [615, 615, 1], // ac_replay
-  [616, 616, 1], // ac_cont
-  [611, 611, 1], // implres
-  [612, 612, 1], // oer19
-  [593, 593, 1], // txt
-  [594, 594, 1], // xssessns
-  [595, 595, 1], // xsattop
-  [596, 596, 1], // xscreop
-  [597, 597, 1], // xsdetop
-  [598, 598, 1], // xsdesop
-  [599, 599, 1], // xssetsp
-  [600, 600, 1], // xssidp
-  [601, 601, 1], // xsprin
-  [602, 602, 1], // xskvl
-  [603, 603, 1], // xsssdef2
-  [604, 604, 1], // xsnsop2
-  [605, 605, 1], // xsns2
-  [622, 622, 1], // kpdnreq
-  [623, 623, 1], // kpdnrnf
-  [624, 624, 1], // kpngnc
-  [625, 625, 1], // kpnri
-  [626, 626, 1], // aqenq
-  [627, 627, 1], // aqdeq
-  [628, 628, 1], // aqjms
-  [629, 629, 1], // kpdnrpay
-  [630, 630, 1], // kpdnrack
-  [631, 631, 1], // kpdnrmp
-  [632, 632, 1], // kpdnrdq
-  [637, 637, 1], // scn
-  [638, 638, 1], // scn8
-  [636, 636, 1], // chunkinfo
-  [639, 639, 1], // ud21
-  [663, 663, 1], // uds
-  [640, 640, 1], // tnp
-  [652, 652, 1], // oer
-  [646, 646, 1], // oac
-  [647, 647, 1], // sesssign
-  [127, 127, 1], // vector
+    [1, 1, 1], // varchar
+    [2, 2, 10], // number
+    [8, 8, 1], // long
+    [12, 12, 10], // date
+    [23, 23, 1], // raw
+    [24, 24, 1], // long_raw
+    [25, 25, 1], // ub2
+    [26, 26, 1], // ub4
+    [27, 27, 10], // sb1
+    [28, 28, 1], // sb2
+    [29, 29, 1], // sb4
+    [30, 30, 1], // sword
+    [31, 31, 1], // uword
+    [32, 32, 1], // ptrb
+    [33, 33, 1], // ptrw
+    [10, 10, 1], // tiddef
+    [11, 11, 1], // rowid
+    [40, 40, 1], // ams
+    [41, 41, 1], // brn
+    [117, 117, 1], // cwd
+    [120, 120, 1], // oac122
+    [290, 290, 1], // oer8
+    [291, 291, 1], // fun
+    [292, 292, 1], // aua
+    [293, 293, 1], // rxh7
+    [294, 294, 1], // na6
+    [298, 298, 1], // brp
+    [299, 299, 1], // brv
+    [300, 300, 1], // kva
+    [301, 301, 1], // cls
+    [302, 302, 1], // cui
+    [303, 303, 1], // dfn
+    [304, 304, 1], // dqr
+    [305, 305, 1], // dsc
+    [306, 306, 1], // exe
+    [307, 307, 1], // fch
+    [308, 308, 1], // gbv
+    [309, 309, 1], // gem
+    [310, 310, 1], // giv
+    [311, 311, 1], // okg
+    [312, 312, 1], // hmi
+    [313, 313, 1], // ino
+    [315, 315, 1], // lnf
+    [316, 316, 1], // ont
+    [317, 317, 1], // ope
+    [318, 318, 1], // osq
+    [319, 319, 1], // sfe
+    [320, 320, 1], // spf
+    [321, 321, 1], // vsn
+    [322, 322, 1], // ud7
+    [323, 323, 1], // dsa
+    [327, 327, 1], // pin
+    [328, 328, 1], // pfn
+    [329, 329, 1], // ppt
+    [331, 331, 1], // sto
+    [333, 333, 1], // arc
+    [334, 334, 1], // mrs
+    [335, 335, 1], // mrt
+    [336, 336, 1], // mrg
+    [337, 337, 1], // mrr
+    [338, 338, 1], // mrc
+    [339, 339, 1], // ver
+    [340, 340, 1], // lon2
+    [341, 341, 1], // ino2
+    [342, 342, 1], // all
+    [343, 343, 1], // udb
+    [344, 344, 1], // aqi
+    [345, 345, 1], // ulb
+    [346, 346, 1], // uld
+    [348, 348, 1], // sid
+    [349, 349, 1], // na7
+    [354, 354, 1], // al7
+    [355, 355, 1], // k2rpc
+    [359, 359, 1], // xdp
+    [363, 363, 1], // oko8
+    [380, 380, 1], // ud12
+    [381, 381, 1], // al8
+    [382, 382, 1], // lfop
+    [383, 383, 1], // fcrt
+    [384, 384, 1], // dny
+    [385, 385, 1], // opr
+    [386, 386, 1], // pls
+    [387, 387, 1], // xid
+    [388, 388, 1], // txn
+    [389, 389, 1], // dcb
+    [390, 390, 1], // cca
+    [391, 391, 1], // wrn
+    [393, 393, 1], // tlh
+    [394, 394, 1], // toh
+    [395, 395, 1], // foi
+    [396, 396, 1], // sid2
+    [397, 397, 1], // tch
+    [398, 398, 1], // pii
+    [399, 399, 1], // pfi
+    [400, 400, 1], // ppu
+    [401, 401, 1], // pte
+    [404, 404, 1], // rxh8
+    [405, 405, 1], // n12
+    [406, 406, 1], // auth
+    [407, 407, 1], // kval
+    [413, 413, 1], // fgi
+    [414, 414, 1], // dsy
+    [415, 415, 1], // dsyr8
+    [416, 416, 1], // dsyh8
+    [417, 417, 1], // dsyl
+    [418, 418, 1], // dsyt8
+    [419, 419, 1], // dsyv8
+    [420, 420, 1], // dsyp
+    [421, 421, 1], // dsyf
+    [422, 422, 1], // dsyk
+    [423, 423, 1], // dsyy
+    [424, 424, 1], // dsyq
+    [425, 425, 1], // dsyc
+    [426, 426, 1], // dsya
+    [427, 427, 1], // ot8
+    [429, 429, 1], // dsyty
+    [430, 430, 1], // aqe
+    [431, 431, 1], // kv
+    [432, 432, 1], // aqd
+    [433, 433, 1], // aq8
+    [449, 449, 1], // rfs
+    [450, 450, 1], // rxh10
+    [454, 454, 1], // kpn
+    [455, 455, 1], // kpdnr
+    [456, 456, 1], // dsyd
+    [457, 457, 1], // dsys
+    [458, 458, 1], // dsyr
+    [459, 459, 1], // dsyh
+    [460, 460, 1], // dsyt
+    [461, 461, 1], // dsyv
+    [462, 462, 1], // aqm
+    [463, 463, 1], // oer11
+    [466, 466, 1], // aql
+    [467, 467, 1], // otc
+    [468, 468, 1], // kfno
+    [469, 469, 1], // kfnp
+    [470, 470, 1], // kgt8
+    [471, 471, 1], // rasb4
+    [472, 472, 1], // raub2
+    [473, 473, 1], // raub1
+    [474, 474, 1], // ratxt
+    [475, 475, 1], // rssb4
+    [476, 476, 1], // rsub2
+    [477, 477, 1], // rsub1
+    [478, 478, 1], // rstxt
+    [479, 479, 1], // ridl
+    [480, 480, 1], // glrdd
+    [481, 481, 1], // glrdg
+    [482, 482, 1], // glrdc
+    [483, 483, 1], // oko
+    [484, 484, 1], // dpp
+    [485, 485, 1], // dpls
+    [486, 486, 1], // dpmop
+    [490, 490, 1], // stat
+    [491, 491, 1], // rfx
+    [492, 492, 1], // fal
+    [493, 493, 1], // ckv
+    [494, 494, 1], // drcx
+    [495, 495, 1], // kgh
+    [496, 496, 1], // aqo
+    [498, 498, 1], // okgt
+    [499, 499, 1], // kpfc
+    [500, 500, 1], // fe2
+    [501, 501, 1], // spfp
+    [502, 502, 1], // dpuls
+    [509, 509, 1], // aqa
+    [510, 510, 1], // kpbf
+    [513, 513, 1], // tsm
+    [514, 514, 1], // mss
+    [516, 516, 1], // kpc
+    [517, 517, 1], // crs
+    [518, 518, 1], // kks
+    [519, 519, 1], // ksp
+    [520, 520, 1], // ksptop
+    [521, 521, 1], // kspval
+    [522, 522, 1], // pss
+    [523, 523, 1], // nls
+    [524, 524, 1], // als
+    [525, 525, 1], // ksdevtval
+    [526, 526, 1], // ksdevttop
+    [527, 527, 1], // kpspp
+    [528, 528, 1], // kol
+    [529, 529, 1], // lst
+    [530, 530, 1], // acx
+    [531, 531, 1], // scs
+    [532, 532, 1], // rxh
+    [533, 533, 1], // kpdns
+    [534, 534, 1], // kpdcn
+    [535, 535, 1], // kpnns
+    [536, 536, 1], // kpncn
+    [537, 537, 1], // kps
+    [538, 538, 1], // apinf
+    [539, 539, 1], // ten
+    [540, 540, 1], // xsscs
+    [541, 541, 1], // xssso
+    [542, 542, 1], // xssao
+    [543, 543, 1], // ksrpc
+    [560, 560, 1], // kvl
+    [565, 565, 1], // xssdef
+    [572, 572, 1], // pdqcinv
+    [573, 573, 1], // pdqidc
+    [574, 574, 1], // kpdqcsta
+    [575, 575, 1], // kprs
+    [576, 576, 1], // kpdqidc
+    [578, 578, 1], // rtstrm
+    [563, 563, 1], // sessget
+    [564, 564, 1], // sessrel
+    [579, 579, 1], // sessret
+    [580, 580, 1], // scn6
+    [581, 581, 1], // kecpa
+    [582, 582, 1], // kecpp
+    [583, 583, 1], // sxa
+    [584, 584, 1], // kvarr
+    [585, 585, 1], // kpngn
+    [3, 2, 10], // binary_integer
+    [4, 2, 10], // float
+    [5, 1, 1], // str
+    [6, 2, 10], // vnu
+    [7, 2, 10], // pdn
+    [9, 1, 1], // vcs
+    [15, 1, 1], // vbi
+    [39, 39, 1], // oac9
+    [68, 2, 10], // uin
+    [91, 2, 10], // sls
+    [94, 1, 1], // lvc
+    [95, 23, 1], // lvb
+    [96, 96, 1], // char
+    [97, 96, 1], // avc
+    [100, 100, 1], // binary_float
+    [101, 101, 1], // binary_double
+    [102, 102, 1], // cursor
+    [104, 11, 1], // rdd
+    [106, 106, 1], // osl
+    [108, 109, 1], // ext_named
+    [109, 109, 1], // int_named
+    [110, 111, 1], // ext_ref
+    [111, 111, 1], // int_ref
+    [112, 112, 1], // clob
+    [113, 113, 1], // blob
+    [114, 114, 1], // bfile
+    [115, 115, 1], // cfile
+    [116, 102, 1], // rset
+    [119, 119, 1], // json
+    [198, 198, 1], // djson
+    [146, 146, 1], // clv
+    [152, 2, 10], // dtr
+    [153, 2, 10], // dun
+    [154, 2, 10], // dop
+    [155, 1, 1], // vst
+    [156, 12, 10], // odt
+    [172, 2, 10], // dol
+    [178, 178, 1], // time
+    [179, 179, 1], // time_tz
+    [180, 180, 1], // timestamp
+    [181, 181, 1], // timestamp_tz
+    [182, 182, 1], // interval_ym
+    [183, 183, 1], // interval_ds
+    [184, 12, 10], // edate
+    [185, 185, 1], // etime
+    [186, 186, 1], // ettz
+    [187, 187, 1], // estamp
+    [188, 188, 1], // estz
+    [189, 189, 1], // eiym
+    [190, 190, 1], // eids
+    [195, 112, 1], // dclob
+    [196, 113, 1], // dblob
+    [197, 114, 1], // dbfile
+    [208, 208, 1], // urowid
+    [231, 231, 1], // timestamp_ltz
+    [232, 231, 1], // esitz
+    [233, 233, 1], // ub8
+    [241, 109, 1], // pnty
+    [252, 252, 1], // boolean
+    [590, 590, 1], // xsnsop
+    [591, 591, 1], // xsattr
+    [592, 592, 1], // xsns
+    [613, 613, 1], // ub1array
+    [614, 614, 1], // sessstate
+    [615, 615, 1], // ac_replay
+    [616, 616, 1], // ac_cont
+    [611, 611, 1], // implres
+    [612, 612, 1], // oer19
+    [593, 593, 1], // txt
+    [594, 594, 1], // xssessns
+    [595, 595, 1], // xsattop
+    [596, 596, 1], // xscreop
+    [597, 597, 1], // xsdetop
+    [598, 598, 1], // xsdesop
+    [599, 599, 1], // xssetsp
+    [600, 600, 1], // xssidp
+    [601, 601, 1], // xsprin
+    [602, 602, 1], // xskvl
+    [603, 603, 1], // xsssdef2
+    [604, 604, 1], // xsnsop2
+    [605, 605, 1], // xsns2
+    [622, 622, 1], // kpdnreq
+    [623, 623, 1], // kpdnrnf
+    [624, 624, 1], // kpngnc
+    [625, 625, 1], // kpnri
+    [626, 626, 1], // aqenq
+    [627, 627, 1], // aqdeq
+    [628, 628, 1], // aqjms
+    [629, 629, 1], // kpdnrpay
+    [630, 630, 1], // kpdnrack
+    [631, 631, 1], // kpdnrmp
+    [632, 632, 1], // kpdnrdq
+    [637, 637, 1], // scn
+    [638, 638, 1], // scn8
+    [636, 636, 1], // chunkinfo
+    [639, 639, 1], // ud21
+    [663, 663, 1], // uds
+    [640, 640, 1], // tnp
+    [652, 652, 1], // oer
+    [646, 646, 1], // oac
+    [647, 647, 1], // sesssign
+    [127, 127, 1], // vector
   ];
 
   // Compile capability indices (from node-oracledb constants.js)
@@ -1242,8 +1202,18 @@ class Transport {
     // Handle MARKER packets - Oracle may send these during authentication
     // Simply skip them and read the next packet
     while (response.type == tnsPacketMarker) {
-      _log.fine('Received MARKER packet (${response.payload.length} bytes), reading next packet');
+      _log.fine(
+          'Received MARKER packet (${response.payload.length} bytes), reading next packet');
       response = await receive();
+    }
+
+    // Handle REFUSE packet - Oracle sends this when authentication fails
+    if (response.type == tnsPacketRefuse) {
+      _log.warning('Authentication refused by server');
+      throw const OracleException(
+        errorCode: oraInvalidCredentials,
+        message: 'Authentication failed: invalid username or password',
+      );
     }
 
     if (response.type != tnsPacketData) {
@@ -1258,20 +1228,5 @@ class Transport {
       return response.payload;
     }
     return response.payload.sublist(2);
-  }
-
-  /// DEBUG: Saves TTC batch to file for byte-by-byte comparison with node-oracledb.
-  Future<void> _saveTtcBatchForDebug(Uint8List ttcBatch) async {
-    final file = File('dart_ttc_batch.bin');
-    await file.writeAsBytes(ttcBatch);
-    _log.info(
-        'DEBUG: Saved TTC batch to ${file.path} (${ttcBatch.length} bytes)');
-
-    // Also log first 100 bytes as hex for quick comparison
-    final hexPreview = ttcBatch
-        .sublist(0, ttcBatch.length < 100 ? ttcBatch.length : 100)
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join(' ');
-    _log.fine('First 100 bytes: $hexPreview');
   }
 }

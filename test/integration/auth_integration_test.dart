@@ -54,8 +54,8 @@ void main() {
       final connectData = buildConnectData();
       await transport.sendConnectReceiveAccept(connectData);
 
-      // Perform TTC protocol negotiation (with data types - required before auth)
-      await transport.sendProtocolNegotiation();
+      // Note: Protocol negotiation is now part of FAST_AUTH
+      // (authenticate() sends Protocol + DataTypes + AUTH_PHASE_ONE together)
     });
 
     tearDown(() async {
@@ -135,7 +135,8 @@ void main() {
         verifierType: verifierTypePbkdf2,
         salt: Uint8List.fromList(List.generate(16, (i) => i)),
         iterations: 4096,
-        serverNonce: Uint8List.fromList(List.generate(16, (i) => i + 100)),
+        // serverNonce is AUTH_SESSKEY (64 bytes encrypted, decrypts to 32 bytes for Oracle 12c)
+        serverNonce: Uint8List.fromList(List.generate(64, (i) => i + 100)),
         authPasswordMode: 0,
       );
       final clientNonce = Uint8List.fromList(List.generate(16, (i) => i + 50));
@@ -146,14 +147,24 @@ void main() {
         clientNonce: clientNonce,
       );
 
+      // Note: proof1 != proof2 because we add random salt for security
+      // But both should succeed and produce valid sessionKey
+      expect(proof1, isNotNull);
+      expect(proof1.length, greaterThan(0));
+      expect(auth.sessionKey, isNotNull);
+
       final proof2 = auth.generatePasswordProof(
         password: 'testpassword',
         params: params,
         clientNonce: clientNonce,
       );
 
-      expect(proof1, equals(proof2));
+      expect(proof2, isNotNull);
+      expect(proof2.length, greaterThan(0));
       expect(auth.sessionKey, isNotNull);
+
+      // Proofs are different due to random salt (correct behavior for security)
+      expect(proof1, isNot(equals(proof2)));
     });
   });
 }

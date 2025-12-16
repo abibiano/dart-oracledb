@@ -382,8 +382,7 @@ class AcceptPacketInfo {
       final flag2 = buffer.readUint32BE();
 
       if (version >= tnsVersionMinEndOfResponse) {
-        supportsEndOfRequest =
-            (flag2 & tnsAcceptFlagHasEndOfRequest) != 0;
+        supportsEndOfRequest = (flag2 & tnsAcceptFlagHasEndOfRequest) != 0;
       }
       supportsFastAuth = (flag2 & tnsAcceptFlagFastAuth) != 0;
     }

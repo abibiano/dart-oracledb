@@ -62,14 +62,16 @@ void main() {
       const authMode = ttcAuthModeLogon | ttcAuthModeWithPassword;
 
       // Username presence and length
-      final usernameBytes = Uint8List.fromList(utf8.encode(username)); // Send as-is (lowercase)
+      final usernameBytes =
+          Uint8List.fromList(utf8.encode(username)); // Send as-is (lowercase)
       buffer.writeUint8(usernameBytes.isNotEmpty ? 1 : 0);
       buffer.writeUB4(usernameBytes.length);
       buffer.writeUB4(authMode);
 
       // Phase one parameters - Match node-oracledb format
       buffer.writeUint8(1); // Unknown flag
-      buffer.writeUB4(5); // Number of key-value pairs = 5 (matching node-oracledb)
+      buffer.writeUB4(
+          5); // Number of key-value pairs = 5 (matching node-oracledb)
       buffer.writeUint8(0); // Unknown
       buffer.writeUint8(1); // Unknown
 
@@ -120,9 +122,11 @@ void main() {
         // Try to receive AUTH_PHASE_ONE response
         final response = await transport.receiveData();
         // ignore: avoid_print
-        print('SUCCESS! Received AUTH_PHASE_ONE response: ${response.length} bytes');
+        print(
+            'SUCCESS! Received AUTH_PHASE_ONE response: ${response.length} bytes');
         // ignore: avoid_print
-        print('Response hex: ${response.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
+        print(
+            'Response hex: ${response.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
 
         // Verify it's an AUTH_PHASE_ONE response (should contain verifier data)
         expect(response.length, greaterThan(0));
@@ -133,7 +137,8 @@ void main() {
       }
     });
 
-    test('complete authentication flow (AUTH_PHASE_ONE + AUTH_PHASE_TWO)', () async {
+    test('complete authentication flow (AUTH_PHASE_ONE + AUTH_PHASE_TWO)',
+        () async {
       // ignore: avoid_print
       print('\n=== Testing Complete Authentication Flow ===');
 

@@ -141,8 +141,8 @@ class OracleSocket {
       // Check connection status inside the loop to catch disconnects during wait
       if (!isConnected) {
         throw OracleException(
-          errorCode: oraProtocolError,
-          message: 'Socket closed while waiting for data: '
+          errorCode: oraNetworkError,
+          message: 'Connection closed by server while waiting for data: '
               'need $length bytes, have ${_pendingData.length}',
         );
       }

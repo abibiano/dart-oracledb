@@ -66,16 +66,18 @@ void main() {
 
         // Parse response
         final authFlow = AuthFlow();
-        final parsedResponse =
-            AuthPhaseOneResponse.decode(phaseOneResponse);
+        final parsedResponse = AuthPhaseOneResponse.decode(phaseOneResponse);
         final verifierParams = parsedResponse.toVerifierParams();
 
         // ignore: avoid_print
-        print('Verifier type: 0x${verifierParams.verifierType.toRadixString(16)}');
+        print(
+            'Verifier type: 0x${verifierParams.verifierType.toRadixString(16)}');
         // ignore: avoid_print
-        print('Salt: ${verifierParams.salt.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
+        print(
+            'Salt: ${verifierParams.salt.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
         // ignore: avoid_print
-        print('Server nonce: ${verifierParams.serverNonce.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
+        print(
+            'Server nonce: ${verifierParams.serverNonce.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
         // ignore: avoid_print
         print('Iterations: ${verifierParams.iterations}');
 
@@ -87,9 +89,11 @@ void main() {
         );
 
         // ignore: avoid_print
-        print('Encrypted proof (${encryptedProof.length} bytes): ${encryptedProof.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
+        print(
+            'Encrypted proof (${encryptedProof.length} bytes): ${encryptedProof.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
         // ignore: avoid_print
-        print('Session key (${authFlow.sessionKey!.length} bytes): ${authFlow.sessionKey!.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
+        print(
+            'Session key (${authFlow.sessionKey!.length} bytes): ${authFlow.sessionKey!.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
 
         // Create AUTH_PHASE_TWO message
         final phaseTwoRequest = AuthPhaseTwoRequest(
@@ -110,7 +114,8 @@ void main() {
         for (var i = 0; i < phaseTwoBytes.length; i += 16) {
           final chunk = phaseTwoBytes.sublist(
               i, i + 16 > phaseTwoBytes.length ? phaseTwoBytes.length : i + 16);
-          final hex = chunk.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+          final hex =
+              chunk.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
           final offset = i.toString().padLeft(4, '0');
           // ignore: avoid_print
           print('  $offset: $hex');
