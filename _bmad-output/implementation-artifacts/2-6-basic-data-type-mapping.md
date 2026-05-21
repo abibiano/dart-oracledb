@@ -1,6 +1,6 @@
 # Story 2.6: Basic Data Type Mapping
 
-Status: Review
+Status: done
 
 ## Story
 
@@ -489,8 +489,8 @@ group('Data type mapping integration',
 
 **Negative:**
 ```
--1 → [0x3E, 0x65, 0x66]  // complement encoding + terminator
--123 → [0x3D, 0x65, 0x59, 0x66]  // complement + terminator
+-1 → [0x3E, 0x64, 0x66]  // complement encoding + terminator (101-1=100=0x64)
+-123 → [0x3D, 0x64, 0x4E, 0x66]  // complement + terminator (101-1=0x64, 101-23=78=0x4E)
 ```
 
 ### References
@@ -520,6 +520,75 @@ Unlike Stories 2.1-2.5 which were blocked by Epic 1 authentication bugs, **Story
 - ✅ Data types file exists, just needs enhancement
 
 **This story can be implemented and tested immediately against Oracle 23ai.**
+
+### Review Findings
+
+_Code review 2026-05-21 — 3 layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) over commit 40db746._
+
+**Patches (all resolved):**
+
+- [x] [Review][Patch] AC6 NULL test omits VARCHAR_COL and CHAR_COL — _NULL test extended to assert all three character columns plus int/decimal/date/timestamp._ [test/integration/query_integration_test.dart]
+- [x] [Review][Patch] Round-trip INSERT test omits VARCHAR_COL and CHAR_COL — _Round-trip test now inserts and verifies VARCHAR2/VARCHAR/CHAR alongside numeric and temporal columns._ [test/integration/query_integration_test.dart]
+- [x] [Review][Patch] tearDown swallows all DROP TABLE exceptions — _tearDown narrowed to ignore only `OracleException` with `errorCode == 942` (ORA-00942); other errors rethrow so real teardown failures surface._ [test/integration/query_integration_test.dart]
+- [x] [Review][Patch] setUp leaks the connection if CREATE TABLE fails with a non-955 reason — _setUp now closes the connection before rethrowing on non-955 CREATE TABLE failures._ [test/integration/query_integration_test.dart]
+- [x] [Review][Patch] Negative NUMBER value not exercised by integration — _Production bug fixed in `decodeNumber` / `encodeNumber`: negative-mantissa digits use `101 - digit`, not `102 - digit` (confirmed against node-oracledb `parseOracleNumber` at lib/impl/datahandlers/buffer.js:268). The 102 byte is a pure terminator sentinel — never a digit value, since `101 - digit` for digit ∈ [0,99] yields bytes in [2,101]. The unit round-trip tests had hidden the bug because the encoder was symmetrically off-by-one. Both integration tests are now active and pass against Oracle 23ai (-98765 → -98765, -123.45 → -123.45)._ [lib/src/protocol/data_types.dart, test/integration/query_integration_test.dart]
+- [x] [Review][Patch] Zero NUMBER value not exercised by integration — _Test added; `0` and `NUMBER(10,2) 0` both decode correctly._ [test/integration/query_integration_test.dart]
+
+**Deferred (pre-existing or out of scope for this story):**
+
+- [x] [Review][Defer] TIMESTAMP WITH TIME ZONE / LOCAL TIME ZONE decoder reads only 11 bytes [lib/src/protocol/data_types.dart:426-473] — deferred, pre-existing production code path; needs its own story
+- [x] [Review][Defer] DATE/TIMESTAMP round-trip via Dart-bound parameters not exercised (inserts use Oracle TO_DATE/TO_TIMESTAMP server-side) [test/integration/query_integration_test.dart:233-345] — deferred, bind-side encoder coverage is a separate scope
+- [x] [Review][Defer] NUMBER 2^53 int-vs-double boundary not tested at integration level — deferred, additional coverage beyond AC
+- [x] [Review][Defer] NUMBER 38-digit / very large values not tested (precision loss at Dart double limit ~17 digits) — deferred, additional coverage
+- [x] [Review][Defer] Bare `NUMBER` (default precision/scale) column not exercised — deferred, additional coverage
+- [x] [Review][Defer] Pure-fraction NUMBER (negative-exponent branch, e.g. 0.0001, 0.000001) not exercised by integration — deferred, additional coverage
+- [x] [Review][Defer] TIMESTAMP nanosecond truncation not asserted (inputs are µs-aligned at `.123456`) — deferred, additional coverage
+- [x] [Review][Defer] Pre-epoch / BC and year-boundary (1, 100, 9999) DATE values not tested — deferred, additional coverage
+- [x] [Review][Defer] CHAR(5) padding semantics not validated — test inserts exactly 5 chars 'ABCDE'; the interesting Oracle behavior (right-pad with spaces for shorter values, trimming on read) is sidestepped [test/integration/query_integration_test.dart:179-202] — deferred, additional coverage
+- [x] [Review][Defer] Multi-byte UTF-8 in VARCHAR2/VARCHAR/CHAR not tested — deferred, additional coverage
+- [x] [Review][Defer] Empty-string vs NULL conflation in VARCHAR2 (Oracle treats `''` as NULL) not tested — deferred, additional coverage
+- [x] [Review][Defer] VARCHAR2(100) length boundary and over-length (ORA-12899) not tested — deferred, additional coverage
+- [x] [Review][Defer] Shared fixed table name `test_types_story26` and fixed PK ids 1..7 collide if suite is run in parallel against the same DB — deferred, test isolation strategy is a cross-cutting concern
+- [x] [Review][Defer] No connect timeout / no explicit auto-commit boundary across tests — deferred, pre-existing pattern in integration suite
+- [x] [Review][Defer] `hasOracle` is `Platform.environment.containsKey('RUN_INTEGRATION_TESTS')` — true for any value (including `0` or empty) [test/integration/test_helper.dart] — deferred, pre-existing helper convention
+- [x] [Review][Defer] `oraTypeInteger` / `oraTypeFloat` / `oraTypeVarnum` switch arms in `decodeValue`, plus absent BINARY_FLOAT / BINARY_DOUBLE / LONG / CLOB / NCHAR / NVARCHAR2, not exercised — deferred, separate type-coverage scope
+
+**Dismissed (noise / false positives, 14):**
+
+- TIMESTAMP `millisecond=123 + microsecond=456` assertion for `.123456` is correct per Dart's `DateTime` API (millisecond and microsecond are separate 0–999 components).
+- `closeTo(123.45, 0.001)` is appropriate — 123.45 is not exactly representable in IEEE 754 double.
+- Magic Oracle error code 955 / column-name validation / `rows.single` cryptic error / `$testTable` interpolation — style nits in a test fixture.
+- Status string change "Ready for Review" → "Review" — intentional alignment with `sprint-status.yaml` taxonomy.
+- Formatter whitespace tweaks in adjacent string literals — Dart concatenation only joins the quoted content.
+- Two implementation dates (2025-12-16, 2026-05-21) — intentional, separate dev and validation passes.
+- Three other low-severity items already captured in defer/patch buckets.
+
+### Review Findings — Patch-Resolution Pass (2026-05-21)
+
+_Reviewing uncommitted changes (dev session 3 patches) against commit 40db746. 3 layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor). 2 dismissed as noise._
+
+**Patches (open):**
+
+- [x] [Review][Patch] setUp TRUNCATE path leaks connection if TRUNCATE throws — the ORA-00955 branch calls `await connection.execute('TRUNCATE TABLE $testTable')` with no error handling; if TRUNCATE throws (lock, privilege, etc.) the connection is not closed. Fix: wrap TRUNCATE in a try/finally that closes the connection before rethrowing. [test/integration/query_integration_test.dart]
+- [x] [Review][Patch] Spec byte-level examples for negative NUMBER are wrong after 101 fix — "Oracle NUMBER Examples" shows `-1 → [0x3E, 0x65, 0x66]` (implying `102 - 1 = 0x65`); with the corrected formula `101 - digit`, digit=1 encodes as `100 = 0x64`, so the correct bytes are `[0x3E, 0x64, 0x66]`. The prose above the examples ("101 - digit") is correct; the concrete examples are stale and will mislead future readers. [_bmad-output/implementation-artifacts/2-6-basic-data-type-mapping.md]
+
+**Deferred:**
+
+- [x] [Review][Defer] `decodeNumber` no length-based sentinel guard — if Oracle omits the 0x66 terminator, the loop consumes the rest of the buffer as mantissa digits, desynchronising the packet reader [lib/src/protocol/data_types.dart] — pre-existing architectural issue; needs its own story
+- [x] [Review][Defer] `encodeNumber` unconditional terminator append for all negative numbers — potential over-long encoding if Oracle decoder is strict at max field length [lib/src/protocol/data_types.dart] — pre-existing, validated against Oracle 23ai
+- [x] [Review][Defer] `encodeNumber` throws `FormatException` (not `OracleException`) for `double.infinity` / `double.nan` [lib/src/protocol/data_types.dart] — pre-existing
+- [x] [Review][Defer] `encodeNumber` `toStringAsFixed(20)` introduces floating-point string artefacts (e.g. 678.90 → 678.900...09); integration tests use `closeTo` to accommodate [lib/src/protocol/data_types.dart] — pre-existing
+- [x] [Review][Defer] `decodeNumber` returns `int 0` for `NUMBER(10,2)` zero (0x80 special case), inconsistent with non-zero path that returns `double` for scale>0 columns [lib/src/protocol/data_types.dart] — pre-existing; acknowledged in test with weakened assertion
+- [x] [Review][Defer] Negative mantissa digit-pair=0 (e.g. -100, -200, -10001) not covered by unit or integration tests [test/integration/query_integration_test.dart] — additional coverage gap
+- [x] [Review][Defer] setUp close() in non-955 else-branch can throw, masking original CREATE TABLE error [test/integration/query_integration_test.dart] — pre-existing cleanup-in-error-path risk
+- [x] [Review][Defer] tearDown finally close() can throw, masking non-942 DROP TABLE error [test/integration/query_integration_test.dart] — pre-existing cleanup-in-error-path risk
+- [x] [Review][Defer] Fixed PK ids 8–10 in shared table collide on retry or concurrent runs [test/integration/query_integration_test.dart] — pre-existing; extends prior-pass defer (ids 1–7)
+- [x] [Review][Defer] DML operations group tearDown still uses old `catch (_) {}` pattern — out of scope for this story [test/integration/query_integration_test.dart] — pre-existing
+
+**Dismissed (2):**
+
+- Blind Hunter digit=0 encoding range analysis self-resolved as no-bug.
+- Acceptance Auditor "malformed test body in diff" was a false positive caused by a diff construction error in the review prompt; committed code has two correctly separated test functions.
 
 ## Dev Agent Record
 
@@ -619,6 +688,23 @@ Add a Story 2.6 integration test group to `test/integration/query_integration_te
 - `RUN_INTEGRATION_TESTS=1 dart test test/integration/query_integration_test.dart --plain-name "Data type mapping"` - pass (7 tests)
 - `RUN_INTEGRATION_TESTS=1 dart test test/integration/query_integration_test.dart` - pass (60 tests)
 
+**Implementation Date:** 2026-05-21 (session 3 — production bug fix)
+
+**decodeNumber negative-branch fix:**
+✅ Root-caused the off-by-one defect surfaced by the negative-NUMBER integration tests against Oracle 23ai.
+   - `lib/src/protocol/data_types.dart` `decodeNumber` was applying `digit = 102 - byte` for negative mantissa digits. Oracle's wire format encodes negative digits as `byte = 101 - digit`, with `102` reserved as the terminator sentinel (confirmed against node-oracledb `parseOracleNumber` at `lib/impl/datahandlers/buffer.js:268`).
+   - `encodeNumber` was symmetrically wrong (`byte = 102 - digit`). Round-trip unit tests passed because the encoder and decoder both inverted by 1, cancelling out — only real Oracle wire bytes exposed the asymmetry.
+   - Fixed both call sites to use `101`; encoder still emits the `102` sentinel after the mantissa for negative values, matching node-oracledb's `buf[buf.length - 1] === 102` check.
+   - `102` cannot collide with any valid digit byte because `101 - digit` for digit ∈ [0,99] yields bytes in `[2, 101]`.
+✅ Removed the two `skip:` markers in `test/integration/query_integration_test.dart` for "SELECT negative NUMBER returns int" and "SELECT negative NUMBER(10,2) returns double".
+
+**Validation Results:**
+- `dart format --set-exit-if-changed lib/src/protocol/data_types.dart test/integration/query_integration_test.dart` - pass
+- `dart analyze` - pass (no issues)
+- `dart test` - pass (454 tests, 93 skipped — same baseline)
+- `RUN_INTEGRATION_TESTS=1 dart test test/integration/query_integration_test.dart --plain-name "Data type mapping"` - pass (10 tests; was 7 before the unskip, +2 negative-NUMBER tests now run, +1 pre-existing zero-NUMBER reflows into the group count)
+- `RUN_INTEGRATION_TESTS=1 dart test test/integration/query_integration_test.dart` - pass (63 tests; was 60)
+
 ### File List
 
 **Files Modified:**
@@ -635,3 +721,4 @@ Add a Story 2.6 integration test group to `test/integration/query_integration_te
 ### Change Log
 
 - 2026-05-21: Added Story 2.6 Oracle 23ai integration tests and marked data type mapping story ready for review.
+- 2026-05-21: Fixed `decodeNumber`/`encodeNumber` negative-mantissa off-by-one (101 vs 102) per node-oracledb reference; unskipped both negative-NUMBER integration tests; all 6 code-review patches now resolved; status → review.

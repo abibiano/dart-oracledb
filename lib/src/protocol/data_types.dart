@@ -44,13 +44,9 @@ bool isNullValue(Uint8List data) {
 ///   - Negative: complement of (0xC0 + exponent - 1)
 /// - Bytes 1-21: Mantissa digits in base-100 (2 decimal digits per byte)
 ///   - Positive: digit + 1
-///   - Negative: 101 - digit, terminated by 102
-///
-/// The exponent represents the power of 100 for the first digit pair.
-/// For example:
-/// - 123 → exponent=2, digits=[1,23] → 1*100^1 + 23*100^0 = 123
-/// - 1.23 → exponent=1, digits=[1,23] → 1*100^0 + 23*100^-1 = 1.23
-/// - 0.5 → exponent=0, digits=[50] → 50*100^-1 = 0.5
+///   - Negative: 101 - digit, terminated by sentinel byte 102 (the terminator
+///     value is distinct from any encoded digit because `101 - digit` for
+///     digit ∈ [0,99] yields bytes in [2,101]).
 Uint8List encodeNumber(num value) {
   if (value == 0) {
     // Special case: zero is encoded as single byte 0x80
@@ -121,9 +117,9 @@ Uint8List encodeNumber(num value) {
   if (isNegative) {
     // Negative: exponent byte is ~(192 + exponent)
     result.add((~(192 + exponent)) & 0xFF);
-    // Digits: complement encoding using 102 - digit
+    // Digits: complement encoding using 101 - digit
     for (final digit in digits) {
-      result.add(102 - digit);
+      result.add(101 - digit);
     }
     // Terminator for negative numbers
     result.add(102);
@@ -177,8 +173,8 @@ num decodeNumber(ReadBuffer buffer) {
 
     int digit;
     if (isNegative) {
-      // Negative: digit byte was (102 - digit), so digit = 102 - byte
-      digit = 102 - byte;
+      // Negative: digit byte was (101 - digit), so digit = 101 - byte
+      digit = 101 - byte;
     } else {
       digit = byte - 1;
     }

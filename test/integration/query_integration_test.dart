@@ -234,8 +234,17 @@ void main() {
         ''');
       } on OracleException catch (e) {
         if (e.errorCode == 955) {
-          await connection.execute('TRUNCATE TABLE $testTable');
+          // ORA-00955: table already exists — reuse it
+          try {
+            await connection.execute('TRUNCATE TABLE $testTable');
+          } catch (_) {
+            await connection.close();
+            rethrow;
+          }
         } else {
+          // Close the connection before rethrowing so a setUp failure does
+          // not leak a session into the next test.
+          await connection.close();
           rethrow;
         }
       }
@@ -244,8 +253,15 @@ void main() {
     tearDown(() async {
       try {
         await connection.execute('DROP TABLE $testTable');
-      } catch (_) {}
-      await connection.close();
+      } on OracleException catch (e) {
+        // ORA-00942: table or view does not exist — acceptable in tearDown.
+        // Anything else (network, auth, protocol) should surface.
+        if (e.errorCode != 942) {
+          rethrow;
+        }
+      } finally {
+        await connection.close();
+      }
     });
 
     test('SELECT character columns return String values', () async {
@@ -358,7 +374,8 @@ void main() {
 
       final result = await connection.execute(
         '''
-        SELECT varchar2_col, int_col, decimal_col, date_col, timestamp_col
+        SELECT varchar2_col, varchar_col, char_col,
+               int_col, decimal_col, date_col, timestamp_col
         FROM $testTable
         WHERE id = 6
         ''',
@@ -366,10 +383,58 @@ void main() {
       final row = result.rows.single;
 
       expect(row['VARCHAR2_COL'], isNull);
+      expect(row['VARCHAR_COL'], isNull);
+      expect(row['CHAR_COL'], isNull);
       expect(row['INT_COL'], isNull);
       expect(row['DECIMAL_COL'], isNull);
       expect(row['DATE_COL'], isNull);
       expect(row['TIMESTAMP_COL'], isNull);
+    });
+
+    test('SELECT negative NUMBER returns int', () async {
+      await connection.execute(
+        'INSERT INTO $testTable (id, int_col) VALUES (8, -98765)',
+      );
+
+      final result = await connection.execute(
+        'SELECT int_col FROM $testTable WHERE id = 8',
+      );
+      final value = result.rows.single['INT_COL'];
+
+      expect(value, isA<int>());
+      expect(value, equals(-98765));
+    });
+
+    test('SELECT negative NUMBER(10,2) returns double', () async {
+      await connection.execute(
+        'INSERT INTO $testTable (id, decimal_col) VALUES (9, -123.45)',
+      );
+
+      final result = await connection.execute(
+        'SELECT decimal_col FROM $testTable WHERE id = 9',
+      );
+      final value = result.rows.single['DECIMAL_COL'];
+
+      expect(value, isA<double>());
+      expect(value, closeTo(-123.45, 0.001));
+    });
+
+    test('SELECT zero NUMBER returns int', () async {
+      await connection.execute(
+        'INSERT INTO $testTable (id, int_col, decimal_col) VALUES (10, 0, 0)',
+      );
+
+      final result = await connection.execute(
+        'SELECT int_col, decimal_col FROM $testTable WHERE id = 10',
+      );
+      final row = result.rows.single;
+
+      expect(row['INT_COL'], isA<int>());
+      expect(row['INT_COL'], equals(0));
+      // NUMBER(10,2) zero — scale > 0 column still decodes the special 0x80
+      // encoding; Dart-side may return int or double depending on the
+      // decoder's int-vs-double heuristic. Assert numeric value, not type.
+      expect(row['DECIMAL_COL'], equals(0));
     });
 
     test('INSERT all mapped types and SELECT verifies Dart values', () async {
@@ -378,6 +443,8 @@ void main() {
         INSERT INTO $testTable (
           id,
           varchar2_col,
+          varchar_col,
+          char_col,
           int_col,
           decimal_col,
           date_col,
@@ -385,6 +452,8 @@ void main() {
         ) VALUES (
           7,
           'Round trip',
+          'VARCHAR round',
+          'ABCDE',
           98765,
           678.90,
           TO_DATE('2025-12-17 08:15:30', 'YYYY-MM-DD HH24:MI:SS'),
@@ -398,7 +467,8 @@ void main() {
 
       final result = await connection.execute(
         '''
-        SELECT varchar2_col, int_col, decimal_col, date_col, timestamp_col
+        SELECT varchar2_col, varchar_col, char_col,
+               int_col, decimal_col, date_col, timestamp_col
         FROM $testTable
         WHERE id = 7
         ''',
@@ -406,6 +476,8 @@ void main() {
       final row = result.rows.single;
 
       expect(row['VARCHAR2_COL'], equals('Round trip'));
+      expect(row['VARCHAR_COL'], equals('VARCHAR round'));
+      expect(row['CHAR_COL'], equals('ABCDE'));
       expect(row['INT_COL'], equals(98765));
       expect(row['DECIMAL_COL'], closeTo(678.90, 0.001));
       expect(
