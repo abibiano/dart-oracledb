@@ -327,7 +327,8 @@ class Transport {
       buf.writeUB8(0);
     }
     await sendData(buf.toBytes());
-    final payload = await _receiveDataWithTimeout(timeout);
+    final payload =
+        await _receiveDataWithTimeout(timeout, operation: 'Commit');
     final response = decodeExecuteResponse(payload,
         isQuery: false, ttcFieldVersion: _ttcFieldVersion);
     if (!response.isSuccess) {
@@ -352,7 +353,8 @@ class Transport {
       buf.writeUB8(0);
     }
     await sendData(buf.toBytes());
-    final payload = await _receiveDataWithTimeout(timeout);
+    final payload =
+        await _receiveDataWithTimeout(timeout, operation: 'Rollback');
     final response = decodeExecuteResponse(payload,
         isQuery: false, ttcFieldVersion: _ttcFieldVersion);
     if (!response.isSuccess) {
@@ -380,7 +382,8 @@ class Transport {
     );
   }
 
-  Future<Uint8List> _receiveDataWithTimeout(Duration? timeout) async {
+  Future<Uint8List> _receiveDataWithTimeout(Duration? timeout,
+      {String operation = 'Query'}) async {
     final future = _receiveAllTtcData();
     if (timeout == null) return future;
     // NOTE: on timeout the underlying socket read continues; subsequent
@@ -390,7 +393,7 @@ class Transport {
       timeout,
       onTimeout: () => throw OracleException(
         errorCode: oraConnectTimeout,
-        message: 'Query timeout after ${timeout.inSeconds}s',
+        message: '$operation timeout after ${timeout.inMilliseconds}ms',
       ),
     );
   }

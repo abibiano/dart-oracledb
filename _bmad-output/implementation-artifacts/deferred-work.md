@@ -1,5 +1,11 @@
 # Deferred Work
 
+## Deferred from: code review of 2-5-transaction-management (2026-05-21)
+
+- **AC8 has no end-to-end test that forces the timeout path** — `_receiveDataWithTimeout` is exercised only via the default 30-second value; no test ever blocks a server response to prove the timeout actually fires with a useful `OracleException`. Spec Task 2.3 allowed documenting why ("no mock hook in transport tests; fake server out of scope") and that documentation exists in the Dev Agent Record. Add a mock-socket transport unit test when the transport test infra gains a hook, or an integration-style test using a pausable network proxy.
+- **Transport sequence-desync after RPC timeout** — `_receiveDataWithTimeout` (transport.dart:386-388) already documents: "on timeout the underlying socket read continues; subsequent operations may receive stale data." This is a known hazard for all timeout-bounded RPCs, not just commit/rollback. Mark the transport as broken (force disconnect or set `_corrupted = true` checked by `_ensureOpen`) on timeout so the next RPC fails loudly rather than reading the orphaned response.
+- **`_ensureOpen()` does not detect silently-dropped sockets** — Only checks `_isClosed`. TCP RST or idle-firewall-kill is only observed after the 30s RPC timeout fires. Cross-check `_transport.isConnected` (or its socket-level equivalent) inside `_ensureOpen` so dead-connection RPC attempts fail fast.
+
 ## Deferred from: code review of classical-auth-fallback (2026-05-21)
 
 - **`sendAuthPhaseOne` lacks a timeout wrapper** — `AuthFlow.authenticate` wraps AUTH_PHASE_TWO's `receiveData` in `authTimeout` to handle Oracle's silent-close on wrong password, but the classical AUTH_PHASE_ONE has no timeout. A pre-23 server that silently closes after sending an internal error (dead instance, listener misroute) would hang indefinitely. The 21c wrong-password integration test currently passes because 21c errors out at phase two, not phase one. Add a timeout if a real hang is ever observed.

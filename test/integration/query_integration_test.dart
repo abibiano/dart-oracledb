@@ -545,11 +545,22 @@ void main() {
         user: testUser,
         password: testPassword,
       );
+      addTearDown(() async {
+        try {
+          await conn1.close();
+        } catch (_) {}
+      });
+
       conn2 = await OracleConnection.connect(
         testConnectString,
         user: testUser,
         password: testPassword,
       );
+      addTearDown(() async {
+        try {
+          await conn2.close();
+        } catch (_) {}
+      });
 
       try {
         await conn1.execute('''
@@ -575,8 +586,9 @@ void main() {
       try {
         await conn1.execute('DROP TABLE $testTable');
       } catch (_) {}
-      await conn1.close();
-      await conn2.close();
+      // Individual connection closes are handled by the addTearDown hooks
+      // registered in setUp so that a close() failure on one does not
+      // prevent the other from closing.
     });
 
     // Task 3: commit() tests
@@ -622,8 +634,27 @@ void main() {
       expect(after.rows.single['CNT'], equals(2));
     });
 
-    test('commit with no pending changes succeeds', () async {
-      await expectLater(conn1.commit(), completes);
+    test('commit with no pending changes succeeds (fresh connection)',
+        () async {
+      // Use a fresh connection that has not run any DML or DDL on this
+      // session. setUp's CREATE TABLE on conn1 is DDL — Oracle implicitly
+      // commits, so calling commit() on conn1 would be testing
+      // "commit-after-implicit-commit", not a truly empty transaction.
+      final fresh = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+      addTearDown(() async {
+        try {
+          await fresh.close();
+        } catch (_) {}
+      });
+
+      await expectLater(fresh.commit(), completes);
+      // Connection must still be usable for subsequent work.
+      final result = await fresh.execute('SELECT 1 AS X FROM DUAL');
+      expect(result.rows.single['X'], equals(1));
     });
 
     test('commit on closed connection throws oraConnectionClosed', () async {
@@ -632,6 +663,11 @@ void main() {
         user: testUser,
         password: testPassword,
       );
+      addTearDown(() async {
+        try {
+          await closed.close();
+        } catch (_) {}
+      });
       await closed.close();
 
       expect(
@@ -719,8 +755,22 @@ void main() {
       expect(result.rows.single['NAME'], equals('keep-me'));
     });
 
-    test('rollback with no pending changes succeeds', () async {
-      await expectLater(conn1.rollback(), completes);
+    test('rollback with no pending changes succeeds (fresh connection)',
+        () async {
+      final fresh = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+      addTearDown(() async {
+        try {
+          await fresh.close();
+        } catch (_) {}
+      });
+
+      await expectLater(fresh.rollback(), completes);
+      final result = await fresh.execute('SELECT 1 AS X FROM DUAL');
+      expect(result.rows.single['X'], equals(1));
     });
 
     test('rollback on closed connection throws oraConnectionClosed', () async {
@@ -729,6 +779,11 @@ void main() {
         user: testUser,
         password: testPassword,
       );
+      addTearDown(() async {
+        try {
+          await closed.close();
+        } catch (_) {}
+      });
       await closed.close();
 
       expect(
@@ -760,17 +815,24 @@ void main() {
           reason: 'Row must be visible after auto-commit');
     });
 
-    test('runTransaction auto-rolls-back on callback exception and rethrows',
-        () async {
+    test('runTransaction auto-rolls-back on callback exception and rethrows '
+        'the original exception (identity-preserving)', () async {
+      final original = Exception('intentional failure');
+
       await expectLater(
         conn1.runTransaction((conn) async {
           await conn.execute(
             'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
             [60, 'will-be-rolledback'],
           );
-          throw Exception('intentional failure');
+          throw original;
         }),
-        throwsA(isA<Exception>()),
+        throwsA(predicate(
+          (e) => identical(e, original),
+          'is the same instance as the original Exception '
+              '(AC5 requires the ORIGINAL exception to be rethrown, '
+              'not a wrapper)',
+        )),
       );
 
       final verify = await conn2.execute(
@@ -808,6 +870,11 @@ void main() {
         user: testUser,
         password: testPassword,
       );
+      addTearDown(() async {
+        try {
+          await closed.close();
+        } catch (_) {}
+      });
       await closed.close();
 
       expect(
@@ -816,9 +883,28 @@ void main() {
             .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
       );
     });
-    // Note: nested runTransaction() is unsupported in this story. Oracle
-    // does not provide savepoints via this API surface; nesting would silently
-    // commit the outer transaction on the inner commit() call. This behavior
-    // is intentionally left undocumented until a savepoint API is added.
+
+    test('runTransaction rejects nested invocation with a clear error',
+        () async {
+      // Oracle has no savepoint API surface here, and an inner commit() would
+      // silently commit the outer transaction. The driver must surface this
+      // rather than corrupt data silently.
+      Object? caught;
+      try {
+        await conn1.runTransaction((conn) async {
+          await conn1.runTransaction((_) async => 'inner');
+          return 'outer';
+        });
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught, isA<OracleException>());
+
+      // After the nested attempt aborts, the outer rollback runs and the
+      // connection must remain usable (the rollback succeeded against a
+      // healthy server).
+      final still = await conn1.execute('SELECT 1 AS X FROM DUAL');
+      expect(still.rows.single['X'], equals(1));
+    });
   });
 }

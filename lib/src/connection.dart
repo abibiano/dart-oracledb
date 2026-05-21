@@ -41,6 +41,7 @@ class OracleConnection {
   final Transport _transport;
   final ConnectionInfo _connectionInfo;
   bool _isClosed;
+  bool _inTransaction = false;
 
   /// Whether the connection is currently open and usable.
   ///
@@ -309,17 +310,24 @@ class OracleConnection {
   /// - Commit operation fails or times out
   Future<void> commit(
       {Duration timeout = const Duration(seconds: 30)}) async {
+    if (timeout <= Duration.zero) {
+      throw ArgumentError.value(
+          timeout, 'timeout', 'must be a positive Duration');
+    }
     _ensureOpen();
 
     try {
       await _transport.sendCommit(timeout: timeout);
       _log.fine('Transaction committed');
-    } catch (e) {
+    } catch (e, st) {
       if (e is OracleException) rethrow;
-      throw OracleException(
-        errorCode: oraProtocolError,
-        message: 'Failed to commit transaction',
-        cause: e,
+      Error.throwWithStackTrace(
+        OracleException(
+          errorCode: oraProtocolError,
+          message: 'Failed to commit transaction',
+          cause: e,
+        ),
+        st,
       );
     }
   }
@@ -348,17 +356,24 @@ class OracleConnection {
   /// - Rollback operation fails or times out
   Future<void> rollback(
       {Duration timeout = const Duration(seconds: 30)}) async {
+    if (timeout <= Duration.zero) {
+      throw ArgumentError.value(
+          timeout, 'timeout', 'must be a positive Duration');
+    }
     _ensureOpen();
 
     try {
       await _transport.sendRollback(timeout: timeout);
       _log.fine('Transaction rolled back');
-    } catch (e) {
+    } catch (e, st) {
       if (e is OracleException) rethrow;
-      throw OracleException(
-        errorCode: oraProtocolError,
-        message: 'Failed to rollback transaction',
-        cause: e,
+      Error.throwWithStackTrace(
+        OracleException(
+          errorCode: oraProtocolError,
+          message: 'Failed to rollback transaction',
+          cause: e,
+        ),
+        st,
       );
     }
   }
@@ -402,6 +417,17 @@ class OracleConnection {
     Future<T> Function(OracleConnection conn) callback,
   ) async {
     _ensureOpen();
+    if (_inTransaction) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'Nested runTransaction() is not supported: an outer transaction '
+            'is already active on this connection. Oracle has no savepoint '
+            'API surface here, and the inner commit() would silently commit '
+            'the outer transaction.',
+      );
+    }
+    _inTransaction = true;
 
     try {
       _log.fine('Starting transaction');
@@ -413,11 +439,26 @@ class OracleConnection {
       _log.warning('Transaction failed, rolling back: $e');
       try {
         await rollback();
-      } catch (rollbackError) {
-        _log.severe('Rollback failed: $rollbackError');
-        // Rethrow original error, but log rollback failure
+      } catch (rollbackError, rollbackSt) {
+        _log.severe('Rollback failed after callback error: $rollbackError');
+        // Rollback itself failed: the server-side transaction state is now
+        // indeterminate. Invalidate the connection so subsequent RPCs fail
+        // loudly instead of joining the orphaned transaction.
+        _isClosed = true;
+        Error.throwWithStackTrace(
+          OracleException(
+            errorCode: oraProtocolError,
+            message:
+                'Transaction rollback failed after callback error; connection '
+                'invalidated. Original error: $e. Rollback error: $rollbackError',
+            cause: rollbackError,
+          ),
+          rollbackSt,
+        );
       }
       rethrow;
+    } finally {
+      _inTransaction = false;
     }
   }
 
