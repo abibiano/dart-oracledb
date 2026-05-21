@@ -17,6 +17,7 @@ analyzer:
     parameter_assignments: error
   exclude:
     - "reference/**"
+    - "_bmad-output/**"
     - "**/*.g.dart"
     - "**/*.freezed.dart"
 

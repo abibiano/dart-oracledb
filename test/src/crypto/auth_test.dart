@@ -416,7 +416,7 @@ void main() {
     });
 
     test('AUTH_SESSKEY is hex-encoded to 64 uppercase characters', () {
-      final passwordProof = auth.generatePasswordProof(
+      auth.generatePasswordProof(
         password: 'testpassword',
         params: params,
         clientNonce: clientNonce,
@@ -444,7 +444,7 @@ void main() {
 
     test('AUTH_PBKDF2_SPEEDY_KEY is hex-encoded to 160 uppercase characters',
         () {
-      final passwordProof = auth.generatePasswordProof(
+      auth.generatePasswordProof(
         password: 'testpassword',
         params: params,
         clientNonce: clientNonce,
@@ -501,7 +501,7 @@ void main() {
     });
 
     test('Hex encoding uses UTF-8 string byte storage, not raw bytes', () {
-      final passwordProof = auth.generatePasswordProof(
+      auth.generatePasswordProof(
         password: 'testpassword',
         params: params,
         clientNonce: clientNonce,
@@ -522,7 +522,6 @@ void main() {
 
       // Verify speedy key is UTF-8 encoded hex string
       final speedyKey = auth.speedyKey!;
-      final speedyKeyHex = utf8.decode(speedyKey);
       expect(() => utf8.decode(speedyKey), returnsNormally,
           reason: 'Speedy key should be valid UTF-8');
     });

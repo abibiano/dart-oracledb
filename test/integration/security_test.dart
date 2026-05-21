@@ -13,7 +13,7 @@ library;
 import 'dart:io';
 
 import 'package:logging/logging.dart';
-import 'package:oracledb/oracledb.dart';
+import 'package:oracledb/dart_oracledb.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -22,7 +22,7 @@ void main() {
 
   if (!runIntegrationTests) {
     test('Security tests require RUN_INTEGRATION_TESTS=true', () {
-      print('Skipping security integration tests - set RUN_INTEGRATION_TESTS=true');
+      Logger.root.info('Skipping security integration tests - set RUN_INTEGRATION_TESTS=true');
     });
     return;
   }

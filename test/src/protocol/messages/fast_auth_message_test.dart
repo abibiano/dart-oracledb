@@ -92,7 +92,7 @@ void main() {
       // Find AUTH_PHASE_ONE function header
       // Function header: [ttcMsgTypeFunction(3), ttcAuthPhaseOne(0x76), sequence]
       // Look for ttcAuthPhaseOne (0x76 = 118 decimal)
-      final authPhaseOneCode = 0x76;
+      const authPhaseOneCode = 0x76;
       var functionIndex = -1;
       for (int i = 0; i < bytes.length - 1; i++) {
         if (bytes[i] == ttcMsgTypeFunction && bytes[i + 1] == authPhaseOneCode) {
@@ -130,7 +130,7 @@ void main() {
       final bytes = buffer.toBytes();
 
       // Find AUTH_PHASE_ONE function header (0x76)
-      final authPhaseOneCode = 0x76;
+      const authPhaseOneCode = 0x76;
       var functionIndex = -1;
       for (int i = 0; i < bytes.length - 2; i++) {
         if (bytes[i] == ttcMsgTypeFunction && bytes[i + 1] == authPhaseOneCode) {
@@ -267,7 +267,7 @@ void main() {
       final bytes = buffer.toBytes();
 
       // Verify order: FAST_AUTH header → Protocol → DataTypes → AUTH_PHASE_ONE
-      final fastAuthIndex = 0; // First byte
+      const fastAuthIndex = 0; // First byte
       final protocolIndex = bytes.indexOf(ttcMsgTypeProtocol);
       final dataTypesIndex = bytes.indexOf(ttcMsgTypeDataTypes);
       final functionIndex = bytes.indexOf(ttcMsgTypeFunction);
@@ -366,7 +366,7 @@ void main() {
       final bytes = buffer.toBytes();
 
       // Find AUTH_PHASE_ONE function header (0x76)
-      final authPhaseOneCode = 0x76;
+      const authPhaseOneCode = 0x76;
       var functionIndex = -1;
       for (int i = 0; i < bytes.length - 2; i++) {
         if (bytes[i] == ttcMsgTypeFunction && bytes[i + 1] == authPhaseOneCode) {
