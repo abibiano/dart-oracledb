@@ -160,14 +160,18 @@ jobs:
           ORACLE_PASSWORD: testpassword
         run: dart test --tags=integration --reporter=expanded
 
-  # Oracle 19c (gvenzl community image — no registry credentials required).
-  integration-19c:
-    name: Oracle 19c Integration Tests (Linux)
+  # Pre-23 Oracle XE for non-23ai protocol-path validation (gvenzl community
+  # image — no registry credentials required). Originally specced as
+  # gvenzl/oracle-xe:19, but that tag does not exist on Docker Hub
+  # (gvenzl/oracle-xe ships 21c/18c/11g only). 21c is the closest available
+  # image and exercises the same pre-23 code path 19c would.
+  integration-21c:
+    name: Oracle 21c Integration Tests (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
       oracle:
-        image: gvenzl/oracle-xe:19
+        image: gvenzl/oracle-xe:21
         env:
           ORACLE_PASSWORD: testpassword
         ports:
@@ -190,7 +194,7 @@ jobs:
       - name: Install dependencies
         run: dart pub get
 
-      - name: Wait for Oracle 19c listener on localhost:1521
+      - name: Wait for Oracle 21c listener on localhost:1521
         run: |
           set -eu
           attempts=60
@@ -200,14 +204,14 @@ jobs:
               sleep 5
               exit 0
             fi
-            echo "Oracle 19c not ready yet (attempt ${i}/${attempts})..."
+            echo "Oracle 21c not ready yet (attempt ${i}/${attempts})..."
             sleep 10
           done
-          echo "::error::Oracle 19c did not become ready within timeout"
+          echo "::error::Oracle 21c did not become ready within timeout"
           docker ps --no-trunc || true
           exit 1
 
-      - name: Run integration tests (Oracle 19c)
+      - name: Run integration tests (Oracle 21c)
         env:
           RUN_INTEGRATION_TESTS: 'true'
           ORACLE_HOST: localhost

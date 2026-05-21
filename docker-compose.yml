@@ -25,10 +25,14 @@ services:
       retries: 10
       start_period: 300s
 
-  oracle19c:
-    image: gvenzl/oracle-xe:19
+  # Older Oracle XE for non-23ai protocol validation. Originally specced as
+  # gvenzl/oracle-xe:19, but that tag does not exist on Docker Hub
+  # (gvenzl/oracle-xe ships 21c/18c/11g only). 21c is the closest available
+  # image and exercises the same pre-23 code path as 19c would.
+  oracle21c:
+    image: gvenzl/oracle-xe:21
     profiles:
-      - oracle19c
+      - oracle21c
     ports:
       - "1522:1521"
     environment:

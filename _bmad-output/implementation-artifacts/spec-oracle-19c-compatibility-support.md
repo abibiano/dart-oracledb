@@ -2,7 +2,8 @@
 title: 'Oracle 19c Compatibility Support'
 type: 'feature'
 created: '2026-05-21'
-status: 'done'
+status: 'partially-done'
+status_reason: 'Code changes shipped (version gates, env normalization), but the spec was never validated against a real pre-23 Oracle container because the referenced image (gvenzl/oracle-xe:19) does not exist on Docker Hub. Subsequent validation against gvenzl/oracle-xe:21 revealed a deeper FAST_AUTH protocol incompatibility — no integration test can even authenticate against pre-23 Oracle. See Known Issues below.'
 baseline_commit: '211cbd03e8bb3c6df1514c5efb6ef085e224b799'
 context:
   - '_bmad-output/project-context.md'
@@ -100,6 +101,49 @@ context:
 ## Spec Change Log
 
 - **2026-05-21 (loop 1):** Finding: `sendData()` bootstrap calls inside `sendProtocolNegotiation` and `sendFastAuth` are made before `_serverMajorVersion` is set from the server response — so they always send `0x0800` regardless of Oracle version, defeating the version gate for those initial packets. Amended: task 1 now requires explicit `dataFlags: 0x0000` at bootstrap call sites; the version-gated default applies only post-negotiation. Known-bad state avoided: Oracle 19c receiving `0x0800` on the FAST_AUTH/protocol-negotiation packets. KEEP: `_serverMajorVersion` field (default 23), getter, `_extractMajorVersion()` function, version-gated `sendData` default, `ttcFieldVersion` getter — all correct. KEEP: tasks 2–7 unchanged. Added patch tasks: `tls_integration_test.dart` (missed in initial impl) and `test_helper.dart` `int.tryParse` fix.
+
+- **2026-05-21 (post-Story-2.5 investigation):** Finding: `gvenzl/oracle-xe:19` does not exist on Docker Hub — the `gvenzl/oracle-xe` repo publishes only 21c, 18c, and 11g tags (verified via `https://hub.docker.com/v2/repositories/gvenzl/oracle-xe/tags?name=19` → `count: 0` and the maintainer's repo description: *"Oracle Database XE (21c, 18c, 11g) for everyone!"*). Every `integration-19c` CI run since the spec was committed has failed at image pull with `manifest unknown`. The spec was marked done because the *code* changes (version gates, env normalization) were complete, but actual validation against a pre-23 container never happened. Amended: switched image to `gvenzl/oracle-xe:21` everywhere — `docker-compose.yml` service renamed `oracle19c → oracle21c` (profile and service), and CI job renamed `integration-19c → integration-21c`. 21c is the closest available community image and exercises the same pre-23 code path (`_serverMajorVersion < 23` branch) that 19c would. The connection params (port 1522 host-side / 1521 in-container, service `XEPDB1`, no registry creds) are unchanged. Original spec intent (validating non-23ai protocol paths) is preserved; the "19c" framing is no longer literally accurate.
+
+## Known Issues
+
+**Status was reopened from `done` → `partially-done` on 2026-05-21 (post-Story-2.5 investigation).**
+
+### 1. Spec was never actually validated against pre-23 Oracle
+
+The original `done` mark was based on code review and 23ai regression passing — not on the spec's own verification command:
+
+```
+ORACLE_SERVICE=XEPDB1 ORACLE_PORT=1522 RUN_INTEGRATION_TESTS=true dart test --tags=integration
+```
+
+That command never produced a green run, because the referenced image (`gvenzl/oracle-xe:19`) does not and never has existed on Docker Hub. Every CI run of the `integration-19c` job since the spec landed has failed at `docker pull` with `manifest unknown`. The image has since been swapped to `gvenzl/oracle-xe:21` (closest available community image; see Spec Change Log entry from 2026-05-21 post-Story-2.5).
+
+### 2. FAST_AUTH does not work against pre-23 Oracle (blocking)
+
+Once the image was switched to `gvenzl/oracle-xe:21` and the container was running healthy, the integration suite was executed with `ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1`. **Every test failed at connection setup** with:
+
+```
+OracleException: ORA-12150: Connection closed by server while waiting for data: need 8 bytes, have 0
+  package:oracledb/src/transport/transport.dart 653:26  Transport.sendFastAuth
+```
+
+The Oracle 21c server closes the TCP connection during the FAST_AUTH exchange. FAST_AUTH is an Oracle 23ai-era protocol affordance that pre-23 servers do not recognize. The version gates this spec added (`_serverMajorVersion < 23` for the `0x0800` flag, `_ttcFieldVersion < 24` for the 23.4 vector fields) address *visible* code paths that diverge after the connection is established — they do not help if the connection never gets that far.
+
+**What's needed (out of scope for this spec):** implement a classical `AUTH_PHASE_ONE` / `AUTH_PHASE_TWO` fallback path that triggers when the server signals it does not support FAST_AUTH (or, equivalently, gate FAST_AUTH itself behind `_serverMajorVersion >= 23` after a pre-auth protocol probe). Track in a new spec — do not retrofit into this one.
+
+### 3. CI `integration-21c` job will continue to fail until #2 is fixed
+
+The job now successfully pulls the image and the container boots, but every test fails at `sendFastAuth`. This is a known-bad state and a useful waypoint — it surfaces the real protocol problem instead of masking it behind an image-pull error. Do not green-wash the failure; leave the job red until the auth fallback lands.
+
+### 4. Acceptance criteria revisited
+
+| Original AC | Actual status |
+|-------------|---------------|
+| "All integration tests pass against Oracle 19c (XEPDB1, port 1522)" | **Not met.** Cannot authenticate. |
+| "All 38 23ai integration tests still pass" | **Met.** No regression. |
+| "Zero `dart analyze` warnings" | **Met.** |
+| "462+ unit tests pass" | **Met.** |
+| "CI `integration-19c` job completes within 20 minutes and fails on integration test failure" | **Not met.** Now renamed `integration-21c`; job runs but fails on auth, as described above. |
 
 ## Suggested Review Order
 

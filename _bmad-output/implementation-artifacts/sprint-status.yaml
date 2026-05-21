@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-05-21  # Story 6.4 code review complete — Oracle registry credentials patch applied; 10 items deferred
+last_updated: 2026-05-21  # Story 2.5 context refreshed for post-Story-6.3 transaction re-validation
 project: dart-oracledb
 tracking_system: file-system
 story_location: docs/sprint-artifacts
@@ -79,7 +79,7 @@ development_status:
   2-2-result-set-handling: done  # 2026-05-21 Story 6.3 — OracleResult/OracleRow validated; missing 2-2 artifact noted in story 6.3 DAR
   2-3-bind-parameters: done  # 2026-05-21 Story 6.3 — All 12 bind integration tests pass against Oracle 23ai
   2-4-dml-operations-insert-update-delete: done  # 2026-05-21 Story 6.3 session 2 — All 20 DML integration tests pass. BREAK/RESET MARKER protocol implemented in transport. INSERT/UPDATE/DELETE + error paths validated against Oracle 23ai.
-  2-5-transaction-management: dev-complete-pending-validation  # 2026-05-21 Story 6.3 — Needs re-validation post-protocol rebuild
+  2-5-transaction-management: review  # 2026-05-21 dev-story — All ACs validated; 14 integration tests pass against Oracle 23ai
   2-6-basic-data-type-mapping: dev-complete-pending-validation  # 2026-05-21 Story 6.3 — Needs re-validation post-protocol rebuild
   2-7-statement-caching: backlog
   2-8-query-error-handling: backlog

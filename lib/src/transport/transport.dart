@@ -307,8 +307,10 @@ class Transport {
 
   /// Sends a TTC COMMIT message and waits for the server's acknowledgement.
   ///
-  /// Throws [OracleException] if the commit fails or the connection is broken.
-  Future<void> sendCommit() async {
+  /// [timeout] bounds how long to wait for Oracle's commit acknowledgement.
+  /// Throws [OracleException] if the commit fails, times out, or the connection is broken.
+  Future<void> sendCommit(
+      {Duration timeout = const Duration(seconds: 30)}) async {
     final buf = WriteBuffer();
     buf.writeUint8(ttcMsgTypeFunction);
     buf.writeUint8(ttcFuncCommit);
@@ -317,7 +319,7 @@ class Transport {
       buf.writeUB8(0);
     }
     await sendData(buf.toBytes());
-    final payload = await _receiveAllTtcData();
+    final payload = await _receiveDataWithTimeout(timeout);
     final response = decodeExecuteResponse(payload,
         isQuery: false, ttcFieldVersion: _ttcFieldVersion);
     if (!response.isSuccess) {
@@ -330,8 +332,10 @@ class Transport {
 
   /// Sends a TTC ROLLBACK message and waits for the server's acknowledgement.
   ///
-  /// Throws [OracleException] if the rollback fails or the connection is broken.
-  Future<void> sendRollback() async {
+  /// [timeout] bounds how long to wait for Oracle's rollback acknowledgement.
+  /// Throws [OracleException] if the rollback fails, times out, or the connection is broken.
+  Future<void> sendRollback(
+      {Duration timeout = const Duration(seconds: 30)}) async {
     final buf = WriteBuffer();
     buf.writeUint8(ttcMsgTypeFunction);
     buf.writeUint8(ttcFuncRollback);
@@ -340,7 +344,7 @@ class Transport {
       buf.writeUB8(0);
     }
     await sendData(buf.toBytes());
-    final payload = await _receiveAllTtcData();
+    final payload = await _receiveDataWithTimeout(timeout);
     final response = decodeExecuteResponse(payload,
         isQuery: false, ttcFieldVersion: _ttcFieldVersion);
     if (!response.isSuccess) {

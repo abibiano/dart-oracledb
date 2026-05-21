@@ -295,6 +295,8 @@ class OracleConnection {
   /// sessions. Oracle automatically starts a transaction on the first DML
   /// statement (INSERT, UPDATE, DELETE), so no explicit "BEGIN" is needed.
   ///
+  /// [timeout] bounds how long to wait for the server acknowledgement.
+  ///
   /// Example:
   /// ```dart
   /// await connection.execute('INSERT INTO users VALUES (:1, :2)', [1, 'Alice']);
@@ -304,12 +306,13 @@ class OracleConnection {
   ///
   /// Throws [OracleException] if:
   /// - Connection is closed (ORA-03113)
-  /// - Commit operation fails
-  Future<void> commit() async {
+  /// - Commit operation fails or times out
+  Future<void> commit(
+      {Duration timeout = const Duration(seconds: 30)}) async {
     _ensureOpen();
 
     try {
-      await _transport.sendCommit();
+      await _transport.sendCommit(timeout: timeout);
       _log.fine('Transaction committed');
     } catch (e) {
       if (e is OracleException) rethrow;
@@ -326,6 +329,8 @@ class OracleConnection {
   /// Undoes all pending changes since the last commit. This is useful for
   /// handling errors or canceling a multi-step operation.
   ///
+  /// [timeout] bounds how long to wait for the server acknowledgement.
+  ///
   /// Example:
   /// ```dart
   /// try {
@@ -340,12 +345,13 @@ class OracleConnection {
   ///
   /// Throws [OracleException] if:
   /// - Connection is closed (ORA-03113)
-  /// - Rollback operation fails
-  Future<void> rollback() async {
+  /// - Rollback operation fails or times out
+  Future<void> rollback(
+      {Duration timeout = const Duration(seconds: 30)}) async {
     _ensureOpen();
 
     try {
-      await _transport.sendRollback();
+      await _transport.sendRollback(timeout: timeout);
       _log.fine('Transaction rolled back');
     } catch (e) {
       if (e is OracleException) rethrow;

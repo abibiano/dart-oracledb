@@ -531,4 +531,294 @@ void main() {
       );
     });
   });
+
+  // Story 2.5 - Transaction Management (commit, rollback, runTransaction)
+  group('Transaction management',
+      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+    late OracleConnection conn1;
+    late OracleConnection conn2;
+    const testTable = 'test_tx_story25';
+
+    setUp(() async {
+      conn1 = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+      conn2 = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+
+      try {
+        await conn1.execute('''
+          CREATE TABLE $testTable (
+            id NUMBER PRIMARY KEY,
+            name VARCHAR2(100),
+            value NUMBER
+          )
+        ''');
+      } on OracleException catch (e) {
+        if (e.errorCode == 955) {
+          await conn1.execute('TRUNCATE TABLE $testTable');
+        } else {
+          rethrow;
+        }
+      }
+    });
+
+    tearDown(() async {
+      try {
+        await conn1.rollback();
+      } catch (_) {}
+      try {
+        await conn1.execute('DROP TABLE $testTable');
+      } catch (_) {}
+      await conn1.close();
+      await conn2.close();
+    });
+
+    // Task 3: commit() tests
+
+    test('commit makes inserted row visible to another connection', () async {
+      await conn1.execute(
+        'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
+        [1, 'committed'],
+      );
+
+      final before = await conn2.execute(
+        'SELECT name FROM $testTable WHERE id = :1',
+        [1],
+      );
+      expect(before.rows, isEmpty,
+          reason: 'Uncommitted INSERT must not be visible to conn2');
+
+      await conn1.commit();
+
+      final after = await conn2.execute(
+        'SELECT name FROM $testTable WHERE id = :1',
+        [1],
+      );
+      expect(after.rows.single['NAME'], equals('committed'));
+    });
+
+    test('commit makes multiple DML statements all visible', () async {
+      await conn1.execute(
+        'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
+        [1, 'first'],
+      );
+      await conn1.execute(
+        'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
+        [2, 'second'],
+      );
+
+      final before = await conn2.execute('SELECT COUNT(*) AS CNT FROM $testTable');
+      expect(before.rows.single['CNT'], equals(0));
+
+      await conn1.commit();
+
+      final after = await conn2.execute('SELECT COUNT(*) AS CNT FROM $testTable');
+      expect(after.rows.single['CNT'], equals(2));
+    });
+
+    test('commit with no pending changes succeeds', () async {
+      await expectLater(conn1.commit(), completes);
+    });
+
+    test('commit on closed connection throws oraConnectionClosed', () async {
+      final closed = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+      await closed.close();
+
+      expect(
+        () => closed.commit(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+      );
+    });
+
+    // Task 4: rollback() tests
+
+    test('rollback undoes INSERT so row is not visible', () async {
+      await conn1.execute(
+        'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
+        [10, 'rolledback'],
+      );
+      await conn1.rollback();
+
+      final result = await conn1.execute(
+        'SELECT name FROM $testTable WHERE id = :1',
+        [10],
+      );
+      expect(result.rows, isEmpty);
+
+      final conn2Result = await conn2.execute(
+        'SELECT name FROM $testTable WHERE id = :1',
+        [10],
+      );
+      expect(conn2Result.rows, isEmpty);
+    });
+
+    test('rollback undoes multiple DML statements in one call', () async {
+      await conn1.execute(
+        'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
+        [20, 'a'],
+      );
+      await conn1.execute(
+        'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
+        [21, 'b'],
+      );
+      await conn1.rollback();
+
+      final result =
+          await conn1.execute('SELECT COUNT(*) AS CNT FROM $testTable');
+      expect(result.rows.single['CNT'], equals(0));
+    });
+
+    test('rollback restores original value after UPDATE', () async {
+      await conn1.execute(
+        'INSERT INTO $testTable (id, name, value) VALUES (:1, :2, :3)',
+        [30, 'original', 100],
+      );
+      await conn1.commit();
+
+      await conn1.execute(
+        'UPDATE $testTable SET value = :1 WHERE id = :2',
+        [999, 30],
+      );
+      await conn1.rollback();
+
+      final result = await conn1.execute(
+        'SELECT value FROM $testTable WHERE id = :1',
+        [30],
+      );
+      expect(result.rows.single['VALUE'], equals(100));
+    });
+
+    test('rollback restores deleted row', () async {
+      await conn1.execute(
+        'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
+        [40, 'keep-me'],
+      );
+      await conn1.commit();
+
+      await conn1.execute(
+        'DELETE FROM $testTable WHERE id = :1',
+        [40],
+      );
+      await conn1.rollback();
+
+      final result = await conn1.execute(
+        'SELECT name FROM $testTable WHERE id = :1',
+        [40],
+      );
+      expect(result.rows.single['NAME'], equals('keep-me'));
+    });
+
+    test('rollback with no pending changes succeeds', () async {
+      await expectLater(conn1.rollback(), completes);
+    });
+
+    test('rollback on closed connection throws oraConnectionClosed', () async {
+      final closed = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+      await closed.close();
+
+      expect(
+        () => closed.rollback(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+      );
+    });
+
+    // Task 5: runTransaction() tests
+
+    test('runTransaction auto-commits on success and returns callback value',
+        () async {
+      final result = await conn1.runTransaction((conn) async {
+        await conn.execute(
+          'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
+          [50, 'tx-success'],
+        );
+        return 'done';
+      });
+
+      expect(result, equals('done'));
+
+      final verify = await conn2.execute(
+        'SELECT name FROM $testTable WHERE id = :1',
+        [50],
+      );
+      expect(verify.rows.single['NAME'], equals('tx-success'),
+          reason: 'Row must be visible after auto-commit');
+    });
+
+    test('runTransaction auto-rolls-back on callback exception and rethrows',
+        () async {
+      await expectLater(
+        conn1.runTransaction((conn) async {
+          await conn.execute(
+            'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
+            [60, 'will-be-rolledback'],
+          );
+          throw Exception('intentional failure');
+        }),
+        throwsA(isA<Exception>()),
+      );
+
+      final verify = await conn2.execute(
+        'SELECT name FROM $testTable WHERE id = :1',
+        [60],
+      );
+      expect(verify.rows, isEmpty,
+          reason: 'Row must not be visible after rollback');
+    });
+
+    test('runTransaction callback with multiple DML all participate in same transaction',
+        () async {
+      await conn1.runTransaction((conn) async {
+        await conn.execute(
+          'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
+          [70, 'part1'],
+        );
+        await conn.execute(
+          'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
+          [71, 'part2'],
+        );
+      });
+
+      final verify = await conn2.execute(
+        'SELECT COUNT(*) AS CNT FROM $testTable WHERE id IN (:1, :2)',
+        [70, 71],
+      );
+      expect(verify.rows.single['CNT'], equals(2));
+    });
+
+    test('runTransaction on closed connection throws oraConnectionClosed',
+        () async {
+      final closed = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+      await closed.close();
+
+      expect(
+        () => closed.runTransaction((_) async => 'value'),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+      );
+    });
+    // Note: nested runTransaction() is unsupported in this story. Oracle
+    // does not provide savepoints via this API surface; nesting would silently
+    // commit the outer transaction on the inner commit() call. This behavior
+    // is intentionally left undocumented until a savepoint API is added.
+  });
 }
