@@ -39,7 +39,7 @@ _This document builds collaboratively through step-by-step discovery. Sections a
 - **dart:io Socket**: Limits to desktop platforms (no web/mobile)
 - **Crypto Libraries**: package:crypto + pointycastle for authentication
 - **Reference Implementation**: node-oracledb thin driver structure
-- **Target Database**: Oracle 23ai with modern authentication
+- **Target Databases**: Oracle 23ai (primary, FAST_AUTH path) and pre-23 Oracle 12c+ (supported via classical AUTH_PHASE_ONE/TWO fallback). Auth path selected from the server-advertised `TNS_ACCEPT_FLAG_FAST_AUTH` bit, not by version-string parsing.
 
 ### Cross-Cutting Concerns Identified
 
@@ -106,7 +106,7 @@ Then reorganize to match the custom structure defined below.
 **Development Experience:**
 
 - Standard Dart tooling (`dart test`, `dart analyze`, `dart doc`)
-- Integration tests against Oracle 23ai (Docker)
+- Integration tests against Oracle 23ai Docker (primary) and `gvenzl/oracle-xe:21` Docker (pre-23 fallback path) — both wired into CI as `integration` and `integration-21c` jobs
 - Cross-platform CI (macOS, Windows, Linux)
 
 **Note:** Project initialization using `dart create` should be the first implementation story, followed by directory restructuring.

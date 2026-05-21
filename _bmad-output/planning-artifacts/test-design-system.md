@@ -37,7 +37,7 @@
 
 **Controllability Notes:**
 - Architecture enables mocking at each layer boundary
-- Oracle 23ai Docker provides real database for integration testing
+- Oracle Docker (23ai for FAST_AUTH path, `gvenzl/oracle-xe:21` for classical AUTH_PHASE_ONE/TWO path) provides real databases for integration testing
 - Recommend: Add test helper utilities for common setup patterns
 
 ### Observability
@@ -166,7 +166,7 @@ Based on project type (database driver library, no UI):
 |-------------|---------------|--------------|
 | NFR5: Credentials never logged | Log output scanning | CI job scans all test output for password patterns |
 | NFR6: TLS/SSL encryption | TLS connection tests | Verify handshake, cert validation against Oracle |
-| NFR7: SHA512/PBKDF2 auth | Auth flow integration tests | Successful auth against Oracle 23ai |
+| NFR7: SHA512/PBKDF2 auth | Auth flow integration tests | Successful auth against both Oracle 23ai (FAST_AUTH) and pre-23 (classical AUTH_PHASE_ONE/TWO) |
 
 **Security Testing Tools:**
 - Custom log scanner (regex for credential patterns)
@@ -277,12 +277,13 @@ test('pool removes dead connections and creates new ones', () async {
 |-------------|---------------|--------------|
 | NFR11: Dart SDK 3.0+ | pubspec.yaml constraint | CI verifies minimum SDK |
 | NFR12: Cross-platform | CI matrix testing | Tests pass on macOS, Windows, Linux |
-| NFR13: Oracle 23ai support | Integration tests | Full test suite against 23ai |
+| NFR13: Oracle 23ai support (primary) | Integration tests | Full test suite against 23ai (FAST_AUTH path) |
+| NFR13b: Oracle pre-23 support (via fallback) | Integration tests + `classical_auth_integration_test.dart` | Same suite against `gvenzl/oracle-xe:21` (classical AUTH_PHASE_ONE/TWO path) |
 | NFR14: JIT/AOT compatible | Compilation verification | AOT compile + run in CI |
 
 **Compatibility Testing Tools:**
 - GitHub Actions matrix for platforms
-- Docker for Oracle 23ai
+- Docker for Oracle: 23ai (primary) and `gvenzl/oracle-xe:21` (pre-23 fallback)
 - AOT compilation job in CI
 
 ---
@@ -291,9 +292,10 @@ test('pool removes dead connections and creates new ones', () async {
 
 | Environment | Purpose | Infrastructure |
 |-------------|---------|----------------|
-| **Local Development** | Unit tests, fast integration | Docker Compose with Oracle 23ai Free |
+| **Local Development** | Unit tests, fast integration | Docker Compose: default profile (Oracle 23ai Free, FAST_AUTH) and `--profile oracle21c` (gvenzl/oracle-xe:21, classical auth) |
 | **CI - Unit** | Fast feedback on PRs | GitHub Actions (no Oracle needed) |
-| **CI - Integration** | Protocol/Oracle tests | GitHub Actions + Oracle 23ai container |
+| **CI - Integration (23ai)** | Protocol/Oracle tests on the FAST_AUTH path | GitHub Actions + Oracle 23ai container — `integration` job |
+| **CI - Integration (pre-23)** | Same suite on the classical AUTH_PHASE_ONE/TWO path | GitHub Actions + gvenzl/oracle-xe:21 container — `integration-21c` job |
 | **CI - Platform Matrix** | Cross-platform validation | GitHub Actions matrix: macOS-arm64, macos-latest, windows-latest, ubuntu-latest |
 
 ### Oracle 23ai Docker Setup

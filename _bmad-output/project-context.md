@@ -24,7 +24,11 @@ _This file contains critical rules and patterns that AI agents must follow when 
 | package:test | ^1.28.0 | Integration testing |
 | package:lints | ^6.0.0 | Strict analysis |
 
-**Target Database:** Oracle 23ai (Docker for testing)
+**Target Databases:**
+- **Oracle 23ai** (primary) — Docker: `container-registry.oracle.com/database/free`, service `FREEPDB1` on port 1521. Uses the FAST_AUTH protocol.
+- **Oracle pre-23 (12c+)** (supported via fallback) — Docker: `gvenzl/oracle-xe:21`, service `XEPDB1` on port 1522 (CI: 1521 inside container). Uses the classical AUTH_PHASE_ONE/AUTH_PHASE_TWO sequence.
+
+**Auth path is server-driven**, not version-driven: `Transport.supportsFastAuth` is set from the `TNS_ACCEPT_FLAG_FAST_AUTH` bit in the TNS ACCEPT packet. `AuthFlow.authenticate` branches on that flag. Do not parse version strings to choose the auth path; do not assume FAST_AUTH is universally available.
 
 **Platforms:** Desktop only (macOS, Windows, Linux) - no web/mobile due to dart:io Socket requirement
 
@@ -89,25 +93,31 @@ final value = buffer.readUint16();    // Which endian?
 
 ### Authentication Flow
 
-Two-phase authentication - MUST complete both phases:
+Two logical phases must complete (AUTH_PHASE_ONE → AUTH_PHASE_TWO), but the *transport-layer* sequence depends on `transport.supportsFastAuth`:
 
-1. AUTH_PHASE_ONE: Get server challenge
-2. AUTH_PHASE_TWO: Send verifier response
+- **FAST_AUTH path (23ai, supportsFastAuth=true):** single round-trip — `transport.sendFastAuth()` bundles Protocol + DataTypes + AUTH_PHASE_ONE. AUTH_PHASE_TWO sent separately with `dataFlags: 0x0800`.
+- **Classical path (pre-23, supportsFastAuth=false):** four messages — `sendProtocolNegotiation()` (Protocol + DataTypes), then `sendAuthPhaseOne()` with `dataFlags: 0x0000`, then AUTH_PHASE_TWO with `dataFlags: 0x0000`.
 
-**Security:** Never store or log passwords - only derived keys
+The branch lives in `lib/src/crypto/auth.dart` `AuthFlow.authenticate`. Never call `sendFastAuth` unconditionally — always gate on `transport.supportsFastAuth`.
+
+**Security:** Never store or log passwords — only derived keys.
 
 ## Testing Rules
 
 ### Integration-First Approach
 
-- All tests run against **real Oracle 23ai** in Docker
-- No mocking of database connections
-- Test file structure mirrors `lib/src/` exactly
-- Test files use `_test.dart` suffix
+- All tests run against **a real Oracle server** in Docker — no mocking of database connections.
+- Test file structure mirrors `lib/src/` exactly. Test files use `_test.dart` suffix.
+- Integration tests use `test/integration/test_helper.dart` to read connection params from env (`ORACLE_HOST`, `ORACLE_PORT`, `ORACLE_SERVICE`, `ORACLE_USER`, `ORACLE_PASSWORD`) so the same suite runs against either Oracle version. Never hardcode `FREEPDB1`, `XEPDB1`, port numbers, or credentials in test files.
 
-### Test Environment
+### Test Environments
 
-Requires Oracle 23ai container running on port 1521.
+| Profile | Image | Service | Host port | Auth path exercised |
+|---------|-------|---------|-----------|--------------------|
+| Default (23ai) | `container-registry.oracle.com/database/free` | `FREEPDB1` | 1521 | FAST_AUTH |
+| `oracle21c` profile (`docker-compose --profile oracle21c up -d`) | `gvenzl/oracle-xe:21` | `XEPDB1` | 1522 | Classical AUTH_PHASE_ONE/TWO |
+
+CI runs both via the `integration` and `integration-21c` jobs. Auth-flow-specific tests (e.g. `classical_auth_integration_test.dart`) auto-skip on the wrong server using a `Transport.supportsFastAuth` probe.
 
 ## Error Handling Rules
 

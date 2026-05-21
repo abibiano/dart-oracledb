@@ -33,7 +33,7 @@ By porting the official node-oracledb thin driver architecture to Dart, this pro
 1. **Pure Dart** - Zero native dependencies, works everywhere Dart runs including Apple Silicon
 2. **Thin Protocol** - Direct TNS/TTC wire protocol implementation, no middleware or Oracle Client required
 3. **Apple Silicon Native** - First-class support for modern Mac development environments where the existing package fails
-4. **Oracle 23ai Ready** - Supports latest Oracle LTS with modern authentication (SHA512/PBKDF2)
+4. **Multi-Version Oracle Support** - Primary target Oracle 23ai (FAST_AUTH path); pre-23 Oracle (12c+) supported via classical AUTH_PHASE_ONE/AUTH_PHASE_TWO fallback. Auth path selected from the negotiated TNS `supportsFastAuth` flag, not version strings. Modern SHA512/PBKDF2 verifier on both paths.
 5. **Maintainable Architecture** - Mirrors official node-oracledb structure for long-term sustainability and easier upstream sync
 6. **First-Class Dart API** - Idiomatic Dart interface matching ecosystem conventions
 
@@ -68,7 +68,7 @@ This is a database connectivity library targeting enterprise Dart developers. Wh
 
 ### Technical Success
 
-- All core integration tests passing against Oracle 23ai
+- All core integration tests passing against Oracle 23ai (FAST_AUTH path); classical-auth integration tests passing against `gvenzl/oracle-xe:21` (pre-23 fallback path)
 - Cross-platform verified: macOS (Apple Silicon), Windows, Linux
 - Zero critical bugs in production use
 - API consistency with Dart database package conventions
@@ -79,7 +79,7 @@ This is a database connectivity library targeting enterprise Dart developers. Wh
 | Metric | Target | Validation |
 |--------|--------|------------|
 | Production Stability | Runs reliably in author's production environment | Real-world usage without critical failures |
-| Test Coverage | Core integration tests passing | CI against Oracle 23ai |
+| Test Coverage | Core integration tests passing | CI against Oracle 23ai (`integration` job) and pre-23 (`integration-21c` job) |
 | Platform Support | Works on macOS Apple Silicon, Windows, Linux | Cross-platform test runs |
 | API Familiarity | Comparable to `package:postgres` | Developer feedback, API review |
 | Community Reception | Positive pub.dev likes/popularity | pub.dev metrics |
@@ -90,7 +90,7 @@ This is a database connectivity library targeting enterprise Dart developers. Wh
 
 **Connection & Authentication:**
 
-- Connect to Oracle 23ai with modern authentication (SHA512/PBKDF2)
+- Connect to Oracle with modern authentication (SHA512/PBKDF2). Primary target 23ai via FAST_AUTH; pre-23 Oracle (12c+) supported via classical AUTH_PHASE_ONE/TWO fallback, gated by the server-advertised `supportsFastAuth` capability flag.
 - EZ Connect string parsing (host:port/service)
 - TLS/SSL support
 - Connection timeout handling

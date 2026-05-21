@@ -86,7 +86,7 @@ test/
 ### @Tags Usage
 
 ```dart
-@Tags(['integration'])  // Integration tests (require Oracle 23ai)
+@Tags(['integration'])  // Integration tests (require a running Oracle container — 23ai or pre-23)
 @Tags(['slow'])         // Tests taking >5 seconds
 @Tags(['security'])     // NFR5 credential protection tests
 @Tags(['performance'])  // Performance benchmarks (NFR1-4)
@@ -101,7 +101,7 @@ To eliminate tag warnings, register all custom tags in `dart_test.yaml`:
 # dart_test.yaml
 tags:
   integration:
-    description: Integration tests requiring Oracle 23ai
+    description: Integration tests requiring a real Oracle container (23ai by default; pre-23 via the oracle21c docker-compose profile)
   security:
     description: NFR5 credential protection tests
   slow:
@@ -236,14 +236,15 @@ RUN_INTEGRATION_TESTS=true dart test
 
 ## 4. Protocol-Specific Testing Patterns
 
-### Epic 1 Discoveries (Oracle 23ai Requirements)
+### Epic 1 Discoveries (Oracle Protocol Requirements)
 
 **Critical Protocol Behaviors Discovered:**
 
-1. **FAST_AUTH Protocol (MANDATORY)**
-   - Oracle 23ai requires combined protocol envelope
-   - Single packet containing: Protocol + DataTypes + AUTH messages
-   - NOT documented in Oracle manuals (found via node-oracledb)
+1. **FAST_AUTH Protocol (server-advertised, not mandatory)**
+   - Oracle 23ai advertises FAST_AUTH via the `TNS_ACCEPT_FLAG_FAST_AUTH` bit in the TNS ACCEPT packet; when set, the driver bundles Protocol + DataTypes + AUTH_PHASE_ONE into a single envelope.
+   - Pre-23 Oracle servers do not advertise FAST_AUTH; the driver falls back to the classical four-message sequence (`sendProtocolNegotiation` → `sendAuthPhaseOne` → AUTH_PHASE_TWO). See `spec-classical-auth-fallback.md`.
+   - Routing is driven by `transport.supportsFastAuth`, never by version-string parsing.
+   - NOT documented in Oracle manuals (found via node-oracledb / python-oracledb).
 
 2. **Hex-Encoded Crypto Values (UPPERCASE)**
    - AUTH_SESSKEY: Hex-encoded string
@@ -376,26 +377,28 @@ group('MARKER packet handling', () {
 });
 ```
 
-#### Oracle 23ai-Specific Behaviors
+#### Oracle Version-Specific Behaviors
+
+The driver supports two Oracle authentication paths; the right one is chosen from the negotiated `Transport.supportsFastAuth` flag (set from `TNS_ACCEPT_FLAG_FAST_AUTH` in the TNS ACCEPT packet). Tests should not assume one path is universal.
 
 ```dart
 @Tags(['integration'])
-group('Oracle 23ai specific behaviors', () {
+group('Oracle authentication paths', () {
   test('supports SHA512/PBKDF2 authentication (NFR7)', () async {
-    // Verify modern authentication works
+    // SHA512/PBKDF2 verifier is used on both Oracle versions.
     final conn = await OracleConnection.connect(
-      'localhost:1521/FREEPDB1',
-      user: 'testuser',
-      password: 'testpass',
+      testConnectString, // from test_helper.dart — works for 23ai and pre-23
+      user: testUser,
+      password: testPassword,
     );
 
     expect(conn.isConnected, isTrue);
     await conn.close();
   });
 
-  test('accepts only FAST_AUTH protocol', () async {
-    // Verify FAST_AUTH is required (not optional)
-    // Attempting old-style auth should fail
+  test('selects FAST_AUTH path when the server advertises it (23ai)', () async {
+    // 23ai container will advertise FAST_AUTH; classical_auth_integration_test.dart
+    // covers the inverse case (pre-23 → classical AUTH_PHASE_ONE/TWO).
   });
 });
 ```
