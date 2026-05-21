@@ -1,5 +1,16 @@
 # Deferred Work
 
+## Deferred from: code review of 2-7-statement-caching (2026-05-21)
+
+- **Concurrent `execute()` on the same connection is undefined** — `OracleConnection.execute()` does not serialize calls; cache hit/miss, `inUse` semantics, and drained `cursorsToClose` all assume serialized callers. Documented contract in node-oracledb thin; user error to overlap futures on one connection. Not Story 2.7 scope.
+- **Cached `expectedColumns` becomes stale after DDL changes the SELECT result shape** — `decodeExecuteResponse` decodes new bytes with old column metadata when Oracle omits DESCRIBE_INFO on cached reuse. No invalidation on schema change. Production drivers don't handle this; would require server-side change notifications.
+- **Cache key is exact SQL only — bind type changes can mismatch cached cursor's bind metadata** — node-oracledb thin caches per (SQL, bind signature). Needs investigation; ORA-01007 / silent coercion risk if user reuses same SQL with different bind types. Deferred behind Epic 2 error handling.
+- **`sendCloseCursors` writes all queued IDs in one message — no SDU/chunking bound** — A long-lived session with `maxSize: 1` could overflow on `closeAll`. Practical risk is low; add bounded chunking later.
+- **Cache hit + successful re-execute returning `response.cursorId == 0` triggers `_cache.invalidate(sql)`** — Closes a healthy cached cursor if Oracle ever returns 0 on legitimate re-execute. Integration tests pass; needs protocol verification before changing logic.
+- **`SELECT ... FOR UPDATE` is cache-eligible — cursor reuse may change Oracle row-lock semantics across executions.** Needs Oracle-side investigation.
+- **`statementCacheSize` has no upper bound — pathological large values (e.g., 2^31) lead to unbounded memory.** Add a documented cap or warning later.
+- **Integration test for `statementCacheSize: 1` does not verify cursor reuse / parse-bit clearing** — only that A→B→A doesn't crash. AC3 evidence is weak. Strengthen with `v$open_cursor` query or transport-level instrumentation later.
+
 ## Deferred from: code review of 2-6-basic-data-type-mapping patch-resolution pass (2026-05-21)
 
 - **`decodeNumber` no length-based sentinel guard** — If Oracle omits the 0x66 terminator for a negative NUMBER, the decode loop in `decodeNumber` consumes all remaining bytes in the buffer as mantissa digits, desynchronising the packet reader for every subsequent field. `decodeNumber` does not accept a `length` parameter even though `decodeValue` always has one. Pre-existing architectural issue; needs its own story.

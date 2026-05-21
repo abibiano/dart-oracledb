@@ -1197,4 +1197,162 @@ void main() {
       expect(still.rows.single['X'], equals(1));
     });
   });
+
+  group('Statement caching',
+      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+    late OracleConnection conn;
+    const testTable = 'test_stmt_cache_story27';
+
+    setUp(() async {
+      conn = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        statementCacheSize: 50,
+      );
+      try {
+        await conn.execute('''
+          CREATE TABLE $testTable (
+            id     NUMBER PRIMARY KEY,
+            label  VARCHAR2(100)
+          )
+        ''');
+      } on OracleException catch (e) {
+        if (e.errorCode == 955) {
+          // ORA-00955: already exists — truncate and reuse.
+          try {
+            await conn.execute('TRUNCATE TABLE $testTable');
+          } catch (_) {
+            await conn.close();
+            rethrow;
+          }
+        } else {
+          await conn.close();
+          rethrow;
+        }
+      }
+    });
+
+    tearDown(() async {
+      try {
+        await conn.execute('DROP TABLE $testTable');
+      } on OracleException catch (e) {
+        // ORA-00942: table or view does not exist — acceptable in tearDown.
+        if (e.errorCode != 942) rethrow;
+      } finally {
+        await conn.close();
+      }
+    });
+
+    test(
+        'repeated SELECT with different bind values returns correct results '
+        '(cursor reuse, AC1)', () async {
+      // Execute the same SELECT three times with different bind values.
+      // If cursor reuse is broken the server would return corrupt data or a
+      // protocol error; expect correct results each time.
+      for (var i = 1; i <= 3; i++) {
+        final r = await conn.execute(
+          'SELECT :1 AS VAL FROM DUAL',
+          [i],
+        );
+        expect(r.rows.single['VAL'], equals(i),
+            reason: 'iteration $i must return $i');
+      }
+    });
+
+    test('repeated DML still reports rowsAffected correctly (AC1)', () async {
+      // Insert three rows individually using the same SQL, then update them
+      // using the same SQL, and verify rowsAffected each time.
+      for (var i = 1; i <= 3; i++) {
+        final ins = await conn.execute(
+          'INSERT INTO $testTable (id, label) VALUES (:1, :2)',
+          [i, 'row$i'],
+        );
+        expect(ins.rowsAffected, equals(1),
+            reason: 'INSERT iteration $i must affect 1 row');
+      }
+
+      final upd = await conn.execute(
+        'UPDATE $testTable SET label = :1 WHERE id > 0',
+        ['updated'],
+      );
+      expect(upd.rowsAffected, equals(3), reason: 'UPDATE must affect 3 rows');
+    });
+
+    test(
+        'statementCacheSize: 50 accepts and reports the configured value '
+        '(AC2)', () {
+      expect(conn.statementCacheSize, equals(50));
+    });
+
+    test('statementCacheSize defaults to 30 when omitted (AC2)', () async {
+      // Connect with no statementCacheSize argument and confirm the public
+      // getter exposes the documented default of 30. Live-connection check
+      // because the value cannot be observed without constructing an
+      // OracleConnection (private constructor).
+      final defaultConn = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+      try {
+        expect(defaultConn.statementCacheSize, equals(30));
+      } finally {
+        await defaultConn.close();
+      }
+    });
+
+    test(
+        'statementCacheSize: 1 evicts LRU — SQL A then SQL B then SQL A again '
+        'succeeds without errors (AC3)', () async {
+      // With cache size 1: execute SQL-A (stored), execute SQL-B (evicts A),
+      // execute SQL-A again (re-parse required, evicts B). Oracle must not
+      // return a cursor-already-closed or invalid cursor error.
+      final conn1 = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        statementCacheSize: 1,
+      );
+      addTearDown(() async {
+        try {
+          await conn1.close();
+        } catch (_) {}
+      });
+
+      const sqlA = 'SELECT 1 AS A FROM DUAL';
+      const sqlB = 'SELECT 2 AS B FROM DUAL';
+
+      final r1 = await conn1.execute(sqlA);
+      expect(r1.rows.single['A'], equals(1));
+
+      final r2 = await conn1.execute(sqlB);
+      expect(r2.rows.single['B'], equals(2));
+
+      // sqlA was evicted; re-executing it must re-parse cleanly.
+      final r3 = await conn1.execute(sqlA);
+      expect(r3.rows.single['A'], equals(1),
+          reason: 'sqlA must work after LRU eviction and re-parse');
+    });
+
+    test('statementCacheSize: 0 disables caching — queries still succeed',
+        () async {
+      final noCache = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        statementCacheSize: 0,
+      );
+      addTearDown(() async {
+        try {
+          await noCache.close();
+        } catch (_) {}
+      });
+
+      for (var i = 0; i < 3; i++) {
+        final r = await noCache.execute('SELECT :1 AS N FROM DUAL', [i]);
+        expect(r.rows.single['N'], equals(i));
+      }
+    });
+  });
 }

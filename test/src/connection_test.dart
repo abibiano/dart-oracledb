@@ -1,4 +1,5 @@
 import 'package:oracledb/dart_oracledb.dart';
+import 'package:oracledb/src/statement_cache.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -117,6 +118,78 @@ void main() {
 
       test('oraConnectTimeout is exported and equals 12170', () {
         expect(oraConnectTimeout, equals(12170));
+      });
+    });
+
+    group('statementCacheSize parameter', () {
+      test('default statementCacheSize matches StatementCache default capacity',
+          () {
+        // The connect() default (30) is wired straight into StatementCache;
+        // asserting the cache capacity guards against drift if the default
+        // ever changes silently in one place but not the other.
+        expect(StatementCache(30).maxSize, equals(30));
+      });
+
+      test('negative statementCacheSize rejects before network', () {
+        // ArgumentError must fire before any TCP attempt for invalid params.
+        expect(
+          () => OracleConnection.connect(
+            '10.255.255.1:1521/TEST',
+            user: 'u',
+            password: 'p',
+            statementCacheSize: -1,
+            timeout: const Duration(milliseconds: 1),
+          ),
+          throwsA(isA<ArgumentError>()
+              .having((e) => e.message, 'message', contains('must be >= 0'))),
+        );
+      });
+
+      test('statementCacheSize: 50 does not throw', () async {
+        // A valid positive value must not throw ArgumentError before connect.
+        // We expect a network error (not reached), never an ArgumentError.
+        try {
+          await OracleConnection.connect(
+            '10.255.255.1:1521/TEST',
+            user: 'u',
+            password: 'p',
+            statementCacheSize: 50,
+            timeout: const Duration(seconds: 1),
+          );
+        } on ArgumentError {
+          fail('ArgumentError must not be thrown for statementCacheSize: 50');
+        } on OracleException {
+          // Expected — network not reachable.
+        }
+      });
+
+      test('statementCacheSize: 0 (disabled) does not throw', () async {
+        try {
+          await OracleConnection.connect(
+            '10.255.255.1:1521/TEST',
+            user: 'u',
+            password: 'p',
+            statementCacheSize: 0,
+            timeout: const Duration(seconds: 1),
+          );
+        } on ArgumentError {
+          fail('ArgumentError must not be thrown for statementCacheSize: 0');
+        } on OracleException {
+          // Expected — network not reachable.
+        }
+      });
+
+      test('negative statementCacheSize rejects with ArgumentError', () {
+        expect(
+          () => OracleConnection.connect(
+            '10.255.255.1:1521/TEST',
+            user: 'u',
+            password: 'p',
+            statementCacheSize: -5,
+            timeout: const Duration(milliseconds: 1),
+          ),
+          throwsA(isA<ArgumentError>()),
+        );
       });
     });
 

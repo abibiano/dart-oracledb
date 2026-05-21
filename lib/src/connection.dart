@@ -6,7 +6,9 @@ import 'package:logging/logging.dart';
 import 'crypto/auth.dart';
 import 'errors.dart';
 import 'protocol/bind_parser.dart';
+import 'protocol/messages/execute_message.dart';
 import 'result.dart';
+import 'statement_cache.dart';
 import 'transport/connect_string.dart';
 import 'transport/packet.dart';
 import 'transport/tls.dart';
@@ -34,14 +36,20 @@ class OracleConnection {
   OracleConnection._({
     required Transport transport,
     required ConnectionInfo connectionInfo,
+    required int statementCacheSize,
   })  : _transport = transport,
         _connectionInfo = connectionInfo,
+        _cache = StatementCache(statementCacheSize),
         _isClosed = false;
 
   final Transport _transport;
   final ConnectionInfo _connectionInfo;
+  final StatementCache _cache;
   bool _isClosed;
   bool _inTransaction = false;
+
+  /// The configured statement cache size for this connection.
+  int get statementCacheSize => _cache.maxSize;
 
   /// Whether the connection is currently open and usable.
   ///
@@ -58,6 +66,40 @@ class OracleConnection {
   /// For a more thorough check that sends a ping message to the server,
   /// use [ping()] instead.
   bool get isHealthy => isConnected;
+
+  /// Returns true when [sql] is eligible for statement caching.
+  ///
+  /// Eligible statements: SELECT, WITH, INSERT, UPDATE, DELETE.
+  /// Excluded: DDL (ALTER, CREATE, DROP, …) and PL/SQL (BEGIN, DECLARE, CALL).
+  ///
+  /// A keyword only matches when followed by whitespace or end-of-string, so
+  /// identifiers like `INSERTED` or `UPDATEABLE` don't accidentally qualify.
+  static bool _isCacheEligible(String sql) {
+    if (_isQuery(sql)) return true;
+    final i = _skipSqlPrefixes(sql, 0);
+    if (i >= sql.length) return false;
+    if (_matchesKeyword(sql, i, 'INSERT')) return true;
+    if (_matchesKeyword(sql, i, 'UPDATE')) return true;
+    if (_matchesKeyword(sql, i, 'DELETE')) return true;
+    return false;
+  }
+
+  /// Matches a keyword at [pos] case-insensitively, requiring the character
+  /// after the keyword to be whitespace or end-of-string (word boundary).
+  static bool _matchesKeyword(String sql, int pos, String keyword) {
+    final n = sql.length;
+    final klen = keyword.length;
+    if (pos + klen > n) return false;
+    for (var k = 0; k < klen; k++) {
+      final c = sql.codeUnitAt(pos + k);
+      // Uppercase ASCII: lowercase letters (97-122) map to 65-90 by clearing 0x20.
+      final upper = (c >= 0x61 && c <= 0x7A) ? c - 0x20 : c;
+      if (upper != keyword.codeUnitAt(k)) return false;
+    }
+    if (pos + klen == n) return true;
+    final after = sql.codeUnitAt(pos + klen);
+    return after == 0x20 || after == 0x09 || after == 0x0A || after == 0x0D;
+  }
 
   /// Returns true when [sql] is a SELECT or WITH query, false for DML/DDL/PLSQL.
   ///
@@ -221,20 +263,68 @@ class OracleConnection {
       }
     }
 
+    final isQuery = _isQuery(sql);
+    final eligible = _isCacheEligible(sql);
+
+    // Try to acquire a cached cursor.
+    StatementCacheEntry? cacheEntry;
+    int cursorId = 0;
+    List<ColumnMetadata>? expectedColumns;
+    if (eligible) {
+      cacheEntry = _cache.acquire(sql);
+      if (cacheEntry != null) {
+        cursorId = cacheEntry.cursorId;
+        if (cacheEntry.columnMetadata.isNotEmpty) {
+          expectedColumns = cacheEntry.columnMetadata;
+        }
+      }
+    }
+
+    // Drain any cursor IDs queued from prior LRU evictions or errors.
+    final cursorsToClose = _cache.drainCursorsToClose();
+
     try {
-      final isQuery = _isQuery(sql);
       final response = await _transport.sendExecute(
         sql,
         isQuery: isQuery,
         bindValues: bindList,
         bindNames: bindNames,
+        cursorId: cursorId,
+        expectedColumns: expectedColumns,
+        cursorsToClose: cursorsToClose,
       );
 
       if (!response.isSuccess) {
+        if (cacheEntry != null) {
+          _cache.invalidate(sql);
+          cacheEntry = null;
+        }
         throw OracleException(
           errorCode: response.errorCode ?? oraProtocolError,
           message: response.errorMessage ?? 'Query execution failed',
         );
+      }
+
+      // Update cache from response.
+      if (eligible && response.cursorId != 0) {
+        if (cacheEntry != null) {
+          cacheEntry.cursorId = response.cursorId;
+          if (response.columnMetadata.isNotEmpty) {
+            cacheEntry.columnMetadata = response.columnMetadata;
+          }
+          _cache.release(cacheEntry);
+          cacheEntry = null;
+        } else {
+          _cache.store(StatementCacheEntry(
+            sql: sql,
+            cursorId: response.cursorId,
+            columnMetadata: response.columnMetadata,
+          ));
+        }
+      } else if (cacheEntry != null) {
+        // Server returned cursorId == 0; cannot cache this execution.
+        _cache.invalidate(sql);
+        cacheEntry = null;
       }
 
       return OracleResult(
@@ -243,6 +333,14 @@ class OracleConnection {
         rowsAffected: response.rowsAffected,
       );
     } catch (e) {
+      if (cacheEntry != null) {
+        _cache.invalidate(sql);
+      }
+      // sendExecute may have thrown before the close-cursor piggyback hit the
+      // wire. Put the drained IDs back so the next call (or close()) retries.
+      if (cursorsToClose.isNotEmpty) {
+        _cache.requeueCursorsToClose(cursorsToClose);
+      }
       if (e is OracleException) rethrow;
       throw OracleException(
         errorCode: oraProtocolError,
@@ -491,7 +589,12 @@ class OracleConnection {
     required String password,
     Duration timeout = const Duration(seconds: 60),
     TlsConfig? tls,
+    int statementCacheSize = 30,
   }) async {
+    if (statementCacheSize < 0) {
+      throw ArgumentError.value(
+          statementCacheSize, 'statementCacheSize', 'must be >= 0');
+    }
     _log.info(
         'Connecting to: $connectionString${tls?.enabled == true ? ' (TLS)' : ''}');
 
@@ -559,6 +662,7 @@ class OracleConnection {
     return OracleConnection._(
       transport: transport,
       connectionInfo: connectionInfo,
+      statementCacheSize: statementCacheSize,
     );
   }
 
@@ -587,6 +691,7 @@ class OracleConnection {
     required String password,
     Duration timeout = const Duration(seconds: 60),
     TlsConfig? tls,
+    int statementCacheSize = 30,
     required Future<T> Function(OracleConnection connection) callback,
   }) async {
     final connection = await connect(
@@ -595,6 +700,7 @@ class OracleConnection {
       password: password,
       timeout: timeout,
       tls: tls,
+      statementCacheSize: statementCacheSize,
     );
 
     try {
@@ -636,6 +742,12 @@ class OracleConnection {
 
     _log.info('Closing connection');
     _isClosed = true;
+
+    // Clear cache state locally; per node-oracledb reference, cached cursors
+    // are only ever closed via piggyback on a subsequent execute. On close
+    // there is no next execute, so the server reaps them at session teardown.
+    _cache.closeAll();
+
     await _transport.disconnect();
     _log.fine('Connection closed successfully');
   }

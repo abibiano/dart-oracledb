@@ -87,6 +87,103 @@ void main() {
     });
   });
 
+  group('ExecuteRequest with cached cursorId', () {
+    test('nonzero cursorId clears ttcExecOptionParse bit', () {
+      final req = ExecuteRequest(
+        sql: 'SELECT 1 FROM dual',
+        isQuery: true,
+        cursorId: 42,
+      );
+      final bytes = req.toBytes();
+      final options = _readOptionsFromHeader(bytes);
+      expect(options & ttcExecOptionParse, equals(0),
+          reason: 'PARSE bit must be cleared when reusing a cached cursor');
+      expect(options & ttcExecOptionExecute, isNonZero);
+    });
+
+    test('nonzero cursorId writes zero SQL pointer and zero SQL length', () {
+      final req = ExecuteRequest(
+        sql: 'SELECT 1 FROM dual',
+        isQuery: true,
+        cursorId: 7,
+      );
+      final bytes = req.toBytes();
+      // Locate the SQL pointer byte: after header (msgType + funcCode + seq + UB8(9 bytes)) + options UB4 + cursorId UB4
+      final buf = ReadBuffer(bytes);
+      buf.readUint8(); // msg type
+      buf.readUint8(); // func code
+      buf.readUint8(); // seq
+      buf.skipUB8(); // token number
+      buf.readUB4(); // options
+      buf.readUB4(); // cursor id value
+      final sqlPtr = buf.readUint8(); // pointer to SQL (0 = null = no SQL)
+      final sqlLen = buf.readUB4(); // SQL length
+      expect(sqlPtr, equals(0), reason: 'SQL pointer must be null for reuse');
+      expect(sqlLen, equals(0), reason: 'SQL length must be 0 for reuse');
+    });
+
+    test('zero cursorId includes PARSE bit and SQL bytes', () {
+      const sql = 'SELECT 1 FROM dual';
+      final req = ExecuteRequest(sql: sql, isQuery: true, cursorId: 0);
+      final bytes = req.toBytes();
+      final options = _readOptionsFromHeader(bytes);
+      expect(options & ttcExecOptionParse, isNonZero);
+    });
+  });
+
+  group('decodeExecuteResponse with expectedColumns', () {
+    test('uses expectedColumns when DESCRIBE_INFO is absent', () {
+      final payload = _buildPayload([
+        // ROW_HEADER (minimal)
+        _rowHeader(),
+        // ROW_DATA with one VARCHAR column
+        [ttcMsgTypeRowData, ..._bytesWithLength('hello'.codeUnits)],
+        // ERROR end-of-fetch
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+
+      const col = ColumnMetadata(
+          name: 'VAL', oracleType: oraTypeVarchar, maxLength: 100);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: [col],
+      );
+
+      expect(r.isSuccess, isTrue);
+      expect(r.columnMetadata, hasLength(1));
+      expect(r.columnMetadata.first.name, equals('VAL'));
+      expect(r.rows, hasLength(1));
+      expect(r.rows.first.first, equals('hello'));
+    });
+
+    test('DESCRIBE_INFO in response overrides expectedColumns', () {
+      // Build a minimal DESCRIBE_INFO + ROW_DATA payload.
+      final describePayload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'FRESH', oraType: oraTypeVarchar, maxSize: 50),
+        ]),
+        _rowHeader(),
+        [ttcMsgTypeRowData, ..._bytesWithLength('world'.codeUnits)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+
+      const stale = ColumnMetadata(
+          name: 'STALE', oracleType: oraTypeVarchar, maxLength: 10);
+      final r = decodeExecuteResponse(
+        describePayload,
+        isQuery: true,
+        expectedColumns: [stale],
+      );
+
+      expect(r.columnMetadata.first.name, equals('FRESH'),
+          reason: 'DESCRIBE_INFO must override expectedColumns');
+      expect(r.rows.first.first, equals('world'));
+    });
+  });
+
   group('FetchRequest encoding', () {
     test('uses TTC RPC FETCH (funcCode 5)', () {
       final req = FetchRequest(cursorId: 42, numRows: 10);
@@ -142,6 +239,81 @@ void main() {
       expect(r.moreRowsToFetch, isFalse);
     });
   });
+}
+
+/// Builds a minimal TTC ROW_HEADER message with no bit-vector and no rowid.
+List<int> _rowHeader() {
+  return [
+    ttcMsgTypeRowHeader,
+    0, // flags (UB1)
+    ..._ub2(0), // num requests
+    ..._ub4(0), // iteration number
+    ..._ub4(0), // num iters
+    ..._ub2(0), // buffer length
+    ..._ub4(0), // bitVecLen = 0
+    ..._ub4(0), // rxhridLen = 0
+  ];
+}
+
+/// Builds a TTC DESCRIBE_INFO message containing [columns].
+List<int> _describeInfo(List<List<int>> columns) {
+  final out = <int>[ttcMsgTypeDescribeInfo];
+  out.add(0); // version bytes length = 0 (readBytesWithLength → empty)
+  out.addAll(_ub4(0)); // max row size
+  out.addAll(_ub4(columns.length)); // numCols
+  if (columns.isNotEmpty) out.add(0); // extra byte present when numCols > 0
+  for (final col in columns) {
+    out.addAll(col);
+  }
+  out.addAll(_ub4(0)); // dateBytes = 0 (no current-date field)
+  out.addAll(_ub4(0)); // dcbflag
+  out.addAll(_ub4(0)); // dcbmdbz
+  out.addAll(_ub4(0)); // dcbmnpr
+  out.addAll(_ub4(0)); // dcbmxpr
+  out.addAll(_ub4(0)); // tailBytes = 0
+  return out;
+}
+
+/// Builds a single column-info entry for DESCRIBE_INFO.
+///
+/// Matches the layout read by [_processColumnInfo] with ttcFieldVersion = 24
+/// (the default used by [decodeExecuteResponse]).
+List<int> _columnInfo({
+  required String name,
+  required int oraType,
+  required int maxSize,
+}) {
+  final nameBytes = name.codeUnits;
+  return [
+    oraType, // dataType
+    0, // flags
+    0, // precision
+    0, // scale
+    ..._ub4(maxSize), // maxSize
+    ..._ub4(0), // max num array elements
+    ..._ub8(0), // cont flags (UB8)
+    ..._ub4(0), // oidLen = 0
+    ..._ub2(0), // version
+    ..._ub2(0), // charset id
+    0, // csfrm
+    ..._ub4(maxSize), // size
+    ..._ub4(0), // oaccolid (12.2)
+    0, // nullable
+    0, // v7 name length
+    ..._ub4(nameBytes.length), // nameLen
+    ..._bytesWithLength(nameBytes), // name with length prefix
+    ..._ub4(0), // schema len = 0
+    ..._ub4(0), // type name len = 0
+    ..._ub2(0), // column position
+    ..._ub4(0), // uds flags
+    ..._ub4(0), // domain schema len = 0
+    ..._ub4(0), // domain name len = 0
+    ..._ub4(0), // annotations len = 0
+    // ttcFieldVersion >= 24 (23.4) vector fields:
+    ..._ub4(0), // dimensions
+    0, // format
+    0, // flags
+  ];
 }
 
 /// Reads the EXECUTE options UB4 from a request that begins with the standard

@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-05-21  # Story 2.6 code review complete — 2 patches applied (setUp TRUNCATE leak guard, spec byte examples corrected); status → done
+last_updated: 2026-05-21  # Story 2.7 code review complete; status -> done
 project: dart-oracledb
 tracking_system: file-system
 story_location: docs/sprint-artifacts
@@ -81,7 +81,7 @@ development_status:
   2-4-dml-operations-insert-update-delete: done  # 2026-05-21 Story 6.3 session 2 — All 20 DML integration tests pass. BREAK/RESET MARKER protocol implemented in transport. INSERT/UPDATE/DELETE + error paths validated against Oracle 23ai.
   2-5-transaction-management: done  # 2026-05-21 code-review — 11 patches applied (re-entrancy guard, rollback-failure handling, timeout msg, AC5/AC6 test hardening, leak fixes); Oracle 23ai integration re-run: 79 pass / 7 skipped (TLS-only)
   2-6-basic-data-type-mapping: done  # 2026-05-21 code review complete — all 8 patches resolved (6 from pass 1 + 2 from pass 2: setUp TRUNCATE leak guard, spec byte examples corrected). 63 query-integration tests pass.
-  2-7-statement-caching: backlog
+  2-7-statement-caching: done  # 2026-05-21 — Code review complete. 11 patches applied (10 from review + 1 from Decision 1 reference alignment: sendCloseCursors removed). 486 unit tests pass / 6 Oracle 23ai integration tests pass. 8 items deferred. Oracle 21c execute compatibility is pre-existing issue (tracked separately).
   2-8-query-error-handling: backlog
   epic-2-retrospective: optional
 

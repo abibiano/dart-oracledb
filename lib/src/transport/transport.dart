@@ -252,8 +252,12 @@ class Transport {
     List<String>? bindNames,
     int prefetchRows = 50,
     Duration? timeout = const Duration(minutes: 2),
+    int cursorId = 0,
+    List<ColumnMetadata>? expectedColumns,
+    List<int> cursorsToClose = const [],
   }) async {
-    _log.fine('Sending execute request (isQuery=$isQuery)...');
+    _log.fine('Sending execute request (isQuery=$isQuery, '
+        'cursorId=$cursorId)...');
 
     final request = ExecuteRequest(
       sql: sql,
@@ -263,8 +267,21 @@ class Transport {
       numIters: prefetchRows,
       ttcFieldVersion: _ttcFieldVersion,
       sequence: nextSequence(),
+      cursorId: cursorId,
     );
-    final requestData = request.toBytes();
+
+    // Prepend close-cursor piggyback when LRU evictions produced pending IDs.
+    final executeData = request.toBytes();
+    final Uint8List requestData;
+    if (cursorsToClose.isNotEmpty) {
+      final closeData = _buildCloseCursorPiggyback(cursorsToClose);
+      requestData = Uint8List(closeData.length + executeData.length)
+        ..setRange(0, closeData.length, closeData)
+        ..setRange(closeData.length, closeData.length + executeData.length,
+            executeData);
+    } else {
+      requestData = executeData;
+    }
 
     await sendData(requestData);
     final payload = await _receiveDataWithTimeout(timeout);
@@ -273,11 +290,17 @@ class Transport {
       payload,
       isQuery: isQuery,
       ttcFieldVersion: _ttcFieldVersion,
+      expectedColumns: expectedColumns,
     );
 
     // If this is a SELECT and the server kept the cursor open with more rows
     // pending, drain them via FETCH calls until EOF.
     if (isQuery && response.cursorId != 0 && response.isSuccess) {
+      // Use column metadata from this response (populated from DESCRIBE or
+      // expectedColumns) so fetch rounds can decode rows without DESCRIBE.
+      final fetchColumns = response.columnMetadata.isNotEmpty
+          ? response.columnMetadata
+          : expectedColumns;
       var fetchCount = 0;
       while (_needsMoreRows(response)) {
         if (++fetchCount > _maxFetchIterations) {
@@ -286,13 +309,12 @@ class Transport {
           response.moreRowsToFetch = false;
           break;
         }
-        final fetched =
-            await _sendFetch(response.cursorId, prefetchRows, timeout);
+        final fetched = await _sendFetch(
+            response.cursorId, prefetchRows, timeout,
+            expectedColumns: fetchColumns);
         response.rows.addAll(fetched.rows);
         response.moreRowsToFetch = fetched.moreRowsToFetch;
         if (!fetched.isSuccess) {
-          // TODO(cursor-leak): send TTC CLOSE_CURSORS for response.cursorId
-          // to avoid ORA-01000 on long-running sessions (follow-up story).
           return ExecuteResponse(
             isSuccess: false,
             cursorId: response.cursorId,
@@ -309,6 +331,28 @@ class Transport {
     }
 
     return response;
+  }
+
+  /// Builds a close-cursor piggyback TTC message (prepended to another message).
+  ///
+  /// Matches node-oracledb thin `writeCloseCursorsPiggyBack` — close-cursor
+  /// is exclusively a piggyback prefix on outgoing TTC messages. There is no
+  /// standalone close-cursors round trip; pending cursor IDs are abandoned
+  /// at session teardown and reaped by Oracle when the session ends.
+  Uint8List _buildCloseCursorPiggyback(List<int> cursorIds) {
+    final buf = WriteBuffer();
+    buf.writeUint8(ttcMsgTypePiggyback);
+    buf.writeUint8(ttcFuncCloseCursors);
+    buf.writeUint8(nextSequence() & 0xFF);
+    if (_ttcFieldVersion >= ttcCcapFieldVersion23_1Ext1) {
+      buf.writeUB8(0); // token number
+    }
+    buf.writeUint8(1); // pointer — non-null signals cursor list follows
+    buf.writeUB4(cursorIds.length);
+    for (final id in cursorIds) {
+      buf.writeUB4(id);
+    }
+    return buf.toBytes();
   }
 
   bool _needsMoreRows(ExecuteResponse r) => r.moreRowsToFetch;
@@ -365,7 +409,8 @@ class Transport {
   }
 
   Future<ExecuteResponse> _sendFetch(
-      int cursorId, int numRows, Duration? timeout) async {
+      int cursorId, int numRows, Duration? timeout,
+      {List<ColumnMetadata>? expectedColumns}) async {
     final fetch = FetchRequest(
       cursorId: cursorId,
       numRows: numRows,
@@ -378,6 +423,7 @@ class Transport {
       payload,
       isQuery: true,
       ttcFieldVersion: _ttcFieldVersion,
+      expectedColumns: expectedColumns,
     );
   }
 
