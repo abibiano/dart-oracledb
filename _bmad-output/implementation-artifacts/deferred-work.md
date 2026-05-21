@@ -1,5 +1,10 @@
 # Deferred Work
 
+## Deferred from: Oracle 21c integration test review (2026-05-21)
+
+- **Intermittent `RangeError (end): Invalid value: Not in inclusive range 0..31: 32` during auth flow** — Surfaces sporadically on both Oracle 23ai and 21c after the first ~30–50 authentications in a sequential test run (`-j 1`). Caller sees it as `ORA-01017: Authentication failed` because `OracleConnection.connect` wraps any auth exception. Stack trace lands at `lib/src/crypto/auth.dart:199` (`fullHash.sublist(0, 32)`) which assumes a 32-byte hash; under load the underlying buffer is occasionally shorter. Tests pass when re-run in isolation. Pre-existing flake; not exposed by anything in this review. Needs a defensive length check + targeted reproducer in a future story.
+- **`_receiveAllTtcData` does a probe-decode after each packet on pre-23.4 servers** — Costs one full decoder pass per inbound packet because `ttcStreamIsComplete` re-walks the accumulated bytes. Cheap for the typical single-SDU response (8 KB), but every additional packet on a long fetch incurs O(bytes-so-far) extra work. The right long-term shape mirrors node-oracledb's lazy buffer that fetches packets on demand inside the decoder — substantial refactor. Acceptable for now.
+
 ## Deferred from: code review of 2-7-statement-caching (2026-05-21)
 
 - **Concurrent `execute()` on the same connection is undefined** — `OracleConnection.execute()` does not serialize calls; cache hit/miss, `inUse` semantics, and drained `cursorsToClose` all assume serialized callers. Documented contract in node-oracledb thin; user error to overlap futures on one connection. Not Story 2.7 scope.

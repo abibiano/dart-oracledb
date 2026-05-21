@@ -292,8 +292,18 @@ const int ttcCcapFieldVersion12_2 = 8;
 /// CCAP field version threshold for Oracle 12.2 ext1 (chunk ids).
 const int ttcCcapFieldVersionExt1 = 9;
 
-/// CCAP field version threshold for Oracle 20.1 (sql type + checksum in error).
-const int ttcCcapFieldVersion20_1 = 10;
+/// CCAP field version threshold for Oracle 20.1 (sql type + checksum in
+/// error response). Value 14 = TNS_CCAP_FIELD_VERSION_20_1 in node-oracledb
+/// `constants.js`. The previous value `10` was actually 18_1 and over-fired
+/// on 18c/19c/21c, reading 8 stale bytes from the buffer.
+const int ttcCcapFieldVersion20_1 = 14;
+
+/// CCAP field version threshold for Oracle 23.1 — domain schema and domain
+/// name added to column metadata.
+const int ttcCcapFieldVersion23_1 = 17;
+
+/// CCAP field version threshold for Oracle 23.1 ext 3 — column annotations.
+const int ttcCcapFieldVersion23_1Ext3 = 20;
 
 /// CCAP field version threshold for Oracle 23.4 vector fields.
 /// Value 24 = TNS_CCAP_FIELD_VERSION_MAX in node-oracledb constants.js.

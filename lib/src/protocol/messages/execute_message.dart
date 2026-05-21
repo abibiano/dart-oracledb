@@ -451,12 +451,47 @@ class ExecuteResponse {
   final String? errorMessage;
 }
 
+/// Returns true if the accumulated TTC bytes contain a complete response
+/// (i.e. a STATUS or END_OF_REQUEST terminal message). Returns false if the
+/// scanner runs out of bytes mid-message, signalling that more TNS DATA
+/// packets are still needed.
+///
+/// Used by the transport layer to detect end-of-response on Oracle pre-23.4
+/// servers, which do not emit TNS-level end-of-request flags. Discards
+/// decoded values; the actual response is decoded again by the caller via
+/// [decodeExecuteResponse] once all bytes have arrived. The double pass is
+/// cheap because typical responses fit in a single 8 KB SDU.
+bool ttcStreamIsComplete(Uint8List data,
+    {int ttcFieldVersion = 24,
+    bool endOfRequestSupport = true,
+    List<ColumnMetadata>? expectedColumns}) {
+  final buffer = ReadBuffer(data);
+  final state = _DecodeState(
+    isQuery: false,
+    ttcFieldVersion: ttcFieldVersion,
+    columns: expectedColumns != null
+        ? List.of(expectedColumns)
+        : <ColumnMetadata>[],
+    endOfRequestSupport: endOfRequestSupport,
+  );
+  try {
+    while (buffer.hasRemaining && !state.endOfResponse) {
+      final msgType = buffer.readUint8();
+      _dispatch(msgType, buffer, state);
+    }
+    return state.endOfResponse;
+  } on BufferException {
+    return false;
+  }
+}
+
 /// Parses a complete TTC response payload (one or more TTC messages) into an
 /// [ExecuteResponse]. Handles SELECT (DESCRIBE_INFO + ROW_HEADER + ROW_DATA +
 /// ERROR-end-of-fetch) and DML (PARAMETER + ERROR) shapes plus piggybacks.
 ExecuteResponse decodeExecuteResponse(Uint8List data,
     {required bool isQuery,
     int ttcFieldVersion = 24,
+    bool endOfRequestSupport = true,
     List<ColumnMetadata>? expectedColumns}) {
   final buffer = ReadBuffer(data);
   final state = _DecodeState(
@@ -464,6 +499,7 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
     ttcFieldVersion: ttcFieldVersion,
     columns:
         expectedColumns != null ? List.of(expectedColumns) : <ColumnMetadata>[],
+    endOfRequestSupport: endOfRequestSupport,
   );
 
   try {
@@ -502,10 +538,17 @@ class _DecodeState {
   _DecodeState(
       {required this.isQuery,
       required this.columns,
-      this.ttcFieldVersion = 24});
+      this.ttcFieldVersion = 24,
+      this.endOfRequestSupport = true});
 
   final bool isQuery;
   final int ttcFieldVersion;
+
+  /// Server-side TNS_CCAP_END_OF_REQUEST capability. On pre-23.4 servers
+  /// (false), an ERROR TTC message terminates the response — no STATUS or
+  /// END_OF_REQUEST follows. node-oracledb encodes the same rule via
+  /// `endOfResponse = !endOfRequestSupport` in `base.js processErrorInfo`.
+  final bool endOfRequestSupport;
   List<ColumnMetadata> columns;
   final List<List<Object?>> rows = [];
   int cursorId = 0;
@@ -616,25 +659,29 @@ ColumnMetadata _processColumnInfo(ReadBuffer buf, int ttcFieldVersion) {
   if (typeNameLen > 0) buf.readBytesWithLength();
   buf.skipUB2(); // column position
   buf.skipUB4(); // uds flags
-  // 23.1 domain schema / name
-  final domainSchemaLen = buf.readUB4();
-  if (domainSchemaLen > 0) buf.readBytesWithLength();
-  final domainNameLen = buf.readUB4();
-  if (domainNameLen > 0) buf.readBytesWithLength();
+  // 23.1: domain schema / name — only present when server negotiated >= 23.1
+  if (ttcFieldVersion >= ttcCcapFieldVersion23_1) {
+    final domainSchemaLen = buf.readUB4();
+    if (domainSchemaLen > 0) buf.readBytesWithLength();
+    final domainNameLen = buf.readUB4();
+    if (domainNameLen > 0) buf.readBytesWithLength();
+  }
   // 23.1 ext 3: annotations
-  final annoLen = buf.readUB4();
-  if (annoLen > 0) {
-    buf.skipUB1();
-    final numAnno = buf.readUB4();
-    buf.skipUB1();
-    for (var i = 0; i < numAnno; i++) {
-      buf.skipUB4();
-      buf.readBytesWithLength(); // key
-      final valBytes = buf.readUB4();
-      if (valBytes > 0) buf.readBytesWithLength();
+  if (ttcFieldVersion >= ttcCcapFieldVersion23_1Ext3) {
+    final annoLen = buf.readUB4();
+    if (annoLen > 0) {
+      buf.skipUB1();
+      final numAnno = buf.readUB4();
+      buf.skipUB1();
+      for (var i = 0; i < numAnno; i++) {
+        buf.skipUB4();
+        buf.readBytesWithLength(); // key
+        final valBytes = buf.readUB4();
+        if (valBytes > 0) buf.readBytesWithLength();
+        buf.skipUB4(); // flags
+      }
       buf.skipUB4(); // flags
     }
-    buf.skipUB4(); // flags
   }
   // 23.4 vector fields — only present when server negotiated field version >= 24
   if (ttcFieldVersion >= ttcCcapFieldVersion23_4) {
@@ -841,6 +888,12 @@ void _processError(ReadBuffer buf, _DecodeState s) {
   }
   if (!s.isQuery && num == 0) {
     s.rowsAffected = rowCount;
+  }
+  // Pre-23.4 servers emit no STATUS or END_OF_REQUEST after an ERROR — the
+  // ERROR itself is the terminal message. Match node-oracledb thin
+  // (`processErrorInfo`).
+  if (!s.endOfRequestSupport) {
+    s.endOfResponse = true;
   }
 }
 

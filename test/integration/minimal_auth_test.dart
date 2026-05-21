@@ -52,6 +52,12 @@ void main() {
     test('fast auth protocol (FAST_AUTH message type 15)', () async {
       print('\n=== Testing FAST_AUTH Protocol (Oracle 23ai) ===');
 
+      if (!transport.supportsFastAuth) {
+        markTestSkipped(
+            'Server does not advertise FAST_AUTH (e.g. Oracle 19c / 21c).');
+        return;
+      }
+
       // Generate client nonce for authentication
       final clientNonce = Uint8List(16); // Zeros for deterministic test
 

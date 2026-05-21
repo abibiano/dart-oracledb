@@ -284,12 +284,14 @@ class Transport {
     }
 
     await sendData(requestData);
-    final payload = await _receiveDataWithTimeout(timeout);
+    final payload = await _receiveDataWithTimeout(timeout,
+        expectedColumns: expectedColumns);
 
     final response = decodeExecuteResponse(
       payload,
       isQuery: isQuery,
       ttcFieldVersion: _ttcFieldVersion,
+      endOfRequestSupport: _supportsEndOfRequest,
       expectedColumns: expectedColumns,
     );
 
@@ -373,7 +375,9 @@ class Transport {
     await sendData(buf.toBytes());
     final payload = await _receiveDataWithTimeout(timeout, operation: 'Commit');
     final response = decodeExecuteResponse(payload,
-        isQuery: false, ttcFieldVersion: _ttcFieldVersion);
+        isQuery: false,
+        ttcFieldVersion: _ttcFieldVersion,
+        endOfRequestSupport: _supportsEndOfRequest);
     if (!response.isSuccess) {
       throw OracleException(
         errorCode: response.errorCode ?? oraProtocolError,
@@ -399,7 +403,9 @@ class Transport {
     final payload =
         await _receiveDataWithTimeout(timeout, operation: 'Rollback');
     final response = decodeExecuteResponse(payload,
-        isQuery: false, ttcFieldVersion: _ttcFieldVersion);
+        isQuery: false,
+        ttcFieldVersion: _ttcFieldVersion,
+        endOfRequestSupport: _supportsEndOfRequest);
     if (!response.isSuccess) {
       throw OracleException(
         errorCode: response.errorCode ?? oraProtocolError,
@@ -418,18 +424,21 @@ class Transport {
       sequence: nextSequence(),
     );
     await sendData(fetch.toBytes());
-    final payload = await _receiveDataWithTimeout(timeout);
+    final payload = await _receiveDataWithTimeout(timeout,
+        expectedColumns: expectedColumns);
     return decodeExecuteResponse(
       payload,
       isQuery: true,
       ttcFieldVersion: _ttcFieldVersion,
+      endOfRequestSupport: _supportsEndOfRequest,
       expectedColumns: expectedColumns,
     );
   }
 
   Future<Uint8List> _receiveDataWithTimeout(Duration? timeout,
-      {String operation = 'Query'}) async {
-    final future = _receiveAllTtcData();
+      {String operation = 'Query',
+      List<ColumnMetadata>? expectedColumns}) async {
+    final future = _receiveAllTtcData(expectedColumns: expectedColumns);
     if (timeout == null) return future;
     // NOTE: on timeout the underlying socket read continues; subsequent
     // operations may receive stale data. Disconnect and reconnect if that
@@ -445,11 +454,21 @@ class Transport {
 
   /// Reads one or more TNS DATA packets and concatenates their TTC payloads.
   ///
-  /// Loops until a DATA packet with the EOF (0x0040) or END_OF_REQUEST
-  /// (0x2000) data-flag is received, or a single-byte TTC END_OF_REQUEST
-  /// (0x1D) terminal packet is received. Oracle 23ai sends the single-byte
-  /// form after DML responses without setting any data flags.
-  Future<Uint8List> _receiveAllTtcData() async {
+  /// Termination differs by server capability:
+  ///   * `_supportsEndOfRequest == true` (Oracle 23.4+) — the server signals
+  ///     end-of-response with the `TNS_DATA_FLAGS_END_OF_REQUEST` (0x2000)
+  ///     data-flag, or by sending the single-byte `TNS_MSG_TYPE_END_OF_REQUEST`
+  ///     (0x1D) marker as the last payload byte. The EOF (0x0040) data-flag
+  ///     also terminates the stream.
+  ///   * `_supportsEndOfRequest == false` (Oracle pre-23.4 / 21c / 19c) — there
+  ///     is no TNS-level end-of-response marker. End-of-response is encoded in
+  ///     the TTC message stream itself (STATUS / ERROR / END_OF_REQUEST). We
+  ///     scan accumulated bytes after each packet using [_ttcStreamEndsResponse]
+  ///     and keep reading more packets if the response is incomplete. This
+  ///     matches node-oracledb thin (`packet.js waitForPackets`), which only
+  ///     batches packets for `endOfRequestSupport == true`.
+  Future<Uint8List> _receiveAllTtcData(
+      {List<ColumnMetadata>? expectedColumns}) async {
     final chunks = <Uint8List>[];
     while (true) {
       var packet = await receive();
@@ -482,20 +501,36 @@ class Transport {
       final flags = (packet.payload[0] << 8) | packet.payload[1];
       final ttcData = Uint8List.sublistView(packet.payload, 2);
       chunks.add(ttcData);
-      // Oracle 23ai uses 0x1D (END_OF_REQUEST) as the terminal TTC message.
-      // For success responses, Oracle sets flags=0x2000 and embeds 0x1D as the
-      // last payload byte. For error responses (e.g. ORA-00001), Oracle uses
-      // flags=0x0000 but still ends the payload with 0x1D. Terminate whenever
-      // the last byte of the received TTC data is 0x1D — this covers both cases
-      // and avoids a deadlock where we wait for a second packet that never comes.
-      if (ttcData.isNotEmpty && ttcData.last == ttcMsgTypeEndOfRequest) {
-        break;
-      }
-      if ((flags & _tnsDataFlagsEof) != 0 ||
-          (flags & _tnsDataFlagsEndOfRequest) != 0) {
-        break;
+      if (_supportsEndOfRequest) {
+        // Oracle 23.4+: the server provides explicit end-of-request markers.
+        // For success responses, Oracle sets flags=0x2000 and embeds 0x1D as
+        // the last payload byte. For error responses (e.g. ORA-00001), Oracle
+        // uses flags=0x0000 but still ends the payload with 0x1D. Terminate
+        // whenever the last byte of the received TTC data is 0x1D — this
+        // covers both cases and avoids waiting for a packet that never comes.
+        if (ttcData.isNotEmpty && ttcData.last == ttcMsgTypeEndOfRequest) {
+          break;
+        }
+        if ((flags & _tnsDataFlagsEof) != 0 ||
+            (flags & _tnsDataFlagsEndOfRequest) != 0) {
+          break;
+        }
+      } else {
+        // Pre-23.4 (Oracle 21c / 19c): no TNS-level boundary. Scan the
+        // accumulated TTC bytes for STATUS / END_OF_REQUEST. If the response
+        // is complete, stop; otherwise wait for the next packet.
+        if (ttcStreamIsComplete(_concatChunks(chunks),
+            ttcFieldVersion: _ttcFieldVersion,
+            endOfRequestSupport: _supportsEndOfRequest,
+            expectedColumns: expectedColumns)) {
+          break;
+        }
       }
     }
+    return _concatChunks(chunks);
+  }
+
+  static Uint8List _concatChunks(List<Uint8List> chunks) {
     if (chunks.length == 1) return chunks.first;
     final total = chunks.fold(0, (sum, c) => sum + c.length);
     final result = Uint8List(total);
