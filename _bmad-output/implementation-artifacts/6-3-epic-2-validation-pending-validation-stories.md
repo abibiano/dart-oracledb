@@ -1,6 +1,6 @@
 # Story 6.3: Epic 2 Validation - Review Existing Pending-Validation Stories
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -461,3 +461,71 @@ _Code review 2026-05-21 — 3 layers (Blind Hunter, Edge Case Hunter, Acceptance
 - `OracleResult` "lost null fallback" (auditor #6): new `ExecuteResponse` fields are non-nullable with `const []` defaults; type system guarantees the safety.
 - `ColumnMetadata.decode` removal (auditor #13): internal API only; transport was updated as part of the same change.
 - `last_updated` key in sprint-status (auditor #14): YAML schema additions are harmless and don't violate the tracking system.
+
+---
+
+### Chunk A Code Review Findings (code-review skill, 2026-05-21)
+
+_3-layer review (Blind Hunter + Edge Case Hunter + Acceptance Auditor) of `buffer.dart`, `constants.dart`, `execute_message.dart`. 14 retained, 7 dismissed._
+
+---
+
+### Chunk B Code Review Findings (code-review skill, 2026-05-21)
+
+_3-layer review of `transport.dart`, `connection.dart`. 8 retained, 7 dismissed._
+
+#### Patches (3)
+
+- [x] [Review][Patch] **`moreRowsToFetch` never set to `true` — FETCH loop is dead code; queries > 50 rows silently truncated** — Added `state.moreRowsToFetch = true` in `decodeExecuteResponse` when `isQuery && isSuccess && cursorId != 0 && errorNum == null`. [lib/src/protocol/messages/execute_message.dart — decodeExecuteResponse] — _Applied 2026-05-21_
+- [x] [Review][Patch] **Unterminated block comment in `_skipSqlPrefixes` returns `pos = n-1` instead of `n`** — Added `if (pos + 1 >= n) pos = n` after the inner block-comment loop. [lib/src/connection.dart — _skipSqlPrefixes] — _Applied 2026-05-21_
+- [x] [Review][Patch] **`_maxFetchIterations` cap breaks loop without clearing `moreRowsToFetch`** — Added `response.moreRowsToFetch = false` before `break` in the cap branch. [lib/src/transport/transport.dart — sendExecute FETCH loop] — _Applied 2026-05-21_
+
+#### Deferred (5)
+
+- [x] [Review][Defer] **`sendCommit()`/`sendRollback()` have no timeout — hang indefinitely on network partition** — Both call `_receiveAllTtcData()` directly without the `_receiveDataWithTimeout` wrapper. Pre-existing behavior (old CommitRequest path also had no timeout). [lib/src/transport/transport.dart] — deferred, same behavior as pre-Story-6.3; add timeout in a connection-lifecycle story.
+- [x] [Review][Defer] **`sendData()` 0x0800 default silently applied to FAST_AUTH and protocol-negotiation packets** — Auth callers use the default `dataFlags`; now sends `0x0800` instead of `0x0000`. Empirically verified: 38 tests pass including auth integration. [lib/src/transport/transport.dart — sendData] — deferred, empirically works on Oracle 23ai; risk is pre-23ai Oracle versions (out of scope).
+- [x] [Review][Defer] **`0x1D` termination heuristic in `_receiveAllTtcData` may false-positive on column data ending with byte 29** — `ttcData.last == ttcMsgTypeEndOfRequest` fires on any packet whose last payload byte is `0x1D`. For small test data this never triggers incorrectly. The heuristic is necessary to fix the DML hang (flags=0x0000 error responses). [lib/src/transport/transport.dart — _receiveAllTtcData] — deferred, heuristic works for all 38 tests; proper fix requires full TTC stream-level framing.
+- [x] [Review][Defer] **`tnsPacketRefuse` in `_receiveAllTtcData` always reports `oraInvalidCredentials`** — Any REFUSE packet mid-query reports "Authentication failed", misleading for non-auth failures (session killed, listener redirect). [lib/src/transport/transport.dart] — deferred, REFUSE during active query is unusual; message is misleading but connection closes correctly.
+- [x] [Review][Defer] **`dart_fast_auth.bin` debug write still present in `sendFastAuth()`** — Protocol bytes written to disk on every connect (pre-existing code in Story 6.2; not in Story 6.3 diff). Binary was added to `.gitignore` in commit `9ac292f`. [lib/src/transport/transport.dart — sendFastAuth] — deferred, pre-existing; remove write code in a cleanup story.
+
+---
+
+### Chunk C Code Review Findings (code-review skill, 2026-05-21)
+
+_3-layer review of `execute_message_test.dart`, `tool/dml_probe.dart`, `tool/simple_probe.dart` (delegated to fresh-context agent). 0 patches, 4 deferred, 3 dismissed. No blockers for Story 6.3 sign-off._
+
+#### Deferred (4)
+
+- [x] [Review][Defer] **Probe tools committed to source tree** — `tool/dml_probe.dart` and `tool/simple_probe.dart` are one-off debugging artifacts written to diagnose the DML hang during 6.3. Not referenced by tests, examples, CI, or docs. Move to `.gitignore` / `.pubignore`, relocate to a `tool/debug/` folder, or delete after the epic closes. [tool/dml_probe.dart, tool/simple_probe.dart] — deferred, housekeeping; consider removal in next epic cleanup.
+- [x] [Review][Defer] **Hardcoded local credentials in probes** — `user: 'system', password: 'testpassword'` against `localhost:1521/FREEPDB1` is checked in. Local-dev DB only, but if probes stay, read from env vars like the integration tests. [tool/dml_probe.dart:10-12, tool/simple_probe.dart:10-12] — deferred, tied to D1 above.
+- [x] [Review][Defer] **`_ub8` helper aliases `_ub4` — silently truncates rowCount >4 bytes** — Today only called with small test values (0, 3) so it works by accident. Any future fixture using a >4-byte UB8 will silently truncate. Replace with a proper variable-length UB8 emitter. [test/src/protocol/messages/execute_message_test.dart:185] — deferred, latent bug; harmless until a wider fixture is added.
+- [x] [Review][Defer] **Sparse decoder coverage in unit tests** — Only 4 `decodeExecuteResponse` cases (success, DML rowsAffected, ORA error, ORA-01403). Story 6.3 spec calls out NUMBER decode variants, multi-bind ordering, and column metadata parsing as critical. Behavioral integration suite covers these against Oracle 23ai; losing CI access to Oracle would leave the unit layer blind. Add fixture-based tests for column-describe and at least one NUMBER decode path. [test/src/protocol/messages/execute_message_test.dart:99-142] — deferred, overlaps with existing deferred-work entry "Unit test coverage gaps from execute_message_test.dart rewrite".
+
+#### Dismissed (3)
+
+- Magic number `94` in test name — references the constant `ttcFuncExecute`, not the literal; the `94` in test description is annotation.
+- "v23 should include extra token-number bytes" looks self-referential but tests an observable version-gate behavior (`ttcFieldVersion >= 18`).
+- Probes breaking CI — not wired into `pubspec.yaml` test runners or any CI script; opt-in via `dart run tool/...`.
+
+#### Decision Needed (2)
+
+- [x] [Review][Decision] **NULL bind encoding vs `ttcBindUseIndicators` flag** — _Dismissed 2026-05-21: 38 integration tests pass against Oracle 23ai including NULL bind round-trips. Empirical ground truth outweighs theoretical concern. Flag value 0x01 + zero-byte null is accepted by Oracle 23ai as-is._
+- [x] [Review][Decision] **`_processIoVector` — `fastFetchLen`/`rowidLen` read as variable-length UB2 vs raw UB2** — _Deferred 2026-05-21: IO_VECTOR only triggered for OUT bind parameters (Epic 3 / Story 3.1 scope). Untestable until PL/SQL work begins. Audit against node-oracledb `messages/ioVector.js` at Story 3.1 start._
+
+#### Patches (4)
+
+- [x] [Review][Patch] **Duplicate constant value: `ttcExecOptionNotPlSql` and `ttcExecOptionImplicitResultset` both = `0x8000`** — Added comments to both constants clarifying which EXECUTE request field each targets. [lib/src/protocol/constants.dart] — _Applied 2026-05-21_
+- [x] [Review][Patch] **Magic number `96` for CHAR Oracle type in `_decodeColumnValue`** — Added `const int oraTypeChar = 96` to `constants.dart`; replaced inline `case 96:` with `case oraTypeChar:`. [lib/src/protocol/messages/execute_message.dart — _decodeColumnValue] — _Applied 2026-05-21_
+- [x] [Review][Patch] **`_processBitVector` uses float division for fallback `numBytes`** — Replaced `(numColsSent / 8).ceil()` with `(numColsSent + 7) ~/ 8`. [lib/src/protocol/messages/execute_message.dart — _processBitVector] — _Applied 2026-05-21_
+- [x] [Review][Patch] **Unit test fixture uses `_ub2(0)` for `cursorId` field that the decoder reads as `UB4`** — Updated fixture to `_ub4(0)` and corrected adjacent comment. [test/src/protocol/messages/execute_message_test.dart] — _Applied 2026-05-21_
+
+#### Deferred (8)
+
+- [x] [Review][Defer] **`_readInteger` UB8 produces wrong results on Flutter Web (JS)** — Dart `int` on JS is limited to 53-bit safe integers; UB8 values > 2^53 (possible for SCNs and large row counts) are silently corrupted. Not blocking for Dart VM target, but blocks any future Flutter Web or dart2js port. [lib/src/protocol/buffer.dart — _readInteger / readUB8] — deferred, Dart VM is the only supported target; Flutter Web Oracle driver is out of scope.
+- [x] [Review][Defer] **`readBytesWithLength` treats 0xFF as null/empty — may corrupt LONG column data** — 0xFF previously meant "short length = 255 bytes"; now returns empty. If Oracle sends a 255-byte LONG/LONG RAW value with a 0xFF length prefix, the 255 bytes are silently discarded and misread as the next field. LONG type support is Epic 4 scope. [lib/src/protocol/buffer.dart — readBytesWithLength] — deferred, LONG/LONG RAW types are Epic 4 work; 0xFF-as-null is correct for all types in current scope.
+- [x] [Review][Defer] **`_readInteger` sign-magnitude may misrepresent negative-zero (size byte 0x80)** — `0x80` passes the sign-bit check but sets `size=0`, loops zero times, and returns `-0 = 0`. If Oracle uses 0x80 as an error sentinel (distinct from true 0x00), this silently coerces it to zero. [lib/src/protocol/buffer.dart — _readInteger] — deferred, hypothetical Oracle sentinel; sign-magnitude matches Oracle TNS convention.
+- [x] [Review][Defer] **`_processColumnInfo` reads 23.4 vector fields unconditionally regardless of server version** — `buf.skipUB4(); buf.skipUB1(); buf.skipUB1()` consumes 6 bytes for every column with no version gate. Against a pre-23.4 server these bytes belong to the next column's header, causing cascade misalignment. [lib/src/protocol/messages/execute_message.dart — _processColumnInfo] — deferred, Oracle 23ai is the only tested target; version-gating for older servers is a future story.
+- [x] [Review][Defer] **`_processColumnInfo` reads 12.2 `oaccolid` field unconditionally (no version guard on read side)** — `buf.skipUB4(); // 12.2 oaccolid` is consumed regardless of `ttcFieldVersion`. The encode side gates this on `ttcCcapFieldVersion12_2` but the decode side does not. Against a pre-12.2 server this advances by 4 bytes into the column name section. [lib/src/protocol/messages/execute_message.dart — _processColumnInfo] — deferred, same as above; pre-12.2 server support out of scope.
+- [x] [Review][Defer] **`_processColumnInfo` — `maxLength` uses `size` for non-RAW types; `size` can be 0 for fixed-precision numerics** — `maxLength: dataType == oraTypeRaw ? maxSize : size`. For NUMBER/DATE columns Oracle may report `size=0` (display size), giving `maxLength=0`. Harmless for current callers (decoding is wire-length-driven) but misleading for any future caller that allocates buffers from `maxLength`. [lib/src/protocol/messages/execute_message.dart — _processColumnInfo] — deferred, no current caller depends on `maxLength` for allocation.
+- [x] [Review][Defer] **`rowsAffected` incorrectly set to 0 (not null) for DML on pre-12.2 server** — `rowCount` defaults to 0; for pre-12.2 servers the UB8 row-count is not sent, so `rowsAffected = rowCount = 0` rather than null. Multi-row DML would silently report 0 rows affected. [lib/src/protocol/messages/execute_message.dart — _processError] — deferred, pre-12.2 server support not in scope.
+- [x] [Review][Defer] **`_maxSizeFor` returns `1` for null-valued VARCHAR bind — cursor re-use risk** — A null String bind declares `maxSize=1`. If a cursor is later re-executed with a non-null string longer than 1 byte, Oracle rejects or truncates it. Not a current issue since each `execute()` is a full re-parse (cursorId=0), but relevant when cursor caching is added. [lib/src/protocol/messages/execute_message.dart — _maxSizeFor] — deferred, cursor re-use / statement caching is Story 2.7 work.

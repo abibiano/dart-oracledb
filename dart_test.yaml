@@ -1,3 +1,19 @@
-# Integration tests require external Oracle database
-# Run with: RUN_INTEGRATION_TESTS=true dart test
-# Tests self-skip via environment check when RUN_INTEGRATION_TESTS is not set
+# package:test configuration for dart-oracledb.
+#
+# Integration tests target a real Oracle 23ai instance and self-skip
+# unless `RUN_INTEGRATION_TESTS=true` is set in the environment.
+# Run locally with:
+#   docker-compose up -d
+#   RUN_INTEGRATION_TESTS=true dart test --tags=integration
+
+tags:
+  unit: {}
+  protocol: {}
+  integration:
+    timeout: 2x
+  security:
+    timeout: 2x
+  slow:
+    timeout: 4x
+  performance:
+    timeout: 4x

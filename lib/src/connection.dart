@@ -97,6 +97,8 @@ class OracleConnection {
           }
           pos++;
         }
+        // Unterminated comment: consume the remaining byte and signal end.
+        if (pos + 1 >= n) pos = n;
       } else if (c == 0x2D && pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x2D) {
         // Line comment: -- …
         pos += 2;

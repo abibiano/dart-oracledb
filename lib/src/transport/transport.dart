@@ -266,6 +266,7 @@ class Transport {
         if (++fetchCount > _maxFetchIterations) {
           _log.warning(
               'Reached max fetch iterations ($_maxFetchIterations); stopping');
+          response.moreRowsToFetch = false;
           break;
         }
         final fetched =

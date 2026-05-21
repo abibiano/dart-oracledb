@@ -204,8 +204,8 @@ List<int> _errorMessage({
   out.addAll(_ub2(0)); // err num short
   out.addAll(_ub2(0)); // array elem
   out.addAll(_ub2(0)); // array elem
-  out.addAll(_ub2(0)); // cursor id
-  out.addAll(_ub2(0)); // error position (SB2 in wire; encoded same as UB2 for 0)
+  out.addAll(_ub4(0)); // cursor id (decoder reads readUB4)
+  out.addAll(_ub2(0)); // error position (SB4 in wire; encoded same as UB2 for 0)
   out.add(0); // sql type
   out.add(0); // fatal
   out.add(0); // flags

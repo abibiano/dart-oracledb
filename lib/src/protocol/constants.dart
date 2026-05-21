@@ -103,6 +103,9 @@ const int oraTypeRaw = 23;
 /// LONG RAW data type.
 const int oraTypeLongRaw = 24;
 
+/// CHAR data type (fixed-length character).
+const int oraTypeChar = 96;
+
 /// UROWID data type.
 const int oraTypeURowid = 104;
 
@@ -231,10 +234,11 @@ const int ttcExecOptionCommit = 0x100;
 /// Describe query without executing.
 const int ttcExecOptionDescribe = 0x20000;
 
-/// SQL is not PL/SQL.
+/// SQL is not PL/SQL (used in the `options` field of EXECUTE request).
 const int ttcExecOptionNotPlSql = 0x8000;
 
-/// Implicit result set (dmlOptions field).
+/// Implicit result set (used in the `dmlOptions` field of EXECUTE request —
+/// different field from [ttcExecOptionNotPlSql] despite sharing the same value).
 const int ttcExecOptionImplicitResultset = 0x8000;
 
 /// PL/SQL bind variables.

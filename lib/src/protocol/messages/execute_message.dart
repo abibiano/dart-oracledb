@@ -479,6 +479,12 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
   }
 
   final isSuccess = state.errorNum == 0 || state.errorNum == null;
+  // Cursor is still open when: query succeeded, no ORA-01403 end-of-fetch
+  // received, and the server assigned a non-zero cursor id. In that case the
+  // first batch may be incomplete — signal the transport to FETCH more rows.
+  if (isQuery && isSuccess && state.cursorId != 0 && state.errorNum == null) {
+    state.moreRowsToFetch = true;
+  }
   return ExecuteResponse(
     isSuccess: isSuccess,
     cursorId: state.cursorId,
@@ -688,7 +694,7 @@ Object? _decodeColumnValue(ReadBuffer buf, ColumnMetadata col) {
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
       return utf8.decode(bytes, allowMalformed: true);
-    case 96: // CHAR
+    case oraTypeChar:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
       return utf8.decode(bytes, allowMalformed: true);
@@ -725,7 +731,7 @@ void _processBitVector(ReadBuffer buf, _DecodeState s) {
   final numColsSent = buf.readUB2();
   var numBytes = (s.columns.length / 8).floor();
   if (s.columns.length % 8 > 0) numBytes++;
-  if (numBytes <= 0) numBytes = (numColsSent / 8).ceil();
+  if (numBytes <= 0) numBytes = (numColsSent + 7) ~/ 8;
   s.bitVector = buf.readBytes(numBytes);
 }
 

@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-05-21  # Story 6.3 complete — All 38 integration tests pass; Story 2.4 DML validated
+last_updated: 2026-05-21  # Story 6.4 code review complete — Oracle registry credentials patch applied; 10 items deferred
 project: dart-oracledb
 tracking_system: file-system
 story_location: docs/sprint-artifacts
@@ -112,6 +112,6 @@ development_status:
   epic-6: in-progress  # Story 6.3 ready for dev
   6-1-test-architecture-design-standards: done  # Code review passed with fixes applied
   6-2-epic-1-authentication-test-suite-rework: done  # 2026-05-21 - Code review complete. 12 patches applied (prod bug fix + test fixes). 489 unit tests passing.
-  6-3-epic-2-validation-pending-validation-stories: review  # 2026-05-21 All tasks complete — 38/38 integration tests pass; DML validated; Story 2.4 marked done
-  6-4-ci-cd-integration-test-automation: backlog
+  6-3-epic-2-validation-pending-validation-stories: done  # 2026-05-21 Code review complete — all 3 chunks reviewed; 7 patches applied; 17 items deferred to follow-up
+  6-4-ci-cd-integration-test-automation: done
   epic-6-retrospective: optional
