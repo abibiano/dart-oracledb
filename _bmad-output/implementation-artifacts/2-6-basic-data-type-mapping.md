@@ -1,6 +1,6 @@
 # Story 2.6: Basic Data Type Mapping
 
-Status: Ready for Review
+Status: Review
 
 ## Story
 
@@ -100,16 +100,16 @@ So that **I can work with query results naturally** (FR30, FR31, FR32, FR33).
   - [x] 5.4: Test round-trip precision (Oracle nanoseconds → Dart microseconds)
   - [x] 5.5: Add to `test/src/protocol/data_types_test.dart`
 
-- [ ] Task 6: Add Integration Tests Against Oracle 23ai (AC: all)
-  - [ ] 6.1: Create test table with all data types (VARCHAR2, NUMBER, DATE, TIMESTAMP)
-  - [ ] 6.2: Test SELECT with VARCHAR2 column returns String
-  - [ ] 6.3: Test SELECT with NUMBER(10) column returns int
-  - [ ] 6.4: Test SELECT with NUMBER(10,2) column returns double
-  - [ ] 6.5: Test SELECT with DATE column returns DateTime (no subsecond precision)
-  - [ ] 6.6: Test SELECT with TIMESTAMP column returns DateTime (with subsecond precision)
-  - [ ] 6.7: Test SELECT with NULL values returns Dart null
-  - [ ] 6.8: Test INSERT with all types and verify via SELECT
-  - [ ] 6.9: Add to `test/integration/query_integration_test.dart`
+- [x] Task 6: Add Integration Tests Against Oracle 23ai (AC: all)
+  - [x] 6.1: Create test table with all data types (VARCHAR2, NUMBER, DATE, TIMESTAMP)
+  - [x] 6.2: Test SELECT with VARCHAR2 column returns String
+  - [x] 6.3: Test SELECT with NUMBER(10) column returns int
+  - [x] 6.4: Test SELECT with NUMBER(10,2) column returns double
+  - [x] 6.5: Test SELECT with DATE column returns DateTime (no subsecond precision)
+  - [x] 6.6: Test SELECT with TIMESTAMP column returns DateTime (with subsecond precision)
+  - [x] 6.7: Test SELECT with NULL values returns Dart null
+  - [x] 6.8: Test INSERT with all types and verify via SELECT
+  - [x] 6.9: Add to `test/integration/query_integration_test.dart`
 
 - [x] Task 7: Add Dartdoc Documentation (AC: all)
   - [x] 7.1: Document `encodeNumber()` with decimal handling notes
@@ -123,7 +123,7 @@ So that **I can work with query results naturally** (FR30, FR31, FR32, FR33).
   - [x] 8.1: Run `dart analyze` with zero warnings
   - [x] 8.2: Run `dart format --set-exit-if-changed .`
   - [x] 8.3: Run all unit tests with `dart test test/src/protocol/data_types_test.dart`
-  - [ ] 8.4: Run integration tests against Oracle 23ai (deferred - no Oracle connection available)
+  - [x] 8.4: Run integration tests against Oracle 23ai
   - [x] 8.5: Update this story file with completion notes
 
 ### Architecture Compliance (MANDATORY)
@@ -556,6 +556,10 @@ Story created by SM agent using ultimate context engine analysis.
 
 Claude Sonnet 4.5 (claude-sonnet-4-5-20250929)
 
+### Implementation Plan
+
+Add a Story 2.6 integration test group to `test/integration/query_integration_test.dart` using the existing Oracle integration helper. The group creates an isolated table, validates each required Oracle-to-Dart mapping through SELECTs, validates NULL handling, then validates an INSERT plus SELECT round trip for all mapped types. No production code changes are required because the existing type mapping implementation already satisfies the new integration coverage.
+
 ### Completion Notes List
 
 **Implementation Date:** 2025-12-16
@@ -594,12 +598,40 @@ Claude Sonnet 4.5 (claude-sonnet-4-5-20250929)
 
 **Integration Tests:** Deferred to separate validation effort (requires Oracle 23ai connection)
 
+**Implementation Date:** 2026-05-21
+
+**Story 2.6 Validation Pass:**
+✅ Added Oracle 23ai integration coverage for Story 2.6 data type mapping
+✅ Created `test_types_story26` test table with VARCHAR2, VARCHAR, CHAR, NUMBER, DATE, and TIMESTAMP columns
+✅ Validated character columns return Dart `String`
+✅ Validated `NUMBER(10)` returns Dart `int`
+✅ Validated `NUMBER(10,2)` returns Dart `double`
+✅ Validated `DATE` returns `DateTime` without subsecond precision
+✅ Validated `TIMESTAMP(6)` returns `DateTime` with microsecond precision
+✅ Validated NULL values return Dart `null`
+✅ Validated INSERT plus SELECT round trip for all mapped types
+
+**Validation Results:**
+- `dart format --set-exit-if-changed test/integration/query_integration_test.dart` - pass
+- `dart analyze` - pass
+- `dart test test/src/protocol/data_types_test.dart` - pass (47 tests)
+- `dart test` - pass (454 tests, 90 skipped)
+- `RUN_INTEGRATION_TESTS=1 dart test test/integration/query_integration_test.dart --plain-name "Data type mapping"` - pass (7 tests)
+- `RUN_INTEGRATION_TESTS=1 dart test test/integration/query_integration_test.dart` - pass (60 tests)
+
 ### File List
 
 **Files Modified:**
 - `lib/src/protocol/data_types.dart` - Enhanced NUMBER encoding/decoding for decimals, added TIMESTAMP support, updated encodeValue/decodeValue
 - `test/src/protocol/data_types_test.dart` - Added 15 NUMBER decimal tests, 5 TIMESTAMP tests
+- `test/integration/query_integration_test.dart` - Added Story 2.6 Oracle 23ai data type mapping integration tests
+- `_bmad-output/implementation-artifacts/2-6-basic-data-type-mapping.md` - Updated story status, task completion, validation notes, and file list
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` - Updated Story 2.6 sprint tracking status
 
 **Files Referenced (Not Modified):**
 - `lib/src/protocol/constants.dart` - Oracle type constants (used existing)
 - `lib/src/protocol/buffer.dart` - ReadBuffer/WriteBuffer utilities (used existing)
+
+### Change Log
+
+- 2026-05-21: Added Story 2.6 Oracle 23ai integration tests and marked data type mapping story ready for review.

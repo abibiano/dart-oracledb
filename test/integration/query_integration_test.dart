@@ -206,6 +206,220 @@ void main() {
     });
   });
 
+  // Story 2.6 - Basic Data Type Mapping
+  group('Data type mapping',
+      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+    late OracleConnection connection;
+    const testTable = 'test_types_story26';
+
+    setUp(() async {
+      connection = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+
+      try {
+        await connection.execute('''
+          CREATE TABLE $testTable (
+            id NUMBER PRIMARY KEY,
+            varchar2_col VARCHAR2(100),
+            varchar_col VARCHAR(100),
+            char_col CHAR(5),
+            int_col NUMBER(10),
+            decimal_col NUMBER(10,2),
+            date_col DATE,
+            timestamp_col TIMESTAMP(6)
+          )
+        ''');
+      } on OracleException catch (e) {
+        if (e.errorCode == 955) {
+          await connection.execute('TRUNCATE TABLE $testTable');
+        } else {
+          rethrow;
+        }
+      }
+    });
+
+    tearDown(() async {
+      try {
+        await connection.execute('DROP TABLE $testTable');
+      } catch (_) {}
+      await connection.close();
+    });
+
+    test('SELECT character columns return String values', () async {
+      await connection.execute(
+        '''
+        INSERT INTO $testTable (id, varchar2_col, varchar_col, char_col)
+        VALUES (1, 'Hello Oracle', 'VARCHAR value', 'ABCDE')
+        ''',
+      );
+
+      final result = await connection.execute(
+        '''
+        SELECT varchar2_col, varchar_col, char_col
+        FROM $testTable
+        WHERE id = 1
+        ''',
+      );
+      final row = result.rows.single;
+
+      expect(row['VARCHAR2_COL'], isA<String>());
+      expect(row['VARCHAR2_COL'], equals('Hello Oracle'));
+      expect(row['VARCHAR_COL'], isA<String>());
+      expect(row['VARCHAR_COL'], equals('VARCHAR value'));
+      expect(row['CHAR_COL'], isA<String>());
+      expect(row['CHAR_COL'], equals('ABCDE'));
+    });
+
+    test('SELECT NUMBER(10) returns int', () async {
+      await connection.execute(
+        'INSERT INTO $testTable (id, int_col) VALUES (2, 12345)',
+      );
+
+      final result = await connection.execute(
+        'SELECT int_col FROM $testTable WHERE id = 2',
+      );
+      final value = result.rows.single['INT_COL'];
+
+      expect(value, isA<int>());
+      expect(value, equals(12345));
+    });
+
+    test('SELECT NUMBER(10,2) returns double', () async {
+      await connection.execute(
+        'INSERT INTO $testTable (id, decimal_col) VALUES (3, 123.45)',
+      );
+
+      final result = await connection.execute(
+        'SELECT decimal_col FROM $testTable WHERE id = 3',
+      );
+      final value = result.rows.single['DECIMAL_COL'];
+
+      expect(value, isA<double>());
+      expect(value, closeTo(123.45, 0.001));
+    });
+
+    test('SELECT DATE returns DateTime without subsecond precision', () async {
+      await connection.execute(
+        '''
+        INSERT INTO $testTable (id, date_col)
+        VALUES (4, TO_DATE('2025-12-16 14:30:45', 'YYYY-MM-DD HH24:MI:SS'))
+        ''',
+      );
+
+      final result = await connection.execute(
+        'SELECT date_col FROM $testTable WHERE id = 4',
+      );
+      final value = result.rows.single['DATE_COL'];
+
+      expect(value, isA<DateTime>());
+      final date = value! as DateTime;
+      expect(date, equals(DateTime(2025, 12, 16, 14, 30, 45)));
+      expect(date.millisecond, equals(0));
+      expect(date.microsecond, equals(0));
+    });
+
+    test('SELECT TIMESTAMP returns DateTime with subsecond precision',
+        () async {
+      await connection.execute(
+        '''
+        INSERT INTO $testTable (id, timestamp_col)
+        VALUES (
+          5,
+          TO_TIMESTAMP(
+            '2025-12-16 14:30:45.123456',
+            'YYYY-MM-DD HH24:MI:SS.FF6'
+          )
+        )
+        ''',
+      );
+
+      final result = await connection.execute(
+        'SELECT timestamp_col FROM $testTable WHERE id = 5',
+      );
+      final value = result.rows.single['TIMESTAMP_COL'];
+
+      expect(value, isA<DateTime>());
+      final timestamp = value! as DateTime;
+      expect(timestamp.year, equals(2025));
+      expect(timestamp.month, equals(12));
+      expect(timestamp.day, equals(16));
+      expect(timestamp.hour, equals(14));
+      expect(timestamp.minute, equals(30));
+      expect(timestamp.second, equals(45));
+      expect(timestamp.millisecond, equals(123));
+      expect(timestamp.microsecond, equals(456));
+    });
+
+    test('SELECT NULL values return Dart null', () async {
+      await connection.execute('INSERT INTO $testTable (id) VALUES (6)');
+
+      final result = await connection.execute(
+        '''
+        SELECT varchar2_col, int_col, decimal_col, date_col, timestamp_col
+        FROM $testTable
+        WHERE id = 6
+        ''',
+      );
+      final row = result.rows.single;
+
+      expect(row['VARCHAR2_COL'], isNull);
+      expect(row['INT_COL'], isNull);
+      expect(row['DECIMAL_COL'], isNull);
+      expect(row['DATE_COL'], isNull);
+      expect(row['TIMESTAMP_COL'], isNull);
+    });
+
+    test('INSERT all mapped types and SELECT verifies Dart values', () async {
+      await connection.execute(
+        '''
+        INSERT INTO $testTable (
+          id,
+          varchar2_col,
+          int_col,
+          decimal_col,
+          date_col,
+          timestamp_col
+        ) VALUES (
+          7,
+          'Round trip',
+          98765,
+          678.90,
+          TO_DATE('2025-12-17 08:15:30', 'YYYY-MM-DD HH24:MI:SS'),
+          TO_TIMESTAMP(
+            '2025-12-17 08:15:30.654321',
+            'YYYY-MM-DD HH24:MI:SS.FF6'
+          )
+        )
+        ''',
+      );
+
+      final result = await connection.execute(
+        '''
+        SELECT varchar2_col, int_col, decimal_col, date_col, timestamp_col
+        FROM $testTable
+        WHERE id = 7
+        ''',
+      );
+      final row = result.rows.single;
+
+      expect(row['VARCHAR2_COL'], equals('Round trip'));
+      expect(row['INT_COL'], equals(98765));
+      expect(row['DECIMAL_COL'], closeTo(678.90, 0.001));
+      expect(
+        row['DATE_COL'],
+        equals(DateTime(2025, 12, 17, 8, 15, 30)),
+      );
+
+      final timestamp = row['TIMESTAMP_COL'];
+      expect(timestamp, isA<DateTime>());
+      expect((timestamp! as DateTime).millisecond, equals(654));
+      expect(timestamp.microsecond, equals(321));
+    });
+  });
+
   // Story 2.4 - DML Operations (INSERT, UPDATE, DELETE)
   group('DML operations',
       skip: !hasOracle ? 'Integration tests disabled' : null, () {
@@ -625,12 +839,14 @@ void main() {
         [2, 'second'],
       );
 
-      final before = await conn2.execute('SELECT COUNT(*) AS CNT FROM $testTable');
+      final before =
+          await conn2.execute('SELECT COUNT(*) AS CNT FROM $testTable');
       expect(before.rows.single['CNT'], equals(0));
 
       await conn1.commit();
 
-      final after = await conn2.execute('SELECT COUNT(*) AS CNT FROM $testTable');
+      final after =
+          await conn2.execute('SELECT COUNT(*) AS CNT FROM $testTable');
       expect(after.rows.single['CNT'], equals(2));
     });
 
@@ -815,7 +1031,8 @@ void main() {
           reason: 'Row must be visible after auto-commit');
     });
 
-    test('runTransaction auto-rolls-back on callback exception and rethrows '
+    test(
+        'runTransaction auto-rolls-back on callback exception and rethrows '
         'the original exception (identity-preserving)', () async {
       final original = Exception('intentional failure');
 
@@ -830,8 +1047,8 @@ void main() {
         throwsA(predicate(
           (e) => identical(e, original),
           'is the same instance as the original Exception '
-              '(AC5 requires the ORIGINAL exception to be rethrown, '
-              'not a wrapper)',
+          '(AC5 requires the ORIGINAL exception to be rethrown, '
+          'not a wrapper)',
         )),
       );
 
@@ -843,7 +1060,8 @@ void main() {
           reason: 'Row must not be visible after rollback');
     });
 
-    test('runTransaction callback with multiple DML all participate in same transaction',
+    test(
+        'runTransaction callback with multiple DML all participate in same transaction',
         () async {
       await conn1.runTransaction((conn) async {
         await conn.execute(
