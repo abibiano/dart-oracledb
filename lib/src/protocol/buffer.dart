@@ -131,44 +131,100 @@ class ReadBuffer {
     _position = offset;
   }
 
-  /// Reads an Oracle UB4 (variable-length unsigned 4-byte integer).
-  int readUB4() {
-    final numBytes = readUint8();
-    if (numBytes == 0) return 0;
-    if (numBytes == 1) return readUint8();
-    if (numBytes == 2) return readUint16BE();
-    if (numBytes == 4) return readUint32BE();
-    throw BufferException('Invalid UB4 length: $numBytes');
+  /// Reads an Oracle variable-length unsigned integer of up to [maxSize] bytes.
+  ///
+  /// Wire format: first byte is the size N (high bit set means signed-negative,
+  /// rejected here when [signed] is false), followed by N big-endian bytes.
+  int _readInteger(int maxSize, {required bool signed}) {
+    var size = readUint8();
+    if (size == 0) return 0;
+    var isNegative = false;
+    if ((size & 0x80) != 0) {
+      if (!signed) {
+        throw BufferException(
+          'Unexpected negative integer (size byte 0x${size.toRadixString(16)}) '
+          'at position ${_position - 1}',
+        );
+      }
+      isNegative = true;
+      size &= 0x7F;
+    }
+    if (size > maxSize) {
+      throw BufferException(
+        'Integer too large: size=$size exceeds maxSize=$maxSize',
+      );
+    }
+    var value = 0;
+    for (var i = 0; i < size; i++) {
+      value = (value << 8) | readUint8();
+    }
+    return isNegative ? -value : value;
   }
 
-  /// Reads an Oracle UB2 (variable-length unsigned 2-byte integer).
-  int readUB2() {
-    final numBytes = readUint8();
-    if (numBytes == 0) return 0;
-    if (numBytes == 1) return readUint8();
-    if (numBytes == 2) return readUint16BE();
-    throw BufferException('Invalid UB2 length: $numBytes');
+  /// Reads an Oracle UB4 (variable-length unsigned, up to 4 bytes).
+  int readUB4() => _readInteger(4, signed: false);
+
+  /// Reads an Oracle UB2 (variable-length unsigned, up to 2 bytes).
+  int readUB2() => _readInteger(2, signed: false);
+
+  /// Reads an Oracle UB8 (variable-length unsigned, up to 8 bytes).
+  int readUB8() => _readInteger(8, signed: false);
+
+  /// Reads an Oracle SB1 (variable-length signed, up to 1 byte).
+  int readSB1() => _readInteger(1, signed: true);
+
+  /// Reads an Oracle SB2 (variable-length signed, up to 2 bytes).
+  int readSB2() => _readInteger(2, signed: true);
+
+  /// Reads an Oracle SB4 (variable-length signed, up to 4 bytes).
+  int readSB4() => _readInteger(4, signed: true);
+
+  /// Skips an Oracle UB1 (1 byte).
+  void skipUB1() => skip(1);
+
+  /// Skips an Oracle UB2 (variable-length unsigned, up to 2 bytes).
+  void skipUB2() {
+    _readInteger(2, signed: false);
   }
 
-  /// Long length indicator for chunked encoding.
-  static const int _tnsLongLengthIndicator = 254;
+  /// Skips an Oracle UB4 (variable-length unsigned, up to 4 bytes).
+  void skipUB4() {
+    _readInteger(4, signed: false);
+  }
+
+  /// Skips an Oracle UB8 (variable-length unsigned, up to 8 bytes).
+  void skipUB8() {
+    _readInteger(8, signed: false);
+  }
+
+  /// Skips an Oracle SB4 (variable-length signed, up to 4 bytes).
+  void skipSB4() {
+    _readInteger(4, signed: true);
+  }
+
+  /// Skips a length-prefixed (possibly chunked) byte sequence.
+  void skipBytesChunked() {
+    readBytesWithLength();
+  }
+
+  /// Long length indicator for chunked encoding (TNS_LONG_LENGTH_INDICATOR).
+  static const int _tnsLongLengthIndicator = 0xFE;
+
+  /// Null length indicator (TNS_NULL_LENGTH_INDICATOR).
+  static const int _tnsNullLengthIndicator = 0xFF;
 
   /// Reads bytes with a single-byte length prefix.
   ///
-  /// Format:
-  /// - 0 = null/empty
-  /// - 1-253, 255 = short length (read that many bytes)
-  /// - 254 = chunked encoding (TNS_LONG_LENGTH_INDICATOR)
+  /// Returns empty for 0 or 0xFF (null marker), reads N bytes for 1..253,
+  /// or reads chunked encoding when length byte is 0xFE.
   Uint8List readBytesWithLength() {
     final numBytes = readUint8();
-    if (numBytes == 0) {
+    if (numBytes == 0 || numBytes == _tnsNullLengthIndicator) {
       return Uint8List(0);
     }
     if (numBytes != _tnsLongLengthIndicator) {
-      // Short format - numBytes is the actual length (1-253 or 255)
       return readBytes(numBytes);
     }
-    // Chunked encoding (numBytes == 254)
     final chunks = <Uint8List>[];
     while (true) {
       final chunkSize = readUB4();
@@ -183,6 +239,22 @@ class ReadBuffer {
       offset += chunk.length;
     }
     return result;
+  }
+
+  /// Reads bytes with length, returning null when the marker indicates null.
+  Uint8List? readBytesWithLengthOrNull() {
+    final marker = peekUint8();
+    if (marker == 0 || marker == _tnsNullLengthIndicator) {
+      readUint8();
+      return null;
+    }
+    return readBytesWithLength();
+  }
+
+  /// Peeks the next byte without advancing the read position.
+  int peekUint8() {
+    _checkAvailable(1);
+    return _data[_position];
   }
 
   /// Reads a string with length prefix.
@@ -308,11 +380,11 @@ class WriteBuffer {
 
   /// Writes bytes with a single-byte length prefix.
   ///
-  /// For short data (<= 254 bytes), writes [length, ...data].
-  /// For longer data, uses chunked encoding.
+  /// For short data (<= 253 bytes), writes [length, ...data].
+  /// For longer data, uses chunked encoding with 0xFE long-length indicator.
   void writeBytesWithLength(Uint8List bytes) {
     final numBytes = bytes.length;
-    if (numBytes <= 254) {
+    if (numBytes <= 253) { // 0xFE (254) is the long-length indicator; must not be used as a plain length
       writeUint8(numBytes);
       if (numBytes > 0) {
         writeBytes(bytes);

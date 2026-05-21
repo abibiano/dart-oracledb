@@ -9,3 +9,9 @@
 - **W5: Timeout range `inInclusiveRange(4, 6)` accepts 6s** — AC3 spec says "within 5 seconds" but 6s is kept for CI jitter tolerance. If Oracle 23ai behavior tightens, revisit.
 - **W6: `AuthPhaseTwoRequest` verifierType=0xB92 speedyKey not sent on wire** — `generatePasswordProof` sets `_speedyKey` for 0xB92, but `auth_message.dart` only sends it for 0x4815 (`ttcVerifierType12c`). Investigate whether 0xB92 should include the speedy key in the wire message, or if this is intentional protocol behavior.
 - **D3: SHA512 verifier path (`verifierType=0x939`) untested** — 11g-era verifier not reachable against Oracle 23ai. ECH flagged a potential AES block-alignment crash in the SHA512 branch of `generatePasswordProof`. When adding legacy Oracle support, add tests for this path and verify the server nonce length assumption.
+
+## Deferred from: code review of 6-3-epic-2-validation-pending-validation-stories (2026-05-21)
+
+- **`ColumnMetadata` / `ExecuteResponse` fields are now mutable** — `lib/src/protocol/messages/execute_message.dart:~1019`. The rewrite turned previously-immutable response objects into mutable ones, and `_DecodeState.rows` aliases `response.rows`. Currently functional and analyzer-clean, but mutability invites bugs once callers retain the response across awaits. Tighten back to immutable (or copy lists on assignment) in a future cleanup pass.
+- **Stories 2.5 / 2.6 need re-validation post-protocol-rebuild** — Downgraded from `review` to `dev-complete-pending-validation` in Story 6.3 because the execute path changed. Re-run their integration tests after DML patches are applied and update sprint status accordingly.
+- **Unit test coverage gaps from execute_message_test.dart rewrite** — ~27 test cases removed with the old invented-format suite. Scenarios needing future coverage: NUMBER decode variants, DML rowsAffected combinations, multi-bind value ordering, and chunked payload decoding.

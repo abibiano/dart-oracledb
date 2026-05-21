@@ -6,6 +6,7 @@ import 'package:logging/logging.dart';
 
 import '../errors.dart';
 import '../protocol/buffer.dart';
+import '../protocol/constants.dart';
 import '../protocol/messages/execute_message.dart';
 import '../protocol/messages/fast_auth_message.dart';
 import '../protocol/messages/ping_message.dart';
@@ -220,44 +221,220 @@ class Transport {
   /// Defaults to 2 minutes. Set to `null` for no timeout.
   ///
   /// Throws [OracleException] if execution fails, times out, or protocol error occurs.
+  // Data flags that indicate no more packets will follow.
+  static const int _tnsDataFlagsEof = 0x0040;
+  static const int _tnsDataFlagsEndOfRequest = 0x2000;
+
+  // Safety cap: prevent infinite FETCH loops when moreRowsToFetch stays true.
+  static const int _maxFetchIterations = 1000;
+
   Future<ExecuteResponse> sendExecute(
     String sql, {
-    List<dynamic>? bindValues,
+    required bool isQuery,
+    List<Object?>? bindValues,
     List<String>? bindNames,
+    int prefetchRows = 50,
     Duration? timeout = const Duration(minutes: 2),
   }) async {
-    _log.fine('Sending execute request...');
+    _log.fine('Sending execute request (isQuery=$isQuery)...');
 
     final request = ExecuteRequest(
       sql: sql,
       bindValues: bindValues,
       bindNames: bindNames,
+      isQuery: isQuery,
+      numIters: prefetchRows,
+      ttcFieldVersion: _ttcFieldVersion,
+      sequence: nextSequence(),
     );
     final requestData = request.toBytes();
 
-    final packet = TnsPacket(type: tnsPacketData, payload: requestData);
-    await send(packet);
+    await sendData(requestData);
+    final payload = await _receiveDataWithTimeout(timeout);
 
-    // Receive response with optional timeout
-    final Future<TnsPacket> receiveFuture = receive();
-    final response = timeout != null
-        ? await receiveFuture.timeout(
-            timeout,
-            onTimeout: () => throw OracleException(
-              errorCode: oraConnectTimeout,
-              message: 'Query timeout after ${timeout.inSeconds}s',
-            ),
-          )
-        : await receiveFuture;
+    final response = decodeExecuteResponse(
+      payload,
+      isQuery: isQuery,
+      ttcFieldVersion: _ttcFieldVersion,
+    );
 
-    if (response.type != tnsPacketData) {
-      throw OracleException(
-        errorCode: oraProtocolError,
-        message: 'Unexpected response type: ${response.type}',
-      );
+    // If this is a SELECT and the server kept the cursor open with more rows
+    // pending, drain them via FETCH calls until EOF.
+    if (isQuery && response.cursorId != 0 && response.isSuccess) {
+      var fetchCount = 0;
+      while (_needsMoreRows(response)) {
+        if (++fetchCount > _maxFetchIterations) {
+          _log.warning(
+              'Reached max fetch iterations ($_maxFetchIterations); stopping');
+          break;
+        }
+        final fetched =
+            await _sendFetch(response.cursorId, prefetchRows, timeout);
+        response.rows.addAll(fetched.rows);
+        response.moreRowsToFetch = fetched.moreRowsToFetch;
+        if (!fetched.isSuccess) {
+          // TODO(cursor-leak): send TTC CLOSE_CURSORS for response.cursorId
+          // to avoid ORA-01000 on long-running sessions (follow-up story).
+          return ExecuteResponse(
+            isSuccess: false,
+            cursorId: response.cursorId,
+            columnMetadata: response.columnMetadata,
+            rows: response.rows,
+            rowsAffected: fetched.rowsAffected,
+            moreRowsToFetch: fetched.moreRowsToFetch,
+            errorCode: fetched.errorCode,
+            errorMessage: fetched.errorMessage,
+          );
+        }
+        if (!fetched.moreRowsToFetch) break;
+      }
     }
 
-    return ExecuteResponse.decode(response.payload);
+    return response;
+  }
+
+  bool _needsMoreRows(ExecuteResponse r) => r.moreRowsToFetch;
+
+  /// Sends a TTC COMMIT message and waits for the server's acknowledgement.
+  ///
+  /// Throws [OracleException] if the commit fails or the connection is broken.
+  Future<void> sendCommit() async {
+    final buf = WriteBuffer();
+    buf.writeUint8(ttcMsgTypeFunction);
+    buf.writeUint8(ttcFuncCommit);
+    buf.writeUint8(nextSequence() & 0xFF);
+    if (_ttcFieldVersion >= ttcCcapFieldVersion23_1Ext1) {
+      buf.writeUB8(0);
+    }
+    await sendData(buf.toBytes());
+    final payload = await _receiveAllTtcData();
+    final response = decodeExecuteResponse(payload,
+        isQuery: false, ttcFieldVersion: _ttcFieldVersion);
+    if (!response.isSuccess) {
+      throw OracleException(
+        errorCode: response.errorCode ?? oraProtocolError,
+        message: response.errorMessage ?? 'Commit failed',
+      );
+    }
+  }
+
+  /// Sends a TTC ROLLBACK message and waits for the server's acknowledgement.
+  ///
+  /// Throws [OracleException] if the rollback fails or the connection is broken.
+  Future<void> sendRollback() async {
+    final buf = WriteBuffer();
+    buf.writeUint8(ttcMsgTypeFunction);
+    buf.writeUint8(ttcFuncRollback);
+    buf.writeUint8(nextSequence() & 0xFF);
+    if (_ttcFieldVersion >= ttcCcapFieldVersion23_1Ext1) {
+      buf.writeUB8(0);
+    }
+    await sendData(buf.toBytes());
+    final payload = await _receiveAllTtcData();
+    final response = decodeExecuteResponse(payload,
+        isQuery: false, ttcFieldVersion: _ttcFieldVersion);
+    if (!response.isSuccess) {
+      throw OracleException(
+        errorCode: response.errorCode ?? oraProtocolError,
+        message: response.errorMessage ?? 'Rollback failed',
+      );
+    }
+  }
+
+  Future<ExecuteResponse> _sendFetch(
+      int cursorId, int numRows, Duration? timeout) async {
+    final fetch = FetchRequest(
+      cursorId: cursorId,
+      numRows: numRows,
+      ttcFieldVersion: _ttcFieldVersion,
+      sequence: nextSequence(),
+    );
+    await sendData(fetch.toBytes());
+    final payload = await _receiveDataWithTimeout(timeout);
+    return decodeExecuteResponse(
+      payload,
+      isQuery: true,
+      ttcFieldVersion: _ttcFieldVersion,
+    );
+  }
+
+  Future<Uint8List> _receiveDataWithTimeout(Duration? timeout) async {
+    final future = _receiveAllTtcData();
+    if (timeout == null) return future;
+    // NOTE: on timeout the underlying socket read continues; subsequent
+    // operations may receive stale data. Disconnect and reconnect if that
+    // matters (tracked as deferred tech-debt in deferred-work.md).
+    return future.timeout(
+      timeout,
+      onTimeout: () => throw OracleException(
+        errorCode: oraConnectTimeout,
+        message: 'Query timeout after ${timeout.inSeconds}s',
+      ),
+    );
+  }
+
+  /// Reads one or more TNS DATA packets and concatenates their TTC payloads.
+  ///
+  /// Loops until a DATA packet with the EOF (0x0040) or END_OF_REQUEST
+  /// (0x2000) data-flag is received, or a single-byte TTC END_OF_REQUEST
+  /// (0x1D) terminal packet is received. Oracle 23ai sends the single-byte
+  /// form after DML responses without setting any data flags.
+  Future<Uint8List> _receiveAllTtcData() async {
+    final chunks = <Uint8List>[];
+    while (true) {
+      var packet = await receive();
+      while (packet.type == tnsPacketMarker) {
+        // Marker payload: [markerType(1B), pad(1B), dataType(1B)]
+        // dataType: 1=BREAK(NIQBMARK), 2=RESET(NIQRMARK), 3=INTERRUPT(NIQIMARK)
+        // When Oracle sends a BREAK marker it means "I have an error; acknowledge
+        // with a RESET marker before I send the DATA response."
+        if (packet.payload.length >= 3 && packet.payload[2] == 1) {
+          await _sendResetMarker();
+        }
+        packet = await receive();
+      }
+      if (packet.type == tnsPacketRefuse) {
+        throw const OracleException(
+          errorCode: oraInvalidCredentials,
+          message: 'Authentication failed: invalid username or password',
+        );
+      }
+      if (packet.type != tnsPacketData) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message: 'Expected DATA packet, got type ${packet.type}',
+        );
+      }
+      if (packet.payload.length < 2) {
+        chunks.add(packet.payload);
+        break;
+      }
+      final flags = (packet.payload[0] << 8) | packet.payload[1];
+      final ttcData = Uint8List.sublistView(packet.payload, 2);
+      chunks.add(ttcData);
+      // Oracle 23ai uses 0x1D (END_OF_REQUEST) as the terminal TTC message.
+      // For success responses, Oracle sets flags=0x2000 and embeds 0x1D as the
+      // last payload byte. For error responses (e.g. ORA-00001), Oracle uses
+      // flags=0x0000 but still ends the payload with 0x1D. Terminate whenever
+      // the last byte of the received TTC data is 0x1D — this covers both cases
+      // and avoids a deadlock where we wait for a second packet that never comes.
+      if (ttcData.isNotEmpty && ttcData.last == ttcMsgTypeEndOfRequest) {
+        break;
+      }
+      if ((flags & _tnsDataFlagsEof) != 0 ||
+          (flags & _tnsDataFlagsEndOfRequest) != 0) {
+        break;
+      }
+    }
+    if (chunks.length == 1) return chunks.first;
+    final total = chunks.fold(0, (sum, c) => sum + c.length);
+    final result = Uint8List(total);
+    var offset = 0;
+    for (final chunk in chunks) {
+      result.setRange(offset, offset + chunk.length, chunk);
+      offset += chunk.length;
+    }
+    return result;
   }
 
   /// Sends a TTC PING message to verify connection health.
@@ -1163,16 +1340,19 @@ class Transport {
     return caps;
   }
 
+  // END_OF_RPC bit written in the client's final DATA packet — required by
+  // Oracle 23ai to signal the end of each client request. node-oracledb uses
+  // this same value (FAST_AUTH_END_OF_RPC_VALUE = 0x800) for every sendPacket.
+  static const int _tnsDataFlagsEndOfRpc = 0x0800;
+
   /// Sends TTC data in a TNS DATA packet with proper data flags.
   ///
   /// TNS DATA packets have a 2-byte data flags field at the start of
   /// the payload, followed by the actual TTC message data.
-  ///
-  /// Note: Outgoing data flags are always 0. The END_OF_REQUEST/EOF flags
-  /// are only used for checking incoming responses.
   Future<void> sendData(Uint8List ttcData, {int? dataFlags}) async {
-    // Outgoing data flags are always 0 (node-oracledb startRequest defaults to 0)
-    dataFlags ??= 0;
+    // 0x0800 signals end-of-RPC to Oracle 23ai; without it, Oracle waits for
+    // more client data after its first response and ignores subsequent commands.
+    dataFlags ??= _tnsDataFlagsEndOfRpc;
 
     // Build payload with 2-byte data flags prefix
     final payload = Uint8List(2 + ttcData.length);
@@ -1181,6 +1361,20 @@ class Transport {
     payload.setRange(2, payload.length, ttcData);
 
     final packet = TnsPacket(type: tnsPacketData, payload: payload);
+    await send(packet);
+  }
+
+  /// Sends a TNS MARKER packet with RESET data (NIQRMARK=2).
+  ///
+  /// Required after receiving an Oracle BREAK MARKER: Oracle will not send the
+  /// DATA error response until the client acknowledges with a RESET MARKER.
+  /// Marker payload: [1 (NSPMKTD1=with-data), 0 (pad), 2 (NIQRMARK=reset)]
+  Future<void> _sendResetMarker() async {
+    final payload = Uint8List(3);
+    payload[0] = 1; // NSPMKTD1 — data marker with 1 data byte
+    payload[1] = 0; // padding
+    payload[2] = 2; // NIQRMARK — reset
+    final packet = TnsPacket(type: tnsPacketMarker, payload: payload);
     await send(packet);
   }
 

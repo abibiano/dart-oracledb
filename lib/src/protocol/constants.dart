@@ -24,11 +24,32 @@ const int ttcAuthPhaseTwo = 0x73; // 115
 /// Close connection function code.
 const int ttcClose = 0x09; // 9
 
-/// Execute statement function code.
+/// Legacy execute opcode marker; for TTC RPC, use [ttcFuncExecute].
 const int ttcExecute = 0x03; // 3
 
-/// Fetch rows function code.
+/// Legacy fetch opcode marker; for TTC RPC, use [ttcFuncFetch].
 const int ttcFetch = 0x05; // 5
+
+/// TTC RPC function code: full execute (OALL8).
+const int ttcFuncExecute = 94;
+
+/// TTC RPC function code: fetch more rows.
+const int ttcFuncFetch = 5;
+
+/// TTC RPC function code: re-execute (cursor cached).
+const int ttcFuncReExecute = 4;
+
+/// TTC RPC function code: re-execute and fetch (cursor cached).
+const int ttcFuncReExecuteAndFetch = 78;
+
+/// TTC RPC function code: commit.
+const int ttcFuncCommit = 14;
+
+/// TTC RPC function code: rollback.
+const int ttcFuncRollback = 15;
+
+/// TTC RPC function code: close cursors.
+const int ttcFuncCloseCursors = 105;
 
 /// Commit transaction function code.
 const int ttcCommit = 0x0E; // 14
@@ -166,6 +187,109 @@ const int ttcMsgTypeWarning = 15;
 /// Fast authentication message type (Oracle 23ai optimization).
 /// Combines protocol negotiation, data types, and AUTH_PHASE_ONE in a single message.
 const int ttcMsgTypeFastAuth = 34;
+
+/// Row data describe-info message type (column metadata).
+const int ttcMsgTypeDescribeInfo = 16;
+
+/// IO vector message type (used for OUT bind directions).
+const int ttcMsgTypeIoVector = 11;
+
+/// Piggyback message type (client → server side metadata).
+const int ttcMsgTypePiggyback = 17;
+
+/// Bit vector message type (sparse row selection).
+const int ttcMsgTypeBitVector = 21;
+
+/// Server-side piggyback (transactional updates, LTXID, etc.).
+const int ttcMsgTypeServerSidePiggyback = 23;
+
+/// End of request marker (response complete).
+const int ttcMsgTypeEndOfRequest = 29;
+
+// ============================================================================
+// TTC Execute Option Flags (al8i4 / dmlOptions)
+// ============================================================================
+
+/// Parse SQL.
+const int ttcExecOptionParse = 0x01;
+
+/// Bind parameters present.
+const int ttcExecOptionBind = 0x08;
+
+/// Define query columns explicitly (re-execute with describe).
+const int ttcExecOptionDefine = 0x10;
+
+/// Execute the SQL.
+const int ttcExecOptionExecute = 0x20;
+
+/// Fetch rows in the same round trip.
+const int ttcExecOptionFetch = 0x40;
+
+/// Auto-commit.
+const int ttcExecOptionCommit = 0x100;
+
+/// Describe query without executing.
+const int ttcExecOptionDescribe = 0x20000;
+
+/// SQL is not PL/SQL.
+const int ttcExecOptionNotPlSql = 0x8000;
+
+/// Implicit result set (dmlOptions field).
+const int ttcExecOptionImplicitResultset = 0x8000;
+
+/// PL/SQL bind variables.
+const int ttcExecOptionPlSqlBind = 0x400;
+
+// ============================================================================
+// TTC Bind Flags
+// ============================================================================
+
+/// Bind values include null indicator bytes.
+const int ttcBindUseIndicators = 0x0001;
+
+/// Bind is an array.
+const int ttcBindArray = 0x0040;
+
+// ============================================================================
+// TTC Char Set Form
+// ============================================================================
+
+/// Implicit charset (database character set).
+const int ttcCsfrmImplicit = 1;
+
+/// NCHAR charset.
+const int ttcCsfrmNChar = 2;
+
+/// Oracle wire charset UTF-8 (AL32UTF8).
+const int ttcCharsetUtf8 = 873;
+
+// ============================================================================
+// TTC Length / Limits
+// ============================================================================
+
+/// Long length indicator for chunked encoding.
+const int ttcLongLengthIndicator = 0xFE;
+
+/// Null length indicator.
+const int ttcNullLengthIndicator = 0xFF;
+
+/// Maximum LONG / LONG RAW length.
+const int ttcMaxLongLength = 0x7fffffff;
+
+/// CCAP field version index in compile capabilities array.
+const int ttcCcapFieldVersionIndex = 7;
+
+/// CCAP field version threshold for writing token numbers (UB8).
+const int ttcCcapFieldVersion23_1Ext1 = 18;
+
+/// CCAP field version threshold for Oracle 12.2 (some fields).
+const int ttcCcapFieldVersion12_2 = 8;
+
+/// CCAP field version threshold for Oracle 12.2 ext1 (chunk ids).
+const int ttcCcapFieldVersionExt1 = 9;
+
+/// CCAP field version threshold for Oracle 20.1 (sql type + checksum in error).
+const int ttcCcapFieldVersion20_1 = 10;
 
 // ============================================================================
 // TTC Authentication Mode Flags

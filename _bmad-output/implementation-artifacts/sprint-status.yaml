@@ -34,6 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
+last_updated: 2026-05-21  # Story 6.3 complete — All 38 integration tests pass; Story 2.4 DML validated
 project: dart-oracledb
 tracking_system: file-system
 story_location: docs/sprint-artifacts
@@ -42,6 +43,21 @@ story_location: docs/sprint-artifacts
 # ✅ Epic 1 COMPLETE - Authentication WORKING! Crypto format bugs fixed
 # ✅ Epic 2 UNBLOCKED - Ready for development
 # Details: Story 1-4-fix - Fixed 5 crypto bugs (password uppercasing, hex encoding, session key length)
+#
+# SPRINT UPDATE: 2026-05-21 (Story 6.3 - session 1)
+# 🚨 Critical defect found and partially fixed in Story 6.3:
+#   - Pre-existing Epic 2 EXECUTE protocol was an invented wire format Oracle 23ai rejected.
+#   - Rebuilt against node-oracledb thin client reference.
+#   - SELECTs (Stories 2.1, 2.2, 2.3) now validated against Oracle 23ai.
+#   - DML (Story 2.4) still fails — documented as follow-up.
+#   - Stories 2.5, 2.6 also need re-validation after the protocol change.
+#
+# SPRINT UPDATE: 2026-05-21 (Story 6.3 - session 2)
+# ✅ DML hang root cause found and fixed:
+#   - Oracle sends BREAK+RESET MARKER packets for constraint violations; client must acknowledge.
+#   - _receiveAllTtcData() now sends RESET MARKER on BREAK detection before waiting for DATA.
+#   - All 38 integration tests pass (18 query + 20 DML) — Story 2.4 fully validated.
+#   - Story 6.3 marked review; Story 2.4 marked done.
 
 development_status:
   # Epic 1: Core Connection & Authentication [IN-PROGRESS - Story 1-8 added]
@@ -57,14 +73,14 @@ development_status:
   1-8-fix-wrong-password-error: done  # RESOLVED - 5s timeout for wrong password (was 30s), security fixes applied
   epic-1-retrospective: done  # Completed 2025-12-16 - See epic-1-retro-2025-12-16.md
 
-  # Epic 2: Query Execution & Transactions [READY]
-  epic-2: ready-for-dev  # Unblocked - authentication works!
-  2-1-execute-message-basic-query: dev-complete-pending-validation
-  2-2-result-set-handling: dev-complete-pending-validation
-  2-3-bind-parameters: dev-complete-pending-validation
-  2-4-dml-operations-insert-update-delete: dev-complete-pending-validation
-  2-5-transaction-management: review
-  2-6-basic-data-type-mapping: review
+  # Epic 2: Query Execution & Transactions [IN-PROGRESS - protocol rebuilt in Story 6.3]
+  epic-2: in-progress
+  2-1-execute-message-basic-query: done  # 2026-05-21 Story 6.3 — Protocol rebuilt; SELECT validated against Oracle 23ai (6/6 integration tests pass)
+  2-2-result-set-handling: done  # 2026-05-21 Story 6.3 — OracleResult/OracleRow validated; missing 2-2 artifact noted in story 6.3 DAR
+  2-3-bind-parameters: done  # 2026-05-21 Story 6.3 — All 12 bind integration tests pass against Oracle 23ai
+  2-4-dml-operations-insert-update-delete: done  # 2026-05-21 Story 6.3 session 2 — All 20 DML integration tests pass. BREAK/RESET MARKER protocol implemented in transport. INSERT/UPDATE/DELETE + error paths validated against Oracle 23ai.
+  2-5-transaction-management: dev-complete-pending-validation  # 2026-05-21 Story 6.3 — Needs re-validation post-protocol rebuild
+  2-6-basic-data-type-mapping: dev-complete-pending-validation  # 2026-05-21 Story 6.3 — Needs re-validation post-protocol rebuild
   2-7-statement-caching: backlog
   2-8-query-error-handling: backlog
   epic-2-retrospective: optional
@@ -93,9 +109,9 @@ development_status:
   epic-5-retrospective: optional
 
   # Epic 6: Test Architecture & Coverage [CRITICAL - Blocks Epic 2.5+]
-  epic-6: in-progress  # Story 6.1 done - Story 6.2 ready for review
+  epic-6: in-progress  # Story 6.3 ready for dev
   6-1-test-architecture-design-standards: done  # Code review passed with fixes applied
   6-2-epic-1-authentication-test-suite-rework: done  # 2026-05-21 - Code review complete. 12 patches applied (prod bug fix + test fixes). 489 unit tests passing.
-  6-3-epic-2-validation-pending-validation-stories: backlog
+  6-3-epic-2-validation-pending-validation-stories: review  # 2026-05-21 All tasks complete — 38/38 integration tests pass; DML validated; Story 2.4 marked done
   6-4-ci-cd-integration-test-automation: backlog
   epic-6-retrospective: optional

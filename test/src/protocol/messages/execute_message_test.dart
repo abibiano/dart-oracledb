@@ -1,753 +1,239 @@
-import 'dart:convert';
+/// Unit tests for ExecuteRequest / ExecuteResponse / FetchRequest using the
+/// real Oracle TTC EXECUTE wire format introduced in Story 6.3.
+///
+/// These tests validate the structural shape of encoded requests and the
+/// decoder's response loop against hand-crafted fixtures. Behavioral
+/// validation against an actual Oracle 23ai server lives in
+/// `test/integration/query_integration_test.dart`.
+library;
+
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
 
-import 'package:oracledb/src/errors.dart';
-import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
+import 'package:oracledb/src/protocol/messages/execute_message.dart';
 
 void main() {
-  group('ExecuteRequest', () {
-    test('encodes with correct function code (0x03)', () {
-      final request = ExecuteRequest(sql: 'SELECT * FROM dual');
-      final bytes = request.toBytes();
+  group('ExecuteRequest encoding', () {
+    test('writes function header with TTC RPC EXECUTE (funcCode 94)', () {
+      final req = ExecuteRequest(sql: 'SELECT 1 FROM dual', isQuery: true);
+      final bytes = req.toBytes();
 
-      expect(bytes[0], equals(ttcExecute)); // 0x03
+      // Header: msgType (3), funcCode (94), seqNum (1 byte), tokenNumber UB8
+      expect(bytes[0], equals(ttcMsgTypeFunction));
+      expect(bytes[1], equals(ttcFuncExecute));
+      expect(bytes[2], equals(1)); // default sequence
     });
 
-    test('encodes cursor ID as 4-byte big-endian', () {
-      final request = ExecuteRequest(sql: 'SELECT 1', cursorId: 0);
-      final bytes = request.toBytes();
-
-      // After function code (1 byte), cursor ID is 4 bytes BE
-      expect(bytes[1], equals(0));
-      expect(bytes[2], equals(0));
-      expect(bytes[3], equals(0));
-      expect(bytes[4], equals(0));
+    test('SELECT sets EXECUTE+FETCH+PARSE option bits', () {
+      final req = ExecuteRequest(sql: 'SELECT 1 FROM dual', isQuery: true);
+      final bytes = req.toBytes();
+      final options = _readOptionsFromHeader(bytes);
+      expect(options & ttcExecOptionExecute, isNonZero);
+      expect(options & ttcExecOptionFetch, isNonZero);
+      expect(options & ttcExecOptionParse, isNonZero);
+      expect(options & ttcExecOptionNotPlSql, equals(0)); // queries clear NOT_PLSQL
     });
 
-    test('encodes non-zero cursor ID correctly', () {
-      final request = ExecuteRequest(sql: 'SELECT 1', cursorId: 256);
-      final bytes = request.toBytes();
-
-      // cursor ID = 256 = 0x00000100 in BE
-      expect(bytes[1], equals(0));
-      expect(bytes[2], equals(0));
-      expect(bytes[3], equals(1));
-      expect(bytes[4], equals(0));
+    test('DML sets NOT_PLSQL flag and clears FETCH bit', () {
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t VALUES (1)',
+        isQuery: false,
+      );
+      final bytes = req.toBytes();
+      final options = _readOptionsFromHeader(bytes);
+      expect(options & ttcExecOptionExecute, isNonZero);
+      expect(options & ttcExecOptionParse, isNonZero);
+      expect(options & ttcExecOptionFetch, equals(0));
+      expect(options & ttcExecOptionNotPlSql, isNonZero);
     });
 
-    test('encodes options byte', () {
-      final request = ExecuteRequest(sql: 'SELECT 1', options: 0x42);
-      final bytes = request.toBytes();
-
-      // After cursor ID (5 bytes), options is 1 byte
-      expect(bytes[5], equals(0x42));
+    test('sets BIND flag when bind values are provided', () {
+      final req = ExecuteRequest(
+        sql: 'SELECT * FROM t WHERE id = :1',
+        isQuery: true,
+        bindValues: [42],
+      );
+      final bytes = req.toBytes();
+      final options = _readOptionsFromHeader(bytes);
+      expect(options & ttcExecOptionBind, isNonZero);
     });
 
-    test('encodes SQL as UTF-8 with 4-byte length prefix', () {
-      const sql = 'SELECT * FROM dual';
-      final request = ExecuteRequest(sql: sql);
-      final bytes = request.toBytes();
-
-      final sqlBytes = utf8.encode(sql);
-
-      // SQL length prefix starts at byte 6 (4 bytes BE)
-      final lengthFromBytes =
-          (bytes[6] << 24) | (bytes[7] << 16) | (bytes[8] << 8) | bytes[9];
-      expect(lengthFromBytes, equals(sqlBytes.length));
-
-      // SQL bytes start at byte 10
-      final encodedSql = bytes.sublist(10, 10 + sqlBytes.length);
-      expect(encodedSql, equals(sqlBytes));
+    test('passes a unique sequence number to the wire', () {
+      final r1 = ExecuteRequest(
+          sql: 'SELECT 1 FROM dual', isQuery: true, sequence: 7);
+      expect(r1.toBytes()[2], equals(7));
     });
 
-    test('encodes UTF-8 characters correctly', () {
-      // SQL with unicode characters
-      const sql = "SELECT 'héllo' FROM dual";
-      final request = ExecuteRequest(sql: sql);
-      final bytes = request.toBytes();
-
-      final sqlBytes = utf8.encode(sql);
-      final lengthFromBytes =
-          (bytes[6] << 24) | (bytes[7] << 16) | (bytes[8] << 8) | bytes[9];
-      expect(lengthFromBytes, equals(sqlBytes.length));
-    });
-
-    test('has correct message type', () {
-      final request = ExecuteRequest(sql: 'SELECT 1');
-      expect(request.messageType, equals(ttcExecute));
-    });
-
-    test('default cursor ID is 0', () {
-      final request = ExecuteRequest(sql: 'SELECT 1');
-      expect(request.cursorId, equals(0));
-    });
-
-    test('default options is 0', () {
-      final request = ExecuteRequest(sql: 'SELECT 1');
-      expect(request.options, equals(0));
-    });
-
-    group('bind parameter encoding', () {
-      test('encodes bind count as 2-byte big-endian after SQL', () {
-        final request = ExecuteRequest(
-          sql: 'SELECT :1 FROM dual',
-          bindValues: ['hello'],
-        );
-        final bytes = request.toBytes();
-
-        // Find SQL end position
-        const sql = 'SELECT :1 FROM dual';
-        final sqlBytes = utf8.encode(sql);
-        final bindCountOffset = 1 +
-            4 +
-            1 +
-            4 +
-            sqlBytes.length; // func + cursor + opts + sqlLen + sql
-
-        // Bind count = 1 (2 bytes BE)
-        expect(bytes[bindCountOffset], equals(0));
-        expect(bytes[bindCountOffset + 1], equals(1));
-      });
-
-      test('encodes zero bind count when no binds provided', () {
-        final request = ExecuteRequest(sql: 'SELECT * FROM dual');
-        final bytes = request.toBytes();
-
-        const sql = 'SELECT * FROM dual';
-        final sqlBytes = utf8.encode(sql);
-        final bindCountOffset = 1 + 4 + 1 + 4 + sqlBytes.length;
-
-        expect(bytes[bindCountOffset], equals(0));
-        expect(bytes[bindCountOffset + 1], equals(0));
-      });
-
-      test('encodes String bind value as VARCHAR2', () {
-        final request = ExecuteRequest(
-          sql: 'SELECT :1 FROM dual',
-          bindValues: ['test'],
-        );
-        final bytes = request.toBytes();
-
-        const sql = 'SELECT :1 FROM dual';
-        final sqlBytes = utf8.encode(sql);
-        final bindDataOffset =
-            1 + 4 + 1 + 4 + sqlBytes.length + 2; // after bind count
-
-        // Non-null indicator (0x00)
-        expect(bytes[bindDataOffset], equals(0x00));
-        // Type indicator (oraTypeVarchar2 = 9)
-        expect(bytes[bindDataOffset + 1], equals(oraTypeVarchar2));
-        // Length (2 bytes BE)
-        expect(bytes[bindDataOffset + 2], equals(0));
-        expect(bytes[bindDataOffset + 3], equals(4)); // "test" = 4 bytes
-        // Value
-        expect(bytes[bindDataOffset + 4], equals(0x74)); // 't'
-        expect(bytes[bindDataOffset + 5], equals(0x65)); // 'e'
-        expect(bytes[bindDataOffset + 6], equals(0x73)); // 's'
-        expect(bytes[bindDataOffset + 7], equals(0x74)); // 't'
-      });
-
-      test('encodes int bind value as NUMBER', () {
-        final request = ExecuteRequest(
-          sql: 'SELECT :1 FROM dual',
-          bindValues: [123],
-        );
-        final bytes = request.toBytes();
-
-        const sql = 'SELECT :1 FROM dual';
-        final sqlBytes = utf8.encode(sql);
-        final bindDataOffset = 1 + 4 + 1 + 4 + sqlBytes.length + 2;
-
-        // Non-null indicator
-        expect(bytes[bindDataOffset], equals(0x00));
-        // Type indicator (oraTypeNumber = 2)
-        expect(bytes[bindDataOffset + 1], equals(oraTypeNumber));
-      });
-
-      test('encodes null bind value with NULL indicator', () {
-        final request = ExecuteRequest(
-          sql: 'SELECT :1 FROM dual',
-          bindValues: [null],
-        );
-        final bytes = request.toBytes();
-
-        const sql = 'SELECT :1 FROM dual';
-        final sqlBytes = utf8.encode(sql);
-        final bindDataOffset = 1 + 4 + 1 + 4 + sqlBytes.length + 2;
-
-        // NULL indicator (0xFF)
-        expect(bytes[bindDataOffset], equals(0xFF));
-      });
-
-      test('encodes multiple bind values', () {
-        final request = ExecuteRequest(
-          sql: 'SELECT :1, :2 FROM dual',
-          bindValues: ['a', 'b'],
-        );
-        final bytes = request.toBytes();
-
-        const sql = 'SELECT :1, :2 FROM dual';
-        final sqlBytes = utf8.encode(sql);
-        final bindCountOffset = 1 + 4 + 1 + 4 + sqlBytes.length;
-
-        // Bind count = 2
-        expect(bytes[bindCountOffset], equals(0));
-        expect(bytes[bindCountOffset + 1], equals(2));
-      });
-
-      test('encodes DateTime bind value as DATE', () {
-        final dt = DateTime(2025, 12, 15, 10, 30, 45);
-        final request = ExecuteRequest(
-          sql: 'SELECT :1 FROM dual',
-          bindValues: [dt],
-        );
-        final bytes = request.toBytes();
-
-        const sql = 'SELECT :1 FROM dual';
-        final sqlBytes = utf8.encode(sql);
-        final bindDataOffset = 1 + 4 + 1 + 4 + sqlBytes.length + 2;
-
-        // Non-null indicator
-        expect(bytes[bindDataOffset], equals(0x00));
-        // Type indicator (oraTypeDate = 12)
-        expect(bytes[bindDataOffset + 1], equals(oraTypeDate));
-      });
-
-      test('encodes Uint8List bind value as RAW', () {
-        final data = Uint8List.fromList([0x01, 0x02, 0x03]);
-        final request = ExecuteRequest(
-          sql: 'SELECT :1 FROM dual',
-          bindValues: [data],
-        );
-        final bytes = request.toBytes();
-
-        const sql = 'SELECT :1 FROM dual';
-        final sqlBytes = utf8.encode(sql);
-        final bindDataOffset = 1 + 4 + 1 + 4 + sqlBytes.length + 2;
-
-        // Non-null indicator
-        expect(bytes[bindDataOffset], equals(0x00));
-        // Type indicator (oraTypeRaw = 23)
-        expect(bytes[bindDataOffset + 1], equals(oraTypeRaw));
-      });
-
-      test('throws on unsupported bind value type', () {
-        final request = ExecuteRequest(
-          sql: 'SELECT :1 FROM dual',
-          bindValues: [<String, dynamic>{}], // Map is not a valid bind value
-        );
-
-        expect(
-          () => request.toBytes(),
-          throwsA(isA<OracleException>().having(
-            (e) => e.errorCode,
-            'errorCode',
-            oraBindTypeError,
-          )),
-        );
-      });
-
-      test('stores bind names for named binds', () {
-        final request = ExecuteRequest(
-          sql: 'SELECT :name FROM dual',
-          bindValues: ['test'],
-          bindNames: ['name'],
-        );
-
-        expect(request.bindNames, equals(['name']));
-        expect(request.bindValues, equals(['test']));
-      });
+    test('encodes token number UB8 only when ttcFieldVersion >= 18', () {
+      final headerSize23 = ExecuteRequest(
+        sql: 'SELECT 1 FROM dual',
+        isQuery: true,
+        ttcFieldVersion: 24,
+      ).toBytes();
+      final headerSizeOld = ExecuteRequest(
+        sql: 'SELECT 1 FROM dual',
+        isQuery: true,
+        ttcFieldVersion: 17,
+      ).toBytes();
+      expect(
+        headerSize23.length,
+        greaterThan(headerSizeOld.length),
+        reason: 'v23 should include extra token-number bytes',
+      );
     });
   });
 
-  group('ExecuteResponse', () {
-    test('decodes success response with status byte 0', () {
-      // Success response: status=0, cursorId=1, columnCount=1, column, rowCount=1, row
-      final bytes = _buildSuccessResponse(
-        cursorId: 1,
-        columns: [_TestColumn('DUMMY', oraTypeVarchar, 1)],
-        rows: [
-          ['X']
-        ],
-      );
-
-      final response = ExecuteResponse.decode(bytes);
-
-      expect(response.isSuccess, isTrue);
-      expect(response.cursorId, equals(1));
-      expect(response.errorCode, isNull);
-      expect(response.errorMessage, isNull);
-    });
-
-    test('decodes error response with ORA code', () {
-      // Error response: status=1, errorCode=942, message="table or view does not exist"
-      final bytes = _buildErrorResponse(
-        errorCode: 942,
-        errorMessage: 'table or view does not exist',
-      );
-
-      final response = ExecuteResponse.decode(bytes);
-
-      expect(response.isSuccess, isFalse);
-      expect(response.errorCode, equals(942));
-      expect(response.errorMessage, equals('table or view does not exist'));
-    });
-
-    test('decodes column metadata correctly', () {
-      final bytes = _buildSuccessResponse(
-        cursorId: 1,
-        columns: [
-          _TestColumn('ID', oraTypeNumber, 22),
-          _TestColumn('NAME', oraTypeVarchar, 100),
-        ],
-        rows: [],
-      );
-
-      final response = ExecuteResponse.decode(bytes);
-
-      expect(response.columnMetadata, hasLength(2));
-      expect(response.columnMetadata![0].name, equals('ID'));
-      expect(response.columnMetadata![0].oracleType, equals(oraTypeNumber));
-      expect(response.columnMetadata![1].name, equals('NAME'));
-      expect(response.columnMetadata![1].oracleType, equals(oraTypeVarchar));
-    });
-
-    test('decodes row data when present', () {
-      final bytes = _buildSuccessResponse(
-        cursorId: 1,
-        columns: [_TestColumn('GREETING', oraTypeVarchar, 10)],
-        rows: [
-          ['hello']
-        ],
-      );
-
-      final response = ExecuteResponse.decode(bytes);
-
-      expect(response.rows, hasLength(1));
-      expect(response.rows![0][0], equals('hello'));
-    });
-
-    test('decodes multiple rows', () {
-      final bytes = _buildSuccessResponse(
-        cursorId: 1,
-        columns: [_TestColumn('VAL', oraTypeVarchar, 10)],
-        rows: [
-          ['one'],
-          ['two'],
-          ['three']
-        ],
-      );
-
-      final response = ExecuteResponse.decode(bytes);
-
-      expect(response.rows, hasLength(3));
-      expect(response.rows![0][0], equals('one'));
-      expect(response.rows![1][0], equals('two'));
-      expect(response.rows![2][0], equals('three'));
-    });
-
-    test('handles null values in rows', () {
-      final bytes = _buildSuccessResponseWithNull(
-        cursorId: 1,
-        columns: [_TestColumn('VAL', oraTypeVarchar, 10)],
-      );
-
-      final response = ExecuteResponse.decode(bytes);
-
-      expect(response.rows, hasLength(1));
-      expect(response.rows![0][0], isNull);
-    });
-
-    test('decodes empty result set', () {
-      final bytes = _buildSuccessResponse(
-        cursorId: 1,
-        columns: [_TestColumn('DUMMY', oraTypeVarchar, 1)],
-        rows: [],
-      );
-
-      final response = ExecuteResponse.decode(bytes);
-
-      expect(response.isSuccess, isTrue);
-      expect(response.rows, isEmpty);
-    });
-
-    group('DML response (columnCount = 0)', () {
-      test('decodes DML response with rowsAffected = 1', () {
-        final bytes = _buildDmlResponse(cursorId: 0, rowsAffected: 1);
-
-        final response = ExecuteResponse.decode(bytes);
-
-        expect(response.isSuccess, isTrue);
-        expect(response.rowsAffected, equals(1));
-        expect(response.rows, isEmpty);
-        expect(response.columnMetadata, isEmpty);
-      });
-
-      test('decodes DML response with rowsAffected = 0', () {
-        final bytes = _buildDmlResponse(cursorId: 0, rowsAffected: 0);
-
-        final response = ExecuteResponse.decode(bytes);
-
-        expect(response.isSuccess, isTrue);
-        expect(response.rowsAffected, equals(0));
-      });
-
-      test('decodes DML response with multiple rows affected', () {
-        final bytes = _buildDmlResponse(cursorId: 0, rowsAffected: 42);
-
-        final response = ExecuteResponse.decode(bytes);
-
-        expect(response.isSuccess, isTrue);
-        expect(response.rowsAffected, equals(42));
-      });
-
-      test('decodes DML response with large rowsAffected', () {
-        // Test large count (65536 = 0x00010000)
-        final bytes = _buildDmlResponse(cursorId: 0, rowsAffected: 65536);
-
-        final response = ExecuteResponse.decode(bytes);
-
-        expect(response.isSuccess, isTrue);
-        expect(response.rowsAffected, equals(65536));
-      });
-    });
-
-    test('SELECT response has null rowsAffected', () {
-      final bytes = _buildSuccessResponse(
-        cursorId: 1,
-        columns: [_TestColumn('DUMMY', oraTypeVarchar, 1)],
-        rows: [
-          ['X']
-        ],
-      );
-
-      final response = ExecuteResponse.decode(bytes);
-
-      expect(response.isSuccess, isTrue);
-      expect(response.rowsAffected, isNull);
-      expect(response.rows, hasLength(1));
-    });
-
-    group('NUMBER decoding', () {
-      test('decodes zero value', () {
-        // Oracle NUMBER zero is represented as single byte 0x80
-        final bytes = _buildSuccessResponseWithNumber(
-          cursorId: 1,
-          numberBytes: [0x80], // Zero
-        );
-
-        final response = ExecuteResponse.decode(bytes);
-
-        expect(response.isSuccess, isTrue);
-        expect(response.rows, hasLength(1));
-        expect(response.rows![0][0], equals(0));
-      });
-
-      test('decodes small positive integer (1)', () {
-        // Oracle NUMBER 1 = [0xC1, 0x02] (exponent 0xC1, mantissa 1+1=2)
-        final bytes = _buildSuccessResponseWithNumber(
-          cursorId: 1,
-          numberBytes: [0xC1, 0x02],
-        );
-
-        final response = ExecuteResponse.decode(bytes);
-
-        expect(response.isSuccess, isTrue);
-        expect(response.rows![0][0], equals(1));
-      });
-
-      test('decodes positive integer (123)', () {
-        // Oracle NUMBER 123 = [0xC2, 0x02, 0x18] (exponent 0xC2 for 2 base-100 digits)
-        // 123 = 1*100 + 23 → mantissa bytes [1+1, 23+1] = [0x02, 0x18]
-        final bytes = _buildSuccessResponseWithNumber(
-          cursorId: 1,
-          numberBytes: [0xC2, 0x02, 0x18],
-        );
-
-        final response = ExecuteResponse.decode(bytes);
-
-        expect(response.isSuccess, isTrue);
-        expect(response.rows![0][0], equals(123));
-      });
-
-      test('decodes larger positive integer (10000)', () {
-        // Oracle NUMBER 10000 = [0xC3, 0x02, 0x01, 0x01]
-        // 10000 = 1*10000 + 0*100 + 0 → [0x02, 0x01, 0x01]
-        final bytes = _buildSuccessResponseWithNumber(
-          cursorId: 1,
-          numberBytes: [0xC3, 0x02, 0x01, 0x01],
-        );
-
-        final response = ExecuteResponse.decode(bytes);
-
-        expect(response.isSuccess, isTrue);
-        expect(response.rows![0][0], equals(10000));
-      });
+  group('FetchRequest encoding', () {
+    test('uses TTC RPC FETCH (funcCode 5)', () {
+      final req = FetchRequest(cursorId: 42, numRows: 10);
+      final bytes = req.toBytes();
+      expect(bytes[0], equals(ttcMsgTypeFunction));
+      expect(bytes[1], equals(ttcFuncFetch));
+      expect(bytes[2], equals(1));
     });
   });
 
-  group('ColumnMetadata', () {
-    test('decodes column name and type', () {
-      final bytes = _buildColumnMetadataBytes('TEST_COL', oraTypeVarchar, 50);
-      final metadata = ColumnMetadata.decode(ReadBuffer(bytes));
-
-      expect(metadata.name, equals('TEST_COL'));
-      expect(metadata.oracleType, equals(oraTypeVarchar));
-      expect(metadata.maxLength, equals(50));
+  group('decodeExecuteResponse', () {
+    test('reports success on END_OF_REQUEST with no error message', () {
+      final payload = _buildPayload([
+        // ERROR message: success (errorNum=0)
+        _errorMessage(errorNum: 0, rowCount: 0),
+        // STATUS message
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.isSuccess, isTrue);
+      expect(r.errorCode, isNull);
     });
 
-    test('decodes precision and scale when present', () {
-      final bytes =
-          _buildColumnMetadataBytes('AMOUNT', oraTypeNumber, 22, 10, 2);
-      final metadata = ColumnMetadata.decode(ReadBuffer(bytes));
-
-      expect(metadata.name, equals('AMOUNT'));
-      expect(metadata.oracleType, equals(oraTypeNumber));
-      expect(metadata.precision, equals(10));
-      expect(metadata.scale, equals(2));
+    test('DML success exposes rowsAffected', () {
+      final payload = _buildPayload([
+        _errorMessage(errorNum: 0, rowCount: 3),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.isSuccess, isTrue);
+      expect(r.rowsAffected, equals(3));
     });
 
-    test('precision and scale are null when zero', () {
-      final bytes =
-          _buildColumnMetadataBytes('NAME', oraTypeVarchar, 100, 0, 0);
-      final metadata = ColumnMetadata.decode(ReadBuffer(bytes));
+    test('Oracle error number is surfaced with message', () {
+      final payload = _buildPayload([
+        _errorMessage(errorNum: 942, errorMessage: 'table or view does not exist'),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.isSuccess, isFalse);
+      expect(r.errorCode, equals(942));
+      expect(r.errorMessage, contains('table or view'));
+    });
 
-      expect(metadata.precision, isNull);
-      expect(metadata.scale, isNull);
+    test('ORA-01403 end-of-fetch is not treated as an error for queries', () {
+      final payload = _buildPayload([
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.isSuccess, isTrue);
+      expect(r.moreRowsToFetch, isFalse);
     });
   });
 }
 
-// Test helper classes and functions
-
-class _TestColumn {
-  _TestColumn(this.name, this.type, this.maxLength);
-  final String name;
-  final int type;
-  final int maxLength;
+/// Reads the EXECUTE options UB4 from a request that begins with the standard
+/// function header (msg=3, func=94, seq=1 byte) followed by either a UB8 token
+/// number (for ttcFieldVersion >= 18) or nothing.
+int _readOptionsFromHeader(Uint8List bytes) {
+  final buf = ReadBuffer(bytes);
+  buf.readUint8(); // msg type
+  buf.readUint8(); // func code
+  buf.readUint8(); // seq
+  // Token number UB8 (default ttcFieldVersion is 24 in tests).
+  buf.skipUB8();
+  return buf.readUB4();
 }
 
-/// Builds a mock success response for testing.
-Uint8List _buildSuccessResponse({
-  required int cursorId,
-  required List<_TestColumn> columns,
-  required List<List<String>> rows,
-}) {
-  final buffer = BytesBuilder();
-
-  // Status byte (0 = success)
-  buffer.addByte(0);
-
-  // Cursor ID (4 bytes BE)
-  buffer.addByte((cursorId >> 24) & 0xFF);
-  buffer.addByte((cursorId >> 16) & 0xFF);
-  buffer.addByte((cursorId >> 8) & 0xFF);
-  buffer.addByte(cursorId & 0xFF);
-
-  // Column count (2 bytes BE)
-  buffer.addByte((columns.length >> 8) & 0xFF);
-  buffer.addByte(columns.length & 0xFF);
-
-  // Column metadata
-  for (final col in columns) {
-    final nameBytes = utf8.encode(col.name);
-    buffer.addByte(nameBytes.length); // name length
-    buffer.add(nameBytes); // name
-    buffer.addByte((col.type >> 8) & 0xFF); // type BE
-    buffer.addByte(col.type & 0xFF);
-    buffer.addByte((col.maxLength >> 8) & 0xFF); // maxLength BE
-    buffer.addByte(col.maxLength & 0xFF);
-    buffer.addByte(0); // precision
-    buffer.addByte(0); // scale
+Uint8List _buildPayload(List<List<int>> messages) {
+  final out = <int>[];
+  for (final m in messages) {
+    out.addAll(m);
   }
+  return Uint8List.fromList(out);
+}
 
-  // Row count (4 bytes BE)
-  buffer.addByte((rows.length >> 24) & 0xFF);
-  buffer.addByte((rows.length >> 16) & 0xFF);
-  buffer.addByte((rows.length >> 8) & 0xFF);
-  buffer.addByte(rows.length & 0xFF);
+List<int> _ub4(int v) {
+  if (v == 0) return [0];
+  if (v <= 0xff) return [1, v];
+  if (v <= 0xffff) return [2, (v >> 8) & 0xff, v & 0xff];
+  return [
+    4,
+    (v >> 24) & 0xff,
+    (v >> 16) & 0xff,
+    (v >> 8) & 0xff,
+    v & 0xff,
+  ];
+}
 
-  // Row data
-  for (final row in rows) {
-    for (final value in row) {
-      buffer.addByte(0); // not null indicator
-      final valueBytes = utf8.encode(value);
-      buffer.addByte((valueBytes.length >> 8) & 0xFF); // length BE
-      buffer.addByte(valueBytes.length & 0xFF);
-      buffer.add(valueBytes);
-    }
+List<int> _ub2(int v) {
+  if (v == 0) return [0];
+  if (v <= 0xff) return [1, v];
+  return [2, (v >> 8) & 0xff, v & 0xff];
+}
+
+List<int> _ub8(int v) => _ub4(v);
+
+List<int> _bytesWithLength(List<int> data) {
+  if (data.isEmpty) return [0];
+  return [data.length, ...data];
+}
+
+/// Builds a complete TTC ERROR (type 4) message body that mirrors the layout
+/// node-oracledb writes/reads. Optional [errorNum] selects success (0) or a
+/// specific Oracle code; [rowCount] supplies the DML row count field.
+List<int> _errorMessage({
+  int errorNum = 0,
+  int rowCount = 0,
+  String? errorMessage,
+}) {
+  final out = <int>[ttcMsgTypeError];
+  out.addAll(_ub4(0)); // end of call status
+  out.addAll(_ub2(0)); // end-to-end seq num
+  out.addAll(_ub4(0)); // current row
+  out.addAll(_ub2(0)); // err num short
+  out.addAll(_ub2(0)); // array elem
+  out.addAll(_ub2(0)); // array elem
+  out.addAll(_ub2(0)); // cursor id
+  out.addAll(_ub2(0)); // error position (SB2 in wire; encoded same as UB2 for 0)
+  out.add(0); // sql type
+  out.add(0); // fatal
+  out.add(0); // flags
+  out.add(0); // user cursor opts
+  out.add(0); // UPI param
+  out.add(0); // warning
+  // rowID: UB4 rba + UB2 partitionID + UB1 + UB4 blockNum + UB2 slotNum (all zero)
+  out.addAll(_ub4(0));
+  out.addAll(_ub2(0));
+  out.add(0);
+  out.addAll(_ub4(0));
+  out.addAll(_ub2(0));
+  out.addAll(_ub4(0)); // OS error
+  out.add(0); // statement error
+  out.add(0); // call number
+  out.addAll(_ub2(0)); // padding
+  out.addAll(_ub4(0)); // success iters
+  out.addAll(_ub4(0)); // oerrdd length
+  out.addAll(_ub2(0)); // batch error codes count
+  out.addAll(_ub4(0)); // batch error offsets count
+  out.addAll(_ub2(0)); // batch error messages count
+  out.addAll(_ub4(errorNum)); // extended error number
+  out.addAll(_ub8(rowCount)); // extended row count
+  out.addAll(_ub4(0)); // 20.1 sql type
+  out.addAll(_ub4(0)); // 20.1 checksum
+  if (errorNum != 0) {
+    final msg = errorMessage ?? 'ORA-${errorNum.toString().padLeft(5, '0')}';
+    out.addAll(_bytesWithLength(msg.codeUnits));
   }
-
-  return buffer.toBytes();
-}
-
-/// Builds a mock success response with a null value.
-Uint8List _buildSuccessResponseWithNull({
-  required int cursorId,
-  required List<_TestColumn> columns,
-}) {
-  final buffer = BytesBuilder();
-
-  // Status byte (0 = success)
-  buffer.addByte(0);
-
-  // Cursor ID (4 bytes BE)
-  buffer.addByte((cursorId >> 24) & 0xFF);
-  buffer.addByte((cursorId >> 16) & 0xFF);
-  buffer.addByte((cursorId >> 8) & 0xFF);
-  buffer.addByte(cursorId & 0xFF);
-
-  // Column count (2 bytes BE)
-  buffer.addByte((columns.length >> 8) & 0xFF);
-  buffer.addByte(columns.length & 0xFF);
-
-  // Column metadata
-  for (final col in columns) {
-    final nameBytes = utf8.encode(col.name);
-    buffer.addByte(nameBytes.length);
-    buffer.add(nameBytes);
-    buffer.addByte((col.type >> 8) & 0xFF);
-    buffer.addByte(col.type & 0xFF);
-    buffer.addByte((col.maxLength >> 8) & 0xFF);
-    buffer.addByte(col.maxLength & 0xFF);
-    buffer.addByte(0);
-    buffer.addByte(0);
-  }
-
-  // Row count = 1
-  buffer.addByte(0);
-  buffer.addByte(0);
-  buffer.addByte(0);
-  buffer.addByte(1);
-
-  // One row with null value
-  buffer.addByte(0xFF); // NULL indicator
-
-  return buffer.toBytes();
-}
-
-/// Builds a mock error response for testing.
-Uint8List _buildErrorResponse({
-  required int errorCode,
-  required String errorMessage,
-}) {
-  final buffer = BytesBuilder();
-
-  // Status byte (non-zero = error)
-  buffer.addByte(1);
-
-  // Error code (2 bytes BE)
-  buffer.addByte((errorCode >> 8) & 0xFF);
-  buffer.addByte(errorCode & 0xFF);
-
-  // Error message
-  final msgBytes = utf8.encode(errorMessage);
-  buffer.addByte(msgBytes.length);
-  buffer.add(msgBytes);
-
-  return buffer.toBytes();
-}
-
-/// Builds column metadata bytes for testing.
-Uint8List _buildColumnMetadataBytes(
-  String name,
-  int type,
-  int maxLength, [
-  int precision = 0,
-  int scale = 0,
-]) {
-  final buffer = BytesBuilder();
-  final nameBytes = utf8.encode(name);
-
-  buffer.addByte(nameBytes.length);
-  buffer.add(nameBytes);
-  buffer.addByte((type >> 8) & 0xFF);
-  buffer.addByte(type & 0xFF);
-  buffer.addByte((maxLength >> 8) & 0xFF);
-  buffer.addByte(maxLength & 0xFF);
-  buffer.addByte(precision);
-  buffer.addByte(scale);
-
-  return buffer.toBytes();
-}
-
-/// Builds a mock DML response (INSERT/UPDATE/DELETE) for testing.
-///
-/// DML responses have columnCount = 0 and include rowsAffected instead of row data.
-Uint8List _buildDmlResponse({
-  required int cursorId,
-  required int rowsAffected,
-}) {
-  final buffer = BytesBuilder();
-
-  // Status byte (0 = success)
-  buffer.addByte(0);
-
-  // Cursor ID (4 bytes BE)
-  buffer.addByte((cursorId >> 24) & 0xFF);
-  buffer.addByte((cursorId >> 16) & 0xFF);
-  buffer.addByte((cursorId >> 8) & 0xFF);
-  buffer.addByte(cursorId & 0xFF);
-
-  // Column count = 0 (2 bytes BE) - indicates DML response
-  buffer.addByte(0);
-  buffer.addByte(0);
-
-  // Rows affected (4 bytes BE)
-  buffer.addByte((rowsAffected >> 24) & 0xFF);
-  buffer.addByte((rowsAffected >> 16) & 0xFF);
-  buffer.addByte((rowsAffected >> 8) & 0xFF);
-  buffer.addByte(rowsAffected & 0xFF);
-
-  return buffer.toBytes();
-}
-
-/// Builds a mock success response with a NUMBER value for testing.
-Uint8List _buildSuccessResponseWithNumber({
-  required int cursorId,
-  required List<int> numberBytes,
-}) {
-  final buffer = BytesBuilder();
-
-  // Status byte (0 = success)
-  buffer.addByte(0);
-
-  // Cursor ID (4 bytes BE)
-  buffer.addByte((cursorId >> 24) & 0xFF);
-  buffer.addByte((cursorId >> 16) & 0xFF);
-  buffer.addByte((cursorId >> 8) & 0xFF);
-  buffer.addByte(cursorId & 0xFF);
-
-  // Column count = 1
-  buffer.addByte(0);
-  buffer.addByte(1);
-
-  // Column metadata for NUMBER column
-  const colName = 'NUM';
-  final nameBytes = utf8.encode(colName);
-  buffer.addByte(nameBytes.length);
-  buffer.add(nameBytes);
-  buffer.addByte((oraTypeNumber >> 8) & 0xFF); // type BE
-  buffer.addByte(oraTypeNumber & 0xFF);
-  buffer.addByte(0); // maxLength BE
-  buffer.addByte(22);
-  buffer.addByte(0); // precision
-  buffer.addByte(0); // scale
-
-  // Row count = 1
-  buffer.addByte(0);
-  buffer.addByte(0);
-  buffer.addByte(0);
-  buffer.addByte(1);
-
-  // Row data - NUMBER value
-  buffer.addByte(0); // not null indicator
-  buffer.addByte(numberBytes.length); // NUMBER length byte
-  buffer.add(numberBytes); // NUMBER bytes
-
-  return buffer.toBytes();
+  return out;
 }

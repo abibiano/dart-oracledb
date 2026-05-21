@@ -6,8 +6,6 @@ import 'package:logging/logging.dart';
 import 'crypto/auth.dart';
 import 'errors.dart';
 import 'protocol/bind_parser.dart';
-import 'protocol/messages/commit_message.dart';
-import 'protocol/messages/rollback_message.dart';
 import 'result.dart';
 import 'transport/connect_string.dart';
 import 'transport/packet.dart';
@@ -59,6 +57,61 @@ class OracleConnection {
   /// For a more thorough check that sends a ping message to the server,
   /// use [ping()] instead.
   bool get isHealthy => isConnected;
+
+  /// Returns true when [sql] is a SELECT or WITH query, false for DML/DDL/PLSQL.
+  ///
+  /// Handles leading whitespace, block comments (`/* … */`), line comments
+  /// (`-- …`), and leading parentheses (e.g. `(SELECT …)`). WITH is matched
+  /// when followed by any whitespace character (not only space).
+  static bool _isQuery(String sql) {
+    final i = _skipSqlPrefixes(sql, 0);
+    if (i >= sql.length) return false;
+    final n = sql.length;
+    final head = sql.substring(i, (i + 6 > n ? n : i + 6)).toUpperCase();
+    if (head.startsWith('SELECT')) return true;
+    // WITH must be followed by whitespace (WITH\n, WITH\t, etc.)
+    if (head.length >= 5 && head.startsWith('WITH')) {
+      final afterWith = i + 4;
+      if (afterWith < n) {
+        final c = sql.codeUnitAt(afterWith);
+        if (c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D) return true;
+      }
+    }
+    return false;
+  }
+
+  /// Skips leading whitespace, block comments, line comments, and parentheses.
+  static int _skipSqlPrefixes(String sql, int pos) {
+    final n = sql.length;
+    while (pos < n) {
+      final c = sql.codeUnitAt(pos);
+      if (c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D) {
+        pos++;
+      } else if (c == 0x2F && pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x2A) {
+        // Block comment: /* … */
+        pos += 2;
+        while (pos + 1 < n) {
+          if (sql.codeUnitAt(pos) == 0x2A && sql.codeUnitAt(pos + 1) == 0x2F) {
+            pos += 2;
+            break;
+          }
+          pos++;
+        }
+      } else if (c == 0x2D && pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x2D) {
+        // Line comment: -- …
+        pos += 2;
+        while (pos < n && sql.codeUnitAt(pos) != 0x0A) {
+          pos++;
+        }
+      } else if (c == 0x28 /* ( */) {
+        // Leading parenthesis — e.g. (SELECT …)
+        pos++;
+      } else {
+        break;
+      }
+    }
+    return pos;
+  }
 
   /// Throws [OracleException] if connection is closed.
   ///
@@ -166,8 +219,10 @@ class OracleConnection {
     }
 
     try {
+      final isQuery = _isQuery(sql);
       final response = await _transport.sendExecute(
         sql,
+        isQuery: isQuery,
         bindValues: bindList,
         bindNames: bindNames,
       );
@@ -180,8 +235,8 @@ class OracleConnection {
       }
 
       return OracleResult(
-        columnMetadata: response.columnMetadata ?? [],
-        rowData: response.rows ?? [],
+        columnMetadata: response.columnMetadata,
+        rowData: response.rows,
         rowsAffected: response.rowsAffected,
       );
     } catch (e) {
@@ -252,22 +307,7 @@ class OracleConnection {
     _ensureOpen();
 
     try {
-      final request = CommitRequest();
-      final requestBytes = request.toBytes();
-
-      final packet = TnsPacket(type: tnsPacketData, payload: requestBytes);
-      await _transport.send(packet);
-
-      final responsePacket = await _transport.receive();
-      final response = CommitResponse.decode(responsePacket.payload);
-
-      if (!response.isSuccess) {
-        throw OracleException(
-          errorCode: response.errorCode ?? oraProtocolError,
-          message: response.errorMessage ?? 'Commit failed',
-        );
-      }
-
+      await _transport.sendCommit();
       _log.fine('Transaction committed');
     } catch (e) {
       if (e is OracleException) rethrow;
@@ -303,22 +343,7 @@ class OracleConnection {
     _ensureOpen();
 
     try {
-      final request = RollbackRequest();
-      final requestBytes = request.toBytes();
-
-      final packet = TnsPacket(type: tnsPacketData, payload: requestBytes);
-      await _transport.send(packet);
-
-      final responsePacket = await _transport.receive();
-      final response = RollbackResponse.decode(responsePacket.payload);
-
-      if (!response.isSuccess) {
-        throw OracleException(
-          errorCode: response.errorCode ?? oraProtocolError,
-          message: response.errorMessage ?? 'Rollback failed',
-        );
-      }
-
+      await _transport.sendRollback();
       _log.fine('Transaction rolled back');
     } catch (e) {
       if (e is OracleException) rethrow;
