@@ -1,11 +1,11 @@
 /// Unit tests for FAST_AUTH protocol message construction (AC1).
 ///
 /// Validates that FastAuthRequest correctly embeds:
-/// 1. Protocol negotiation (WITHOUT message type prefix - actually includes type)
-/// 2. DataTypes negotiation (WITHOUT message type prefix - actually includes type)
+/// 1. Protocol negotiation (includes message type byte — spec text was incorrect)
+/// 2. DataTypes negotiation (includes message type byte — spec text was incorrect)
 /// 3. AUTH_PHASE_ONE (WITH full function header)
 /// 4. Sequence counter handling (sequence=1 for FAST_AUTH)
-/// 5. Complete message structure (~2780 TTC bytes)
+/// 5. Complete message body structure (150-500 bytes; full TNS packet is ~2780 bytes)
 @Tags(['unit', 'protocol'])
 library;
 
@@ -51,17 +51,20 @@ void main() {
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
 
-      // Find Protocol message type (0x01) after FAST_AUTH header
-      // FAST_AUTH header: [msgType(15), version(1), flag1, flag2] = 4 bytes
-      // Then Protocol message starts
       expect(bytes.length, greaterThan(4),
           reason: 'Message should have FAST_AUTH header + Protocol content');
 
-      // Protocol negotiation should be embedded after FAST_AUTH header
-      // Look for ttcMsgTypeProtocol (1) in the message
-      final protocolTypeIndex = bytes.indexOf(ttcMsgTypeProtocol);
+      // Search for Protocol header as a two-byte pattern [type=1, version=6]
+      // to avoid false matches on capability or length bytes that happen to be 1.
+      var protocolTypeIndex = -1;
+      for (int i = 0; i < bytes.length - 1; i++) {
+        if (bytes[i] == ttcMsgTypeProtocol && bytes[i + 1] == 6) {
+          protocolTypeIndex = i;
+          break;
+        }
+      }
       expect(protocolTypeIndex, greaterThan(0),
-          reason: 'Protocol message type (1) should be embedded');
+          reason: 'Protocol header [type=1, version=6] should be embedded');
       expect(protocolTypeIndex, lessThan(50),
           reason:
               'Protocol message should be near start after FAST_AUTH header');
@@ -196,13 +199,17 @@ void main() {
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
 
-      // Driver name should be present in Protocol message
       final driverBytes = Uint8List.fromList('dart-oracledb'.codeUnits);
       bool found = false;
       for (int i = 0; i <= bytes.length - driverBytes.length; i++) {
-        if (bytes
-            .sublist(i, i + driverBytes.length)
-            .every((b) => driverBytes[bytes.indexOf(b, i) - i] == b)) {
+        bool match = true;
+        for (int j = 0; j < driverBytes.length; j++) {
+          if (bytes[i + j] != driverBytes[j]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
           found = true;
           break;
         }
@@ -215,20 +222,20 @@ void main() {
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
 
-      // Find DataTypes message and check for UTF-8 charset
       final dataTypesIndex = bytes.indexOf(ttcMsgTypeDataTypes);
+      expect(dataTypesIndex, greaterThan(-1),
+          reason: 'DataTypes message type (2) must be present in message');
 
       // UTF-8 charset (873 = 0x0369) is written as little-endian uint16
-      // Should appear twice (charset + ncharset)
-      final charsetBytes = <int>[
-        873 & 0xFF,
-        (873 >> 8) & 0xFF
-      ]; // LE encoding
+      final charsetBytes = <int>[873 & 0xFF, (873 >> 8) & 0xFF];
 
-      // Search for charset near DataTypes message type
+      // Search 30 bytes from DataTypes type byte with bounds protection
       bool foundCharset = false;
-      for (int i = dataTypesIndex; i < dataTypesIndex + 10; i++) {
-        if (bytes[i] == charsetBytes[0] && bytes[i + 1] == charsetBytes[1]) {
+      final charsetSearchEnd = (dataTypesIndex + 30).clamp(0, bytes.length - 1);
+      for (int i = dataTypesIndex; i < charsetSearchEnd; i++) {
+        if (i + 1 < bytes.length &&
+            bytes[i] == charsetBytes[0] &&
+            bytes[i + 1] == charsetBytes[1]) {
           foundCharset = true;
           break;
         }
@@ -267,14 +274,35 @@ void main() {
       final bytes = buffer.toBytes();
 
       // Verify order: FAST_AUTH header → Protocol → DataTypes → AUTH_PHASE_ONE
-      const fastAuthIndex = 0; // First byte
-      final protocolIndex = bytes.indexOf(ttcMsgTypeProtocol);
+      // Use two-byte patterns to avoid collisions with data bytes that share the same value.
+      const fastAuthIndex = 0;
+
+      var protocolIndex = -1;
+      for (int i = 0; i < bytes.length - 1; i++) {
+        if (bytes[i] == ttcMsgTypeProtocol && bytes[i + 1] == 6) {
+          protocolIndex = i;
+          break;
+        }
+      }
+
       final dataTypesIndex = bytes.indexOf(ttcMsgTypeDataTypes);
-      final functionIndex = bytes.indexOf(ttcMsgTypeFunction);
+
+      var functionIndex = -1;
+      const authPhaseOneCode = 0x76;
+      for (int i = 0; i < bytes.length - 1; i++) {
+        if (bytes[i] == ttcMsgTypeFunction && bytes[i + 1] == authPhaseOneCode) {
+          functionIndex = i;
+          break;
+        }
+      }
 
       expect(fastAuthIndex, equals(0));
       expect(protocolIndex, greaterThan(fastAuthIndex));
+      expect(dataTypesIndex, greaterThan(-1),
+          reason: 'DataTypes message type (2) must be present');
       expect(dataTypesIndex, greaterThan(protocolIndex));
+      expect(functionIndex, greaterThan(-1),
+          reason: 'AUTH_PHASE_ONE function header [3, 0x76] must be present');
       expect(functionIndex, greaterThan(dataTypesIndex));
     });
 
@@ -302,12 +330,16 @@ void main() {
       messageWithTrim.encode(buffer);
       final bytes = buffer.toBytes();
 
-      // Find DataTypes message
       final dataTypesIndex = bytes.indexOf(ttcMsgTypeDataTypes);
+      expect(dataTypesIndex, greaterThan(-1),
+          reason: 'DataTypes message type (2) must be present');
 
-      // After charset fields (5 bytes), we should see compile caps length
-      // If trimming works, length should be 3 (not 48)
-      final capsLengthIndex = dataTypesIndex + 1 + 2 + 2 + 1; // Skip to caps
+      // DataTypes layout from fast_auth_message.dart encode():
+      //   [0] type byte (ttcMsgTypeDataTypes=2)
+      //   [1-2] charset uint16LE (2 bytes)
+      //   [3-4] ncharset uint16LE (2 bytes)
+      //   [5] compile caps length byte
+      final capsLengthIndex = dataTypesIndex + 1 + 2 + 2;
       final compileCapsLength = bytes[capsLengthIndex];
 
       expect(compileCapsLength, equals(3),

@@ -132,6 +132,47 @@ void main() {
       });
     });
 
+    group('sequence counter (AC: 1, 4)', () {
+      test('nextSequence() starts at 1', () {
+        final transport = Transport();
+        expect(transport.nextSequence(), equals(1));
+      });
+
+      test('nextSequence() increments on each call', () {
+        final transport = Transport();
+        expect(transport.nextSequence(), equals(1));
+        expect(transport.nextSequence(), equals(2));
+        expect(transport.nextSequence(), equals(3));
+      });
+
+      test('FAST_AUTH uses sequence=1 (first nextSequence() call)', () {
+        final transport = Transport();
+        final fastAuthSeq = transport.nextSequence();
+        expect(fastAuthSeq, equals(1),
+            reason: 'FAST_AUTH must use sequence=1 to match Oracle 23ai requirements');
+      });
+
+      test('AUTH_PHASE_TWO uses sequence=2 (second nextSequence() call)', () {
+        final transport = Transport();
+        transport.nextSequence(); // sequence=1 used by FAST_AUTH
+        final phaseTwoSeq = transport.nextSequence();
+        expect(phaseTwoSeq, equals(2),
+            reason: 'AUTH_PHASE_TWO increments to sequence=2');
+      });
+
+      test('sequence counter progresses monotonically', () {
+        final transport = Transport();
+        final sequences = List.generate(5, (_) => transport.nextSequence());
+        expect(sequences, equals([1, 2, 3, 4, 5]));
+      });
+
+      test('shouldWriteTokenNumber is true by default (ttcFieldVersion=24 >= 18)', () {
+        final transport = Transport();
+        expect(transport.shouldWriteTokenNumber, isTrue,
+            reason: 'Default ttcFieldVersion is 24, which exceeds the 18 threshold');
+      });
+    });
+
     group('send', () {
       test('throws when not connected', () async {
         final transport = Transport();

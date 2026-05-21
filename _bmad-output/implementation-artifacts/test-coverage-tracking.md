@@ -2,9 +2,9 @@
 
 **Purpose:** Track test coverage metrics per epic and ensure quality gates are met
 
-**Version:** 1.0
+**Version:** 1.1
 **Date:** 2025-12-16
-**Last Updated:** 2025-12-16
+**Last Updated:** 2026-05-21 (Story 6.2 completion)
 
 ---
 
@@ -14,18 +14,17 @@
 
 | Metric | Target | Status |
 |--------|--------|--------|
-| Line Coverage | ≥85% | 🔴 75% (baseline) |
-| Branch Coverage | ≥80% | 🔴 TBD |
-| Function Coverage | ≥90% | 🔴 TBD |
+| Line Coverage (unit + auth integration) | ≥85% | 🟡 78.2% |
+| Epic 1 Authentication Code | ≥90% | ✅ **93.8%** (Story 6.2) |
 
-### Layer-Specific Targets
+### Layer-Specific Targets (Post Story 6.2 - 2026-05-21)
 
 | Layer | Target | Current | Status | Priority |
 |-------|--------|---------|--------|----------|
-| **Protocol** | ≥90% | ~70% | 🔴 Below target | Story 6.2 |
-| **Transport** | ≥90% | ~75% | 🔴 Below target | Story 6.2 |
-| **Crypto** | ≥90% | ~80% | 🟡 Near target | Story 6.2 |
-| **Connection API** | ≥85% | ~70% | 🔴 Below target | Story 6.2 |
+| **Crypto** | ≥90% | **93.4%** | ✅ Meets target | - |
+| **Protocol** | ≥90% | 87.3% | 🟡 Near target | Epic 2/3/4 stories |
+| **Transport** | ≥90% | 68.4% | 🔴 Below target (Socket needs Docker integration) | Story 6.3+ |
+| **Connection API** | ≥85% | 40.6% | 🔴 Below target | Story 6.3+ |
 | **Pool** | ≥85% | Not impl | ⚪ N/A | Epic 5 |
 | **Data Types** | ≥85% | TBD | ⚪ TBD | Epic 2 |
 
@@ -35,22 +34,23 @@
 
 ### Epic 1: Core Connection & Authentication
 
-**Status:** ✅ Functionally Complete, ⚠️ Needs Validation (Story 6.2)
+**Status:** ✅ Functionally Complete, ✅ Validated (Story 6.2 - 2026-05-21)
 
-**Baseline Coverage (2025-12-16):**
+**Final Coverage (2026-05-21 - Post Story 6.2):**
 
-| Module | Line Coverage | Branch Coverage | Notes |
-|--------|---------------|-----------------|-------|
-| `lib/src/transport/` | ~75% | TBD | TNS packet handling |
-| `lib/src/protocol/` | ~70% | TBD | TTC protocol messages |
-| `lib/src/crypto/` | ~80% | TBD | SHA512/PBKDF2 auth |
-| `lib/src/connection/` | ~70% | TBD | Connection API |
-| **Overall Epic 1** | **~73%** | **TBD** | Below ≥90% target |
+| Module | Coverage | Target | Status | Notes |
+|--------|----------|--------|--------|-------|
+| `lib/src/crypto/auth.dart` | **93.1%** | ≥90% | ✅ | Hex encoding + integration auth flow |
+| `lib/src/crypto/session_key.dart` | **97.4%** | ≥90% | ✅ | Session key derivation |
+| `lib/src/crypto/verifier.dart` | 85.7% | ≥90% | 🟡 | 2 defensive branches uncovered |
+| `lib/src/protocol/messages/auth_message.dart` | **92.9%** | ≥90% | ✅ | AUTH_PHASE_ONE/TWO + decode paths |
+| `lib/src/protocol/messages/fast_auth_message.dart` | **97.4%** | ≥90% | ✅ | FAST_AUTH envelope |
+| **Total Epic 1 Auth Code** | **93.8%** | **≥90%** | **✅** | **MEETS AC5 TARGET** |
 
-**Test Counts:**
-- Unit Tests: 268+
-- Integration Tests: 30+
-- Total: 298+
+**Test Counts (Final):**
+- Unit Tests: 492 passing, 8 skipped (mock-based, replaced by integration)
+- Integration Tests (auth): 12 passing against Oracle 23ai Docker
+- New tests added in Story 6.2: 49+ (14 FAST_AUTH + 6 hex crypto + 6 security + 7 MARKER + 6 sequence + 24 error path + ~ AUTH_PHASE_ONE/TWO)
 
 **Gap Analysis:**
 
@@ -138,12 +138,12 @@
 
 **Current Story:**
 
-| Story | Status | Coverage Target |
-|-------|--------|-----------------|
-| 6.1: Test Architecture Design & Standards | in-progress | N/A (documentation) |
-| 6.2: Epic 1 Authentication Test Suite Rework | backlog | Achieve ≥90% Epic 1 coverage |
-| 6.3: Epic 2 Validation | backlog | Validate Stories 2.1-2.4 |
-| 6.4: CI/CD Integration | backlog (DESCOPED) | N/A |
+| Story | Status | Coverage Target | Achieved |
+|-------|--------|-----------------|----------|
+| 6.1: Test Architecture Design & Standards | ✅ done | N/A (documentation) | ✅ |
+| 6.2: Epic 1 Authentication Test Suite Rework | ✅ review | ≥90% Epic 1 coverage | ✅ **93.8%** |
+| 6.3: Epic 2 Validation | backlog | Validate Stories 2.1-2.4 | - |
+| 6.4: CI/CD Integration | backlog | N/A | - |
 
 ---
 

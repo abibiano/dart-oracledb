@@ -362,9 +362,10 @@ class AuthPhaseTwoRequest {
     //       SESSION_CLIENT_VERSION, AUTH_ALTER_SESSION, AUTH_PASSWORD
     int numPairs = 6;
 
-    // Add extra pair for 12c verifier (AUTH_PBKDF2_SPEEDY_KEY)
+    // Add extra pair for 12c verifier only when speedyKey is actually provided.
+    // Incrementing numPairs without writing the pair creates a wire format desync.
     final bool is12c = verifierType == ttcVerifierType12c;
-    if (is12c) {
+    if (is12c && speedyKey != null) {
       numPairs += 1;
     }
 

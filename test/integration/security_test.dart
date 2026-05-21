@@ -10,6 +10,7 @@
 @Tags(['integration', 'security'])
 library;
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:logging/logging.dart';
@@ -29,20 +30,20 @@ void main() {
 
   // Capture all log output
   final logMessages = <String>[];
-  late Logger logger;
+  late StreamSubscription<LogRecord> logSubscription;
 
   setUp(() {
     logMessages.clear();
-    logger = Logger.root;
-    logger.level = Level.ALL; // Capture everything, including FINE
-    logger.onRecord.listen((record) {
-      final message = '${record.level.name}: ${record.loggerName}: ${record.message}';
+    Logger.root.level = Level.ALL; // Capture everything, including FINE
+    logSubscription = Logger.root.onRecord.listen((record) {
+      final message =
+          '${record.level.name}: ${record.loggerName}: ${record.message}';
       logMessages.add(message);
     });
   });
 
-  tearDown(() {
-    // Always check logs at the end of each test
+  tearDown(() async {
+    await logSubscription.cancel();
     logMessages.clear();
   });
 
@@ -135,6 +136,7 @@ void main() {
 
     test('Wrong password timeout (~5s) with no credential exposure', () async {
       final stopwatch = Stopwatch()..start();
+      late OracleException authError;
 
       try {
         await OracleConnection.connect(
@@ -144,21 +146,18 @@ void main() {
         );
         fail('Should have thrown OracleException');
       } on OracleException catch (e) {
+        authError = e;
+      } finally {
         stopwatch.stop();
-
-        // Verify timeout (4-6 second range for Oracle 23ai security delay)
-        expect(stopwatch.elapsed.inSeconds, inInclusiveRange(4, 6),
-            reason: 'Wrong password should timeout in ~5 seconds');
-
-        // Verify error code 1017
-        expect(e.errorCode, equals(1017));
-
-        // Verify no credentials in error
-        expect(e.message, isNot(contains(testSecret)));
-        expect(e.message, isNot(contains(validUser)));
       }
 
-      // Verify no credentials in logs
+      // Assertions run after finally — stopwatch is always stopped before these
+      expect(stopwatch.elapsed.inSeconds, inInclusiveRange(4, 6),
+          reason: 'Wrong password should timeout in ~5 seconds');
+      expect(authError.errorCode, equals(1017));
+      expect(authError.message, isNot(contains(testSecret)));
+      expect(authError.message, isNot(contains(validUser)));
+
       for (final logMsg in logMessages) {
         expect(logMsg, isNot(contains(testSecret)),
             reason: 'Password found in log after timeout: $logMsg');
@@ -182,8 +181,9 @@ void main() {
             user: user,
             password: password,
           );
-          // If authentication succeeds (unlikely with test credentials), just continue
-          continue;
+          fail(
+              'Expected authentication to fail for user "$user" but it succeeded — '
+              'credential-protection assertions were skipped');
         } on OracleException catch (e) {
           // Verify credentials NOT in error
           expect(e.message, isNot(contains(password)),

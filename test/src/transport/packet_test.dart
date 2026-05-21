@@ -228,6 +228,65 @@ void main() {
     });
   });
 
+  group('MARKER packet handling (AC: 4)', () {
+    test('MARKER packet type constant is 12', () {
+      expect(tnsPacketMarker, equals(12));
+    });
+
+    test('MARKER packet can be created with correct type', () {
+      final marker = TnsPacket(type: tnsPacketMarker, payload: Uint8List(0));
+      expect(marker.type, equals(tnsPacketMarker));
+    });
+
+    test('MARKER packet encodes type byte at offset 4', () {
+      final marker = TnsPacket(type: tnsPacketMarker, payload: Uint8List(0));
+      final encoded = marker.encode();
+      expect(encoded[4], equals(tnsPacketMarker));
+    });
+
+    test('MARKER packet round-trips correctly', () {
+      final marker = TnsPacket(type: tnsPacketMarker, payload: Uint8List(0));
+      final decoded = TnsPacket.decode(marker.encode());
+      expect(decoded.type, equals(tnsPacketMarker));
+      expect(decoded.payload, isEmpty);
+    });
+
+    test('MARKER packet with payload round-trips correctly', () {
+      final payload = Uint8List.fromList([0x01, 0x02]);
+      final marker = TnsPacket(type: tnsPacketMarker, payload: payload);
+      final decoded = TnsPacket.decode(marker.encode());
+      expect(decoded.type, equals(tnsPacketMarker));
+      expect(decoded.payload, equals(payload));
+    });
+
+    test('MARKER packet type is distinct from DATA and CONNECT types', () {
+      expect(tnsPacketMarker, isNot(equals(tnsPacketData)));
+      expect(tnsPacketMarker, isNot(equals(tnsPacketConnect)));
+      expect(tnsPacketMarker, isNot(equals(tnsPacketAccept)));
+      expect(tnsPacketMarker, isNot(equals(tnsPacketRefuse)));
+    });
+
+    test('MARKER packet (type 12) is included in round-trip test for all types', () {
+      final types = [
+        tnsPacketConnect,
+        tnsPacketAccept,
+        tnsPacketRefuse,
+        tnsPacketData,
+        tnsPacketResend,
+        tnsPacketMarker,
+      ];
+
+      for (final type in types) {
+        final original = TnsPacket(
+          type: type,
+          payload: Uint8List.fromList([0xAB, 0xCD]),
+        );
+        final decoded = TnsPacket.decode(original.encode());
+        expect(decoded.type, equals(type), reason: 'Failed for type $type');
+      }
+    });
+  });
+
   group('TnsPacketException', () {
     test('stores message', () {
       const exception = TnsPacketException('Invalid packet format');
