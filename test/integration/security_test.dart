@@ -17,6 +17,8 @@ import 'package:logging/logging.dart';
 import 'package:oracledb/dart_oracledb.dart';
 import 'package:test/test.dart';
 
+import 'test_helper.dart';
+
 void main() {
   final runIntegrationTests =
       Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
@@ -48,26 +50,21 @@ void main() {
   });
 
   group('NFR5: Credential Protection (AC3, AC4)', () {
-    const oracleHost = 'localhost';
-    const oraclePort = 1521;
-    const oracleService = 'FREEPDB1';
-    const validUser = 'system';
-    const validPassword = 'testpassword';
     const invalidPassword = 'WRONG_PASSWORD';
     const testSecret = 'SECRET_PASSWORD_123';
 
     test('Password never appears in logs (successful auth)', () async {
       final conn = await OracleConnection.connect(
-        '$oracleHost:$oraclePort/$oracleService',
-        user: validUser,
-        password: validPassword,
+        testConnectString,
+        user: testUser,
+        password: testPassword,
       );
 
       await conn.close();
 
       // Verify password not in any log message
       for (final logMsg in logMessages) {
-        expect(logMsg, isNot(contains(validPassword)),
+        expect(logMsg, isNot(contains(testPassword)),
             reason: 'Password found in log: $logMsg');
       }
     });
@@ -75,8 +72,8 @@ void main() {
     test('Password never appears in logs (failed auth)', () async {
       try {
         await OracleConnection.connect(
-          '$oracleHost:$oraclePort/$oracleService',
-          user: validUser,
+          testConnectString,
+          user: testUser,
           password: invalidPassword,
         );
         fail('Should have thrown OracleException');
@@ -94,14 +91,14 @@ void main() {
     test('Username not exposed in error messages', () async {
       try {
         await OracleConnection.connect(
-          '$oracleHost:$oraclePort/$oracleService',
-          user: validUser,
+          testConnectString,
+          user: testUser,
           password: invalidPassword,
         );
         fail('Should have thrown OracleException');
       } on OracleException catch (e) {
         // Error message should NOT contain username
-        expect(e.message, isNot(contains(validUser)),
+        expect(e.message, isNot(contains(testUser)),
             reason: 'Username should not be in error message');
 
         // Error message should be generic
@@ -112,14 +109,14 @@ void main() {
     test('Credentials never in error messages', () async {
       try {
         await OracleConnection.connect(
-          '$oracleHost:$oraclePort/$oracleService',
-          user: validUser,
+          testConnectString,
+          user: testUser,
           password: testSecret,
         );
         fail('Should have thrown OracleException');
       } on OracleException catch (e) {
         // Verify neither username nor password in error
-        expect(e.message, isNot(contains(validUser)),
+        expect(e.message, isNot(contains(testUser)),
             reason: 'Username found in error message');
         expect(e.message, isNot(contains(testSecret)),
             reason: 'Password found in error message');
@@ -140,8 +137,8 @@ void main() {
 
       try {
         await OracleConnection.connect(
-          '$oracleHost:$oraclePort/$oracleService',
-          user: validUser,
+          testConnectString,
+          user: testUser,
           password: testSecret,
         );
         fail('Should have thrown OracleException');
@@ -156,7 +153,7 @@ void main() {
           reason: 'Wrong password should timeout in ~5 seconds');
       expect(authError.errorCode, equals(1017));
       expect(authError.message, isNot(contains(testSecret)));
-      expect(authError.message, isNot(contains(validUser)));
+      expect(authError.message, isNot(contains(testUser)));
 
       for (final logMsg in logMessages) {
         expect(logMsg, isNot(contains(testSecret)),
@@ -177,7 +174,7 @@ void main() {
 
         try {
           await OracleConnection.connect(
-            '$oracleHost:$oraclePort/$oracleService',
+            testConnectString,
             user: user,
             password: password,
           );

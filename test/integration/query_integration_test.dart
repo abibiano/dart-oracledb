@@ -2,8 +2,11 @@
 library;
 
 import 'dart:io';
+
 import 'package:test/test.dart';
 import 'package:oracledb/dart_oracledb.dart';
+
+import 'test_helper.dart';
 
 void main() {
   final hasOracle = Platform.environment.containsKey('RUN_INTEGRATION_TESTS');
@@ -14,9 +17,9 @@ void main() {
 
     setUp(() async {
       connection = await OracleConnection.connect(
-        'localhost:1521/FREEPDB1',
-        user: 'system',
-        password: 'testpassword',
+        testConnectString,
+        user: testUser,
+        password: testPassword,
       );
     });
 
@@ -81,9 +84,9 @@ void main() {
 
     setUp(() async {
       connection = await OracleConnection.connect(
-        'localhost:1521/FREEPDB1',
-        user: 'system',
-        password: 'testpassword',
+        testConnectString,
+        user: testUser,
+        password: testPassword,
       );
     });
 
@@ -211,9 +214,9 @@ void main() {
 
     setUp(() async {
       connection = await OracleConnection.connect(
-        'localhost:1521/FREEPDB1',
-        user: 'system',
-        password: 'testpassword',
+        testConnectString,
+        user: testUser,
+        password: testPassword,
       );
 
       // Create test table (handle "already exists" gracefully)

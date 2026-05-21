@@ -565,7 +565,7 @@ void _processDescribeInfo(ReadBuffer buf, _DecodeState s) {
   }
   final columns = <ColumnMetadata>[];
   for (var i = 0; i < numCols; i++) {
-    columns.add(_processColumnInfo(buf));
+    columns.add(_processColumnInfo(buf, s.ttcFieldVersion));
   }
   // "current date" — UB4 length, then chunked bytes if > 0.
   final dateBytes = buf.readUB4();
@@ -579,7 +579,7 @@ void _processDescribeInfo(ReadBuffer buf, _DecodeState s) {
   s.columns = columns;
 }
 
-ColumnMetadata _processColumnInfo(ReadBuffer buf) {
+ColumnMetadata _processColumnInfo(ReadBuffer buf, int ttcFieldVersion) {
   final dataType = buf.readUint8();
   buf.skipUB1(); // flags
   final precision = buf.readUint8();
@@ -632,10 +632,12 @@ ColumnMetadata _processColumnInfo(ReadBuffer buf) {
     }
     buf.skipUB4(); // flags
   }
-  // 23.4 vector fields
-  buf.skipUB4(); // dimensions
-  buf.skipUB1(); // format
-  buf.skipUB1(); // flags
+  // 23.4 vector fields — only present when server negotiated field version >= 24
+  if (ttcFieldVersion >= ttcCcapFieldVersion23_4) {
+    buf.skipUB4(); // dimensions
+    buf.skipUB1(); // format
+    buf.skipUB1(); // flags
+  }
 
   return ColumnMetadata(
     name: name,

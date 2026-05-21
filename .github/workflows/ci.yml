@@ -159,3 +159,60 @@ jobs:
           # since it only protects an ephemeral CI database instance.
           ORACLE_PASSWORD: testpassword
         run: dart test --tags=integration --reporter=expanded
+
+  # Oracle 19c (gvenzl community image — no registry credentials required).
+  integration-19c:
+    name: Oracle 19c Integration Tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      oracle:
+        image: gvenzl/oracle-xe:19
+        env:
+          ORACLE_PASSWORD: testpassword
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd "sqlplus -L system/testpassword@//localhost:1521/XEPDB1 @/dev/null"
+          --health-interval 20s
+          --health-timeout 10s
+          --health-retries 20
+          --health-start-period 300s
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Wait for Oracle 19c listener on localhost:1521
+        run: |
+          set -eu
+          attempts=60
+          for i in $(seq 1 $attempts); do
+            if bash -c "cat < /dev/tcp/localhost/1521" >/dev/null 2>&1; then
+              echo "Oracle listener accepting connections on localhost:1521 (after ${i} attempts)"
+              sleep 5
+              exit 0
+            fi
+            echo "Oracle 19c not ready yet (attempt ${i}/${attempts})..."
+            sleep 10
+          done
+          echo "::error::Oracle 19c did not become ready within timeout"
+          docker ps --no-trunc || true
+          exit 1
+
+      - name: Run integration tests (Oracle 19c)
+        env:
+          RUN_INTEGRATION_TESTS: 'true'
+          ORACLE_HOST: localhost
+          ORACLE_PORT: '1521'
+          ORACLE_SERVICE: XEPDB1
+          ORACLE_USER: system
+          ORACLE_PASSWORD: testpassword
+        run: dart test --tags=integration --reporter=expanded

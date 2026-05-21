@@ -295,6 +295,12 @@ const int ttcCcapFieldVersionExt1 = 9;
 /// CCAP field version threshold for Oracle 20.1 (sql type + checksum in error).
 const int ttcCcapFieldVersion20_1 = 10;
 
+/// CCAP field version threshold for Oracle 23.4 vector fields.
+/// Value 24 = TNS_CCAP_FIELD_VERSION_MAX in node-oracledb constants.js.
+/// Servers older than 23.4 negotiate a lower field version; use this
+/// threshold to gate the three vector-related fields in column metadata.
+const int ttcCcapFieldVersion23_4 = 24;
+
 // ============================================================================
 // TTC Authentication Mode Flags
 // ============================================================================

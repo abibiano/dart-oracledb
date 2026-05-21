@@ -25,5 +25,20 @@ services:
       retries: 10
       start_period: 300s
 
+  oracle19c:
+    image: gvenzl/oracle-xe:19
+    profiles:
+      - oracle19c
+    ports:
+      - "1522:1521"
+    environment:
+      - ORACLE_PASSWORD=testpassword
+    healthcheck:
+      test: ["CMD", "sqlplus", "-L", "system/testpassword@//localhost:1521/XEPDB1", "@/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+
 volumes:
   oracle-data:

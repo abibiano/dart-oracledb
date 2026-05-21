@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
@@ -56,10 +55,20 @@ class Transport {
   /// is buffered here so the next receiveData() call can return it.
   Uint8List? _bufferedAuthResponse;
 
+  /// Oracle server major version, parsed from the server banner after
+  /// protocol negotiation. Defaults to 23 (23ai) until the banner is received.
+  int _serverMajorVersion = 23;
+
+  /// Returns the Oracle server major version (e.g. 19, 21, 23).
+  int get serverMajorVersion => _serverMajorVersion;
+
   /// TTC field version - adjusted after protocol negotiation.
   /// Used to determine whether token numbers should be written.
   /// TNS_CCAP_FIELD_VERSION_23_1_EXT_1 = 18 is threshold for token numbers.
   int _ttcFieldVersion = 24; // TNS_CCAP_FIELD_VERSION_MAX
+
+  /// Returns the negotiated TTC field version.
+  int get ttcFieldVersion => _ttcFieldVersion;
 
   /// TTC function message sequence number.
   /// Incremented for each TTC function message sent (1, 2, 3, ...).
@@ -576,16 +585,22 @@ class Transport {
   Future<ProtocolResponse> sendProtocolNegotiation() async {
     _log.info('Starting TTC protocol negotiation');
 
-    // Step 1: Send protocol request
+    // Step 1: Send protocol request — version not yet known, force safe flags.
     final request = ProtocolRequest();
     final requestData = request.toBytes();
-    await sendData(requestData);
+    await sendData(requestData, dataFlags: 0x0000);
 
     // Receive protocol response
     final ttcData = await receiveData();
     final protocolResponse = ProtocolResponse.decode(ttcData);
     _log.info('Protocol negotiation complete: '
         'serverVersion=${protocolResponse.serverVersion}');
+
+    // Store server major version for subsequent flag decisions.
+    _serverMajorVersion =
+        _extractMajorVersion(protocolResponse.serverBanner) ?? 23;
+    _log.fine('Server major version: $_serverMajorVersion '
+        '(banner: ${protocolResponse.serverBanner})');
 
     // Adjust ttcFieldVersion based on server compile caps
     _adjustFieldVersion(protocolResponse.compileCaps);
@@ -625,14 +640,9 @@ class Transport {
     final fastAuthBytes = fastAuthRequest.toBytes();
     _log.info('Sending FAST_AUTH message: ${fastAuthBytes.length} bytes');
 
-    // DEBUG: Save bytes for comparison (TODO: Remove before final commit)
-    try {
-      await File('dart_fast_auth.bin').writeAsBytes(fastAuthBytes);
-      _log.fine('Saved FAST_AUTH bytes to dart_fast_auth.bin');
-    } catch (_) {}
-
-    // Send FAST_AUTH message in single TNS DATA packet
-    await sendData(fastAuthBytes);
+    // Send FAST_AUTH message in single TNS DATA packet.
+    // Bootstrap packet: server version not yet known, use 0x0000 explicitly.
+    await sendData(fastAuthBytes, dataFlags: 0x0000);
 
     // CRITICAL: Oracle responds with ONE packet containing MULTIPLE TTC messages
     // We must parse messages sequentially from the single response buffer
@@ -643,6 +653,12 @@ class Transport {
     final protocolResponse = ProtocolResponse.decode(responseData);
     _log.info('Protocol negotiation complete: '
         'serverVersion=${protocolResponse.serverVersion}');
+
+    // Store server major version now that the response is available.
+    _serverMajorVersion =
+        _extractMajorVersion(protocolResponse.serverBanner) ?? 23;
+    _log.fine('Server major version: $_serverMajorVersion '
+        '(banner: ${protocolResponse.serverBanner})');
 
     // Adjust ttcFieldVersion based on server compile caps
     _adjustFieldVersion(protocolResponse.compileCaps);
@@ -802,7 +818,8 @@ class Transport {
     // Send protocol request
     final request = ProtocolRequest();
     final requestData = request.toBytes();
-    await sendData(requestData);
+    // Bootstrap packet: server version not yet known, use 0x0000 explicitly.
+    await sendData(requestData, dataFlags: 0x0000);
 
     // Receive protocol response
     final ttcData = await receiveData();
@@ -1346,6 +1363,18 @@ class Transport {
   // this same value (FAST_AUTH_END_OF_RPC_VALUE = 0x800) for every sendPacket.
   static const int _tnsDataFlagsEndOfRpc = 0x0800;
 
+  /// Extracts the Oracle major version number from a server banner string.
+  ///
+  /// Tries "Release X." or "Version X." first, then falls back to the first
+  /// two-or-more digit token. Returns `null` if no version can be found.
+  static int? _extractMajorVersion(String banner) {
+    final match =
+        RegExp(r'(?:Release|Version)\s+(\d+)\.').firstMatch(banner);
+    if (match != null) return int.tryParse(match.group(1)!);
+    final fallback = RegExp(r'\b(\d{2,})\b').firstMatch(banner);
+    return fallback != null ? int.tryParse(fallback.group(1)!) : null;
+  }
+
   /// Sends TTC data in a TNS DATA packet with proper data flags.
   ///
   /// TNS DATA packets have a 2-byte data flags field at the start of
@@ -1353,7 +1382,10 @@ class Transport {
   Future<void> sendData(Uint8List ttcData, {int? dataFlags}) async {
     // 0x0800 signals end-of-RPC to Oracle 23ai; without it, Oracle waits for
     // more client data after its first response and ignores subsequent commands.
-    dataFlags ??= _tnsDataFlagsEndOfRpc;
+    // Pre-23ai servers do not understand this flag, so gate it on the negotiated
+    // server version. Bootstrap packets (sent before the version is known) must
+    // pass dataFlags: 0x0000 explicitly to override this default safely.
+    dataFlags ??= _serverMajorVersion >= 23 ? _tnsDataFlagsEndOfRpc : 0x0000;
 
     // Build payload with 2-byte data flags prefix
     final payload = Uint8List(2 + ttcData.length);

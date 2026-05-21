@@ -1,5 +1,10 @@
 # Deferred Work
 
+## Deferred from: code review of oracle-19c-compatibility-support (2026-05-21)
+
+- **`dart_fast_auth.bin` debug write removed but `dart:io` import was left behind** — Pre-existing: the debug write (`File('dart_fast_auth.bin').writeAsBytes(...)`) and its `dart:io` import were carried over from before this story. Both were cleaned up as part of this story's review loop. No further action needed.
+- **CI Oracle 19c readiness wait loop uses TCP probe + 5s sleep** — `cat < /dev/tcp/localhost/1521` confirms the listener port is open, then sleeps 5 s before running tests. This matches the existing `integration` job pattern. If Oracle 19c startup in CI is slow (PDB not yet mounted when listener answers), tests may see `ORA-12514`. Monitor CI runs and increase the sleep or add a sqlplus probe loop if needed.
+
 ## Deferred from: code review of 6-4-ci-cd-integration-test-automation (2026-05-21)
 
 - **Job timeout tightness** — `integration` job `timeout-minutes: 15` may be tight on cold runners where Oracle 23ai Free startup takes 5–8+ min. Monitor first few CI runs; bump to 20 min if jobs start timing out before tests run.

@@ -12,6 +12,8 @@ import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
 
+import 'test_helper.dart';
+
 void main() {
   Logger.root.level = Level.INFO;
   Logger.root.onRecord.listen((record) {
@@ -20,16 +22,12 @@ void main() {
 
   test('auth with WRONG password', () async {
     final transport = Transport();
-    const host = 'localhost';
-    const port = 1521;
-    const serviceName = 'FREEPDB1';
-    const username = 'system';
     const password = 'WRONG_PASSWORD_123'; // Intentionally wrong
 
     Uint8List buildConnectData() {
-      const tnsDescriptor = '(DESCRIPTION='
-          '(ADDRESS=(PROTOCOL=TCP)(HOST=$host)(PORT=$port))'
-          '(CONNECT_DATA=(SERVICE_NAME=$serviceName)))';
+      final tnsDescriptor = '(DESCRIPTION='
+          '(ADDRESS=(PROTOCOL=TCP)(HOST=$testHost)(PORT=$testPort))'
+          '(CONNECT_DATA=(SERVICE_NAME=$testService)))';
       final descriptorBytes = Uint8List.fromList(utf8.encode(tnsDescriptor));
       return buildConnectPacketBody(descriptorBytes);
     }
@@ -37,7 +35,7 @@ void main() {
     final stopwatch = Stopwatch()..start();
 
     try {
-      await transport.connect(host, port);
+      await transport.connect(testHost, testPort);
       final connectData = buildConnectData();
       await transport.sendConnectReceiveAccept(connectData);
 
@@ -46,7 +44,7 @@ void main() {
       final authFlow = AuthFlow();
       await authFlow.authenticate(
         transport: transport,
-        username: username,
+        username: testUser,
         password: password, // WRONG!
       );
 

@@ -6,6 +6,8 @@ import 'dart:io';
 import 'package:oracledb/dart_oracledb.dart';
 import 'package:test/test.dart';
 
+import 'test_helper.dart';
+
 void main() {
   final hasOracle = Platform.environment.containsKey('RUN_INTEGRATION_TESTS');
   final hasTlsOracle = Platform.environment.containsKey('ORACLE_TLS_PORT');
@@ -18,9 +20,9 @@ void main() {
         skip: !hasTlsOracle ? 'No TLS Oracle available' : null, () {
       test('connects with TLS enabled', () async {
         final connection = await OracleConnection.connect(
-          'localhost:$tlsPort/FREEPDB1',
-          user: 'system',
-          password: 'testpassword',
+          '$testHost:$tlsPort/$testService',
+          user: testUser,
+          password: testPassword,
           tls: TlsConfig.enabled(),
         );
 
@@ -30,9 +32,9 @@ void main() {
 
       test('connects with TLS and verifyCertificate disabled', () async {
         final connection = await OracleConnection.connect(
-          'localhost:$tlsPort/FREEPDB1',
-          user: 'system',
-          password: 'testpassword',
+          '$testHost:$tlsPort/$testService',
+          user: testUser,
+          password: testPassword,
           tls: TlsConfig.enabled(verifyCertificate: false),
         );
 
@@ -45,9 +47,9 @@ void main() {
       // Attempting TLS upgrade on a non-TLS port should fail with TLS error
       await expectLater(
         OracleConnection.connect(
-          'localhost:1521/FREEPDB1',
-          user: 'system',
-          password: 'testpassword',
+          '$testHost:$testPort/$testService',
+          user: testUser,
+          password: testPassword,
           tls: TlsConfig.enabled(verifyCertificate: false),
           timeout: const Duration(seconds: 10),
         ),

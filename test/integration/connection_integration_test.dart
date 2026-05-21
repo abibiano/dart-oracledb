@@ -6,6 +6,8 @@ import 'dart:io';
 import 'package:oracledb/dart_oracledb.dart';
 import 'package:test/test.dart';
 
+import 'test_helper.dart';
+
 void main() {
   final hasOracle = Platform.environment.containsKey('RUN_INTEGRATION_TESTS');
 
@@ -13,15 +15,15 @@ void main() {
       skip: !hasOracle ? 'Integration tests disabled' : null, () {
     test('connects with valid credentials', () async {
       final connection = await OracleConnection.connect(
-        'localhost:1521/FREEPDB1',
-        user: 'system',
-        password: 'testpassword',
+        testConnectString,
+        user: testUser,
+        password: testPassword,
       );
 
       expect(connection.isConnected, isTrue);
-      expect(connection.serviceName, equals('FREEPDB1'));
-      expect(connection.host, equals('localhost'));
-      expect(connection.port, equals(1521));
+      expect(connection.serviceName, equals(testService));
+      expect(connection.host, equals(testHost));
+      expect(connection.port, equals(testPort));
 
       await connection.close();
       expect(connection.isConnected, isFalse);
@@ -29,9 +31,9 @@ void main() {
 
     test('close() is idempotent', () async {
       final connection = await OracleConnection.connect(
-        'localhost:1521/FREEPDB1',
-        user: 'system',
-        password: 'testpassword',
+        testConnectString,
+        user: testUser,
+        password: testPassword,
       );
 
       expect(connection.isConnected, isTrue);
@@ -47,8 +49,8 @@ void main() {
     test('fails with invalid credentials', () async {
       await expectLater(
         OracleConnection.connect(
-          'localhost:1521/FREEPDB1',
-          user: 'system',
+          testConnectString,
+          user: testUser,
           password: 'wrongpassword',
         ),
         throwsA(
@@ -108,9 +110,9 @@ void main() {
 
     test('ping returns true for active connection', () async {
       final connection = await OracleConnection.connect(
-        'localhost:1521/FREEPDB1',
-        user: 'system',
-        password: 'testpassword',
+        testConnectString,
+        user: testUser,
+        password: testPassword,
       );
 
       try {
@@ -123,9 +125,9 @@ void main() {
 
     test('ping returns false after close', () async {
       final connection = await OracleConnection.connect(
-        'localhost:1521/FREEPDB1',
-        user: 'system',
-        password: 'testpassword',
+        testConnectString,
+        user: testUser,
+        password: testPassword,
       );
 
       await connection.close();
@@ -138,9 +140,9 @@ void main() {
       var callbackExecuted = false;
 
       final result = await OracleConnection.withConnection<int>(
-        'localhost:1521/FREEPDB1',
-        user: 'system',
-        password: 'testpassword',
+        testConnectString,
+        user: testUser,
+        password: testPassword,
         callback: (connection) async {
           expect(connection.isConnected, isTrue);
           callbackExecuted = true;
@@ -158,9 +160,9 @@ void main() {
 
       try {
         await OracleConnection.withConnection<void>(
-          'localhost:1521/FREEPDB1',
-          user: 'system',
-          password: 'testpassword',
+          testConnectString,
+          user: testUser,
+          password: testPassword,
           callback: (connection) async {
             expect(connection.isConnected, isTrue);
             throw Exception('Test exception');
@@ -178,9 +180,9 @@ void main() {
 
     test('ping respects custom timeout', () async {
       final connection = await OracleConnection.connect(
-        'localhost:1521/FREEPDB1',
-        user: 'system',
-        password: 'testpassword',
+        testConnectString,
+        user: testUser,
+        password: testPassword,
       );
 
       try {

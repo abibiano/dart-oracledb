@@ -30,7 +30,8 @@ void main() {
   group('Oracle 23ai authentication', skip: !_runIntegrationTests, () {
     // Connection parameters from environment or defaults
     final host = Platform.environment['ORACLE_HOST'] ?? 'localhost';
-    final port = int.parse(Platform.environment['ORACLE_PORT'] ?? '1521');
+    final port =
+        int.tryParse(Platform.environment['ORACLE_PORT'] ?? '') ?? 1521;
     final serviceName = Platform.environment['ORACLE_SERVICE'] ?? 'FREEPDB1';
     final username = Platform.environment['ORACLE_USER'] ?? 'system';
     final password = Platform.environment['ORACLE_PASSWORD'] ?? 'testpassword';

@@ -15,6 +15,8 @@ import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
 
+import 'test_helper.dart';
+
 void main() {
   Logger.root.level = Level.FINE;
   Logger.root.onRecord.listen((record) {
@@ -23,24 +25,19 @@ void main() {
 
   group('Minimal Auth Protocol Test', () {
     late Transport transport;
-    const host = 'localhost';
-    const port = 1521;
-    const serviceName = 'FREEPDB1';
-    const username = 'system'; // Lowercase to match node-oracledb
-    const password = 'testpassword';
 
     /// Builds the TNS CONNECT packet body.
     Uint8List buildConnectData() {
-      const tnsDescriptor = '(DESCRIPTION='
-          '(ADDRESS=(PROTOCOL=TCP)(HOST=$host)(PORT=$port))'
-          '(CONNECT_DATA=(SERVICE_NAME=$serviceName)))';
+      final tnsDescriptor = '(DESCRIPTION='
+          '(ADDRESS=(PROTOCOL=TCP)(HOST=$testHost)(PORT=$testPort))'
+          '(CONNECT_DATA=(SERVICE_NAME=$testService)))';
       final descriptorBytes = Uint8List.fromList(utf8.encode(tnsDescriptor));
       return buildConnectPacketBody(descriptorBytes);
     }
 
     setUp(() async {
       transport = Transport();
-      await transport.connect(host, port);
+      await transport.connect(testHost, testPort);
 
       // Perform TNS CONNECT/ACCEPT handshake only
       // Protocol negotiation will be batched with AUTH_PHASE_ONE
@@ -62,7 +59,7 @@ void main() {
         // Send FAST_AUTH message: combines Protocol + DataTypes + AUTH_PHASE_ONE
         // This is Oracle 23ai's official Fast Authentication protocol
         await transport.sendFastAuth(
-          username: username,
+          username: testUser,
           clientNonce: clientNonce,
         );
 
@@ -91,8 +88,8 @@ void main() {
 
         await authFlow.authenticate(
           transport: transport,
-          username: username,
-          password: password,
+          username: testUser,
+          password: testPassword,
         );
 
         print('SUCCESS! Authentication completed');
