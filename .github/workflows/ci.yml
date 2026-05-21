@@ -93,7 +93,7 @@ jobs:
   integration:
     name: Oracle 23ai Integration Tests (Linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     services:
       oracle:
         image: container-registry.oracle.com/database/free:latest
@@ -104,15 +104,15 @@ jobs:
           ORACLE_PWD: testpassword
         ports:
           - 1521:1521
-        # The image ships its own HEALTHCHECK (sqlplus probe). We extend
-        # the start period to account for Oracle 23ai Free first-start
-        # latency (~5 minutes); start_period mirrors docker-compose.yml.
+        # The image ships its own HEALTHCHECK (/opt/oracle/checkDBStatus.sh).
+        # We only override the timing: start_period=600s to account for Oracle
+        # 23ai Free cold-start latency on GitHub Actions (~8-10 min); retries
+        # keep polling for up to 500s after the start period ends.
         options: >-
-          --health-cmd "sqlplus -L system/testpassword@//localhost:1521/FREEPDB1 AS SYSDBA @/dev/null"
           --health-interval 20s
-          --health-timeout 10s
-          --health-retries 20
-          --health-start-period 300s
+          --health-timeout 15s
+          --health-retries 25
+          --health-start-period 600s
     steps:
       - name: Checkout
         uses: actions/checkout@v6
