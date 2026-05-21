@@ -36,47 +36,20 @@ class ProtocolRequest extends Message {
 
   @override
   void encode(WriteBuffer buffer) {
-    // Calculate message length for prefix (matches node-oracledb format)
-    // Format: length(1) + msgType(1) + unknown(5) + driver + null + padding(13)
-    // node-oracledb has 13 bytes of padding at end, not 6!
-    final driverBytes = utf8.encode(driverName);
-    final messageLength = 1 + 1 + 5 + driverBytes.length + 1 + 13;
-
-    // Length prefix (node-oracledb uses this for batched messages)
-    buffer.writeUint8(messageLength);
-
-    // Message type
+    // Standalone protocol message: type + version + terminator + driver + null.
+    // Mirrors python-oracledb's ProtocolMessage.encode and the embedded
+    // form used inside FastAuthRequest._encodeProtocolMessageContent — the
+    // length-prefixed "batched" variant previously here was never accepted by
+    // a real server for a standalone send.
     buffer.writeUint8(messageType);
-
-    // Unknown 5-byte sequence (matches node-oracledb: 01 00 01 06 00)
-    buffer.writeUint8(1);
+    buffer.writeUint8(ttcProtocolVersion);
     buffer.writeUint8(0);
-    buffer.writeUint8(1);
-    buffer.writeUint8(ttcProtocolVersion); // 6
-    buffer.writeUint8(0);
-
-    // Driver name (null-terminated string)
+    final driverBytes = utf8.encode(driverName);
     buffer.writeBytes(Uint8List.fromList(driverBytes));
-    buffer.writeUint8(0); // Null terminator
-
-    // Padding (matches node-oracledb: 00 00 00 00 00 0d 02 69 03 69 03 03 35)
-    // The last 7 bytes appear to be critical for Oracle 23ai
     buffer.writeUint8(0);
-    buffer.writeUint8(0);
-    buffer.writeUint8(0);
-    buffer.writeUint8(0);
-    buffer.writeUint8(0);
-    buffer.writeUint8(0x0d);
-    buffer.writeUint8(0x02); // Critical: appears to be protocol flags
-    buffer.writeUint8(0x69); // 105
-    buffer.writeUint8(0x03);
-    buffer.writeUint8(0x69); // 105
-    buffer.writeUint8(0x03);
-    buffer.writeUint8(0x03);
-    buffer.writeUint8(0x35); // 53
 
     _log.fine('Encoded protocol request: version=$ttcProtocolVersion, '
-        'driver=$driverName, length=$messageLength');
+        'driver=$driverName');
   }
 }
 

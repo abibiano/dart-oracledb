@@ -6,6 +6,7 @@ import 'package:logging/logging.dart';
 import '../errors.dart';
 import '../protocol/buffer.dart';
 import '../protocol/constants.dart';
+import '../protocol/messages/auth_message.dart';
 import '../protocol/messages/execute_message.dart';
 import '../protocol/messages/fast_auth_message.dart';
 import '../protocol/messages/ping_message.dart';
@@ -61,6 +62,13 @@ class Transport {
 
   /// Returns the Oracle server major version (e.g. 19, 21, 23).
   int get serverMajorVersion => _serverMajorVersion;
+
+  bool _supportsFastAuth = true;
+
+  /// Whether the server advertised FAST_AUTH in the ACCEPT flag2 byte.
+  /// Defaults to `true` so any failure to parse leaves the 23ai-style path in
+  /// place. Routing source of truth for [AuthFlow.authenticate].
+  bool get supportsFastAuth => _supportsFastAuth;
 
   /// TTC field version - adjusted after protocol negotiation.
   /// Used to determine whether token numbers should be written.
@@ -505,9 +513,11 @@ class Transport {
           final acceptInfo = AcceptPacketInfo.parse(rawPacketData);
           _useLargeSdu = acceptInfo.useLargeSdu;
           _supportsEndOfRequest = acceptInfo.supportsEndOfRequest;
+          _supportsFastAuth = acceptInfo.supportsFastAuth;
           _log.info('Negotiated version=${acceptInfo.version}, '
               'sdu=${acceptInfo.sdu}, largeSdu=$_useLargeSdu, '
-              'endOfRequest=$_supportsEndOfRequest');
+              'endOfRequest=$_supportsEndOfRequest, '
+              'supportsFastAuth=$_supportsFastAuth');
 
           return response;
 
@@ -613,6 +623,15 @@ class Transport {
     await _sendDataTypesNegotiation(protocolResponse);
 
     return protocolResponse;
+  }
+
+  /// Sends a standalone AUTH_PHASE_ONE message and returns the raw TTC
+  /// response data. Used by the classical (pre-23) authentication path, after
+  /// [sendProtocolNegotiation] has completed.
+  Future<Uint8List> sendAuthPhaseOne(AuthPhaseOneRequest request) async {
+    final bytes = request.toBytes();
+    await sendData(bytes, dataFlags: 0x0000);
+    return receiveData();
   }
 
   /// Sends FAST_AUTH message containing protocol negotiation, data types

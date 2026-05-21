@@ -104,6 +104,8 @@ context:
 
 - **2026-05-21 (post-Story-2.5 investigation):** Finding: `gvenzl/oracle-xe:19` does not exist on Docker Hub — the `gvenzl/oracle-xe` repo publishes only 21c, 18c, and 11g tags (verified via `https://hub.docker.com/v2/repositories/gvenzl/oracle-xe/tags?name=19` → `count: 0` and the maintainer's repo description: *"Oracle Database XE (21c, 18c, 11g) for everyone!"*). Every `integration-19c` CI run since the spec was committed has failed at image pull with `manifest unknown`. The spec was marked done because the *code* changes (version gates, env normalization) were complete, but actual validation against a pre-23 container never happened. Amended: switched image to `gvenzl/oracle-xe:21` everywhere — `docker-compose.yml` service renamed `oracle19c → oracle21c` (profile and service), and CI job renamed `integration-19c → integration-21c`. 21c is the closest available community image and exercises the same pre-23 code path (`_serverMajorVersion < 23` branch) that 19c would. The connection params (port 1522 host-side / 1521 in-container, service `XEPDB1`, no registry creds) are unchanged. Original spec intent (validating non-23ai protocol paths) is preserved; the "19c" framing is no longer literally accurate.
 
+- **2026-05-21 (Known Issue #2 dispatched):** The FAST_AUTH-against-pre-23 blocker tracked in Known Issues #2 is now scoped into `spec-classical-auth-fallback.md`. That spec adds an `AcceptPacketInfo.supportsFastAuth`-gated classical AUTH_PHASE_ONE/TWO branch in `AuthFlow.authenticate`. This spec's status remains `partially-done` until that work lands and `integration-21c` goes green.
+
 ## Known Issues
 
 **Status was reopened from `done` → `partially-done` on 2026-05-21 (post-Story-2.5 investigation).**

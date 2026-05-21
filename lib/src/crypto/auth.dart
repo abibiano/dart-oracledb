@@ -355,17 +355,29 @@ class AuthFlow {
     final clientNonce = generateClientNonce();
     _log.fine('Generated client nonce (${clientNonce.length} bytes)');
 
-    // Step 2: Send FAST_AUTH (Protocol + DataTypes + AUTH_PHASE_ONE)
-    // Oracle 23ai requires FAST_AUTH protocol for authentication
+    // Step 2: Send AUTH_PHASE_ONE. Branch on the server-advertised FAST_AUTH
+    // capability — 23ai uses the combined FAST_AUTH envelope; pre-23 runs the
+    // classical Protocol + DataTypes + AUTH_PHASE_ONE sequence.
     updateState(AuthState.phaseOneSent);
-    _log.fine('Sending FAST_AUTH with AUTH_PHASE_ONE');
-    await transport.sendFastAuth(
-      username: username,
-      clientNonce: clientNonce,
-    );
-
-    // Step 3: Receive AUTH_PHASE_ONE response (strips data flags)
-    final phaseOneResponseData = await transport.receiveData();
+    Uint8List phaseOneResponseData;
+    if (transport.supportsFastAuth) {
+      _log.fine('Sending FAST_AUTH with AUTH_PHASE_ONE');
+      await transport.sendFastAuth(
+        username: username,
+        clientNonce: clientNonce,
+      );
+      phaseOneResponseData = await transport.receiveData();
+    } else {
+      _log.fine(
+          'Server does not advertise FAST_AUTH; using classical AUTH_PHASE_ONE/TWO');
+      await transport.sendProtocolNegotiation();
+      final phaseOneRequest = AuthPhaseOneRequest(
+        username: username,
+        clientNonce: clientNonce,
+        sequence: transport.nextSequence(),
+      );
+      phaseOneResponseData = await transport.sendAuthPhaseOne(phaseOneRequest);
+    }
     _log.fine(
         'Received AUTH_PHASE_ONE response (${phaseOneResponseData.length} bytes)');
 
@@ -399,8 +411,10 @@ class AuthFlow {
     final use23aiFormat = transport.shouldWriteTokenNumber;
     final phaseTwoBytes = phaseTwoRequest.toBytes(use23aiFormat: use23aiFormat);
     _log.fine('Sending AUTH_PHASE_TWO request (${phaseTwoBytes.length} bytes)');
-    // AUTH_PHASE_TWO requires data flags 0x0800 (END_OF_REQUEST marker)
-    await transport.sendData(phaseTwoBytes, dataFlags: 0x0800);
+    await transport.sendData(
+      phaseTwoBytes,
+      dataFlags: transport.supportsFastAuth ? 0x0800 : 0x0000,
+    );
 
     // Step 6: Receive AUTH_PHASE_TWO response and verify success
     // Apply timeout to detect wrong password quickly (Oracle closes silently)
