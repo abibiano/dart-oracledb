@@ -182,7 +182,8 @@ void main() {
         expect(bytes.length, greaterThan(20));
       });
 
-      test('use23aiFormat=true produces larger output than use23aiFormat=false', () {
+      test('use23aiFormat=true produces larger output than use23aiFormat=false',
+          () {
         final request = AuthPhaseTwoRequest(
           encryptedProof: mockProof,
           sessionKey: mockSessionKey,
@@ -219,10 +220,12 @@ void main() {
             break;
           }
         }
-        expect(found, isTrue, reason: 'AUTH_PBKDF2_SPEEDY_KEY must be in 12c request');
+        expect(found, isTrue,
+            reason: 'AUTH_PBKDF2_SPEEDY_KEY must be in 12c request');
       });
 
-      test('12c verifier type with speedyKey=null omits AUTH_PBKDF2_SPEEDY_KEY', () {
+      test('12c verifier type with speedyKey=null omits AUTH_PBKDF2_SPEEDY_KEY',
+          () {
         // Regression test: numPairs must not be incremented when speedyKey is null.
         // Previously, numPairs was set to 7 unconditionally for is12c=true, but only
         // 6 pairs were written when speedyKey==null — causing a wire format desync.
@@ -251,7 +254,8 @@ void main() {
           }
         }
         expect(found, isFalse,
-            reason: 'AUTH_PBKDF2_SPEEDY_KEY must not appear when speedyKey is null');
+            reason:
+                'AUTH_PBKDF2_SPEEDY_KEY must not appear when speedyKey is null');
       });
 
       test('AUTH_SESSKEY key name is present in output', () {
@@ -277,7 +281,8 @@ void main() {
             break;
           }
         }
-        expect(found, isTrue, reason: 'AUTH_SESSKEY must be in AUTH_PHASE_TWO request');
+        expect(found, isTrue,
+            reason: 'AUTH_SESSKEY must be in AUTH_PHASE_TWO request');
       });
 
       test('AUTH_PASSWORD key name is present in output', () {
@@ -303,7 +308,8 @@ void main() {
             break;
           }
         }
-        expect(found, isTrue, reason: 'AUTH_PASSWORD must be in AUTH_PHASE_TWO request');
+        expect(found, isTrue,
+            reason: 'AUTH_PASSWORD must be in AUTH_PHASE_TWO request');
       });
 
       test('username bytes appear in output when non-empty', () {
@@ -331,7 +337,8 @@ void main() {
             break;
           }
         }
-        expect(found, isTrue, reason: 'Username must appear in AUTH_PHASE_TWO request');
+        expect(found, isTrue,
+            reason: 'Username must appear in AUTH_PHASE_TWO request');
       });
 
       test('different session keys produce different output', () {
@@ -447,7 +454,9 @@ void main() {
       expect(params.isPbkdf2, isFalse);
     });
 
-    test('toVerifierParams extracts mixing iterations from AUTH_PBKDF2_SDER_COUNT', () {
+    test(
+        'toVerifierParams extracts mixing iterations from AUTH_PBKDF2_SDER_COUNT',
+        () {
       const response = AuthPhaseOneResponse(
         sessionData: {
           'AUTH_VFR_DATA': '00000000000000000000000000000000',

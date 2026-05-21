@@ -462,7 +462,8 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
   final state = _DecodeState(
     isQuery: isQuery,
     ttcFieldVersion: ttcFieldVersion,
-    columns: expectedColumns != null ? List.of(expectedColumns) : <ColumnMetadata>[],
+    columns:
+        expectedColumns != null ? List.of(expectedColumns) : <ColumnMetadata>[],
   );
 
   try {
@@ -498,7 +499,10 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
 }
 
 class _DecodeState {
-  _DecodeState({required this.isQuery, required this.columns, this.ttcFieldVersion = 24});
+  _DecodeState(
+      {required this.isQuery,
+      required this.columns,
+      this.ttcFieldVersion = 24});
 
   final bool isQuery;
   final int ttcFieldVersion;

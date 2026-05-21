@@ -26,12 +26,10 @@ void main() {
     // =========================================================================
     final runNetworkTests =
         Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
-    group(
-      '7.1 Connection failure during auth',
-      skip: runNetworkTests
-          ? null
-          : 'Network calls: set RUN_INTEGRATION_TESTS=true to run',
-      () {
+    group('7.1 Connection failure during auth',
+        skip: runNetworkTests
+            ? null
+            : 'Network calls: set RUN_INTEGRATION_TESTS=true to run', () {
       test('connect to non-existent host throws OracleException', () async {
         await expectLater(
           OracleConnection.connect(
@@ -66,12 +64,14 @@ void main() {
           fail('Expected OracleException');
         } on OracleException catch (e) {
           expect(e.cause, isNotNull,
-              reason: 'Original cause must be preserved for debugging (project-context.md rule)');
+              reason:
+                  'Original cause must be preserved for debugging (project-context.md rule)');
           expect(e.message, isNotEmpty);
         }
       });
 
-      test('connection failure error message never contains password', () async {
+      test('connection failure error message never contains password',
+          () async {
         const secretPassword = 'VERY_SECRET_PASSWORD_789';
         try {
           await OracleConnection.connect(
@@ -135,7 +135,8 @@ void main() {
         );
       });
 
-      test('invalid packet length (< header size) throws TnsPacketException', () {
+      test('invalid packet length (< header size) throws TnsPacketException',
+          () {
         final data = Uint8List.fromList([
           0x00, 0x04, // Length: 4 (less than 8-byte header)
           0x00, 0x00,
@@ -171,14 +172,17 @@ void main() {
     // Task 7.3: Malformed auth responses
     // =========================================================================
     group('7.3 Malformed auth responses', () {
-      test('AuthPhaseOneResponse.decode throws BufferException on empty data', () {
+      test('AuthPhaseOneResponse.decode throws BufferException on empty data',
+          () {
         expect(
           () => AuthPhaseOneResponse.decode(Uint8List(0)),
           throwsA(isA<BufferException>()),
         );
       });
 
-      test('AuthPhaseOneResponse.decode handles unknown message type without throwing', () {
+      test(
+          'AuthPhaseOneResponse.decode handles unknown message type without throwing',
+          () {
         final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
         final response = AuthPhaseOneResponse.decode(data);
         expect(response, isNotNull);
@@ -195,7 +199,8 @@ void main() {
         expect(response.sessionData, isEmpty);
       });
 
-      test('toVerifierParams returns non-null salt when AUTH_VFR_DATA missing', () {
+      test('toVerifierParams returns non-null salt when AUTH_VFR_DATA missing',
+          () {
         final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
         final response = AuthPhaseOneResponse.decode(data);
         final params = response.toVerifierParams();
@@ -203,21 +208,26 @@ void main() {
         expect(params.salt.length, greaterThan(0));
       });
 
-      test('toVerifierParams returns positive iterations when AUTH_VFR_DATA missing', () {
+      test(
+          'toVerifierParams returns positive iterations when AUTH_VFR_DATA missing',
+          () {
         final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
         final response = AuthPhaseOneResponse.decode(data);
         final params = response.toVerifierParams();
         expect(params.iterations, greaterThan(0));
       });
 
-      test('toVerifierParams returns non-null serverNonce when AUTH_SESSKEY missing', () {
+      test(
+          'toVerifierParams returns non-null serverNonce when AUTH_SESSKEY missing',
+          () {
         final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
         final response = AuthPhaseOneResponse.decode(data);
         final params = response.toVerifierParams();
         expect(params.serverNonce, isNotNull);
       });
 
-      test('toVerifierParams handles invalid hex in AUTH_VFR_DATA gracefully', () {
+      test('toVerifierParams handles invalid hex in AUTH_VFR_DATA gracefully',
+          () {
         const response = AuthPhaseOneResponse(
           sessionData: {'AUTH_VFR_DATA': 'GGGG_NOT_HEX'},
           verifierType: 0x4815,
@@ -227,7 +237,8 @@ void main() {
         expect(params.iterations, greaterThan(0));
       });
 
-      test('toVerifierParams uses default 4096 iterations when not parseable', () {
+      test('toVerifierParams uses default 4096 iterations when not parseable',
+          () {
         const response = AuthPhaseOneResponse(
           sessionData: {'AUTH_VFR_DATA': ''},
           verifierType: 0x4815,
@@ -286,7 +297,9 @@ void main() {
         // stopwatch assertion in test/integration/security_test.dart.
       });
 
-      test('OracleException cause is nullable (no cause for timeout-triggered error)', () {
+      test(
+          'OracleException cause is nullable (no cause for timeout-triggered error)',
+          () {
         const timeoutError = OracleException(
           errorCode: oraInvalidCredentials,
           message: 'Authentication failed: invalid username or password',

@@ -98,14 +98,16 @@ void main() {
       const authPhaseOneCode = 0x76;
       var functionIndex = -1;
       for (int i = 0; i < bytes.length - 1; i++) {
-        if (bytes[i] == ttcMsgTypeFunction && bytes[i + 1] == authPhaseOneCode) {
+        if (bytes[i] == ttcMsgTypeFunction &&
+            bytes[i + 1] == authPhaseOneCode) {
           functionIndex = i;
           break;
         }
       }
 
       expect(functionIndex, greaterThan(0),
-          reason: 'Function message type (3) with AUTH_PHASE_ONE (0x76) should be embedded');
+          reason:
+              'Function message type (3) with AUTH_PHASE_ONE (0x76) should be embedded');
 
       // Verify sequence byte follows
       expect(bytes[functionIndex + 2], equals(1),
@@ -136,7 +138,8 @@ void main() {
       const authPhaseOneCode = 0x76;
       var functionIndex = -1;
       for (int i = 0; i < bytes.length - 2; i++) {
-        if (bytes[i] == ttcMsgTypeFunction && bytes[i + 1] == authPhaseOneCode) {
+        if (bytes[i] == ttcMsgTypeFunction &&
+            bytes[i + 1] == authPhaseOneCode) {
           functionIndex = i;
           break;
         }
@@ -157,9 +160,11 @@ void main() {
       // The ~2780 bytes mentioned in AC1 includes TNS packet headers and padding
       // This test validates just the message construction, not the full packet
       expect(bytes.length, greaterThan(150),
-          reason: 'FAST_AUTH message should contain all three embedded messages');
+          reason:
+              'FAST_AUTH message should contain all three embedded messages');
       expect(bytes.length, lessThan(500),
-          reason: 'FAST_AUTH message body should be under 500 bytes (actual: ${bytes.length})');
+          reason:
+              'FAST_AUTH message body should be under 500 bytes (actual: ${bytes.length})');
     });
 
     test('AC1.6: Message type is ttcMsgTypeFastAuth (34)', () {
@@ -290,7 +295,8 @@ void main() {
       var functionIndex = -1;
       const authPhaseOneCode = 0x76;
       for (int i = 0; i < bytes.length - 1; i++) {
-        if (bytes[i] == ttcMsgTypeFunction && bytes[i + 1] == authPhaseOneCode) {
+        if (bytes[i] == ttcMsgTypeFunction &&
+            bytes[i + 1] == authPhaseOneCode) {
           functionIndex = i;
           break;
         }
@@ -401,7 +407,8 @@ void main() {
       const authPhaseOneCode = 0x76;
       var functionIndex = -1;
       for (int i = 0; i < bytes.length - 2; i++) {
-        if (bytes[i] == ttcMsgTypeFunction && bytes[i + 1] == authPhaseOneCode) {
+        if (bytes[i] == ttcMsgTypeFunction &&
+            bytes[i + 1] == authPhaseOneCode) {
           functionIndex = i;
           break;
         }

@@ -25,7 +25,8 @@ void main() {
 
   if (!runIntegrationTests) {
     test('Security tests require RUN_INTEGRATION_TESTS=true', () {
-      Logger.root.info('Skipping security integration tests - set RUN_INTEGRATION_TESTS=true');
+      Logger.root.info(
+          'Skipping security integration tests - set RUN_INTEGRATION_TESTS=true');
     });
     return;
   }

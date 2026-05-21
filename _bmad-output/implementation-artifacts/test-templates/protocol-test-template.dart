@@ -23,7 +23,8 @@ void main() {
   // PROTOCOL TEST GATE
   // ===================================================================
 
-  final runIntegrationTests = Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
+  final runIntegrationTests =
+      Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
 
   if (!runIntegrationTests) {
     test('protocol tests skipped', () {
@@ -52,7 +53,8 @@ void main() {
   // NOT documented in Oracle manuals
 
   group('FAST_AUTH protocol', () {
-    test('sends combined AUTH envelope (Protocol + DataTypes + AUTH)', () async {
+    test('sends combined AUTH envelope (Protocol + DataTypes + AUTH)',
+        () async {
       // Validate FAST_AUTH message structure
       final authMessage = FastAuthMessage(
         username: user,
@@ -101,7 +103,8 @@ void main() {
 
   group('hex crypto encoding', () {
     test('AUTH_SESSKEY is uppercase hex-encoded string', () {
-      final sessionKey = Uint8List.fromList([0x01, 0x02, 0x03, 0xAB, 0xCD, 0xEF]);
+      final sessionKey =
+          Uint8List.fromList([0x01, 0x02, 0x03, 0xAB, 0xCD, 0xEF]);
       final encoded = encodeAuthSessionKey(sessionKey);
 
       // Verify hex encoding

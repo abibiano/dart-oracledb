@@ -327,8 +327,7 @@ class Transport {
       buf.writeUB8(0);
     }
     await sendData(buf.toBytes());
-    final payload =
-        await _receiveDataWithTimeout(timeout, operation: 'Commit');
+    final payload = await _receiveDataWithTimeout(timeout, operation: 'Commit');
     final response = decodeExecuteResponse(payload,
         isQuery: false, ttcFieldVersion: _ttcFieldVersion);
     if (!response.isSuccess) {
@@ -1394,8 +1393,7 @@ class Transport {
   /// Tries "Release X." or "Version X." first, then falls back to the first
   /// two-or-more digit token. Returns `null` if no version can be found.
   static int? _extractMajorVersion(String banner) {
-    final match =
-        RegExp(r'(?:Release|Version)\s+(\d+)\.').firstMatch(banner);
+    final match = RegExp(r'(?:Release|Version)\s+(\d+)\.').firstMatch(banner);
     if (match != null) return int.tryParse(match.group(1)!);
     final fallback = RegExp(r'\b(\d{2,})\b').firstMatch(banner);
     return fallback != null ? int.tryParse(fallback.group(1)!) : null;

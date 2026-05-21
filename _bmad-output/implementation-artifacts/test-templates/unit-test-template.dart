@@ -42,7 +42,10 @@ void main() {
         final result = functionUnderTest(input);
 
         // Assert: Verify expected outcome
-        expect(result, equals('<REPLACE_WITH_EXPECTED_VALUE>')); // TODO: Add expected value
+        expect(
+            result,
+            equals(
+                '<REPLACE_WITH_EXPECTED_VALUE>')); // TODO: Add expected value
       });
 
       test('handles valid input correctly', () {
@@ -58,7 +61,8 @@ void main() {
     group('error paths', () {
       test('throws OracleException when {invalid condition}', () {
         // Arrange
-        final invalidInput = '<REPLACE_WITH_INVALID_DATA>'; // TODO: Add invalid input
+        final invalidInput =
+            '<REPLACE_WITH_INVALID_DATA>'; // TODO: Add invalid input
 
         // Assert: Verify exception thrown
         expect(
@@ -86,14 +90,16 @@ void main() {
     group('edge cases', () {
       test('handles empty input', () {
         final result = functionUnderTest('');
-        expect(result, isNotNull); // TODO: Add specific assertion for empty input behavior
+        expect(result,
+            isNotNull); // TODO: Add specific assertion for empty input behavior
       });
 
       test('handles maximum value', () {
         // Test boundary conditions
         final maxValue = 9999; // TODO: Replace with actual maximum valid value
         final result = functionUnderTest(maxValue);
-        expect(result, isNotNull); // TODO: Add specific assertion for max value behavior
+        expect(result,
+            isNotNull); // TODO: Add specific assertion for max value behavior
       });
 
       test('handles minimum value', () {

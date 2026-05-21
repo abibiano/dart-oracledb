@@ -71,8 +71,8 @@ void main() {
         final descriptor = '(DESCRIPTION='
             '(ADDRESS=(PROTOCOL=TCP)(HOST=$testHost)(PORT=$testPort))'
             '(CONNECT_DATA=(SERVICE_NAME=$testService)))';
-        final connectData = buildConnectPacketBody(
-            Uint8List.fromList(utf8.encode(descriptor)));
+        final connectData =
+            buildConnectPacketBody(Uint8List.fromList(utf8.encode(descriptor)));
         await probeTransport.sendConnectReceiveAccept(connectData);
         expect(probeTransport.supportsFastAuth, isFalse,
             reason: 'Pre-23 server must not advertise FAST_AUTH for this test');
@@ -91,10 +91,7 @@ void main() {
       } finally {
         await connection.close();
       }
-    },
-        skip: !_runIntegrationTests
-            ? 'Integration tests disabled'
-            : null);
+    }, skip: !_runIntegrationTests ? 'Integration tests disabled' : null);
 
     test('wrong password on pre-23 yields oraInvalidCredentials', () async {
       if (fastAuthAdvertised) {
@@ -117,9 +114,6 @@ void main() {
           ),
         ),
       );
-    },
-        skip: !_runIntegrationTests
-            ? 'Integration tests disabled'
-            : null);
+    }, skip: !_runIntegrationTests ? 'Integration tests disabled' : null);
   });
 }

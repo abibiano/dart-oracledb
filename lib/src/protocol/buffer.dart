@@ -384,7 +384,8 @@ class WriteBuffer {
   /// For longer data, uses chunked encoding with 0xFE long-length indicator.
   void writeBytesWithLength(Uint8List bytes) {
     final numBytes = bytes.length;
-    if (numBytes <= 253) { // 0xFE (254) is the long-length indicator; must not be used as a plain length
+    if (numBytes <= 253) {
+      // 0xFE (254) is the long-length indicator; must not be used as a plain length
       writeUint8(numBytes);
       if (numBytes > 0) {
         writeBytes(bytes);

@@ -266,7 +266,8 @@ void main() {
       expect(tnsPacketMarker, isNot(equals(tnsPacketRefuse)));
     });
 
-    test('MARKER packet (type 12) is included in round-trip test for all types', () {
+    test('MARKER packet (type 12) is included in round-trip test for all types',
+        () {
       final types = [
         tnsPacketConnect,
         tnsPacketAccept,

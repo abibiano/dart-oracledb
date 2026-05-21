@@ -34,7 +34,8 @@ void main() {
       expect(options & ttcExecOptionExecute, isNonZero);
       expect(options & ttcExecOptionFetch, isNonZero);
       expect(options & ttcExecOptionParse, isNonZero);
-      expect(options & ttcExecOptionNotPlSql, equals(0)); // queries clear NOT_PLSQL
+      expect(options & ttcExecOptionNotPlSql,
+          equals(0)); // queries clear NOT_PLSQL
     });
 
     test('DML sets NOT_PLSQL flag and clears FETCH bit', () {
@@ -62,8 +63,8 @@ void main() {
     });
 
     test('passes a unique sequence number to the wire', () {
-      final r1 = ExecuteRequest(
-          sql: 'SELECT 1 FROM dual', isQuery: true, sequence: 7);
+      final r1 =
+          ExecuteRequest(sql: 'SELECT 1 FROM dual', isQuery: true, sequence: 7);
       expect(r1.toBytes()[2], equals(7));
     });
 
@@ -121,7 +122,8 @@ void main() {
 
     test('Oracle error number is surfaced with message', () {
       final payload = _buildPayload([
-        _errorMessage(errorNum: 942, errorMessage: 'table or view does not exist'),
+        _errorMessage(
+            errorNum: 942, errorMessage: 'table or view does not exist'),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
       final r = decodeExecuteResponse(payload, isQuery: false);
@@ -205,7 +207,8 @@ List<int> _errorMessage({
   out.addAll(_ub2(0)); // array elem
   out.addAll(_ub2(0)); // array elem
   out.addAll(_ub4(0)); // cursor id (decoder reads readUB4)
-  out.addAll(_ub2(0)); // error position (SB4 in wire; encoded same as UB2 for 0)
+  out.addAll(
+      _ub2(0)); // error position (SB4 in wire; encoded same as UB2 for 0)
   out.add(0); // sql type
   out.add(0); // fatal
   out.add(0); // flags

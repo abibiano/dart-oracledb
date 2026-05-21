@@ -308,8 +308,7 @@ class OracleConnection {
   /// Throws [OracleException] if:
   /// - Connection is closed (ORA-03113)
   /// - Commit operation fails or times out
-  Future<void> commit(
-      {Duration timeout = const Duration(seconds: 30)}) async {
+  Future<void> commit({Duration timeout = const Duration(seconds: 30)}) async {
     if (timeout <= Duration.zero) {
       throw ArgumentError.value(
           timeout, 'timeout', 'must be a positive Duration');

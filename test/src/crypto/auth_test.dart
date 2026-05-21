@@ -157,7 +157,8 @@ void main() {
         verifierType: 0xB92,
         salt: Uint8List.fromList(List.generate(16, (i) => i)),
         iterations: 1000,
-        serverNonce: Uint8List.fromList(List.generate(48, (i) => i + 100)), // 48 bytes for AES
+        serverNonce: Uint8List.fromList(
+            List.generate(48, (i) => i + 100)), // 48 bytes for AES
         authPasswordMode: 0,
       );
       final clientNonce = auth.generateClientNonce();
@@ -178,7 +179,8 @@ void main() {
         verifierType: 0xB92,
         salt: Uint8List.fromList(List.generate(16, (i) => i)),
         iterations: 1000,
-        serverNonce: Uint8List.fromList(List.generate(48, (i) => i + 100)), // 48 bytes for AES
+        serverNonce: Uint8List.fromList(
+            List.generate(48, (i) => i + 100)), // 48 bytes for AES
         authPasswordMode: 0,
       );
       final clientNonce = Uint8List.fromList(List.generate(16, (i) => i + 50));
@@ -206,7 +208,8 @@ void main() {
         verifierType: 0xB92,
         salt: Uint8List.fromList(List.generate(16, (i) => i)),
         iterations: 1000,
-        serverNonce: Uint8List.fromList(List.generate(48, (i) => i + 100)), // 48 bytes for AES
+        serverNonce: Uint8List.fromList(
+            List.generate(48, (i) => i + 100)), // 48 bytes for AES
         authPasswordMode: 0,
       );
       final clientNonce = Uint8List.fromList(List.generate(16, (i) => i + 50));
@@ -230,7 +233,8 @@ void main() {
   // Note: Mock-based authenticate tests skipped - FAST_AUTH protocol requires integration tests
   // See Epic 1 Retrospective: "Integration tests are mandatory for protocol-level code"
   // Real FAST_AUTH testing is done in test/integration/auth_integration_test.dart and minimal_auth_test.dart
-  group('AuthFlow.authenticate', skip: 'Mock transport incompatible with FAST_AUTH protocol', () {
+  group('AuthFlow.authenticate',
+      skip: 'Mock transport incompatible with FAST_AUTH protocol', () {
     late MockTransport mockTransport;
     late AuthFlow auth;
 
@@ -459,8 +463,7 @@ void main() {
       // Decode from UTF-8 bytes to hex string
       final speedyKeyHex = utf8.decode(speedyKey);
       expect(speedyKeyHex.length, equals(160),
-          reason:
-              'Speedy key hex string should be 160 characters (80 bytes)');
+          reason: 'Speedy key hex string should be 160 characters (80 bytes)');
 
       // Verify uppercase hex format
       expect(speedyKeyHex, matches(r'^[0-9A-F]+$'),

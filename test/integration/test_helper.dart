@@ -14,8 +14,7 @@ int get testPort =>
     int.tryParse(Platform.environment['ORACLE_PORT'] ?? '') ?? 1521;
 
 /// Oracle service name. Override with ORACLE_SERVICE env var.
-String get testService =>
-    Platform.environment['ORACLE_SERVICE'] ?? 'FREEPDB1';
+String get testService => Platform.environment['ORACLE_SERVICE'] ?? 'FREEPDB1';
 
 /// Oracle username. Override with ORACLE_USER env var.
 String get testUser => Platform.environment['ORACLE_USER'] ?? 'system';

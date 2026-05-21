@@ -25,7 +25,8 @@ void main() {
   // Requires: RUN_INTEGRATION_TESTS=true environment variable
   //           Oracle 23ai Docker container running
 
-  final runIntegrationTests = Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
+  final runIntegrationTests =
+      Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
 
   if (!runIntegrationTests) {
     test('integration tests skipped', () {
@@ -84,7 +85,8 @@ void main() {
       final testData = '<REPLACE_WITH_TEST_DATA>'; // TODO: Add actual test data
 
       // Act: Execute against Oracle
-      final result = await conn.execute('SELECT 1 FROM dual'); // TODO: Replace with actual SQL
+      final result = await conn
+          .execute('SELECT 1 FROM dual'); // TODO: Replace with actual SQL
 
       // Assert: Verify Oracle behavior
       expect(result, isNotNull); // TODO: Add specific assertion
@@ -98,11 +100,13 @@ void main() {
     group('error paths', () {
       test('handles {error scenario}', () async {
         await expectLater(
-          () => conn.execute('SELECT * FROM nonexistent_table'), // TODO: Replace with actual error scenario
+          () => conn.execute(
+              'SELECT * FROM nonexistent_table'), // TODO: Replace with actual error scenario
           throwsA(isA<OracleException>().having(
             (e) => e.message,
             'message',
-            contains('expected error message'), // TODO: Replace with expected error
+            contains(
+                'expected error message'), // TODO: Replace with expected error
           )),
         );
       });
