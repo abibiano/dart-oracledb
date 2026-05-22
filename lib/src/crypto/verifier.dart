@@ -7,7 +7,6 @@ library;
 
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart';
 import 'package:pointycastle/export.dart';
 
 /// O5LOGON verifier type (SHA512) - Oracle 11g+.
@@ -20,8 +19,7 @@ const int verifierTypePbkdf2 = 0xB92; // 2962
 ///
 /// Returns a 64-byte (512-bit) hash.
 Uint8List sha512Hash(Uint8List data) {
-  final digest = sha512.convert(data);
-  return Uint8List.fromList(digest.bytes);
+  return SHA512Digest().process(data);
 }
 
 /// Derives a key using PBKDF2 with SHA-512 HMAC.
