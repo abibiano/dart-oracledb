@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-05-22  # Story 2.8 code review complete; status -> done
+last_updated: 2026-05-22  # Epics 1, 2, 6 closed to done; all stories complete; Epic 2 retro done
 project: dart-oracledb
 tracking_system: file-system
 story_location: docs/sprint-artifacts
@@ -60,8 +60,8 @@ story_location: docs/sprint-artifacts
 #   - Story 6.3 marked review; Story 2.4 marked done.
 
 development_status:
-  # Epic 1: Core Connection & Authentication [IN-PROGRESS - Story 1-8 added]
-  epic-1: in-progress  # Story 1-8 added for wrong password handling improvement
+  # Epic 1: Core Connection & Authentication [DONE]
+  epic-1: done
   1-1-project-initialization-structure: done
   1-2-tns-transport-layer: done
   1-3-ttc-protocol-foundation: done
@@ -73,8 +73,8 @@ development_status:
   1-8-fix-wrong-password-error: done  # RESOLVED - 5s timeout for wrong password (was 30s), security fixes applied
   epic-1-retrospective: done  # Completed 2025-12-16 - See epic-1-retro-2025-12-16.md
 
-  # Epic 2: Query Execution & Transactions [IN-PROGRESS - protocol rebuilt in Story 6.3]
-  epic-2: in-progress
+  # Epic 2: Query Execution & Transactions [DONE]
+  epic-2: done
   2-1-execute-message-basic-query: done  # 2026-05-21 Story 6.3 — Protocol rebuilt; SELECT validated against Oracle 23ai (6/6 integration tests pass)
   2-2-result-set-handling: done  # 2026-05-21 Story 6.3 — OracleResult/OracleRow validated; missing 2-2 artifact noted in story 6.3 DAR
   2-3-bind-parameters: done  # 2026-05-21 Story 6.3 — All 12 bind integration tests pass against Oracle 23ai
@@ -83,7 +83,7 @@ development_status:
   2-6-basic-data-type-mapping: done  # 2026-05-21 code review complete — all 8 patches resolved (6 from pass 1 + 2 from pass 2: setUp TRUNCATE leak guard, spec byte examples corrected). 63 query-integration tests pass.
   2-7-statement-caching: done  # 2026-05-21 — Code review complete. 11 patches applied (10 from review + 1 from Decision 1 reference alignment: sendCloseCursors removed). 486 unit tests pass / 6 Oracle 23ai integration tests pass. 8 items deferred. Oracle 21c execute compatibility is pre-existing issue (tracked separately).
   2-8-query-error-handling: done  # 2026-05-22 — Code review complete. 4 patches applied (sql doc clarified, errorOffset stale-state fix, SB4 test encoding fix, AC4 offset assertion weakened). 497 unit tests pass.
-  epic-2-retrospective: optional
+  epic-2-retrospective: done  # Completed 2026-05-22 - See epic-2-retro-2026-05-22.md
 
   # Epic 3: PL/SQL Execution
   epic-3: backlog
@@ -109,9 +109,9 @@ development_status:
   epic-5-retrospective: optional
 
   # Epic 6: Test Architecture & Coverage [CRITICAL - Blocks Epic 2.5+]
-  epic-6: in-progress  # Story 6.3 ready for dev
+  epic-6: done
   6-1-test-architecture-design-standards: done  # Code review passed with fixes applied
   6-2-epic-1-authentication-test-suite-rework: done  # 2026-05-21 - Code review complete. 12 patches applied (prod bug fix + test fixes). 489 unit tests passing.
   6-3-epic-2-validation-pending-validation-stories: done  # 2026-05-21 Code review complete — all 3 chunks reviewed; 7 patches applied; 17 items deferred to follow-up
   6-4-ci-cd-integration-test-automation: done
-  epic-6-retrospective: optional
+  epic-6-retrospective: done  # Completed 2026-05-21 - See epic-6-retro-2026-05-21.md

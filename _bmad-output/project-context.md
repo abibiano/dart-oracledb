@@ -18,8 +18,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 | Technology | Version | Notes |
 |------------|---------|-------|
 | Dart SDK | ^3.0.0 | Pure Dart, no FFI |
-| package:crypto | latest | SHA-512 hashing |
-| pointycastle | latest | PBKDF2 key derivation |
+| pointycastle | ^4.0.0 | All crypto: SHA-512 hashing, PBKDF2 key derivation, HMAC — `package:crypto` is NOT used and must not be added |
 | package:logging | latest | Diagnostic output |
 | package:test | ^1.28.0 | Integration testing |
 | package:lints | ^6.0.0 | Strict analysis |
@@ -118,6 +117,40 @@ The branch lives in `lib/src/crypto/auth.dart` `AuthFlow.authenticate`. Never ca
 | `oracle21c` profile (`docker-compose --profile oracle21c up -d`) | `gvenzl/oracle-xe:21` | `XEPDB1` | 1522 | Classical AUTH_PHASE_ONE/TWO |
 
 CI runs both via the `integration` and `integration-21c` jobs. Auth-flow-specific tests (e.g. `classical_auth_integration_test.dart`) auto-skip on the wrong server using a `Transport.supportsFastAuth` probe.
+
+### ⚠️ MANDATORY: Dual-Environment Validation (EVERY Feature, EVERY Story)
+
+**ALL new stories and features MUST write integration tests that pass on BOTH Oracle versions and MUST be validated on both before a story is considered done.**
+
+This is not optional. Running only 23ai is not sufficient. The classical AUTH_PHASE_ONE/TWO path (Oracle 21c/pre-23) is a first-class supported target and must be exercised for every new feature.
+
+**Exact commands to run integration tests on both environments:**
+
+```bash
+# Step 1 — Start both containers (if not already running)
+docker-compose up -d
+docker-compose --profile oracle21c up -d
+
+# Step 2 — Run against Oracle 23ai (FAST_AUTH path)
+RUN_INTEGRATION_TESTS=true dart test test/integration/ --no-color
+
+# Step 3 — Run against Oracle 21c (Classical AUTH path)
+RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test/integration/ --no-color
+```
+
+**Rules for writing tests:**
+
+- NEVER hardcode `FREEPDB1`, `XEPDB1`, port `1521`, or port `1522` in test code — always use `test_helper.dart` getters (`testHost`, `testPort`, `testService`, `testUser`, `testPassword`, `testConnectString`).
+- Tests that target auth-path-specific behaviour (e.g. `classical_auth_integration_test.dart`) MUST use a `Transport.supportsFastAuth` probe to auto-skip on the wrong server version.
+- All other integration tests are expected to pass on BOTH versions without skipping.
+- When a story AC table says "integration test passes", it means **passes on 23ai AND 21c**.
+
+**Story done-criteria checklist (append to every story spec):**
+
+- [ ] Integration tests written using `test_helper.dart` (no hardcoded connection params)
+- [ ] Tests pass: `RUN_INTEGRATION_TESTS=true dart test test/integration/ --no-color` (Oracle 23ai)
+- [ ] Tests pass: `RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test/integration/ --no-color` (Oracle 21c)
+- [ ] Any 21c-specific failure is either fixed or explicitly documented as a known skip with `Transport.supportsFastAuth` guard
 
 ## Error Handling Rules
 
