@@ -24,6 +24,14 @@ import 'protocol/messages/execute_message.dart';
 /// );
 /// print('Updated ${result.rowsAffected} rows');
 /// ```
+///
+/// ## Oracle NULL conventions
+///
+/// Oracle treats an empty string (`''`) as `NULL` for `VARCHAR2` columns.
+/// Inserting `''` (whether as a SQL literal or as a bound parameter) and
+/// selecting it back yields `null`, not a zero-length `String`. Code that
+/// needs to round-trip an empty string must use a non-VARCHAR2 column type
+/// or a sentinel value.
 class OracleResult {
   /// Creates a result from the given column metadata and row data.
   factory OracleResult({

@@ -423,7 +423,7 @@ void main() {
         bindMetadata: const [
           BindMetadata(
               oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
-          BindMetadata(oraType: oraTypeNumber),
+          BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
         ],
       );
 
@@ -623,12 +623,253 @@ void main() {
         payload,
         isQuery: false,
         bindMetadata: const [
-          BindMetadata(oraType: oraTypeNumber),
-          BindMetadata(oraType: oraTypeVarchar),
+          BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
+          BindMetadata(oraType: oraTypeVarchar, dir: BindDir.input),
         ],
       );
       expect(r.outBindIndices, isEmpty);
       expect(r.outBindValues, isEmpty);
+    });
+  });
+
+  group('Story 7.2 — IO_VECTOR and OUT-bind hardening', () {
+    test('AC1 — unknown direction byte raises OracleException', () {
+      // Synthesize an IO_VECTOR with a direction byte (99) that is neither
+      // tnsBindDirInput (32), tnsBindDirOutput (16), nor tnsBindDirInputOutput
+      // (48). The decoder must surface a protocol error rather than treat
+      // 99 as an output direction.
+      final payload = _buildPayload([
+        _ioVector([99]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
+          ],
+        ),
+        throwsA(isA<OracleException>().having(
+            (e) => e.errorCode, 'errorCode', equals(oraProtocolError))),
+      );
+    });
+
+    test('AC2 — server OUT for client-declared IN raises mismatch', () {
+      // Client declared bind 0 as IN; server reports direction 16 (OUT).
+      // The two views disagree —
+      // raise a protocol error rather than silently follow the server.
+      final payload = _buildPayload([
+        _ioVector([16]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
+          ],
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+            .having((e) => e.message, 'message', contains('client declared IN'))),
+      );
+    });
+
+    test('AC2 — server OUT vs client IN OUT raises mismatch', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(
+                oraType: oraTypeNumber, maxSize: 22, dir: BindDir.inputOutput),
+          ],
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+            .having((e) => e.message, 'message',
+                contains('client declared inputOutput'))),
+      );
+    });
+
+    test('AC2 — server IN OUT vs client OUT raises mismatch', () {
+      final payload = _buildPayload([
+        _ioVector([48]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(
+                oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+          ],
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+            .having((e) => e.message, 'message',
+                contains('client declared output'))),
+      );
+    });
+
+    test(
+        'AC3 — all-null OUT-bind decode does not re-enable decoding on '
+        'subsequent ROW_DATA-style state transitions', () {
+      // Pre-Story-7.2 the double-decode guard used `outBindValues.isEmpty`.
+      // After this story it uses an explicit `outBindsDecoded` flag, so the
+      // first decode is the authoritative one regardless of whether every
+      // decoded value happened to be null. We exercise this by running the
+      // same payload through ttcStreamIsComplete (one decode pass) and then
+      // decodeExecuteResponse (a second pass on the same bytes) — both
+      // produce the same single-null result without one influencing the
+      // other. Pre-fix, swapping the guard to `outBindValues.isEmpty` after
+      // a true zero-output decode would have re-entered the loop on the
+      // second pass and shifted bytes; this test pins the new contract.
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          0, // null indicator (length 0)
+          ..._ub4(0), // SB4 trailer
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      const meta = [
+        BindMetadata(oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+      ];
+      expect(ttcStreamIsComplete(payload, bindMetadata: meta), isTrue);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: meta,
+      );
+      expect(r.isSuccess, isTrue);
+      expect(r.outBindValues, equals([null]));
+    });
+
+    test('AC9 — numBinds > 65535 raises OracleException', () {
+      // Hand-craft an IO_VECTOR whose temp32 high field is 256, producing
+      // numBinds = 256 * 256 + 0 = 65536 (just over the Oracle bind ceiling).
+      // The decoder must reject this rather than try to iterate that many
+      // direction bytes.
+      final ioVector = <int>[
+        ttcMsgTypeIoVector,
+        0, // flag
+        ..._ub2(0), // temp16
+        ..._ub4(256), // temp32 — produces 65536 when multiplied by 256
+        ..._ub4(0), // num iters this time
+        ..._ub2(0), // uac buffer length
+        ..._ub2(0), // fast-fetch
+        ..._ub2(0), // rowid
+        // No direction bytes — decoder must throw before reading any.
+      ];
+      final payload = _buildPayload([
+        ioVector,
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(payload, isQuery: false),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+            .having((e) => e.message, 'message', contains('implausible'))),
+      );
+    });
+
+    test('AC2 — server IN for client-declared OUT raises mismatch', () {
+      // Review patch: the previous implementation `continue`d on direction 32
+      // before running the consistency check, silently dropping a server-IN
+      // for a bind the client declared OUT. The fix moves the consistency
+      // check ahead of the input-direction shortcut so this asymmetric case
+      // is caught too.
+      final payload = _buildPayload([
+        _ioVector([32]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(
+                oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+          ],
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+            .having((e) => e.message, 'message',
+                contains('client declared output'))),
+      );
+    });
+
+    test('AC2 — server IN for client-declared IN OUT raises mismatch', () {
+      final payload = _buildPayload([
+        _ioVector([32]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(
+                oraType: oraTypeNumber, maxSize: 22, dir: BindDir.inputOutput),
+          ],
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+            .having((e) => e.message, 'message',
+                contains('client declared inputOutput'))),
+      );
+    });
+
+    test('AC2 — missing metadata leaves stream alignment to ROW_DATA', () {
+      // When `bindMetadata.length` is smaller than the server-reported bind
+      // count, the consistency check has nothing to compare against; the
+      // decoder should fall through to the conservative ROW_DATA branch
+      // that consumes bytes and emits null for those slots. This keeps the
+      // legacy stream-alignment behavior intact for unknown trailing binds.
+      final payload = _buildPayload([
+        _ioVector([16, 16]),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength('hi'.codeUnits),
+          ..._ub4(0),
+          // Second slot: no metadata means the decoder reads bytes
+          // conservatively and emits null.
+          ..._bytesWithLength('world'.codeUnits),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(
+              oraType: oraTypeVarchar, maxSize: 100, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindIndices, equals([0, 1]));
+      expect(r.outBindValues, hasLength(2));
+      expect(r.outBindValues[0], equals('hi'));
+      // Trailing bind without metadata: bytes consumed, value null.
+      expect(r.outBindValues[1], isNull);
     });
   });
 }

@@ -876,6 +876,211 @@ void main() {
       }
     });
   });
+
+  // Story 7.3 AC4 — PL/SQL statement-cache exclusion evidence.
+  //
+  // The classifier marks BEGIN/DECLARE/CALL blocks as cache-ineligible, so
+  // OracleConnection.execute must never store them. These tests use the
+  // package-internal `debugCacheSize` getter (not exported from
+  // `lib/oracledb.dart`) to observe per-connection cache state directly and
+  // prove that:
+  //
+  //   * Repeatedly executing the same PL/SQL block on a connection with a
+  //     positive statementCacheSize never adds an entry to the cache.
+  //   * Repeatedly executing the same SELECT *does* add a cache entry — the
+  //     control case demonstrates the cache is functional in the same
+  //     session, so a zero PL/SQL count is not an artifact of a disabled
+  //     cache.
+  //
+  // The hook lives on OracleConnection (no public export) per Story 7.3
+  // task 4.3: "the smallest test-only or package-private instrumentation
+  // hook that can prove isCacheEligibleSql(sql) == false prevents
+  // _cache.store(...) for PL/SQL".
+  group('Story 7.3 AC4 — PL/SQL statement-cache exclusion', () {
+    late OracleConnection conn;
+
+    setUp(() async {
+      conn = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        statementCacheSize: 50,
+      );
+    });
+
+    tearDown(() async {
+      await conn.close();
+    });
+
+    test(
+        'repeated PL/SQL block leaves cache empty — same BEGIN ... END; '
+        'executed 5x adds zero cache entries', () async {
+      expect(conn.debugCacheSize, equals(0),
+          reason: 'fresh connection must start with an empty cache');
+
+      const plsql = 'BEGIN NULL; END;';
+      for (var i = 0; i < 5; i++) {
+        final r = await conn.execute(plsql);
+        expect(r.rowsAffected, isNull,
+            reason: 'PL/SQL must keep rowsAffected null');
+        expect(conn.debugCacheSize, equals(0),
+            reason: 'PL/SQL block must never enter the statement cache '
+                '(iteration ${i + 1})');
+      }
+    });
+
+    test(
+        'distinct PL/SQL block variants do not accumulate in the cache '
+        '— 3 different DECLARE blocks add zero cache entries', () async {
+      expect(conn.debugCacheSize, equals(0));
+
+      // Three syntactically distinct PL/SQL strings. If isCacheEligibleSql
+      // were lenient, each would add a separate cache entry; the contract
+      // is that all three must be skipped.
+      const blocks = [
+        'DECLARE v NUMBER; BEGIN v := 1; END;',
+        'DECLARE v NUMBER; BEGIN v := 2; END;',
+        'BEGIN NULL; END;',
+      ];
+      for (final sql in blocks) {
+        await conn.execute(sql);
+      }
+      expect(conn.debugCacheSize, equals(0),
+          reason: 'No PL/SQL variant must enter the cache');
+    });
+
+    test(
+        'cache is functional in the same session — control SELECT adds one '
+        'entry per distinct SQL', () async {
+      expect(conn.debugCacheSize, equals(0));
+
+      // Single distinct SELECT — caches once and stays at size 1 across
+      // repeated executions (LRU refresh, no new entry).
+      const selectMarker = "SELECT 'story73_cache_marker' AS m FROM dual";
+      for (var i = 0; i < 5; i++) {
+        await conn.execute(selectMarker);
+      }
+      expect(conn.debugCacheSize, equals(1),
+          reason: 'Repeated SELECT must occupy exactly one cache slot');
+
+      // A second distinct SELECT adds another entry — control that cache
+      // capacity is honored.
+      await conn.execute("SELECT 'story73_cache_marker2' AS m FROM dual");
+      expect(conn.debugCacheSize, equals(2));
+    });
+
+    test(
+        'mixed workload — interleaving PL/SQL and SELECT only grows cache '
+        'for the SELECT', () async {
+      expect(conn.debugCacheSize, equals(0));
+
+      const plsql = 'BEGIN NULL; END;';
+      const select = "SELECT 'story73_mix' AS m FROM dual";
+
+      // Execute PL/SQL — cache must stay at 0.
+      await conn.execute(plsql);
+      expect(conn.debugCacheSize, equals(0));
+
+      // Execute SELECT — cache must grow to 1.
+      await conn.execute(select);
+      expect(conn.debugCacheSize, equals(1));
+
+      // Re-run PL/SQL several times — cache must remain at 1 (only the
+      // SELECT entry).
+      for (var i = 0; i < 4; i++) {
+        await conn.execute(plsql);
+        expect(conn.debugCacheSize, equals(1),
+            reason: 'PL/SQL must not displace or duplicate the SELECT entry '
+                '(iteration ${i + 1})');
+      }
+    });
+
+    test('CALL my_proc() shape is also excluded from the cache', () async {
+      // Create a no-op stored proc so CALL has a valid target on both
+      // 23ai and 21c. ORA-00955 means the proc already exists from a
+      // previous failed run — that's fine.
+      await _ignoreOraCodes(
+        () => conn.execute(
+          'CREATE OR REPLACE PROCEDURE story73_noop AS BEGIN NULL; END;',
+        ),
+        const <int>[],
+      );
+      try {
+        expect(conn.debugCacheSize, equals(0));
+        for (var i = 0; i < 3; i++) {
+          await conn.execute('CALL story73_noop()');
+        }
+        expect(conn.debugCacheSize, equals(0),
+            reason: 'CALL is PL/SQL — must not enter the cache');
+      } finally {
+        await _ignoreOraCodes(
+          () => conn.execute('DROP PROCEDURE story73_noop'),
+          const <int>[4043],
+        );
+      }
+    });
+  });
+
+  group('Story 7.2 — bind-name and bind-spec validation', () {
+    late OracleConnection conn;
+
+    setUp(() async {
+      conn = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+    });
+
+    tearDown(() async {
+      await _ignoreOraCodes(
+        () => conn.execute('DROP PROCEDURE story72_ret'),
+        const <int>[4043],
+      );
+      await conn.close();
+    });
+
+    test(
+        'AC10 — case-mismatched named bind (:RET vs key "ret") fails at '
+        'bind preparation with oraBindMismatch and message naming :RET',
+        () async {
+      await expectLater(
+        () => conn.execute(
+          'BEGIN :RET := 1; END;',
+          {'ret': OracleBind.out(type: OracleDbType.number)},
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(oraBindMismatch))
+            .having((e) => e.message, 'message', contains(':RET'))),
+      );
+    });
+
+    test(
+        'AC8 — repeated named IN bind reuses the same value in both '
+        'placeholders (first-occurrence contract)',
+        () async {
+      // Oracle's PL/SQL parser rejects the strictest AC8 shape — repeating
+      // an OUT placeholder (e.g. `BEGIN p(:v); p(:v); END;`) raises
+      // ORA-01006 "Bind variable does not exist", so we cannot construct
+      // an integration fixture that round-trips a repeated *OUT* bind.
+      // The first-occurrence semantics on the OracleOutBinds container are
+      // pinned by a unit test in test/src/oracle_bind_test.dart
+      // ("AC8 — repeated named bind index maps to first occurrence").
+      //
+      // The supported closest behavior is repeated *IN* placeholders, where
+      // Oracle uses the single value supplied under the bind name at every
+      // SQL position. The query below reads `:v` twice and proves both
+      // appearances receive the same value, confirming our driver's
+      // first-occurrence mapping at bind-preparation time
+      // (connection.dart:218-233 builds bindList by mapping each parsed
+      // bind name back to bindValues[name], so duplicates share the value).
+      final result = await conn.execute(
+        'SELECT :v AS a, :v AS b FROM dual',
+        {'v': 7},
+      );
+      expect(result.rows.first.toList(), equals([7, 7]));
+    });
+  });
 }
 
 /// Executes [fn] and swallows only [OracleException]s whose `errorCode`

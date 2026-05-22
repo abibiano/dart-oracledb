@@ -1,5 +1,7 @@
-/// Unit tests for the public OUT-bind API (Story 3.2 + Story 3.3).
+/// Unit tests for the public OUT-bind API (Story 3.2 + Story 3.3 + Story 7.2).
 library;
+
+import 'dart:typed_data';
 
 import 'package:test/test.dart';
 
@@ -201,6 +203,157 @@ void main() {
       names['a'] = 5; // mutate original; should not leak into the container.
       expect(out.toMap(), equals(m));
       expect(out['a'], equals(1));
+    });
+  });
+
+  group('Story 7.2 — OracleBind value/type validation (AC6)', () {
+    test('AC6 example: inOut(value: DateTime, type: number) throws '
+        'ArgumentError at construction', () {
+      // The exact AC example: value's runtime type (DateTime) does not match
+      // the declared Oracle type (number). This must surface as an
+      // ArgumentError at the named-constructor call site rather than as a
+      // ClassCastError deep inside wire encoding.
+      expect(
+        () => OracleBind.inOut(
+            value: DateTime(2026, 5, 22), type: OracleDbType.number),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('number type rejects a String value', () {
+      expect(
+        () => OracleBind.inOut(value: 'oops', type: OracleDbType.number),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('varchar type rejects an int value', () {
+      expect(
+        () => OracleBind.inOut(
+            value: 5, type: OracleDbType.varchar, maxSize: 10),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('date type rejects a String value', () {
+      expect(
+        () => OracleBind.inOut(value: 'today', type: OracleDbType.date),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('timestamp type rejects an int value', () {
+      expect(
+        () => OracleBind.inOut(value: 1000, type: OracleDbType.timestamp),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('raw type rejects a String value', () {
+      expect(
+        () => OracleBind.inOut(
+            value: 'abc', type: OracleDbType.raw, maxSize: 10),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('raw type accepts a Uint8List value', () {
+      final spec = OracleBind.inOut(
+          value: Uint8List.fromList([1, 2, 3]),
+          type: OracleDbType.raw,
+          maxSize: 10);
+      expect(spec.value, isA<Uint8List>());
+    });
+
+    test('null IN OUT values bypass the mismatch check', () {
+      // Null carries no runtime type; type-mismatch validation must allow it
+      // for every declared Oracle type.
+      expect(() => OracleBind.inOut(value: null, type: OracleDbType.number),
+          returnsNormally);
+      expect(
+          () => OracleBind.inOut(
+              value: null, type: OracleDbType.varchar, maxSize: 10),
+          returnsNormally);
+      expect(() => OracleBind.inOut(value: null, type: OracleDbType.date),
+          returnsNormally);
+    });
+
+    test('Review patch — number type rejects NaN at construction', () {
+      // Pre-patch, `double.nan` was accepted because `nan is num` is true; the
+      // failure only surfaced inside `encodeNumber` during wire encoding. The
+      // patch adds a finite-double check to `_validate` so the error happens
+      // at the call site.
+      expect(
+        () => OracleBind.inOut(
+            value: double.nan, type: OracleDbType.number),
+        throwsArgumentError,
+      );
+    });
+
+    test('Review patch — number type rejects +Infinity and -Infinity', () {
+      expect(
+        () => OracleBind.inOut(
+            value: double.infinity, type: OracleDbType.number),
+        throwsArgumentError,
+      );
+      expect(
+        () => OracleBind.inOut(
+            value: double.negativeInfinity, type: OracleDbType.number),
+        throwsArgumentError,
+      );
+    });
+
+    test('matching value/type pairs construct successfully', () {
+      // Smoke-test the happy paths so the new validation does not over-reject.
+      expect(() => OracleBind.inOut(value: 42, type: OracleDbType.number),
+          returnsNormally);
+      expect(
+          () => OracleBind.inOut(value: 1.5, type: OracleDbType.number),
+          returnsNormally);
+      expect(
+          () => OracleBind.inOut(
+              value: 'hi', type: OracleDbType.varchar, maxSize: 10),
+          returnsNormally);
+      expect(
+          () => OracleBind.inOut(
+              value: DateTime(2026, 1, 1), type: OracleDbType.date),
+          returnsNormally);
+    });
+  });
+
+  group('Story 7.2 — OracleOutBinds lookup contract (AC7, AC8)', () {
+    test('AC7 — unsupported key type throws ArgumentError', () {
+      // The contract is "int (index) or String (name)" — any other key type
+      // must fail loudly rather than return null and hide the caller bug.
+      final out = OracleOutBinds(values: [1], names: {'v': 0});
+      expect(() => out[#symbolKey], throwsA(isA<ArgumentError>()));
+      expect(() => out[3.14], throwsA(isA<ArgumentError>()));
+      expect(() => out[true], throwsA(isA<ArgumentError>()));
+    });
+
+    test('AC7 — known string and index lookups remain non-throwing', () {
+      final out = OracleOutBinds(values: [1], names: {'v': 0});
+      expect(out['v'], equals(1));
+      expect(out[0], equals(1));
+      // Unknown name / out-of-range index still return null per the documented
+      // contract — only *unsupported key types* throw.
+      expect(out['missing'], isNull);
+      expect(out[5], isNull);
+    });
+
+    test('AC8 — repeated named bind index maps to first occurrence', () {
+      // First-occurrence semantics for a repeated named IN OUT bind:
+      // both placeholders share the bind name, but `outBinds['v']` reports
+      // the value bound at the first SQL position. We construct the
+      // container directly with the index map a real `BEGIN myproc(:v, :v)`
+      // call would produce.
+      final out = OracleOutBinds(
+        values: ['firstOnly'],
+        names: {'v': 0},
+      );
+      expect(out['v'], equals('firstOnly'));
+      // Case-insensitive lookup applies the same way.
+      expect(out['V'], equals('firstOnly'));
     });
   });
 }

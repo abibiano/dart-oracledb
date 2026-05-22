@@ -17,9 +17,24 @@
 /// ```
 library;
 
+import 'dart:typed_data';
+
 import 'errors.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/messages/execute_message.dart' show BindDir;
+
+// AC5: Direction enum boundary.
+//
+// `OracleBind.direction` exposes the internal `BindDir` enum (defined in
+// `protocol/messages/execute_message.dart`) because the public API for
+// declaring a direction is the named constructors `OracleBind.out` and
+// `OracleBind.inOut` — callers never construct a direction value directly.
+// `BindDir` is intentionally NOT re-exported from `lib/oracledb.dart`; the
+// public `OracleBind.direction` field is the only allowed touch-point for
+// consumers, and it satisfies that contract via its enum `name`. There is
+// no separate public `BindDirection` enum in this codebase. Keep this
+// boundary stable unless a future story explicitly promotes the protocol
+// enum into the public API.
 
 /// Dart-facing Oracle data type for binds.
 ///
@@ -66,7 +81,7 @@ class OracleBind {
   OracleBind.out({required this.type, this.maxSize})
       : value = null,
         direction = BindDir.output {
-    _validate(type, maxSize);
+    _validate(type, maxSize, null);
   }
 
   /// Declares an IN OUT bind: sends [value] to the server and reads the
@@ -83,10 +98,10 @@ class OracleBind {
     required this.type,
     this.maxSize,
   }) : direction = BindDir.inputOutput {
-    _validate(type, maxSize);
+    _validate(type, maxSize, value);
   }
 
-  static void _validate(OracleDbType type, int? maxSize) {
+  static void _validate(OracleDbType type, int? maxSize, Object? value) {
     if (maxSize != null && maxSize <= 0) {
       throw OracleException(
         errorCode: oraBindTypeError,
@@ -99,6 +114,47 @@ class OracleBind {
         errorCode: oraBindTypeError,
         message: 'OracleBind(type: $type) requires maxSize',
       );
+    }
+    // AC6: For IN OUT binds (and any future spec that passes a non-null
+    // value into `_validate`), the value's Dart runtime type must match the
+    // declared Oracle type. Catching this at construction is much friendlier
+    // than letting a mismatch surface as a ClassCastError during wire
+    // encoding, which is far from the call site. OUT-only binds always pass
+    // `value: null` and are unaffected.
+    if (value == null) return;
+    switch (type) {
+      case OracleDbType.number:
+        if (value is! num) {
+          throw ArgumentError.value(value, 'value',
+              'OracleBind(type: number) requires int, double, num, or null');
+        }
+        // Oracle NUMBER cannot represent NaN/±Infinity. Reject at
+        // construction so the failure surfaces at the call site, not deep
+        // inside `encodeNumber` during wire encoding.
+        if (value is double && !value.isFinite) {
+          throw ArgumentError.value(value, 'value',
+              'OracleBind(type: number) cannot bind NaN or Infinity');
+        }
+      case OracleDbType.varchar:
+        if (value is! String) {
+          throw ArgumentError.value(value, 'value',
+              'OracleBind(type: varchar) requires String or null');
+        }
+      case OracleDbType.date:
+        if (value is! DateTime) {
+          throw ArgumentError.value(value, 'value',
+              'OracleBind(type: date) requires DateTime or null');
+        }
+      case OracleDbType.timestamp:
+        if (value is! DateTime) {
+          throw ArgumentError.value(value, 'value',
+              'OracleBind(type: timestamp) requires DateTime or null');
+        }
+      case OracleDbType.raw:
+        if (value is! Uint8List) {
+          throw ArgumentError.value(value, 'value',
+              'OracleBind(type: raw) requires Uint8List or null');
+        }
     }
   }
 
@@ -143,8 +199,19 @@ class OracleBind {
 /// result.outBinds[0];       // positional lookup over OUT/IN OUT outputs
 /// ```
 ///
-/// Returns `null` when the bind name/index does not exist or the server
-/// returned NULL.
+/// Lookup contract:
+/// - Unknown [String] names return `null`.
+/// - Out-of-range [int] indices return `null`.
+/// - The server returning SQL NULL is reported as `null`.
+/// - Any other key type throws [ArgumentError]; the container's keys are
+///   strictly `int` (index) or `String` (name).
+///
+/// **Repeated named binds** map to the first SQL occurrence of the bind
+/// name, mirroring the bind-preparation semantics in
+/// [OracleConnection.execute]. Example: `BEGIN myproc(:v, :v); END;` with
+/// an `IN OUT` declaration on `:v` round-trips through the first
+/// placeholder; `outBinds['v']` returns the value bound to that
+/// occurrence.
 class OracleOutBinds {
   /// Creates an empty container (no OUT binds).
   const OracleOutBinds.empty()
@@ -182,9 +249,13 @@ class OracleOutBinds {
   /// Number of OUT binds.
   int get length => _values.length;
 
-  /// Looks up a bind value by name (case-insensitive) or index.
+  /// Looks up a bind value by name (case-insensitive) or zero-based index.
   ///
-  /// Returns `null` if the key is unknown or the value is SQL NULL.
+  /// Returns `null` if the name/index is not in this container or if the
+  /// value is SQL NULL. Throws [ArgumentError] for any key type other than
+  /// [int] or [String] — silent `null` would hide caller bugs such as
+  /// passing a `Symbol` or a `num` that does not fit the int contract
+  /// (AC7).
   Object? operator [](Object key) {
     if (key is int) {
       if (key < 0 || key >= _values.length) return null;
@@ -195,7 +266,9 @@ class OracleOutBinds {
       if (idx == null) return null;
       return _values[idx];
     }
-    return null;
+    throw ArgumentError.value(key, 'key',
+        'OracleOutBinds keys must be int (index) or String (name); '
+            'got ${key.runtimeType}');
   }
 
   /// Returns all values in bind order as an unmodifiable list.

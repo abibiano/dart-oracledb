@@ -130,5 +130,102 @@ void main() {
         );
       });
     });
+
+    // Story 7.3 AC5 — Duplicate bind-name guard for PL/SQL inputs.
+    //
+    // The validator in connection.execute() was previously tested only against
+    // plain SELECT/DML shapes. These tests pin the same guard against PL/SQL
+    // shapes where it is legitimate to repeat a placeholder name in multiple
+    // SQL positions and expect the bind map to provide one value per unique
+    // name. Exercised via the package-internal helper so no live Oracle
+    // session is required.
+    group('validateNamedBindCount (Story 7.3 AC5)', () {
+      test(
+          'PL/SQL block with duplicate placeholder and wrong bind-map count '
+          'throws ORA-01008', () {
+        // `BEGIN p(:a, :a, :b); END;` — two distinct names, three positions.
+        // Bind map provides three values, but only two are needed (the
+        // duplicate `:a` reuses the value). Mismatch → ORA-01008.
+        final bindNames = BindParser.parseNamedBinds(
+          'BEGIN proc_x(:a, :a, :b); END;',
+        );
+        expect(bindNames, equals(['a', 'a', 'b']),
+            reason: 'parseNamedBinds preserves duplicates in SQL order');
+
+        expect(
+          () => BindParser.validateNamedBindCount(bindNames, 3),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraBindMismatch)
+                .having((e) => e.message, 'message',
+                    contains('2 unique placeholders'))
+                .having(
+                    (e) => e.message, 'message', contains('3 values provided')),
+          ),
+        );
+      });
+
+      test(
+          'PL/SQL block with duplicate placeholder and correct bind-map count '
+          'passes', () {
+        // Same SQL as above, but the caller provides one value per *unique*
+        // name (a, b). This is the contract the validator must accept.
+        final bindNames = BindParser.parseNamedBinds(
+          'BEGIN proc_x(:a, :a, :b); END;',
+        );
+        expect(
+          () => BindParser.validateNamedBindCount(bindNames, 2),
+          returnsNormally,
+        );
+      });
+
+      test(
+          'PL/SQL DECLARE block with repeated :ret duplicate counts collapse '
+          'via toSet()', () {
+        // PL/SQL DECLARE shape with a repeated placeholder name. The
+        // `uniqueNames.toSet()` path must collapse `:ret` to a single unique
+        // name and reject a 2-value bind map.
+        final bindNames = BindParser.parseNamedBinds(
+          'DECLARE v NUMBER; BEGIN :ret := story73_add(:a, :ret); END;',
+        );
+        // The parser walks the SQL in order, so duplicate names are emitted
+        // wherever they appear (here `:ret` appears twice).
+        expect(bindNames, contains('ret'));
+        expect(bindNames.where((n) => n == 'ret').length, equals(2));
+
+        // Three SQL positions, two unique names (ret, a). Providing three
+        // values is wrong — must throw.
+        expect(
+          () => BindParser.validateNamedBindCount(bindNames, 3),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraBindMismatch)),
+        );
+
+        // Providing two values (one per unique name) is correct.
+        expect(
+          () => BindParser.validateNamedBindCount(bindNames, 2),
+          returnsNormally,
+        );
+      });
+
+      test('plain SELECT with duplicate :val and wrong count throws ORA-01008',
+          () {
+        // Regression — the existing SELECT/DML path that previously embedded
+        // the same logic now routes through the extracted helper.
+        final bindNames = BindParser.parseNamedBinds(
+          'SELECT :val AS a, :val AS b FROM dual',
+        );
+        expect(bindNames, equals(['val', 'val']));
+        expect(
+          () => BindParser.validateNamedBindCount(bindNames, 2),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraBindMismatch)),
+        );
+        expect(
+          () => BindParser.validateNamedBindCount(bindNames, 1),
+          returnsNormally,
+        );
+      });
+    });
   });
 }

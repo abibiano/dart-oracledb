@@ -161,5 +161,203 @@ void main() {
     test('PL/SQL CALL is not eligible', () {
       expect(isCacheEligibleSql('CALL my_proc()'), isFalse);
     });
+
+    // Story 7.3 — MERGE classification parity with INSERT/UPDATE/DELETE.
+    test('MERGE is eligible (Story 7.3 AC1)', () {
+      expect(
+        isCacheEligibleSql(
+          'MERGE INTO target t USING source s ON (t.id = s.id) '
+          'WHEN MATCHED THEN UPDATE SET t.val = s.val',
+        ),
+        isTrue,
+      );
+    });
+
+    test('MERGE is not a query (Story 7.3 AC1)', () {
+      expect(
+        isQuerySql(
+          'MERGE INTO target t USING source s ON (t.id = s.id) '
+          'WHEN MATCHED THEN UPDATE SET t.val = s.val',
+        ),
+        isFalse,
+      );
+    });
+  });
+
+  // Story 7.3 — CTE-with-DML classification.
+  group('WITH-CTE classification (Story 7.3 AC1)', () {
+    test('WITH ... SELECT remains a query', () {
+      const sql = 'WITH cte AS (SELECT 1 FROM dual) SELECT * FROM cte';
+      expect(isQuerySql(sql), isTrue);
+      expect(isCacheEligibleSql(sql), isTrue);
+    });
+
+    test('WITH ... INSERT is DML, not a query', () {
+      const sql =
+          'WITH src AS (SELECT 1 AS id FROM dual) '
+          'INSERT INTO t (id) SELECT id FROM src';
+      expect(isQuerySql(sql), isFalse,
+          reason: 'CTE-backed INSERT must classify as DML so rowsAffected is '
+              'populated');
+      expect(isCacheEligibleSql(sql), isTrue);
+    });
+
+    test('WITH ... UPDATE is DML, not a query', () {
+      const sql =
+          'WITH src AS (SELECT 1 AS id FROM dual) '
+          'UPDATE t SET val = val + 1 WHERE id IN (SELECT id FROM src)';
+      expect(isQuerySql(sql), isFalse);
+      expect(isCacheEligibleSql(sql), isTrue);
+    });
+
+    test('WITH ... DELETE is DML, not a query', () {
+      const sql =
+          'WITH src AS (SELECT 1 AS id FROM dual) '
+          'DELETE FROM t WHERE id IN (SELECT id FROM src)';
+      expect(isQuerySql(sql), isFalse);
+      expect(isCacheEligibleSql(sql), isTrue);
+    });
+
+    test('WITH ... MERGE is DML, not a query', () {
+      const sql =
+          'WITH src AS (SELECT 1 AS id, 2 AS val FROM dual) '
+          'MERGE INTO t USING src ON (t.id = src.id) '
+          'WHEN MATCHED THEN UPDATE SET t.val = src.val';
+      expect(isQuerySql(sql), isFalse);
+      expect(isCacheEligibleSql(sql), isTrue);
+    });
+
+    test('multiple CTEs followed by SELECT still classify as query', () {
+      const sql =
+          'WITH a AS (SELECT 1 AS x FROM dual), '
+          'b AS (SELECT 2 AS y FROM dual) '
+          'SELECT a.x, b.y FROM a, b';
+      expect(isQuerySql(sql), isTrue);
+      expect(isCacheEligibleSql(sql), isTrue);
+    });
+
+    test('multiple CTEs followed by INSERT classify as DML', () {
+      const sql =
+          'WITH a AS (SELECT 1 AS id FROM dual), '
+          'b AS (SELECT 2 AS id FROM dual) '
+          'INSERT INTO t (id) SELECT id FROM a UNION ALL SELECT id FROM b';
+      expect(isQuerySql(sql), isFalse);
+      expect(isCacheEligibleSql(sql), isTrue);
+    });
+
+    test('CTE inner SELECT keywords do not steal terminal-verb match', () {
+      // The inner SELECT lives inside parens; the scanner must keep paren
+      // depth >0 throughout and only match the terminal INSERT at depth 0.
+      const sql =
+          'WITH src AS (SELECT id FROM (SELECT 1 AS id FROM dual)) '
+          'INSERT INTO t (id) SELECT id FROM src';
+      expect(isQuerySql(sql), isFalse);
+      expect(isCacheEligibleSql(sql), isTrue);
+    });
+
+    test('CTE with string literal containing parens does not corrupt depth',
+        () {
+      // A literal `'('` or `')'` inside the CTE expression must not be
+      // interpreted as a real paren — otherwise the depth tracker would
+      // never return to zero (or would return early) and the terminal verb
+      // would not be found.
+      const sql =
+          "WITH src AS (SELECT '(' || ')' AS s FROM dual) "
+          'INSERT INTO t (s) SELECT s FROM src';
+      expect(isCacheEligibleSql(sql), isTrue);
+      expect(isQuerySql(sql), isFalse);
+    });
+
+    test('malformed WITH with no terminal verb is not classified', () {
+      const sql = 'WITH cte AS (SELECT 1 FROM dual)';
+      expect(isQuerySql(sql), isFalse);
+      expect(isCacheEligibleSql(sql), isFalse);
+    });
+
+    test('bare WITH keyword alone is not classified', () {
+      expect(isQuerySql('WITH'), isFalse);
+      expect(isCacheEligibleSql('WITH'), isFalse);
+    });
+
+    test('WITH case-insensitive (lower-case terminal verb)', () {
+      expect(
+        isQuerySql('with cte as (select 1 from dual) select * from cte'),
+        isTrue,
+      );
+      expect(
+        isCacheEligibleSql(
+            'with cte as (select 1 from dual) insert into t select * from cte'),
+        isTrue,
+      );
+    });
+  });
+
+  // Story 7.3 — Leading parenthesis no longer reclassifies malformed SQL.
+  group('paren-prefixed SQL is not reclassified (Story 7.3 AC2)', () {
+    test('(BEGIN ... END;) is NOT classified as PL/SQL', () {
+      // Pre-7.3 behavior stripped the leading `(` and matched BEGIN. The
+      // story's contract is that a leading paren signals malformed input
+      // and the inner verb is not promoted.
+      expect(isPlSqlSql('(BEGIN NULL; END;)'), isFalse);
+    });
+
+    test('(DELETE FROM t) is NOT classified as DML / cache-eligible', () {
+      expect(isCacheEligibleSql('(DELETE FROM t)'), isFalse);
+      expect(isQuerySql('(DELETE FROM t)'), isFalse);
+    });
+
+    test('((SELECT 1 FROM dual)) is NOT classified as a query', () {
+      expect(isQuerySql('((SELECT 1 FROM dual))'), isFalse);
+      expect(isCacheEligibleSql('((SELECT 1 FROM dual))'), isFalse);
+    });
+
+    test('whitespace before leading paren is still rejected', () {
+      // `skipSqlPrefixes` advances past whitespace but stops at `(`.
+      expect(isPlSqlSql('   (BEGIN NULL; END;)'), isFalse);
+      expect(isQuerySql('   (SELECT 1 FROM dual)'), isFalse);
+    });
+
+    test('comment before leading paren is still rejected', () {
+      expect(isPlSqlSql('/* hint */(BEGIN NULL; END;)'), isFalse);
+      expect(isQuerySql('-- comment\n(SELECT 1 FROM dual)'), isFalse);
+    });
+
+    test('SELECT with embedded inner parens still classifies normally', () {
+      // Only LEADING parens are rejected; parens inside the statement after
+      // the verb are perfectly fine.
+      expect(isQuerySql('SELECT (1 + 2) FROM dual'), isTrue);
+      expect(isCacheEligibleSql('INSERT INTO t (id) VALUES (1)'), isTrue);
+    });
+  });
+
+  // Story 7.3 — CR-only line-comment termination.
+  group('CR-only line-comment termination (Story 7.3 AC3)', () {
+    test('CR-terminated -- comment lets SELECT through (isQuerySql)', () {
+      // Classic Mac line ending (\r only). Pre-7.3 the scanner only
+      // recognised \n and would swallow the whole line including SELECT.
+      expect(isQuerySql('-- comment\rSELECT 1 FROM dual'), isTrue);
+    });
+
+    test('CR-terminated -- comment lets BEGIN through (isPlSqlSql)', () {
+      expect(isPlSqlSql('-- comment\rBEGIN NULL; END;'), isTrue);
+    });
+
+    test('CR-terminated -- comment lets INSERT through (isCacheEligibleSql)',
+        () {
+      expect(
+        isCacheEligibleSql('-- comment\rINSERT INTO t VALUES (1)'),
+        isTrue,
+      );
+    });
+
+    test('CRLF-terminated -- comment still works', () {
+      // \r\n: scanner stops on \r, then the loop in skipSqlPrefixes treats
+      // \n as whitespace.
+      expect(isQuerySql('-- comment\r\nSELECT 1 FROM dual'), isTrue);
+    });
+
+    test('LF-terminated -- comment still works (regression)', () {
+      expect(isQuerySql('-- comment\nSELECT 1 FROM dual'), isTrue);
+    });
   });
 }

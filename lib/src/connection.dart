@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:meta/meta.dart';
+
 import 'package:logging/logging.dart';
 
 import 'crypto/auth.dart';
@@ -53,6 +55,15 @@ class OracleConnection {
 
   /// The configured statement cache size for this connection.
   int get statementCacheSize => _cache.maxSize;
+
+  /// Current number of cached statements.
+  ///
+  /// Exposed for integration tests (Story 7.3 AC4) to assert that PL/SQL
+  /// blocks are not stored in the statement cache. This getter is accessible
+  /// on any `OracleConnection` reference; production callers must not depend
+  /// on it — it exists solely to support test instrumentation.
+  @visibleForTesting
+  int get debugCacheSize => _cache.size;
 
   /// Whether the connection is currently open and usable.
   ///
@@ -205,15 +216,7 @@ class OracleConnection {
         // Named binds - parseNamedBinds returns names in SQL order,
         // including duplicates (e.g., `:a + :a` returns ['a', 'a'])
         bindNames = BindParser.parseNamedBinds(sql);
-        final uniqueNames = bindNames.toSet();
-        if (uniqueNames.length != bindValues.length) {
-          throw OracleException(
-            errorCode: oraBindMismatch,
-            message:
-                'Bind parameter count mismatch: SQL has ${uniqueNames.length} '
-                'unique placeholders but ${bindValues.length} values provided',
-          );
-        }
+        BindParser.validateNamedBindCount(bindNames, bindValues.length);
         // Order values by their appearance in SQL
         bindList = bindNames.map((name) {
           if (!bindValues.containsKey(name)) {
@@ -285,7 +288,10 @@ class OracleConnection {
             dir: raw.direction,
           ));
         } else {
-          bindMetadata.add(BindMetadata(oraType: _inferOraType(raw)));
+          bindMetadata.add(BindMetadata(
+            oraType: _inferOraType(raw),
+            dir: BindDir.input,
+          ));
         }
       }
     }

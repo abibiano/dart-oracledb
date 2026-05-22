@@ -48,6 +48,31 @@ bool isNullValue(Uint8List data) {
 ///     value is distinct from any encoded digit because `101 - digit` for
 ///     digit ∈ [0,99] yields bytes in [2,101]).
 Uint8List encodeNumber(num value) {
+  // Reject non-finite doubles up front — Oracle NUMBER has no representation
+  // for NaN/±Infinity, and silently coercing them would produce a garbage
+  // mantissa.
+  if (value is double && !value.isFinite) {
+    throw OracleException(
+      errorCode: oraDataTypeNotSupported,
+      message: 'Oracle NUMBER cannot represent $value',
+    );
+  }
+
+  // Reject doubles outside Oracle NUMBER's documented exponent range
+  // [1E-130, 9.99...E125]. Smaller (`double.minPositive` ≈ 5E-324) or larger
+  // values cannot round-trip and would otherwise drive `_decimalString` to
+  // allocate massive intermediate strings or produce a garbage exponent.
+  if (value is double && value != 0) {
+    final magnitude = value.abs();
+    if (magnitude < 1e-130 || magnitude >= 1e126) {
+      throw OracleException(
+        errorCode: oraDataTypeNotSupported,
+        message: 'Oracle NUMBER cannot represent $value '
+            '(magnitude outside [1E-130, 1E126))',
+      );
+    }
+  }
+
   if (value == 0) {
     // Special case: zero is encoded as single byte 0x80
     return Uint8List.fromList([0x80]);
@@ -56,17 +81,24 @@ Uint8List encodeNumber(num value) {
   final isNegative = value < 0;
   final absValue = value.abs();
 
-  // Convert to string to extract all digits precisely
-  var valueStr = absValue.toStringAsFixed(20); // Get enough precision
-  valueStr = valueStr.replaceAll(RegExp(r'0+$'), ''); // Remove trailing zeros
-  if (valueStr.endsWith('.')) {
-    valueStr = valueStr.substring(0, valueStr.length - 1);
-  }
+  // Build a plain-decimal string from the value.
+  //
+  // `num.toString()` returns the shortest round-trip decimal for doubles
+  // (e.g. `(678.9).toString() == '678.9'`, not `'678.8999999999999...'`).
+  // This avoids the trailing-9 / trailing-0 artifacts that `toStringAsFixed`
+  // injects for values not exactly representable in IEEE 754. Scientific
+  // notation that Dart emits for very small/large doubles (`1e-7`, `1.5e+21`)
+  // is expanded to plain decimal so the digit-extraction loop below stays
+  // simple. Matches the node-oracledb reference `writeOracleNumber`, which
+  // also operates on a string representation of the number.
+  final decimalStr = _decimalString(absValue);
+  final dotIdx = decimalStr.indexOf('.');
+  var intPart = dotIdx < 0 ? decimalStr : decimalStr.substring(0, dotIdx);
+  var fracPart = dotIdx < 0 ? '' : decimalStr.substring(dotIdx + 1);
 
-  // Split into integer and fractional parts
-  final parts = valueStr.split('.');
-  var intPart = parts[0];
-  var fracPart = parts.length > 1 ? parts[1] : '';
+  // Trim trailing zeros from the fractional part only — never from the
+  // integer part, where `'100'` must not collapse to `'1'`.
+  fracPart = fracPart.replaceAll(RegExp(r'0+$'), '');
 
   // Remove leading zeros from integer part
   intPart = intPart.replaceFirst(RegExp(r'^0+'), '');
@@ -139,7 +171,27 @@ Uint8List encodeNumber(num value) {
 ///
 /// Returns [int] if the number has no fractional part and fits in int range,
 /// otherwise returns [double] to preserve decimal precision.
-num decodeNumber(ReadBuffer buffer) {
+///
+/// [length] bounds the field on the wire. When provided, decoding stops after
+/// exactly [length] bytes have been consumed from the buffer, even if the
+/// terminator sentinel (`0x66`) is absent. Oracle omits the terminator for
+/// negative NUMBERs whose encoding fills the declared length, so relying on
+/// `hasRemaining` alone would consume bytes that belong to the following
+/// field. When [length] is null the decoder reads until the terminator or
+/// `hasRemaining` becomes false — appropriate when the buffer is already
+/// scoped to a single field (e.g. a slice).
+num decodeNumber(ReadBuffer buffer, [int? length]) {
+  // An explicit zero-length wire field is not a valid NUMBER: the NULL case
+  // is signaled by the column indicator before this function is called, so a
+  // length=0 NUMBER reaching us means the stream is misaligned. Bail out
+  // before reading a byte we have no right to consume.
+  if (length == 0) {
+    throw const OracleException(
+      errorCode: oraProtocolError,
+      message: 'NUMBER field has zero length (stream misaligned)',
+    );
+  }
+  final startPos = buffer.position;
   final firstByte = buffer.readUint8();
 
   // Special case: zero
@@ -163,7 +215,12 @@ num decodeNumber(ReadBuffer buffer) {
   // Read mantissa digits (base-100)
   final digits = <int>[];
 
-  while (buffer.hasRemaining) {
+  bool boundReached() {
+    if (length != null && buffer.position - startPos >= length) return true;
+    return !buffer.hasRemaining;
+  }
+
+  while (!boundReached()) {
     final byte = buffer.readUint8();
 
     // Check for negative terminator
@@ -201,6 +258,18 @@ num decodeNumber(ReadBuffer buffer) {
     result = -result;
   }
 
+  // Symmetric with the encode-side rejection of NaN/±Infinity: if the
+  // decoded value overflowed `_pow100` (Oracle exponent past ~+155) the
+  // result is non-finite and cannot be exposed to callers. Surface as a
+  // protocol error rather than silently returning Infinity.
+  if (!result.isFinite) {
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message: 'Decoded Oracle NUMBER overflowed Dart double range '
+          '(exponent=$exponent)',
+    );
+  }
+
   // Return int if no fractional part and within safe int range
   // Safe int range: JavaScript number limit (conservative)
   const maxSafeInt = 9007199254740992; // 2^53
@@ -209,6 +278,36 @@ num decodeNumber(ReadBuffer buffer) {
   }
 
   return result;
+}
+
+/// Returns a plain-decimal string for [absValue] without scientific notation.
+///
+/// For `int`, this is just `toString()`. For `double`, `num.toString()` gives
+/// the shortest round-trip decimal, but Dart switches to scientific notation
+/// for very small/large values (`1e-7`, `1.5e+21`). This helper expands those
+/// into the equivalent plain-decimal form so [encodeNumber] can extract digits
+/// with a single linear scan.
+String _decimalString(num absValue) {
+  if (absValue is int) return absValue.toString();
+  final s = absValue.toString();
+  final eIdx = s.indexOf(RegExp(r'[eE]'));
+  if (eIdx < 0) return s;
+
+  final mantissa = s.substring(0, eIdx);
+  final exp = int.parse(s.substring(eIdx + 1));
+  final dotIdx = mantissa.indexOf('.');
+  final intDigits = dotIdx < 0 ? mantissa : mantissa.substring(0, dotIdx);
+  final fracDigits = dotIdx < 0 ? '' : mantissa.substring(dotIdx + 1);
+  final allDigits = intDigits + fracDigits;
+  final pointIdx = intDigits.length + exp; // position of decimal in allDigits
+
+  if (pointIdx <= 0) {
+    return '0.${'0' * (-pointIdx)}$allDigits';
+  }
+  if (pointIdx >= allDigits.length) {
+    return '$allDigits${'0' * (pointIdx - allDigits.length)}';
+  }
+  return '${allDigits.substring(0, pointIdx)}.${allDigits.substring(pointIdx)}';
 }
 
 /// Helper function to calculate powers of 100.
@@ -244,6 +343,16 @@ double _pow100(int exponent) {
 /// - Byte 5: Minute + 1 (1-60)
 /// - Byte 6: Second + 1 (1-60)
 Uint8List encodeDate(DateTime dt) {
+  // Symmetric with decodeDate: BCE (year < 1) cannot be represented in the
+  // wire encoding without ambiguity, and silently encoding `(-44 % 100)+100`
+  // as AD year 56 (the previous behavior) would be wrong-era data going to
+  // the server. Reject explicitly at the encode boundary.
+  if (dt.year < 1) {
+    throw OracleException(
+      errorCode: oraUnsupportedType,
+      message: 'BCE DATE values are not supported (year=${dt.year})',
+    );
+  }
   return Uint8List.fromList([
     (dt.year ~/ 100) + 100, // Century
     (dt.year % 100) + 100, // Year
@@ -256,8 +365,21 @@ Uint8List encodeDate(DateTime dt) {
 }
 
 /// Decodes Oracle DATE format to DateTime.
+///
+/// Throws [OracleException] (`oraUnsupportedType`) when the century byte
+/// indicates a BCE year. Oracle encodes BCE as `100 - abs(century)`, so any
+/// century byte below 100 is BCE and is rejected explicitly rather than
+/// silently corrupted into a wrong AD year.
 DateTime decodeDate(ReadBuffer buffer) {
-  final century = buffer.readUint8() - 100;
+  final centuryByte = buffer.readUint8();
+  if (centuryByte < 100) {
+    throw OracleException(
+      errorCode: oraUnsupportedType,
+      message: 'BCE DATE values are not supported '
+          '(century byte $centuryByte < 100)',
+    );
+  }
+  final century = centuryByte - 100;
   final year = buffer.readUint8() - 100;
   final month = buffer.readUint8();
   final day = buffer.readUint8();
@@ -281,7 +403,24 @@ DateTime decodeDate(ReadBuffer buffer) {
 /// Note: Oracle TIMESTAMP supports nanosecond precision (9 digits after decimal),
 /// but Dart DateTime only supports microsecond precision (6 digits after decimal).
 /// The nanosecond field is populated from DateTime.microsecond * 1000.
+///
+/// **Time-zone contract:** This encoder writes only the 11-byte wall-clock
+/// form (no TZ trailer). `DateTime.timeZoneOffset` is intentionally NOT
+/// encoded — encoding a TZ-aware variant requires column-type knowledge
+/// (plain TIMESTAMP vs TIMESTAMP WITH TIME ZONE) that the bind layer does
+/// not have. Callers binding to a `TIMESTAMP WITH TIME ZONE` column should
+/// pass a UTC `DateTime` (`DateTime.utc(...)`) to make the wall-clock
+/// unambiguous; a local-time `DateTime` is written as wall-clock-at-server,
+/// which is generally what Oracle expects for plain `TIMESTAMP` columns.
 Uint8List encodeTimestamp(DateTime dt) {
+  // Symmetric with decodeTimestamp: reject BCE rather than silently producing
+  // an AD wire payload via the `% 100` arithmetic.
+  if (dt.year < 1) {
+    throw OracleException(
+      errorCode: oraUnsupportedType,
+      message: 'BCE TIMESTAMP values are not supported (year=${dt.year})',
+    );
+  }
   // First 7 bytes are the same as DATE
   final result = <int>[
     (dt.year ~/ 100) + 100, // Century
@@ -307,7 +446,7 @@ Uint8List encodeTimestamp(DateTime dt) {
   return Uint8List.fromList(result);
 }
 
-/// Decodes Oracle TIMESTAMP format to DateTime.
+/// Decodes Oracle TIMESTAMP format to [DateTime].
 ///
 /// Oracle TIMESTAMP wire format:
 /// - Bytes 0-6: DATE portion (always present)
@@ -316,11 +455,40 @@ Uint8List encodeTimestamp(DateTime dt) {
 ///
 /// Oracle truncates trailing zero bytes in date/timestamp wire payloads, so a
 /// TIMESTAMP whose fractional-seconds (and TZ) are all zero arrives as 7 bytes.
-/// Treat the fractional and TZ bytes as optional, defaulting to zero.
+/// Fractional and TZ bytes are therefore treated as optional, defaulting to
+/// zero.
 ///
-/// Note: Oracle nanoseconds are truncated to microseconds for Dart DateTime.
+/// **Time-zone handling (13-byte payload):** byte 11 encodes the TZ hour as
+/// `tzHour + 20` and byte 12 encodes the TZ minute as `tzMinute + 60`. The
+/// returned [DateTime] is constructed in UTC with the offset applied
+/// (`wallClock - offset`), so a `TIMESTAMP WITH [LOCAL] TIME ZONE` round-trips
+/// to the same absolute instant rather than silently dropping the zone.
+/// When `byte11 & 0x80 != 0`, byte 11 encodes a *region id* (e.g.
+/// `'America/Los_Angeles'`) rather than a numeric offset; the region table is
+/// not bundled with the driver, so this case raises [OracleException]
+/// (`oraUnsupportedType`) instead of misinterpreting the value as a numeric
+/// offset.
+///
+/// **Sub-microsecond contract:** Oracle TIMESTAMP carries nanosecond
+/// precision; Dart [DateTime] supports only microseconds. Sub-microsecond
+/// digits are **truncated toward zero** (`nanos ~/ 1000`), not rounded. A
+/// value of `.123456789` decodes to `.123456`. Callers that need full
+/// nanosecond precision must read the raw bytes themselves.
+///
+/// **BCE rejection:** Oracle encodes BCE century as `100 - abs(century)`, so
+/// any century byte below 100 is BCE. [OracleException]
+/// (`oraUnsupportedType`) is thrown explicitly rather than silently producing
+/// a wrong-era DateTime.
 DateTime decodeTimestamp(ReadBuffer buffer) {
-  final century = buffer.readUint8() - 100;
+  final centuryByte = buffer.readUint8();
+  if (centuryByte < 100) {
+    throw OracleException(
+      errorCode: oraUnsupportedType,
+      message: 'BCE TIMESTAMP values are not supported '
+          '(century byte $centuryByte < 100)',
+    );
+  }
+  final century = centuryByte - 100;
   final year = buffer.readUint8() - 100;
   final month = buffer.readUint8();
   final day = buffer.readUint8();
@@ -347,25 +515,56 @@ DateTime decodeTimestamp(ReadBuffer buffer) {
         buffer.readUint8();
   }
 
-  // TZ-variant trailing bytes (when present) are not surfaced to Dart DateTime.
+  int? tzHourOffset;
+  int? tzMinuteOffset;
   if (remaining == 6) {
-    buffer.readUint8();
-    buffer.readUint8();
+    final byte11 = buffer.readUint8();
+    final byte12 = buffer.readUint8();
+    if ((byte11 & 0x80) != 0) {
+      throw OracleException(
+        errorCode: oraUnsupportedType,
+        message: 'TIMESTAMP region-id time zones are not supported '
+            '(byte11=0x${byte11.toRadixString(16)})',
+      );
+    }
+    tzHourOffset = byte11 - 20;
+    tzMinuteOffset = byte12 - 60;
+    // Oracle's documented TZ offset range is [-12:59, +14:00]. A wire byte
+    // pair that decodes outside this band (e.g. byte11=0 → -20h) indicates
+    // either a corrupted payload or a server-protocol drift. Reject rather
+    // than silently constructing a wildly wrong instant via `subtract()`.
+    if (tzHourOffset < -12 ||
+        tzHourOffset > 14 ||
+        tzMinuteOffset < -59 ||
+        tzMinuteOffset > 59) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'TIMESTAMP TZ offset out of range: '
+            '$tzHourOffset:$tzMinuteOffset (bytes $byte11/$byte12)',
+      );
+    }
   }
 
   final micros = nanos ~/ 1000;
   final millisecond = micros ~/ 1000;
   final microsecond = micros % 1000;
+  final dateYear = century * 100 + year;
+
+  if (tzHourOffset != null) {
+    // Wire fields encode a wall-clock time at the recorded offset. Build that
+    // wall-clock in UTC, then subtract the offset to get the absolute instant
+    // — this is the only way to surface a TZ-aware value through Dart's
+    // offset-less DateTime without dropping information.
+    final wallClock = DateTime.utc(
+      dateYear, month, day, hour, minute, second, millisecond, microsecond,
+    );
+    return wallClock.subtract(
+      Duration(hours: tzHourOffset, minutes: tzMinuteOffset!),
+    );
+  }
 
   return DateTime(
-    century * 100 + year,
-    month,
-    day,
-    hour,
-    minute,
-    second,
-    millisecond,
-    microsecond,
+    dateYear, month, day, hour, minute, second, millisecond, microsecond,
   );
 }
 
@@ -374,11 +573,25 @@ DateTime decodeTimestamp(ReadBuffer buffer) {
 // ============================================================================
 
 /// Encodes a string to Oracle VARCHAR2 format (UTF-8 bytes).
+///
+/// **Empty string semantics:** Oracle treats `''` as `NULL` for `VARCHAR2`
+/// columns. A bound or inlined empty string therefore round-trips back as
+/// `null`, not as a zero-length `String`. Callers that need to preserve the
+/// distinction must use a non-VARCHAR2 type or a sentinel value.
 Uint8List encodeVarchar(String value) {
   return Uint8List.fromList(utf8.encode(value));
 }
 
-/// Decodes Oracle VARCHAR2 format to String.
+/// Decodes Oracle VARCHAR2/CHAR format to String.
+///
+/// **CHAR(N) padding:** `CHAR(N)` columns are server-side padded with trailing
+/// spaces to N bytes; this decoder returns the padded payload verbatim
+/// (`CHAR(10)` containing `'ab'` decodes as `'ab        '`). Callers that
+/// want a trimmed value must call `String.trimRight()` themselves.
+///
+/// **VARCHAR2 empty/NULL contract:** see [encodeVarchar] — Oracle stores `''`
+/// as `NULL`, so a column whose original value was `''` is reported as `null`
+/// by the result set rather than reaching this decoder.
 String decodeVarchar(ReadBuffer buffer, int length) {
   final bytes = buffer.readBytes(length);
   return utf8.decode(bytes);
@@ -480,7 +693,7 @@ dynamic decodeValue(ReadBuffer buffer, int oracleType, int length) {
     case oraTypeInteger:
     case oraTypeFloat:
     case oraTypeVarnum:
-      return decodeNumber(buffer);
+      return decodeNumber(buffer, length);
 
     case oraTypeDate:
       return decodeDate(buffer);

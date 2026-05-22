@@ -1356,6 +1356,167 @@ void main() {
     });
   });
 
+  // Story 7.3 — SQL classification across CTE and MERGE shapes.
+  //
+  // Confirms that the classifier changes in Story 7.3 preserve the user-
+  // visible `OracleResult.rowsAffected` contract end-to-end:
+  //
+  //   * `WITH cte AS (...) SELECT` remains a query (rows returned, no
+  //     misclassification as DML).
+  //   * `INSERT INTO t WITH cte AS (...) SELECT ...` reports rowsAffected.
+  //   * `MERGE INTO ...` reports rowsAffected (parity with INSERT/UPDATE/
+  //     DELETE; previously not classified as cache-eligible DML).
+  //
+  // Note on `WITH ... INSERT/UPDATE/DELETE`: Oracle does not support a
+  // CTE prefix *before* a DML verb (`WITH cte AS (...) INSERT INTO t ...`
+  // is rejected with ORA-00928 "missing SELECT keyword"). The classifier
+  // still handles that shape defensively so that, if the grammar ever
+  // changes, rowsAffected is reported correctly — see the WITH-CTE unit
+  // tests in `test/src/sql_classifier_test.dart`. The integration suite
+  // covers the supported Oracle shapes here.
+  group('Story 7.3 — CTE/MERGE classification end-to-end',
+      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+    late OracleConnection connection;
+    const testTable = 'test_story73_cte';
+
+    setUp(() async {
+      connection = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        statementCacheSize: 50,
+      );
+      try {
+        await connection.execute('''
+          CREATE TABLE $testTable (
+            id NUMBER PRIMARY KEY,
+            val VARCHAR2(50)
+          )
+        ''');
+      } on OracleException catch (e) {
+        if (e.errorCode == 955) {
+          try {
+            await connection.execute('TRUNCATE TABLE $testTable');
+          } catch (_) {
+            await connection.close();
+            rethrow;
+          }
+        } else {
+          await connection.close();
+          rethrow;
+        }
+      }
+    });
+
+    tearDown(() async {
+      try {
+        await connection.execute('DROP TABLE $testTable');
+      } on OracleException catch (e) {
+        if (e.errorCode != 942) rethrow;
+      } finally {
+        await connection.close();
+      }
+    });
+
+    test(
+        'WITH cte AS (...) SELECT remains a query — rows returned, '
+        'rowsAffected is null', () async {
+      final result = await connection.execute(
+        'WITH cte AS (SELECT 1 AS id FROM dual UNION ALL '
+        'SELECT 2 AS id FROM dual) SELECT * FROM cte ORDER BY id',
+      );
+      // Query semantics: rows are populated.
+      expect(result.rows, hasLength(2));
+      expect(result.rows[0]['ID'], equals(1));
+      expect(result.rows[1]['ID'], equals(2));
+      // Pre-7.3 this was already `null` because `WITH => query`, but the
+      // new code reaches the same conclusion through the explicit
+      // terminal-verb scan — pin the contract here so a future regression
+      // in the CTE-DML path cannot silently flip SELECT to DML.
+      expect(result.rowsAffected, isNull,
+          reason: 'WITH ... SELECT is a query, not DML');
+    });
+
+    test('INSERT INTO t WITH cte AS (...) SELECT ... reports rowsAffected',
+        () async {
+      // The leading verb is INSERT, so the classifier path matches INSERT
+      // directly — the WITH inside the SELECT subquery does not perturb
+      // classification. This guards the supported Oracle CTE-in-DML shape.
+      final result = await connection.execute(
+        'INSERT INTO $testTable (id, val) '
+        'WITH src AS (SELECT 10 AS id, \'cte-insert\' AS val FROM dual) '
+        'SELECT id, val FROM src',
+      );
+      expect(result.rowsAffected, equals(1),
+          reason: 'CTE-in-DML must populate rowsAffected like plain INSERT');
+
+      // Verify the row actually landed.
+      final verify = await connection.execute(
+        'SELECT val FROM $testTable WHERE id = :1',
+        [10],
+      );
+      expect(verify.rows.single['VAL'], equals('cte-insert'));
+    });
+
+    test('MERGE INTO ... reports rowsAffected (Story 7.3 AC1 parity)',
+        () async {
+      // Seed an existing row and a new row via a source that MERGE can
+      // pick up.
+      await connection.execute(
+        'INSERT INTO $testTable (id, val) VALUES (:1, :2)',
+        [1, 'existing'],
+      );
+
+      final result = await connection.execute(
+        'MERGE INTO $testTable t '
+        'USING (SELECT 1 AS id, \'updated\' AS val FROM dual UNION ALL '
+        '       SELECT 2 AS id, \'inserted\' AS val FROM dual) src '
+        'ON (t.id = src.id) '
+        'WHEN MATCHED THEN UPDATE SET t.val = src.val '
+        'WHEN NOT MATCHED THEN INSERT (id, val) VALUES (src.id, src.val)',
+      );
+
+      // Oracle reports 2 (1 update + 1 insert) for a MERGE that touches
+      // both branches. Story 7.3 must classify this as DML so rowsAffected
+      // is populated.
+      expect(result.rowsAffected, equals(2),
+          reason: 'MERGE must populate rowsAffected like INSERT/UPDATE/DELETE');
+
+      // Confirm the merge did what we expect.
+      final check = await connection.execute(
+        'SELECT id, val FROM $testTable ORDER BY id',
+      );
+      expect(check.rows, hasLength(2));
+      expect(check.rows[0]['VAL'], equals('updated'));
+      expect(check.rows[1]['VAL'], equals('inserted'));
+    });
+
+    test(
+        'plain DML rowsAffected contract is unchanged after classifier '
+        'rework (regression)', () async {
+      // After the WITH/MERGE-aware classifier rewrite, plain INSERT/UPDATE/
+      // DELETE must still go through the eligible-DML path with
+      // rowsAffected populated.
+      final ins = await connection.execute(
+        'INSERT INTO $testTable (id, val) VALUES (:1, :2)',
+        [100, 'plain'],
+      );
+      expect(ins.rowsAffected, equals(1));
+
+      final upd = await connection.execute(
+        'UPDATE $testTable SET val = :1 WHERE id = :2',
+        ['plain-upd', 100],
+      );
+      expect(upd.rowsAffected, equals(1));
+
+      final del = await connection.execute(
+        'DELETE FROM $testTable WHERE id = :1',
+        [100],
+      );
+      expect(del.rowsAffected, equals(1));
+    });
+  });
+
   // Story 2.8 - Query Error Handling
   group('Query error handling',
       skip: !hasOracle ? 'Integration tests disabled' : null, () {

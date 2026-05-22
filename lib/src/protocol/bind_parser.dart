@@ -133,6 +133,32 @@ class BindParser {
     return hasNamed;
   }
 
+  /// Validates that the number of unique named bind placeholders in
+  /// [bindNames] matches [providedValueCount].
+  ///
+  /// Used by [OracleConnection.execute] to surface ORA-01008 when the caller
+  /// supplies the wrong number of values for a named-bind SQL — including
+  /// PL/SQL blocks that legitimately reuse a placeholder name in multiple
+  /// SQL positions (e.g. `BEGIN p(:a, :a); END;`). Duplicates collapse via
+  /// `toSet()` so the comparison is against the count of *distinct* names.
+  ///
+  /// Exposed as a top-level static helper so unit tests can exercise the
+  /// guard without opening a live Oracle session (Story 7.3 AC5).
+  static void validateNamedBindCount(
+    List<String> bindNames,
+    int providedValueCount,
+  ) {
+    final uniqueNames = bindNames.toSet();
+    if (uniqueNames.length != providedValueCount) {
+      throw OracleException(
+        errorCode: oraBindMismatch,
+        message: 'Bind parameter count mismatch: SQL has '
+            '${uniqueNames.length} unique placeholders but '
+            '$providedValueCount values provided',
+      );
+    }
+  }
+
   /// Checks if a character is a digit (0-9).
   static bool _isDigit(String char) =>
       char.codeUnitAt(0) >= 48 && char.codeUnitAt(0) <= 57;

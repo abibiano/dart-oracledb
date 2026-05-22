@@ -139,6 +139,127 @@ void main() {
       expect(decoded, isA<double>());
       expect(decoded is int, isFalse);
     });
+
+    // Story 7.1 - AC3: non-finite rejection
+    test('rejects double.nan', () {
+      expect(
+        () => encodeNumber(double.nan),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraDataTypeNotSupported)),
+      );
+    });
+
+    test('rejects double.infinity', () {
+      expect(
+        () => encodeNumber(double.infinity),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraDataTypeNotSupported)),
+      );
+    });
+
+    test('rejects double.negativeInfinity', () {
+      expect(
+        () => encodeNumber(double.negativeInfinity),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraDataTypeNotSupported)),
+      );
+    });
+
+    // Story 7.1 - AC4: artifact-free digit extraction
+    test('encodes 678.90 without trailing-9 mantissa artifacts', () {
+      // Regression: the old toStringAsFixed(20) path produced a mantissa
+      // ending in 9 because 678.9 has no exact IEEE 754 representation.
+      //
+      // 678.9 splits to integer "678" (padded to "0678" for even pairs) and
+      // fractional "9" (padded to "90"), giving base-100 digits 6, 78, 90 and
+      // exponent 2. Positive encoding adds 1 to each digit:
+      //   exponent: 192 + 2 = 0xC2
+      //   digits:   6+1=0x07, 78+1=0x4F, 90+1=0x5B
+      final encoded = encodeNumber(678.90);
+      expect(encoded, equals(Uint8List.fromList([0xC2, 0x07, 0x4F, 0x5B])));
+      // Decode must round-trip exactly.
+      expect(decodeNumber(ReadBuffer(encoded)), equals(678.9));
+    });
+
+    test('encodes 0.1 + 0.2 without precision artifacts', () {
+      // 0.1 + 0.2 = 0.30000000000000004 in IEEE 754. num.toString() reports
+      // the shortest round-trip, so the encoded value must match that exact
+      // double when decoded back.
+      const v = 0.1 + 0.2;
+      final encoded = encodeNumber(v);
+      expect(decodeNumber(ReadBuffer(encoded)), closeTo(v, 1e-15));
+    });
+
+    test('encodes integer-valued double without collapsing trailing zeros',
+        () {
+      // Regression guard: stripping trailing zeros from the full numeric
+      // string would turn 100 into 1. After Story 7.1 the trim is fractional
+      // only.
+      for (final v in <num>[100, 1000, 1234567890, 100.0, 100.50]) {
+        final encoded = encodeNumber(v);
+        final decoded = decodeNumber(ReadBuffer(encoded));
+        expect(decoded, equals(v), reason: 'Failed for $v');
+      }
+    });
+
+    test('encodes large integer-valued double 123456789012345.67', () {
+      const v = 123456789012345.67;
+      final encoded = encodeNumber(v);
+      final decoded = decodeNumber(ReadBuffer(encoded));
+      expect(decoded, closeTo(v, 0.01));
+    });
+
+    test('encodes 1.005 without binary-rounding artifacts', () {
+      // 1.005 is the canonical IEEE-754 binary-rounding surprise — it stores
+      // as ~1.00499999999999989. num.toString() reports the shortest
+      // round-trip ("1.005"), so the encoded mantissa must reflect that
+      // value, not the underlying bit pattern.
+      const v = 1.005;
+      final encoded = encodeNumber(v);
+      final decoded = decodeNumber(ReadBuffer(encoded));
+      expect(decoded, closeTo(v, 1e-15));
+    });
+
+    // Story 7.1 - AC2: decodeNumber stops at declared length
+    test('decodeNumber with explicit length stops at field boundary', () {
+      // Encode -100 (negative number whose encoding may omit the 0x66
+      // terminator at the declared length) followed by garbage bytes that
+      // belong to a hypothetical next field on the wire.
+      final encoded = encodeNumber(-100);
+      final fieldLen = encoded.length;
+      final wire = Uint8List.fromList([
+        ...encoded,
+        0xDE, 0xAD, 0xBE, 0xEF, 0x01, // trailing field bytes
+      ]);
+      final buf = ReadBuffer(wire);
+      final value = decodeNumber(buf, fieldLen);
+      expect(value, equals(-100));
+      // Exactly the encoded bytes were consumed; the trailing bytes are
+      // available for the next field's decoder.
+      expect(buf.position, equals(fieldLen));
+      expect(buf.remaining, equals(5));
+    });
+
+    test('decodeNumber length stops decoding even without terminator', () {
+      // Hand-build a negative NUMBER without the 0x66 sentinel — Oracle
+      // omits it when the encoded byte count fills the declared field.
+      // Value: -1, encoded as exponent 0x3E (≈ ~(192+0) & 0xFF) and digit
+      // byte 100 (= 101 - 1).
+      final fieldBytes = encodeNumber(-1);
+      // Strip the trailing 0x66 if present, to simulate Oracle's truncation.
+      Uint8List trimmed = fieldBytes;
+      if (fieldBytes.last == 0x66) {
+        trimmed = Uint8List.fromList(
+          fieldBytes.sublist(0, fieldBytes.length - 1),
+        );
+      }
+      // Append unrelated bytes after.
+      final wire = Uint8List.fromList([...trimmed, 0x42, 0x42]);
+      final buf = ReadBuffer(wire);
+      final value = decodeNumber(buf, trimmed.length);
+      expect(value, equals(-1));
+      expect(buf.remaining, equals(2));
+    });
   });
 
   group('Oracle TIMESTAMP encoding', () {
@@ -222,6 +343,98 @@ void main() {
       expect(timestampEncoded.length, equals(11));
       expect(dateEncoded.length, equals(7));
     });
+
+    // Story 7.1 - AC1: TZ offset extraction
+    test('decodes 13-byte TZ payload with +05:30 offset to UTC', () {
+      // Wall-clock 2024-03-15 10:30:45.123 at +05:30 == 05:00:45.123 UTC.
+      // Build the wire bytes by hand: DATE portion + nanos + TZ.
+      final dateBytes = encodeTimestamp(
+        DateTime.utc(2024, 3, 15, 10, 30, 45, 123),
+      );
+      final wire = Uint8List.fromList([
+        ...dateBytes,
+        20 + 5, // byte 11: hour offset +5
+        60 + 30, // byte 12: minute offset +30
+      ]);
+      final decoded = decodeTimestamp(ReadBuffer(wire));
+      expect(decoded.isUtc, isTrue);
+      expect(
+        decoded,
+        equals(DateTime.utc(2024, 3, 15, 5, 0, 45, 123)),
+      );
+    });
+
+    test('decodes 13-byte TZ payload with -08:00 offset to UTC', () {
+      final dateBytes = encodeTimestamp(
+        DateTime.utc(2024, 3, 15, 10, 30, 45),
+      );
+      // -8:00 means hour byte = 20 + (-8) = 12, minute byte = 60 + 0 = 60.
+      final wire = Uint8List.fromList([...dateBytes, 12, 60]);
+      final decoded = decodeTimestamp(ReadBuffer(wire));
+      expect(decoded.isUtc, isTrue);
+      expect(decoded, equals(DateTime.utc(2024, 3, 15, 18, 30, 45)));
+    });
+
+    test('decodes 13-byte TZ payload with +00:00 offset', () {
+      final dateBytes = encodeTimestamp(
+        DateTime.utc(2024, 3, 15, 10, 30, 45),
+      );
+      final wire = Uint8List.fromList([...dateBytes, 20, 60]);
+      final decoded = decodeTimestamp(ReadBuffer(wire));
+      expect(decoded.isUtc, isTrue);
+      expect(decoded, equals(DateTime.utc(2024, 3, 15, 10, 30, 45)));
+    });
+
+    test('rejects TZ region-id payload (byte11 high bit set)', () {
+      final dateBytes = encodeTimestamp(
+        DateTime.utc(2024, 3, 15, 10, 30, 45),
+      );
+      // 0x80 set on byte 11 = region id, not a numeric offset.
+      final wire = Uint8List.fromList([...dateBytes, 0x80, 0x01]);
+      expect(
+        () => decodeTimestamp(ReadBuffer(wire)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
+      );
+    });
+
+    // Story 7.1 - AC6: sub-microsecond truncation contract
+    test('truncates sub-microsecond fractional seconds toward zero', () {
+      // Build an 11-byte TIMESTAMP whose nanosecond field is 123_456_789ns.
+      // Expected: microseconds == 123_456 (floor). The rounding contract is
+      // explicitly floor (`nanos ~/ 1000`), not banker's rounding.
+      const nanos = 123456789;
+      final wire = Uint8List.fromList([
+        120, // century 2000s (20 + 100)
+        124, // year 24 (24 + 100)
+        3, // month
+        15, // day
+        11, // hour 10 (10 + 1)
+        31, // minute 30 (30 + 1)
+        46, // second 45 (45 + 1)
+        (nanos >> 24) & 0xFF,
+        (nanos >> 16) & 0xFF,
+        (nanos >> 8) & 0xFF,
+        nanos & 0xFF,
+      ]);
+      final decoded = decodeTimestamp(ReadBuffer(wire));
+      expect(decoded.millisecond * 1000 + decoded.microsecond, equals(123456));
+    });
+
+    // Story 7.1 - AC7: BCE rejection
+    test('rejects BCE TIMESTAMP (century byte < 100)', () {
+      // Oracle encodes BCE century as 100 - abs(century). Any byte < 100 is BCE.
+      final wire = Uint8List.fromList([
+        99, // BCE century
+        100,
+        1, 1, 1, 1, 1, // DATE portion fillers (encoded values, +1 offset)
+      ]);
+      expect(
+        () => decodeTimestamp(ReadBuffer(wire)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
+      );
+    });
   });
 
   group('Oracle DATE encoding', () {
@@ -286,6 +499,16 @@ void main() {
         final decoded = decodeDate(ReadBuffer(encoded));
         expect(decoded, equals(dt), reason: 'Failed for date: $dt');
       }
+    });
+
+    // Story 7.1 - AC7: BCE rejection
+    test('rejects BCE DATE (century byte < 100)', () {
+      final wire = Uint8List.fromList([99, 100, 1, 1, 1, 1, 1]);
+      expect(
+        () => decodeDate(ReadBuffer(wire)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
+      );
     });
   });
 
@@ -423,6 +646,74 @@ void main() {
         expect(e.errorCode, equals(oraUnsupportedType));
         expect(e.message, contains('9999'));
       }
+    });
+  });
+
+  group('Review patches — encode/decode symmetry hardening', () {
+    test('encodeDate rejects BCE years symmetrically with decode', () {
+      expect(
+        () => encodeDate(DateTime(-44, 3, 15)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
+      );
+      expect(
+        () => encodeDate(DateTime(0, 1, 1)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
+      );
+    });
+
+    test('encodeTimestamp rejects BCE years symmetrically with decode', () {
+      expect(
+        () => encodeTimestamp(DateTime(-1, 1, 1, 12)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
+      );
+    });
+
+    test('encodeNumber rejects magnitudes outside Oracle NUMBER range', () {
+      // double.minPositive ≈ 5e-324 — below Oracle's 1e-130 floor.
+      expect(
+        () => encodeNumber(double.minPositive),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraDataTypeNotSupported)),
+      );
+      // 1e200 — above Oracle's 1e126 ceiling.
+      expect(
+        () => encodeNumber(1e200),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraDataTypeNotSupported)),
+      );
+    });
+
+    test('decodeNumber rejects zero-length wire field', () {
+      // A NUMBER with length=0 (not the NULL-indicator path) is a stream
+      // misalignment, not a legal Oracle response. Bail before consuming a
+      // byte we have no right to.
+      final buffer = ReadBuffer(Uint8List.fromList([0xC1, 6]));
+      expect(
+        () => decodeNumber(buffer, 0),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+      );
+    });
+
+    test(
+        'decodeTimestamp rejects out-of-range TZ offset bytes (corrupted '
+        'wire payload)', () {
+      // 13-byte TIMESTAMP with byte11=0 (→ -20h, well below the legal -12h
+      // floor). Must surface as a protocol error rather than silently
+      // constructing a wildly wrong UTC instant.
+      final bytes = Uint8List.fromList([
+        120, 126, 3, 15, 11, 31, 46, // DATE portion (2026-03-15 10:30:45)
+        0, 0, 0, 0, // nanos=0
+        0, 60, // byte11=0 → -20h, byte12=60 → 0 minutes
+      ]);
+      expect(
+        () => decodeTimestamp(ReadBuffer(bytes)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+      );
     });
   });
 }

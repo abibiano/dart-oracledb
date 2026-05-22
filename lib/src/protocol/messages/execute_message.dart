@@ -471,10 +471,16 @@ class ColumnMetadata {
 /// the response stream. Order must match the order of binds sent on the wire.
 class BindMetadata {
   /// Creates bind metadata for one bind variable.
+  ///
+  /// [dir] is required (no default): the IO_VECTOR consistency check in
+  /// `_processIoVector` compares server-reported direction to this field, so
+  /// silently defaulting to [BindDir.input] for an OUT/IN OUT bind would
+  /// produce a spurious "client declared IN" protocol error at decode time.
+  /// All call sites must pass the actual direction explicitly.
   const BindMetadata({
     required this.oraType,
+    required this.dir,
     this.maxSize,
-    this.dir = BindDir.input,
   });
 
   /// Oracle wire-protocol type indicator.
@@ -644,6 +650,14 @@ class _DecodeState {
   final List<BindMetadata> bindMetadata;
   final List<int> outBindIndices = [];
   final List<Object?> outBindValues = [];
+
+  /// Set after the first PL/SQL OUT-bind ROW_DATA has been decoded. Tracked
+  /// explicitly (not derived from `outBindValues.isEmpty`) so that an
+  /// all-null first ROW_DATA does not re-enable decoding on a subsequent
+  /// ROW_DATA packet. Each decode pass owns its own `_DecodeState`, so this
+  /// flag resets naturally between `ttcStreamIsComplete` and
+  /// `decodeExecuteResponse`.
+  bool outBindsDecoded = false;
 
   /// Server-side TNS_CCAP_END_OF_REQUEST capability. On pre-23.4 servers
   /// (false), an ERROR TTC message terminates the response — no STATUS or
@@ -821,9 +835,11 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
   // SELECT responses use ROW_DATA after DESCRIBE_INFO + ROW_HEADER to ship
   // result rows. The two never mix on the same statement.
   if (!s.isQuery && s.outBindIndices.isNotEmpty) {
-    // Guard against double-decode: a single PL/SQL execution produces exactly
-    // one ROW_DATA with all OUT bind values; if called again, skip.
-    if (s.outBindValues.isEmpty) {
+    // AC3: A single PL/SQL execution produces exactly one ROW_DATA with all
+    // OUT bind values. `outBindsDecoded` is the authoritative guard against
+    // re-decoding — relying on `outBindValues.isEmpty` would re-enable
+    // decode whenever every OUT bind decoded to NULL.
+    if (!s.outBindsDecoded) {
       for (final bindIdx in s.outBindIndices) {
         if (bindIdx >= s.bindMetadata.length) {
           // Server returned more OUT slots than the client declared binds.
@@ -840,6 +856,7 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
         buf.skipSB4();
         s.outBindValues.add(value);
       }
+      s.outBindsDecoded = true;
     }
     return;
   }
@@ -883,6 +900,10 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType) {
     case oraTypeVarnum:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
+      // The slice from readBytesWithLength already constrains the field, so we
+      // do not need to pass `length` to decodeNumber here — the equivalent
+      // column-decode path in data_types.dart `decodeValue` does pass length
+      // because it reads directly from the row buffer.
       return dt.decodeNumber(ReadBuffer(bytes));
     case oraTypeDate:
       final bytes = buf.readBytesWithLength();
@@ -923,25 +944,92 @@ void _processIoVector(ReadBuffer buf, _DecodeState s) {
   buf.skipUB1(); // flag
   final temp16 = buf.readUB2();
   final temp32 = buf.readUB4();
-  // node-oracledb: readUB2() | (readUB4() << 16) — low 16 bits | high 32 bits shifted
-  final numBinds = temp16 | (temp32 << 16);
+  // Matches node-oracledb processIOVector (reference/node-oracledb/lib/thin/
+  // protocol/messages/withData.js:399): `numBinds = temp32 * 256 + temp16`.
+  // In practice the high field (`temp32`) is 0 for every call this driver
+  // issues (PL/SQL is single-iter and bulk DML is not supported yet), so the
+  // value collapses to `temp16`. The formula is preserved verbatim for
+  // behavioral parity with the reference client.
+  final numBinds = temp32 * 256 + temp16;
   buf.skipUB4(); // num iters this time
   buf.skipUB2(); // uac buffer length
   final fastFetchLen = buf.readUB2();
   if (fastFetchLen > 0) buf.skip(fastFetchLen);
   final rowidLen = buf.readUB2();
   if (rowidLen > 0) buf.skip(rowidLen);
+
+  // Realistic Oracle bind counts are well under 65535 — Oracle's documented
+  // hard limit is 65535 binds per statement. A computed `numBinds` beyond
+  // that bound indicates either a corrupted stream or a server-protocol
+  // change; bail out before iterating into unknown bytes (AC9).
+  if (numBinds > 65535) {
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message: 'IO_VECTOR reports an implausible bind count: $numBinds',
+    );
+  }
+
   // Build the ordered list of OUT bind indices declared by the server. Reset
   // first so a re-decode pass (e.g. ttcStreamIsComplete + decodeExecuteResponse)
-  // does not double-count entries.
+  // OR a second IO_VECTOR within the same pass does not double-count entries
+  // or leak stale decoded values into the next ROW_DATA.
   s.outBindIndices.clear();
+  s.outBindValues.clear();
+  s.outBindsDecoded = false;
   for (var i = 0; i < numBinds; i++) {
     final dir = buf.readUint8();
-    // tnsBindDirOutput (16) and tnsBindDirInputOutput (48) both mean the
-    // server will return a value for this bind in a subsequent ROW_DATA.
-    if (dir != tnsBindDirInput) {
-      s.outBindIndices.add(i);
+    // AC1: Only the three documented TTC bind directions are valid. Any
+    // other byte means the stream is misaligned or the server protocol has
+    // drifted — raise a protocol error rather than silently treat unknown
+    // bytes as outputs.
+    if (dir != tnsBindDirInput &&
+        dir != tnsBindDirOutput &&
+        dir != tnsBindDirInputOutput) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'IO_VECTOR reports an unknown bind direction byte at bind '
+            'index $i: $dir (expected 16, 32, or 48)',
+      );
     }
+
+    // AC2: When metadata is available for this bind, the server-reported
+    // direction must agree with the client-declared one. A mismatch is a
+    // hard error — silently following the server direction would re-decode
+    // unexpected bytes and corrupt later result extraction. This check fires
+    // for ALL direction flavors (including server-IN), so that a server
+    // reporting IN for a client-declared OUT/IN OUT bind is caught as well
+    // as the inverse cases. Missing metadata (i.e. `i >= bindMetadata.length`)
+    // keeps the conservative stream behavior in `_processRowData`.
+    if (i < s.bindMetadata.length) {
+      final clientDir = s.bindMetadata[i].dir;
+      final serverIsIn = dir == tnsBindDirInput;
+      final serverIsOut = dir == tnsBindDirOutput;
+      final serverName = serverIsIn ? 'IN' : (serverIsOut ? 'OUT' : 'IN OUT');
+      if (clientDir == BindDir.input && !serverIsIn) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message: 'IO_VECTOR bind direction mismatch at index $i: '
+              'client declared IN but server reported $serverName ($dir)',
+        );
+      }
+      if (clientDir == BindDir.output && !serverIsOut) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message: 'IO_VECTOR bind direction mismatch at index $i: '
+              'client declared output but server reported $serverName ($dir)',
+        );
+      }
+      if (clientDir == BindDir.inputOutput && dir != tnsBindDirInputOutput) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message: 'IO_VECTOR bind direction mismatch at index $i: '
+              'client declared inputOutput but server reported $serverName ($dir)',
+        );
+      }
+    }
+
+    if (dir == tnsBindDirInput) continue;
+    s.outBindIndices.add(i);
   }
 }
 
