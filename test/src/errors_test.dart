@@ -93,6 +93,97 @@ void main() {
         expect((e.cause as StateError).message, equals('Original error'));
       }
     });
+
+    // Story 2.8: canonical ORA formatting and query context.
+    group('canonical ORA code formatting (Story 2.8)', () {
+      test('low Oracle code is padded to ORA-NNNNN', () {
+        const exception = OracleException(
+          errorCode: 942,
+          message: 'table or view does not exist',
+        );
+        expect(exception.code, equals('ORA-00942'));
+        expect(exception.toString(), contains('ORA-00942'));
+      });
+
+      test('ORA-00001 duplicate key padding', () {
+        const exception = OracleException(
+          errorCode: 1,
+          message: 'unique constraint violated',
+        );
+        expect(exception.code, equals('ORA-00001'));
+        expect(exception.toString(), contains('ORA-00001'));
+      });
+
+      test('high TNS code keeps 5-digit form', () {
+        const exception = OracleException(
+          errorCode: 12170,
+          message: 'TNS:Connect timeout occurred',
+        );
+        expect(exception.code, equals('ORA-12170'));
+        expect(exception.toString(), contains('ORA-12170'));
+      });
+
+      test('errorCode storage is unaffected by formatting', () {
+        const exception = OracleException(
+          errorCode: 942,
+          message: 'table or view does not exist',
+        );
+        expect(exception.errorCode, equals(942));
+      });
+    });
+
+    group('query error context (Story 2.8)', () {
+      test('sql and offset are null by default', () {
+        const exception = OracleException(
+          errorCode: 942,
+          message: 'table or view does not exist',
+        );
+        expect(exception.sql, isNull);
+        expect(exception.offset, isNull);
+      });
+
+      test('sql and offset are exposed when provided', () {
+        const exception = OracleException(
+          errorCode: 942,
+          message: 'table or view does not exist',
+          sql: 'SELECT * FROM missing_table',
+          offset: 14,
+        );
+        expect(exception.sql, equals('SELECT * FROM missing_table'));
+        expect(exception.offset, equals(14));
+      });
+
+      test('toString includes offset when present', () {
+        const exception = OracleException(
+          errorCode: 942,
+          message: 'table or view does not exist',
+          sql: 'SELECT * FROM missing_table',
+          offset: 14,
+        );
+        expect(exception.toString(), contains('offset=14'));
+      });
+
+      test('toString does not include offset when null', () {
+        const exception = OracleException(
+          errorCode: 12170,
+          message: 'TNS:Connect timeout occurred',
+        );
+        expect(exception.toString(), isNot(contains('offset=')));
+      });
+
+      test('toString does not expose bind values (no bind storage)', () {
+        const sentinel = 'story28_secret_bind_value';
+        const exception = OracleException(
+          errorCode: 942,
+          message: 'table or view does not exist',
+          sql: 'SELECT * FROM missing WHERE x = :1',
+          offset: 14,
+        );
+        expect(exception.toString(), isNot(contains(sentinel)),
+            reason: 'OracleException must not store or render bind values');
+        expect(exception.message, isNot(contains(sentinel)));
+      });
+    });
   });
 
   group('Common Oracle Error Codes', () {

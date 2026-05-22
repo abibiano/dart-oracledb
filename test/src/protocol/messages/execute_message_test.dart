@@ -238,6 +238,32 @@ void main() {
       expect(r.isSuccess, isTrue);
       expect(r.moreRowsToFetch, isFalse);
     });
+
+    // Story 2.8: preserve SQL error offset on failure responses.
+    test('error response exposes SQL error offset from TTC ERROR', () {
+      final payload = _buildPayload([
+        _errorMessage(
+            errorNum: 942,
+            errorOffset: 14,
+            errorMessage: 'table or view does not exist'),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.isSuccess, isFalse);
+      expect(r.errorCode, equals(942));
+      expect(r.errorOffset, equals(14),
+          reason: 'SB4 error position must be preserved on the response');
+    });
+
+    test('successful response has null errorOffset', () {
+      final payload = _buildPayload([
+        _errorMessage(errorNum: 0, rowCount: 1),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.isSuccess, isTrue);
+      expect(r.errorOffset, isNull);
+    });
   });
 }
 
@@ -369,6 +395,7 @@ List<int> _bytesWithLength(List<int> data) {
 List<int> _errorMessage({
   int errorNum = 0,
   int rowCount = 0,
+  int errorOffset = 0,
   String? errorMessage,
 }) {
   final out = <int>[ttcMsgTypeError];
@@ -379,8 +406,8 @@ List<int> _errorMessage({
   out.addAll(_ub2(0)); // array elem
   out.addAll(_ub2(0)); // array elem
   out.addAll(_ub4(0)); // cursor id (decoder reads readUB4)
-  out.addAll(
-      _ub2(0)); // error position (SB4 in wire; encoded same as UB2 for 0)
+  // error position (SB4 on wire); use _ub4 to match the 4-byte readSB4 read.
+  out.addAll(_ub4(errorOffset));
   out.add(0); // sql type
   out.add(0); // fatal
   out.add(0); // flags

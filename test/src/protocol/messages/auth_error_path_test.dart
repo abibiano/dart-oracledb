@@ -291,7 +291,8 @@ void main() {
           errorCode: oraInvalidCredentials,
           message: 'Authentication failed: invalid username or password',
         );
-        expect(e.toString(), contains('ORA-$oraInvalidCredentials'),
+        // Story 2.8: canonical 5-digit ORA padding for codes below 10000.
+        expect(e.toString(), contains('ORA-01017'),
             reason: 'ORA-01017 is the Oracle invalid-credentials error code');
         // The ~5-second Oracle 23ai brute-force delay is validated by the
         // stopwatch assertion in test/integration/security_test.dart.

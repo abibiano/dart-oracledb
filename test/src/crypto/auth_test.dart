@@ -70,7 +70,8 @@ void main() {
       );
 
       final str = exception.toString();
-      expect(str, contains('ORA-1017'));
+      // Story 2.8: canonical 5-digit ORA padding for codes below 10000.
+      expect(str, contains('ORA-01017'));
       expect(str, contains('invalid username/password'));
     });
   });

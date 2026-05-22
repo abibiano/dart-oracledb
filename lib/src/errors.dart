@@ -50,10 +50,14 @@ class OracleException implements Exception {
   /// The [errorCode] should be a standard Oracle error code (e.g., 12170).
   /// The [message] provides a human-readable description of the error.
   /// The optional [cause] preserves the original error for debugging.
+  /// The optional [sql] and [offset] carry query-error context for
+  /// server-side failures surfaced via TTC ERROR messages.
   const OracleException({
     required this.errorCode,
     required this.message,
     this.cause,
+    this.sql,
+    this.offset,
   });
 
   /// The Oracle error code (e.g., 12170 for TNS:Connect timeout).
@@ -68,9 +72,29 @@ class OracleException implements Exception {
   /// access to the underlying system error details.
   final Object? cause;
 
+  /// The full SQL text (with bind placeholders) when the error originated from
+  /// a server-side query execution. Null for non-query errors.
+  ///
+  /// Stores the raw SQL with placeholders (`:name`, `:1`) — bind values are
+  /// never substituted. [message] carries a length-bounded snippet (≤200 chars)
+  /// suitable for log lines; this field carries the complete text for callers
+  /// that need programmatic access.
+  final String? sql;
+
+  /// The character offset into [sql] where Oracle reports the error, when
+  /// the server returns a SQL error position. Null otherwise.
+  final int? offset;
+
+  /// Canonical Oracle error code formatted as `ORA-NNNNN` with five-digit
+  /// zero padding (e.g., `ORA-00942`, `ORA-12170`).
+  String get code => 'ORA-${errorCode.toString().padLeft(5, '0')}';
+
   @override
   String toString() {
-    final buffer = StringBuffer('OracleException: ORA-$errorCode: $message');
+    final buffer = StringBuffer('OracleException: $code: $message');
+    if (offset != null) {
+      buffer.write(' [offset=$offset]');
+    }
     if (cause != null) {
       buffer.write('\nCaused by: $cause');
     }

@@ -158,6 +158,21 @@ class OracleConnection {
     return pos;
   }
 
+  /// Bounded SQL snippet length included in query-failure messages.
+  ///
+  /// Mirrors node-oracledb's pragmatic single-line cap: long enough to spot
+  /// the failing statement at a glance, short enough that an arbitrary blob
+  /// of SQL cannot blow up log lines.
+  static const int _maxSqlSnippetLength = 200;
+
+  /// Returns [sql] unchanged when short, otherwise a length-bounded snippet
+  /// suffixed with an ellipsis. Never substitutes bind values — only raw SQL
+  /// with placeholders is exposed, preserving bind privacy (AC5).
+  static String _truncateSql(String sql) {
+    if (sql.length <= _maxSqlSnippetLength) return sql;
+    return '${sql.substring(0, _maxSqlSnippetLength)}...';
+  }
+
   /// Throws [OracleException] if connection is closed.
   ///
   /// This guard method is called by operations that require an open connection
@@ -299,9 +314,15 @@ class OracleConnection {
           _cache.invalidate(sql);
           cacheEntry = null;
         }
+        final serverMessage = response.errorMessage ?? 'Query execution failed';
         throw OracleException(
           errorCode: response.errorCode ?? oraProtocolError,
-          message: response.errorMessage ?? 'Query execution failed',
+          // Append a bounded SQL snippet so the message satisfies FR42
+          // ("clear error messages when queries fail") without ever exposing
+          // bind values — only the raw SQL with placeholders is included.
+          message: '$serverMessage [SQL: ${_truncateSql(sql)}]',
+          sql: sql,
+          offset: response.errorOffset,
         );
       }
 

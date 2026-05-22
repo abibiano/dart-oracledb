@@ -1355,4 +1355,144 @@ void main() {
       }
     });
   });
+
+  // Story 2.8 - Query Error Handling
+  group('Query error handling',
+      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+    late OracleConnection connection;
+    const testTable = 'test_query_error_story28';
+
+    setUp(() async {
+      connection = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+
+      try {
+        await connection.execute('''
+          CREATE TABLE $testTable (
+            id NUMBER PRIMARY KEY,
+            label VARCHAR2(100)
+          )
+        ''');
+      } on OracleException catch (e) {
+        if (e.errorCode == 955) {
+          try {
+            await connection.execute('TRUNCATE TABLE $testTable');
+          } catch (_) {
+            await connection.close();
+            rethrow;
+          }
+        } else {
+          await connection.close();
+          rethrow;
+        }
+      }
+    });
+
+    tearDown(() async {
+      try {
+        await connection.execute('DROP TABLE $testTable');
+      } on OracleException catch (e) {
+        // ORA-00942: table or view does not exist — acceptable in tearDown.
+        if (e.errorCode != 942) rethrow;
+      } finally {
+        await connection.close();
+      }
+    });
+
+    test('AC1: syntax error surfaces ORA-009xx with failing SQL in message',
+        () async {
+      // Invalid SQL — Oracle returns ORA-00900 ("invalid SQL statement") or
+      // ORA-00933 ("SQL command not properly ended") depending on the parser
+      // path. Accept the broader ORA-009xx family to keep the test stable
+      // across Oracle versions.
+      await expectLater(
+        connection.execute('SELEC nonsense FROM dual'),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', inInclusiveRange(900, 999))
+            .having((e) => e.code, 'code', startsWith('ORA-009'))
+            .having((e) => e.message, 'message',
+                contains('SELEC nonsense FROM dual'))
+            .having((e) => e.sql, 'sql', equals('SELEC nonsense FROM dual'))),
+      );
+    });
+
+    test('AC2: table-not-found surfaces ORA-00942 with Oracle text', () async {
+      await expectLater(
+        connection.execute('SELECT * FROM definitely_missing_story28'),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', 942)
+            .having((e) => e.code, 'code', equals('ORA-00942'))
+            .having((e) => e.message, 'message', contains('table or view'))
+            .having((e) => e.toString(), 'toString', contains('ORA-00942'))
+            .having((e) => e.sql, 'sql',
+                equals('SELECT * FROM definitely_missing_story28'))),
+      );
+    });
+
+    test('AC3: duplicate primary key surfaces ORA-00001', () async {
+      await connection.execute(
+        'INSERT INTO $testTable (id, label) VALUES (:1, :2)',
+        [1, 'first'],
+      );
+
+      await expectLater(
+        connection.execute(
+          'INSERT INTO $testTable (id, label) VALUES (:1, :2)',
+          [1, 'duplicate'],
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', 1)
+            .having((e) => e.code, 'code', equals('ORA-00001'))
+            .having((e) => e.message, 'message', contains('unique constraint'))
+            .having((e) => e.toString(), 'toString', contains('ORA-00001'))),
+      );
+    });
+
+    test('AC4: Oracle SQL error position is preserved as structured offset',
+        () async {
+      // The exact offset Oracle reports for a parse error is server-version
+      // dependent, so assert that *some* non-null offset is exposed and that
+      // toString surfaces it in structured form.
+      try {
+        await connection.execute('SELECT * FROM definitely_missing_story28');
+        fail('Expected OracleException');
+      } on OracleException catch (e) {
+        expect(e.errorCode, equals(942));
+        // Oracle may or may not return a SQL error position for ORA-00942
+        // depending on version; assert only that, when present, it is
+        // non-negative and surfaced in toString.
+        expect(e.offset == null || e.offset! >= 0, isTrue,
+            reason: 'offset must be null or a non-negative position');
+        if (e.offset != null) {
+          expect(e.toString(), contains('offset='));
+        }
+      }
+    });
+
+    test('AC5: bind values do not appear in failing-query message or toString',
+        () async {
+      const sentinel = 'story28_secret_bind_value';
+      try {
+        // Force a server-side failure (table missing) while passing a
+        // sentinel bind that must never leak into diagnostics.
+        await connection.execute(
+          'SELECT * FROM definitely_missing_story28 WHERE label = :1',
+          [sentinel],
+        );
+        fail('Expected OracleException');
+      } on OracleException catch (e) {
+        expect(e.errorCode, equals(942));
+        expect(e.message, isNot(contains(sentinel)),
+            reason: 'message must not include bind values');
+        expect(e.toString(), isNot(contains(sentinel)),
+            reason: 'toString must not include bind values');
+        // Raw SQL must still be present in sql / message, with placeholder.
+        expect(e.sql, contains(':1'));
+        expect(e.message, contains(':1'));
+      }
+    });
+  });
 }

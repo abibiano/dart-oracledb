@@ -101,7 +101,8 @@ void main() {
 
         expect(exception.errorCode, equals(3113));
         expect(exception.message, contains('closed'));
-        expect(exception.toString(), contains('ORA-3113'));
+        // Story 2.8: canonical 5-digit ORA padding for codes below 10000.
+        expect(exception.toString(), contains('ORA-03113'));
         expect(exception.toString(), contains('Connection is closed'));
       });
 

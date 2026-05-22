@@ -424,6 +424,7 @@ class ExecuteResponse {
     this.moreRowsToFetch = false,
     this.errorCode,
     this.errorMessage,
+    this.errorOffset,
   });
 
   /// Whether the call succeeded (no Oracle error).
@@ -449,6 +450,10 @@ class ExecuteResponse {
 
   /// Oracle error message if [isSuccess] is false.
   final String? errorMessage;
+
+  /// Character offset into the SQL text where Oracle reports the error,
+  /// when the server provided one. Null on success or when not applicable.
+  final int? errorOffset;
 }
 
 /// Returns true if the accumulated TTC bytes contain a complete response
@@ -469,9 +474,8 @@ bool ttcStreamIsComplete(Uint8List data,
   final state = _DecodeState(
     isQuery: false,
     ttcFieldVersion: ttcFieldVersion,
-    columns: expectedColumns != null
-        ? List.of(expectedColumns)
-        : <ColumnMetadata>[],
+    columns:
+        expectedColumns != null ? List.of(expectedColumns) : <ColumnMetadata>[],
     endOfRequestSupport: endOfRequestSupport,
   );
   try {
@@ -531,6 +535,7 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
     moreRowsToFetch: state.moreRowsToFetch,
     errorCode: isSuccess ? null : state.errorNum,
     errorMessage: isSuccess ? null : state.errorMessage,
+    errorOffset: isSuccess ? null : state.errorOffset,
   );
 }
 
@@ -557,6 +562,7 @@ class _DecodeState {
   bool endOfResponse = false;
   int? errorNum;
   String? errorMessage;
+  int? errorOffset;
   Uint8List? bitVector;
 }
 
@@ -813,7 +819,12 @@ void _processError(ReadBuffer buf, _DecodeState s) {
   buf.skipUB2(); // array elem error
   buf.skipUB2(); // array elem error
   s.cursorId = buf.readUB4(); // cursor id (node-oracledb uses readUB4)
-  buf.readSB4(); // error position (node-oracledb uses readSB4)
+  // Error position (SB4): character offset into the SQL text where Oracle
+  // reports the parse/exec error. node-oracledb only surfaces it when >= 0
+  // (negative is the "unknown" sentinel). Always assign (including null) so
+  // a second _processError call on the same state doesn't carry a stale value.
+  final errorPos = buf.readSB4();
+  s.errorOffset = errorPos >= 0 ? errorPos : null;
   buf.skipUB1(); // sql type
   buf.skipUB1(); // fatal?
   buf.skipUB1(); // flags

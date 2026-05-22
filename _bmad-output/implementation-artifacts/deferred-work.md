@@ -1,5 +1,11 @@
 # Deferred Work
 
+## Deferred from: code review of 2-8-query-error-handling (2026-05-22)
+
+- **`code` getter produces malformed string for negative or ≥100000 errorCode values** — `errorCode.toString().padLeft(5, '0')` emits `ORA--1` for a negative code or `ORA-100000` for a six-digit value. Realistic Oracle error codes never reach these ranges; pre-existing invariant on `errorCode` validity. No guard or test covers pathological values.
+- **`LateInitializationError` if `connect()` throws before `late OracleConnection connection` is assigned in setUp** — `tearDown` always calls `connection.execute(...)` and `connection.close()`; if `connect()` itself throws the `late` variable is unset and `tearDown` raises `LateInitializationError`, masking the root failure. Same pattern used across all existing test groups in the file — pre-existing risk.
+- **`_truncateSql` truncates on UTF-16 code units, not Unicode scalar values** — `sql.substring(0, 200)` can split a surrogate pair if the SQL contains supplementary-plane characters near the 200-char boundary, producing a malformed snippet. SQL with supplementary-plane characters is extremely rare in practice (Oracle identifiers and standard SQL are ASCII). Fix would require `Characters` package or Rune-based slicing.
+
 ## Deferred from: Oracle 21c integration test review (2026-05-21)
 
 - **Intermittent `RangeError (end): Invalid value: Not in inclusive range 0..31: 32` during auth flow** — Surfaces sporadically on both Oracle 23ai and 21c after the first ~30–50 authentications in a sequential test run (`-j 1`). Caller sees it as `ORA-01017: Authentication failed` because `OracleConnection.connect` wraps any auth exception. Stack trace lands at `lib/src/crypto/auth.dart:199` (`fullHash.sublist(0, 32)`) which assumes a 32-byte hash; under load the underlying buffer is occasionally shorter. Tests pass when re-run in isolation. Pre-existing flake; not exposed by anything in this review. Needs a defensive length check + targeted reproducer in a future story.
