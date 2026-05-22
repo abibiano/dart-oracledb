@@ -248,6 +248,7 @@ class Transport {
   Future<ExecuteResponse> sendExecute(
     String sql, {
     required bool isQuery,
+    bool isPlSql = false,
     List<Object?>? bindValues,
     List<String>? bindNames,
     int prefetchRows = 50,
@@ -256,7 +257,7 @@ class Transport {
     List<ColumnMetadata>? expectedColumns,
     List<int> cursorsToClose = const [],
   }) async {
-    _log.fine('Sending execute request (isQuery=$isQuery, '
+    _log.fine('Sending execute request (isQuery=$isQuery, isPlSql=$isPlSql, '
         'cursorId=$cursorId)...');
 
     final request = ExecuteRequest(
@@ -264,6 +265,7 @@ class Transport {
       bindValues: bindValues,
       bindNames: bindNames,
       isQuery: isQuery,
+      isPlSql: isPlSql,
       numIters: prefetchRows,
       ttcFieldVersion: _ttcFieldVersion,
       sequence: nextSequence(),

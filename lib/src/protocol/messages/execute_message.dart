@@ -55,17 +55,22 @@ class ExecuteRequest extends Message {
   /// Creates a full EXECUTE request.
   ///
   /// [isQuery] should be true for SELECT statements (so the server prepares to
-  /// fetch and we set the right options); false for DML/DDL.
+  /// fetch and we set the right options); false for DML/DDL/PL/SQL.
+  /// [isPlSql] should be true for BEGIN/DECLARE/CALL blocks; it clears
+  /// NOT_PLSQL and sets PLSQL_BIND when bind values are present.
   ExecuteRequest({
     required this.sql,
     this.bindValues,
     this.bindNames,
     this.cursorId = 0,
     required this.isQuery,
+    this.isPlSql = false,
     this.numIters = 50,
     this.ttcFieldVersion = 24,
     super.sequence = 1,
-  }) : super(messageType: ttcMsgTypeFunction);
+  })  : assert(!(isQuery && isPlSql),
+            'a statement cannot be both query and PL/SQL'),
+        super(messageType: ttcMsgTypeFunction);
 
   /// The SQL text to execute.
   final String sql;
@@ -81,6 +86,9 @@ class ExecuteRequest extends Message {
 
   /// Whether this is a query statement (changes options).
   final bool isQuery;
+
+  /// Whether this is a PL/SQL block (BEGIN, DECLARE, CALL).
+  final bool isPlSql;
 
   /// Initial prefetch / iteration count for queries.
   final int numIters;
@@ -123,8 +131,10 @@ class ExecuteRequest extends Message {
     }
     if (isQuery) {
       options |= ttcExecOptionFetch;
-    } else {
+    } else if (!isPlSql) {
       options |= ttcExecOptionNotPlSql;
+    } else if (numParams > 0) {
+      options |= ttcExecOptionPlSqlBind;
     }
     if (numParams > 0) {
       options |= ttcExecOptionBind;

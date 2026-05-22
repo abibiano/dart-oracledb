@@ -8,6 +8,7 @@ import 'errors.dart';
 import 'protocol/bind_parser.dart';
 import 'protocol/messages/execute_message.dart';
 import 'result.dart';
+import 'sql_classifier.dart';
 import 'statement_cache.dart';
 import 'transport/connect_string.dart';
 import 'transport/packet.dart';
@@ -66,97 +67,6 @@ class OracleConnection {
   /// For a more thorough check that sends a ping message to the server,
   /// use [ping()] instead.
   bool get isHealthy => isConnected;
-
-  /// Returns true when [sql] is eligible for statement caching.
-  ///
-  /// Eligible statements: SELECT, WITH, INSERT, UPDATE, DELETE.
-  /// Excluded: DDL (ALTER, CREATE, DROP, …) and PL/SQL (BEGIN, DECLARE, CALL).
-  ///
-  /// A keyword only matches when followed by whitespace or end-of-string, so
-  /// identifiers like `INSERTED` or `UPDATEABLE` don't accidentally qualify.
-  static bool _isCacheEligible(String sql) {
-    if (_isQuery(sql)) return true;
-    final i = _skipSqlPrefixes(sql, 0);
-    if (i >= sql.length) return false;
-    if (_matchesKeyword(sql, i, 'INSERT')) return true;
-    if (_matchesKeyword(sql, i, 'UPDATE')) return true;
-    if (_matchesKeyword(sql, i, 'DELETE')) return true;
-    return false;
-  }
-
-  /// Matches a keyword at [pos] case-insensitively, requiring the character
-  /// after the keyword to be whitespace or end-of-string (word boundary).
-  static bool _matchesKeyword(String sql, int pos, String keyword) {
-    final n = sql.length;
-    final klen = keyword.length;
-    if (pos + klen > n) return false;
-    for (var k = 0; k < klen; k++) {
-      final c = sql.codeUnitAt(pos + k);
-      // Uppercase ASCII: lowercase letters (97-122) map to 65-90 by clearing 0x20.
-      final upper = (c >= 0x61 && c <= 0x7A) ? c - 0x20 : c;
-      if (upper != keyword.codeUnitAt(k)) return false;
-    }
-    if (pos + klen == n) return true;
-    final after = sql.codeUnitAt(pos + klen);
-    return after == 0x20 || after == 0x09 || after == 0x0A || after == 0x0D;
-  }
-
-  /// Returns true when [sql] is a SELECT or WITH query, false for DML/DDL/PLSQL.
-  ///
-  /// Handles leading whitespace, block comments (`/* … */`), line comments
-  /// (`-- …`), and leading parentheses (e.g. `(SELECT …)`). WITH is matched
-  /// when followed by any whitespace character (not only space).
-  static bool _isQuery(String sql) {
-    final i = _skipSqlPrefixes(sql, 0);
-    if (i >= sql.length) return false;
-    final n = sql.length;
-    final head = sql.substring(i, (i + 6 > n ? n : i + 6)).toUpperCase();
-    if (head.startsWith('SELECT')) return true;
-    // WITH must be followed by whitespace (WITH\n, WITH\t, etc.)
-    if (head.length >= 5 && head.startsWith('WITH')) {
-      final afterWith = i + 4;
-      if (afterWith < n) {
-        final c = sql.codeUnitAt(afterWith);
-        if (c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D) return true;
-      }
-    }
-    return false;
-  }
-
-  /// Skips leading whitespace, block comments, line comments, and parentheses.
-  static int _skipSqlPrefixes(String sql, int pos) {
-    final n = sql.length;
-    while (pos < n) {
-      final c = sql.codeUnitAt(pos);
-      if (c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D) {
-        pos++;
-      } else if (c == 0x2F && pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x2A) {
-        // Block comment: /* … */
-        pos += 2;
-        while (pos + 1 < n) {
-          if (sql.codeUnitAt(pos) == 0x2A && sql.codeUnitAt(pos + 1) == 0x2F) {
-            pos += 2;
-            break;
-          }
-          pos++;
-        }
-        // Unterminated comment: consume the remaining byte and signal end.
-        if (pos + 1 >= n) pos = n;
-      } else if (c == 0x2D && pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x2D) {
-        // Line comment: -- …
-        pos += 2;
-        while (pos < n && sql.codeUnitAt(pos) != 0x0A) {
-          pos++;
-        }
-      } else if (c == 0x28 /* ( */) {
-        // Leading parenthesis — e.g. (SELECT …)
-        pos++;
-      } else {
-        break;
-      }
-    }
-    return pos;
-  }
 
   /// Bounded SQL snippet length included in query-failure messages.
   ///
@@ -278,8 +188,9 @@ class OracleConnection {
       }
     }
 
-    final isQuery = _isQuery(sql);
-    final eligible = _isCacheEligible(sql);
+    final isQuery = isQuerySql(sql);
+    final isPlSql = !isQuery && isPlSqlSql(sql);
+    final eligible = isCacheEligibleSql(sql);
 
     // Try to acquire a cached cursor.
     StatementCacheEntry? cacheEntry;
@@ -302,6 +213,7 @@ class OracleConnection {
       final response = await _transport.sendExecute(
         sql,
         isQuery: isQuery,
+        isPlSql: isPlSql,
         bindValues: bindList,
         bindNames: bindNames,
         cursorId: cursorId,
@@ -351,7 +263,7 @@ class OracleConnection {
       return OracleResult(
         columnMetadata: response.columnMetadata,
         rowData: response.rows,
-        rowsAffected: response.rowsAffected,
+        rowsAffected: isPlSql ? null : response.rowsAffected,
       );
     } catch (e) {
       if (cacheEntry != null) {

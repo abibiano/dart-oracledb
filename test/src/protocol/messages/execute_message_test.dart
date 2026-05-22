@@ -51,6 +51,60 @@ void main() {
       expect(options & ttcExecOptionNotPlSql, isNonZero);
     });
 
+    test('PL/SQL with binds sets BIND+PLSQL_BIND, clears NOT_PLSQL and FETCH',
+        () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN my_proc(:1, :2); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [1, 'Alice'],
+      );
+      final bytes = req.toBytes();
+      final options = _readOptionsFromHeader(bytes);
+      expect(options & ttcExecOptionExecute, isNonZero,
+          reason: 'EXECUTE must always be set');
+      expect(options & ttcExecOptionBind, isNonZero,
+          reason: 'BIND must be set when bind values are present');
+      expect(options & ttcExecOptionPlSqlBind, isNonZero,
+          reason: 'PLSQL_BIND must be set for PL/SQL with binds');
+      expect(options & ttcExecOptionNotPlSql, equals(0),
+          reason: 'NOT_PLSQL must be cleared for PL/SQL blocks');
+      expect(options & ttcExecOptionFetch, equals(0),
+          reason: 'FETCH must not be set for PL/SQL');
+    });
+
+    test('PL/SQL with no binds clears NOT_PLSQL and PLSQL_BIND', () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN simple_proc(); END;',
+        isQuery: false,
+        isPlSql: true,
+      );
+      final bytes = req.toBytes();
+      final options = _readOptionsFromHeader(bytes);
+      expect(options & ttcExecOptionExecute, isNonZero);
+      expect(options & ttcExecOptionNotPlSql, equals(0),
+          reason: 'NOT_PLSQL must be cleared even without binds');
+      expect(options & ttcExecOptionPlSqlBind, equals(0),
+          reason: 'PLSQL_BIND must not be set when there are no parameters');
+      expect(options & ttcExecOptionBind, equals(0),
+          reason: 'BIND must not be set when there are no parameters');
+    });
+
+    test('DML NOT_PLSQL bit is unchanged after PL/SQL isPlSql=false default',
+        () {
+      // Regression: isPlSql defaults to false, so existing DML tests are intact.
+      final req = ExecuteRequest(
+        sql: 'DELETE FROM t WHERE id = :1',
+        isQuery: false,
+        bindValues: [5],
+      );
+      final bytes = req.toBytes();
+      final options = _readOptionsFromHeader(bytes);
+      expect(options & ttcExecOptionNotPlSql, isNonZero,
+          reason:
+              'DML must still set NOT_PLSQL when isPlSql defaults to false');
+    });
+
     test('sets BIND flag when bind values are provided', () {
       final req = ExecuteRequest(
         sql: 'SELECT * FROM t WHERE id = :1',

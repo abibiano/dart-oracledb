@@ -92,6 +92,67 @@ if ! git diff --quiet HEAD; then
   exit 1
 fi
 
+# ── Check / generate CHANGELOG entry ─────────────────────────────────────────
+CHANGELOG="CHANGELOG.md"
+
+if grep -q "^## ${NEW_VERSION}" "$CHANGELOG" 2>/dev/null; then
+  echo "Changelog entry for $NEW_VERSION already exists."
+else
+  echo "No changelog entry for $NEW_VERSION — generating with Claude..."
+
+  LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+  if [ -n "$LAST_TAG" ]; then
+    GIT_LOG=$(git log "${LAST_TAG}..HEAD" --oneline --no-merges)
+  else
+    GIT_LOG=$(git log --oneline --no-merges)
+  fi
+
+  PROMPT="Generate a CHANGELOG.md entry for version ${NEW_VERSION} of the dart-oracledb Dart package.
+
+Use this exact markdown format:
+## ${NEW_VERSION}
+
+[one-sentence summary]
+
+### Features
+- ...
+
+### Bug Fixes
+- ...
+
+### Breaking Changes
+- ...
+
+Omit sections that have no items.
+Base the entry on these git commits since the last release:
+${GIT_LOG}
+
+Respond with ONLY the markdown — no explanation, no code fences."
+
+  NEW_ENTRY=$(claude -p "$PROMPT" 2>/dev/null)
+
+  if [ -z "$NEW_ENTRY" ]; then
+    echo "error: Claude did not return a changelog entry." >&2
+    echo "Add an entry for ## ${NEW_VERSION} to $CHANGELOG manually, then re-run." >&2
+    exit 1
+  fi
+
+  echo ""
+  echo "──── Generated changelog entry ────────────────────────────────────────"
+  echo "$NEW_ENTRY"
+  echo "────────────────────────────────────────────────────────────────────────"
+  echo ""
+
+  # Insert the new entry after the first line (# Changelog header)
+  TMPFILE=$(mktemp)
+  head -1 "$CHANGELOG" > "$TMPFILE"
+  printf '\n%s\n' "$NEW_ENTRY" >> "$TMPFILE"
+  tail -n +2 "$CHANGELOG" >> "$TMPFILE"
+  mv "$TMPFILE" "$CHANGELOG"
+
+  echo "CHANGELOG.md updated."
+fi
+
 # ── Update pubspec.yaml ───────────────────────────────────────────────────────
 sed -i.bak "s/^version: .*/version: $NEW_VERSION/" "$PUBSPEC"
 rm -f "${PUBSPEC}.bak"
@@ -99,7 +160,7 @@ rm -f "${PUBSPEC}.bak"
 # ── Commit, tag, push ─────────────────────────────────────────────────────────
 TAG="v${NEW_VERSION}"
 
-git add "$PUBSPEC"
+git add "$PUBSPEC" "$CHANGELOG"
 git commit -m "chore: bump version to $NEW_VERSION"
 git tag "$TAG"
 git push origin HEAD
