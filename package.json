@@ -1,9 +1,0 @@
-{
-  "name": "dart-oracledb-debug",
-  "version": "1.0.0",
-  "description": "Debugging tools for dart-oracledb",
-  "type": "module",
-  "dependencies": {
-    "oracledb": "^6.7.0"
-  }
-}
