@@ -1,7 +1,8 @@
-/// Integration tests for PL/SQL stored-procedure execution (Story 3.1).
+/// Integration tests for PL/SQL stored-procedure execution.
 ///
-/// These tests validate IN-parameter procedure calls against a real Oracle
-/// server. Run against both supported environments:
+/// Story 3.1 — IN parameters; Story 3.2 — function returns; Story 3.3 — OUT
+/// and IN OUT parameters. All groups must pass against both supported
+/// environments:
 ///
 ///   RUN_INTEGRATION_TESTS=true dart test test/integration/plsql_integration_test.dart --no-color
 ///   RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test/integration/plsql_integration_test.dart --no-color
@@ -505,6 +506,372 @@ void main() {
         await _ignoreOraCodes(
           () => conn.execute('DROP TABLE story32_dml_tmp'),
           const <int>[942],
+        );
+      }
+    });
+  });
+
+  group('PL/SQL OUT and IN OUT parameters — Story 3.3', () {
+    late OracleConnection conn;
+
+    setUp(() async {
+      conn = await OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+      );
+
+      try {
+        // Procedure with two scalar OUT parameters (NUMBER + VARCHAR2).
+        await conn.execute('''
+          CREATE OR REPLACE PROCEDURE story33_out_values(
+            p_id   OUT NUMBER,
+            p_name OUT VARCHAR2
+          ) AS
+          BEGIN
+            p_id := 42;
+            p_name := 'Smith';
+          END;
+        ''');
+
+        // Procedure with one IN OUT NUMBER parameter (increment).
+        await conn.execute('''
+          CREATE OR REPLACE PROCEDURE story33_inout_increment(
+            p_value IN OUT NUMBER
+          ) AS
+          BEGIN
+            p_value := p_value + 1;
+          END;
+        ''');
+
+        // Procedure with IN OUT VARCHAR2 (append suffix — return value longer
+        // than input value, exercising the maxSize contract).
+        await conn.execute('''
+          CREATE OR REPLACE PROCEDURE story33_inout_text(
+            p_text IN OUT VARCHAR2
+          ) AS
+          BEGIN
+            p_text := p_text || '_suffix';
+          END;
+        ''');
+
+        // Procedure mixing IN, OUT, and IN OUT (positional shape test).
+        await conn.execute('''
+          CREATE OR REPLACE PROCEDURE story33_multi_out(
+            p_in     IN     NUMBER,
+            p_out    OUT    NUMBER,
+            p_inout  IN OUT NUMBER
+          ) AS
+          BEGIN
+            p_out := p_in * 2;
+            p_inout := p_inout + p_in;
+          END;
+        ''');
+
+        // Procedure that explicitly returns NULL through an OUT parameter.
+        await conn.execute('''
+          CREATE OR REPLACE PROCEDURE story33_null_out(
+            p_value OUT VARCHAR2
+          ) AS
+          BEGIN
+            p_value := NULL;
+          END;
+        ''');
+      } catch (_) {
+        await conn.close();
+        rethrow;
+      }
+    });
+
+    tearDown(() async {
+      try {
+        await conn.execute('ROLLBACK');
+      } catch (_) {
+        // ignore — close() below will surface session problems
+      }
+
+      for (final name in const [
+        'story33_out_values',
+        'story33_inout_increment',
+        'story33_inout_text',
+        'story33_multi_out',
+        'story33_null_out',
+      ]) {
+        await _ignoreOraCodes(
+          () => conn.execute('DROP PROCEDURE $name'),
+          const <int>[4043],
+        );
+      }
+      // AC7 DML regression test creates this table inline; guard here so a
+      // cancelled test cannot leak the table into subsequent setUp calls.
+      await _ignoreOraCodes(
+        () => conn.execute('DROP TABLE story33_dml_tmp PURGE'),
+        const <int>[942],
+      );
+      await conn.close();
+    });
+
+    // AC1 — scalar OUT parameters expose their values via outBinds
+    test('AC1: procedure with NUMBER+VARCHAR2 OUT params exposes both values',
+        () async {
+      final result = await conn.execute(
+        'BEGIN story33_out_values(:id, :name); END;',
+        {
+          'id': OracleBind.out(type: OracleDbType.number),
+          'name': OracleBind.out(type: OracleDbType.varchar, maxSize: 80),
+        },
+      );
+      expect(result.outBinds['id'], equals(42));
+      expect(result.outBinds['name'], equals('Smith'));
+    });
+
+    // AC2 — IN OUT parameter modified by the procedure surfaces the new value
+    test('AC2: IN OUT NUMBER parameter returns the modified value', () async {
+      final result = await conn.execute(
+        'BEGIN story33_inout_increment(:value); END;',
+        {
+          'value': OracleBind.inOut(value: 41, type: OracleDbType.number),
+        },
+      );
+      expect(result.outBinds['value'], equals(42));
+    });
+
+    // AC3 — multiple OUT/IN OUT via named binds accessible by name
+    test('AC3: mixed IN/OUT/IN OUT named binds — outputs accessible by name',
+        () async {
+      final result = await conn.execute(
+        'BEGIN story33_multi_out(:in_val, :out_val, :inout_val); END;',
+        {
+          'in_val': 10,
+          'out_val': OracleBind.out(type: OracleDbType.number),
+          'inout_val': OracleBind.inOut(value: 5, type: OracleDbType.number),
+        },
+      );
+      expect(result.outBinds['out_val'], equals(20));
+      expect(result.outBinds['inout_val'], equals(15));
+      // IN bind has no output entry.
+      expect(result.outBinds['in_val'], isNull);
+    });
+
+    // AC4 — positional binds: outputs are indexed by output position only
+    test(
+        'AC4: positional mixed binds expose outputs at zero-based output index',
+        () async {
+      final result = await conn.execute(
+        'BEGIN story33_multi_out(:1, :2, :3); END;',
+        [
+          10,
+          OracleBind.out(type: OracleDbType.number),
+          OracleBind.inOut(value: 5, type: OracleDbType.number),
+        ],
+      );
+      // The IN bind does NOT take a slot in outBinds; outBinds[0] is the
+      // first OUT/IN OUT in SQL order, outBinds[1] is the next.
+      expect(result.outBinds[0], equals(20));
+      expect(result.outBinds[1], equals(15));
+      // Length is 2 — the IN bind never occupies an output slot.
+      expect(result.outBinds.length, equals(2));
+    });
+
+    // AC5 — explicit NULL OUT surfaces as Dart null
+    test('AC5: explicit NULL OUT parameter surfaces as Dart null', () async {
+      final result = await conn.execute(
+        'BEGIN story33_null_out(:value); END;',
+        {
+          'value': OracleBind.out(type: OracleDbType.varchar, maxSize: 80),
+        },
+      );
+      expect(result.outBinds['value'], isNull);
+    });
+
+    // AC6 — IN OUT VARCHAR2 grows in length; maxSize must cover the result
+    test(
+        'AC6: IN OUT VARCHAR2 with sufficient maxSize returns the longer '
+        'value', () async {
+      final result = await conn.execute(
+        'BEGIN story33_inout_text(:text_value); END;',
+        {
+          'text_value': OracleBind.inOut(
+            value: 'abc',
+            type: OracleDbType.varchar,
+            maxSize: 100,
+          ),
+        },
+      );
+      expect(result.outBinds['text_value'], equals('abc_suffix'));
+    });
+
+    // AC6 — undersized maxSize surfaces a clear server error (ORA-06502)
+    // without corrupting subsequent operations.
+    //
+    // Oracle raises ORA-06502 ("character string buffer too small") on both
+    // 21c and 23ai when the PL/SQL assignment exceeds the bind's declared
+    // maxSize. Asserting the code rather than message text keeps the test
+    // resilient to translation/wording differences across server versions.
+    test(
+        'AC6: undersized IN OUT VARCHAR2 maxSize raises ORA-06502 and the '
+        'session remains usable', () async {
+      // 'abc_suffix' is 10 bytes; declare maxSize=5 to force overflow.
+      await expectLater(
+        conn.execute(
+          'BEGIN story33_inout_text(:text_value); END;',
+          {
+            'text_value': OracleBind.inOut(
+              value: 'abc',
+              type: OracleDbType.varchar,
+              maxSize: 5,
+            ),
+          },
+        ),
+        throwsA(isA<OracleException>().having(
+          (e) => e.errorCode,
+          'errorCode',
+          equals(6502),
+        )),
+      );
+
+      // Session must still be usable after a buffer overflow error.
+      final ok = await conn.execute('SELECT 1 FROM dual');
+      expect(ok.rows.first[0], equals(1));
+    });
+
+    // AC7 — Story 3.2 regression: pure OUT function return still works
+    test('AC7-story32-regression: OUT-only function return remains unchanged',
+        () async {
+      await conn.execute('''
+        CREATE OR REPLACE FUNCTION story33_add(
+          p_a IN NUMBER, p_b IN NUMBER
+        ) RETURN NUMBER AS
+        BEGIN
+          RETURN p_a + p_b;
+        END;
+      ''');
+      try {
+        final result = await conn.execute(
+          'BEGIN :ret := story33_add(:a, :b); END;',
+          {
+            'ret': OracleBind.out(type: OracleDbType.number),
+            'a': 7,
+            'b': 11,
+          },
+        );
+        expect(result.outBinds['ret'], equals(18));
+      } finally {
+        await _ignoreOraCodes(
+          () => conn.execute('DROP FUNCTION story33_add'),
+          const <int>[4043],
+        );
+      }
+    });
+
+    // AC7 — Story 3.1 regression: pure IN-only procedure call still works
+    test('AC7-story31-regression: IN-only procedure call remains unchanged',
+        () async {
+      await conn.execute('''
+        CREATE OR REPLACE PROCEDURE story33_in_only(p_x IN NUMBER) AS
+          v NUMBER;
+        BEGIN
+          v := p_x;
+        END;
+      ''');
+      try {
+        await conn.execute(
+          'BEGIN story33_in_only(:x); END;',
+          {'x': 99},
+        );
+      } finally {
+        await _ignoreOraCodes(
+          () => conn.execute('DROP PROCEDURE story33_in_only'),
+          const <int>[4043],
+        );
+      }
+    });
+
+    // AC7 — Epic 2 regression: SELECT and DML still work after Story 3.3 plumbing
+    test('AC7-epic2-regression: SELECT and DML still work alongside Story 3.3 binds',
+        () async {
+      final sel = await conn.execute('SELECT 7 FROM dual');
+      expect(sel.rows.first[0], equals(7));
+      expect(sel.outBinds.isEmpty, isTrue);
+
+      await conn.execute('CREATE TABLE story33_dml_tmp (id NUMBER)');
+      try {
+        await conn.execute('INSERT INTO story33_dml_tmp VALUES (1)');
+        final del =
+            await conn.execute('DELETE FROM story33_dml_tmp WHERE id = 1');
+        expect(del.rowsAffected, equals(1));
+      } finally {
+        await _ignoreOraCodes(
+          () => conn.execute('DROP TABLE story33_dml_tmp PURGE'),
+          const <int>[942],
+        );
+      }
+    });
+
+    // Multiple OUT parameters in one call, all returned together
+    test(
+        'multiple OUT parameters: both values present and indexable by name '
+        'and output position', () async {
+      final result = await conn.execute(
+        'BEGIN story33_out_values(:id, :name); END;',
+        {
+          'id': OracleBind.out(type: OracleDbType.number),
+          'name': OracleBind.out(type: OracleDbType.varchar, maxSize: 80),
+        },
+      );
+      // Named lookup
+      expect(result.outBinds['id'], equals(42));
+      expect(result.outBinds['name'], equals('Smith'));
+      // Output-position lookup (both are OUT, so positions 0 and 1)
+      expect(result.outBinds[0], equals(42));
+      expect(result.outBinds[1], equals('Smith'));
+      expect(result.outBinds.length, equals(2));
+    });
+
+    // Regression: execute() must not mutate the caller's named bind map
+    test('execute() does not mutate caller-owned named bind map', () async {
+      final binds = <String, Object?>{
+        'id': OracleBind.out(type: OracleDbType.number),
+        'name': OracleBind.out(type: OracleDbType.varchar, maxSize: 80),
+      };
+      final snapshot = Map<String, Object?>.of(binds);
+      await conn.execute(
+        'BEGIN story33_out_values(:id, :name); END;',
+        binds,
+      );
+      expect(binds, equals(snapshot),
+          reason: 'execute() must copy bind collections; caller map must be '
+              'unchanged after the call');
+    });
+
+    // IN OUT NUMBER with null IN value
+    test(
+        'IN OUT NUMBER with null input value: procedure sees NULL and may '
+        'replace it', () async {
+      await conn.execute('''
+        CREATE OR REPLACE PROCEDURE story33_inout_null_in(
+          p_value IN OUT NUMBER
+        ) AS
+        BEGIN
+          IF p_value IS NULL THEN
+            p_value := 100;
+          ELSE
+            p_value := p_value + 1;
+          END IF;
+        END;
+      ''');
+      try {
+        final result = await conn.execute(
+          'BEGIN story33_inout_null_in(:value); END;',
+          {
+            'value': OracleBind.inOut(value: null, type: OracleDbType.number),
+          },
+        );
+        expect(result.outBinds['value'], equals(100));
+      } finally {
+        await _ignoreOraCodes(
+          () => conn.execute('DROP PROCEDURE story33_inout_null_in'),
+          const <int>[4043],
         );
       }
     });

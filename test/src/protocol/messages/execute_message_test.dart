@@ -477,6 +477,140 @@ void main() {
       expect(r.outBindValues, equals([null]));
     });
 
+    test('Story 3.3 — IN OUT bind writes input value into ROW_DATA', () {
+      // For an IN OUT bind, the input value must appear in ROW_DATA (unlike
+      // an OUT-only bind, which writes only the null-indicator byte). Use
+      // the integer 5, which Oracle encodes as bytes [0xC1, 6] (2 bytes).
+      // The ROW_DATA segment for a NUMBER IN OUT bind containing the value 5
+      // looks like: [length=2, 0xC1, 0x06].
+      final req = ExecuteRequest(
+        sql: 'BEGIN myproc(:v); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: 5,
+            oraType: oraTypeNumber,
+            maxSize: 22,
+            dir: BindDir.inputOutput,
+          ),
+        ],
+        bindNames: const ['v'],
+      );
+      final bytes = req.toBytes();
+      final rowDataIdx = bytes.indexOf(ttcMsgTypeRowData);
+      expect(rowDataIdx, greaterThan(0));
+      // Byte after marker is length=2, then the Oracle base-100 NUMBER bytes.
+      expect(bytes[rowDataIdx + 1], equals(2),
+          reason: 'IN OUT bind must serialize the input value, not a NULL '
+              'indicator');
+      expect(bytes[rowDataIdx + 2], equals(0xC1));
+      expect(bytes[rowDataIdx + 3], equals(0x06));
+    });
+
+    test('Story 3.3 — OUT bind still writes the null-indicator byte', () {
+      // Regression for Story 3.2 OUT-only behavior: a pure OUT bind must not
+      // write input bytes, only the length=0 null indicator. This guards
+      // against the IN OUT change above touching OUT-only emission.
+      final req = ExecuteRequest(
+        sql: 'BEGIN :ret := myfunc; END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: null,
+            oraType: oraTypeNumber,
+            maxSize: 22,
+            dir: BindDir.output,
+          ),
+        ],
+        bindNames: const ['ret'],
+      );
+      final bytes = req.toBytes();
+      final rowDataIdx = bytes.indexOf(ttcMsgTypeRowData);
+      expect(rowDataIdx, greaterThan(0));
+      expect(bytes[rowDataIdx + 1], equals(0));
+    });
+
+    test('Story 3.3 — IN OUT in non-PL/SQL statement throws OracleException',
+        () {
+      expect(
+        () => ExecuteRequest(
+          sql: 'SELECT :v FROM dual',
+          isQuery: true,
+          bindValues: [
+            BindVariable(
+              value: 1,
+              oraType: oraTypeNumber,
+              dir: BindDir.inputOutput,
+            ),
+          ],
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(6502))),
+      );
+    });
+
+    test('Story 3.3 — IO_VECTOR with mixed OUT (16) and IN OUT (48) directions',
+        () {
+      // Server reports directions [OUT, IN, IN OUT] for three binds.
+      // Both OUT and IN OUT must show up in outBindIndices, in SQL order,
+      // and values are decoded in returned order.
+      final payload = _buildPayload([
+        _ioVector([16, 32, 48]),
+        // ROW_DATA: bind 0 (OUT NUMBER = 5), bind 2 (IN OUT NUMBER = 6).
+        // Oracle base-100 6 → [0xC1, 0x07].
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._ub4(0), // SB4 trailer
+          ..._bytesWithLength([0xC1, 0x07]),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(
+              oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+          BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
+          BindMetadata(
+              oraType: oraTypeNumber, maxSize: 22, dir: BindDir.inputOutput),
+        ],
+      );
+      expect(r.isSuccess, isTrue);
+      expect(r.outBindIndices, equals([0, 2]),
+          reason: 'Both OUT (16) and IN OUT (48) directions surface as '
+              'outputs in SQL order');
+      expect(r.outBindValues, equals([5, 6]));
+    });
+
+    test('Story 3.3 — IN OUT alone (direction 48) decodes returned value', () {
+      final payload = _buildPayload([
+        _ioVector([48]),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength('updated'.codeUnits),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(
+              oraType: oraTypeVarchar, maxSize: 100, dir: BindDir.inputOutput),
+        ],
+      );
+      expect(r.outBindIndices, equals([0]));
+      expect(r.outBindValues, equals(['updated']));
+    });
+
     test('no OUT binds: outBindValues stays empty', () {
       // A bind list with only IN binds produces no OUT decode work even when
       // an IO_VECTOR is present (server only reports IN directions).

@@ -269,19 +269,20 @@ class OracleConnection {
               message: 'OracleBind specs are only supported in PL/SQL blocks',
             );
           }
-          final dir = raw.direction == BindDirection.output
-              ? BindDir.output
-              : BindDir.input;
+          // raw.value is null for OUT-only binds and carries the input value
+          // for IN OUT binds. The execute encoder writes a 0-length null
+          // indicator for null values and the encoded value otherwise — both
+          // shapes are already correct for OUT and IN OUT respectively.
           bindList[i] = BindVariable(
-            value: null,
+            value: raw.value,
             oraType: raw.oracleTypeCode,
             maxSize: raw.maxSize,
-            dir: dir,
+            dir: raw.direction,
           );
           bindMetadata.add(BindMetadata(
             oraType: raw.oracleTypeCode,
             maxSize: raw.maxSize,
-            dir: dir,
+            dir: raw.direction,
           ));
         } else {
           bindMetadata.add(BindMetadata(oraType: _inferOraType(raw)));

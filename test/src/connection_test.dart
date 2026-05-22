@@ -194,6 +194,67 @@ void main() {
       });
     });
 
+    group('OracleBind normalization (Story 3.3)', () {
+      // These tests validate the OracleBind public API shape and verify that
+      // reading bind properties does not modify caller-owned collections.
+      // They do NOT call execute() — execute() requires a live Oracle
+      // connection and its copy-before-mutate protection is covered by the
+      // Story 3.3 integration tests ('execute() does not mutate caller-owned
+      // named bind map').
+
+      test(
+          'OracleBind.out value is null and reading it does not mutate the '
+          'caller map', () {
+        final bind = OracleBind.out(type: OracleDbType.number);
+        final binds = <String, dynamic>{
+          'ret': bind,
+          'a': 10,
+        };
+        final snapshot = Map<String, dynamic>.of(binds);
+        // OUT spec must carry no input value — protocol uses null-indicator.
+        expect(bind.value, isNull);
+        // Reading bind properties must not affect the caller's map.
+        expect(binds, equals(snapshot));
+      });
+
+      test('OracleBind.inOut carries the input value verbatim', () {
+        final spec = OracleBind.inOut(value: 41, type: OracleDbType.number);
+        expect(spec.value, equals(41));
+        expect(spec.type, equals(OracleDbType.number));
+      });
+
+      test(
+          'positional bind list is not mutated when interrogating OracleBind '
+          'specs', () {
+        // Repro of the Story 3.2 caller-owned list mutation. Build a list of
+        // mixed raw and OracleBind values and ensure read-only inspection
+        // does not alter it. Execute() copies the list internally, but this
+        // guards against future refactors that might bypass the copy.
+        final inputs = <Object?>[
+          10,
+          OracleBind.out(type: OracleDbType.number),
+          OracleBind.inOut(value: 5, type: OracleDbType.number),
+        ];
+        final snapshot = List<Object?>.of(inputs);
+        // Touch each spec (simulating connection.execute reading values).
+        for (final v in inputs) {
+          if (v is OracleBind) {
+            expect(v.oracleTypeCode, isPositive);
+          }
+        }
+        expect(inputs, equals(snapshot));
+      });
+
+      test(
+          'IN OUT bind with null value is allowed when type is supplied '
+          'explicitly', () {
+        final spec = OracleBind.inOut(
+            value: null, type: OracleDbType.varchar, maxSize: 50);
+        expect(spec.value, isNull);
+        expect(spec.maxSize, equals(50));
+      });
+    });
+
     group('OracleException properties', () {
       test('has errorCode, message, and cause properties', () {
         final cause = Exception('original error');

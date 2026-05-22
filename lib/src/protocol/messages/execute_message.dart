@@ -17,15 +17,20 @@ import 'base.dart';
 
 /// Direction of a [BindVariable] on the wire.
 ///
-/// Distinct from [BindVariable.value] semantics: an OUT bind has no input
-/// value, but its type/maxSize metadata is still written so the server knows
-/// how large a return buffer to allocate.
+/// - [input] sends a value to the server; nothing comes back for this bind.
+/// - [output] sends only type/maxSize metadata; the server allocates a return
+///   buffer and writes a value back in the response ROW_DATA.
+/// - [inputOutput] sends an input value AND receives a (possibly modified)
+///   value back. Oracle reports it as TTC direction `tnsBindDirInputOutput`.
 enum BindDir {
   /// Client → server (IN).
   input,
 
-  /// Server → client (OUT, function return values).
+  /// Server → client only (OUT — procedure OUT parameter or function return).
   output,
+
+  /// Bidirectional (IN OUT — value is sent and may be modified server-side).
+  inputOutput,
 }
 
 /// One bind variable supplied to an [ExecuteRequest].
@@ -58,8 +63,8 @@ class BindVariable {
   /// values such as `BEGIN :ret := func(...); END;`.
   final BindDir dir;
 
-  /// Whether this bind is purely an output (no input value written).
-  bool get isOutput => dir == BindDir.output;
+  /// Whether the server will return a value for this bind (OUT or IN OUT).
+  bool get hasOutput => dir == BindDir.output || dir == BindDir.inputOutput;
 
   static int _inferType(Object? value) {
     if (value == null) return oraTypeVarchar;
@@ -97,14 +102,15 @@ class ExecuteRequest extends Message {
   })  : assert(!(isQuery && isPlSql),
             'a statement cannot be both query and PL/SQL'),
         super(messageType: ttcMsgTypeFunction) {
-    // OUT binds are only meaningful in PL/SQL. Refuse mid-build rather than
-    // emit malformed bytes that would surface as a confusing server error.
+    // OUT and IN OUT binds are only meaningful in PL/SQL. Refuse mid-build
+    // rather than emit malformed bytes that would surface as a confusing
+    // server error.
     if (bindValues != null) {
       for (final v in bindValues!) {
-        if (v is BindVariable && v.isOutput && !isPlSql) {
+        if (v is BindVariable && v.hasOutput && !isPlSql) {
           throw const OracleException(
             errorCode: oraBindTypeError,
-            message: 'OUT binds are only supported in PL/SQL blocks',
+            message: 'OUT/IN OUT binds are only supported in PL/SQL blocks',
           );
         }
       }

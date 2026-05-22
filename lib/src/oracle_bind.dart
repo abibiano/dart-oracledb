@@ -1,17 +1,29 @@
-/// Public output-bind API for PL/SQL function returns (Story 3.2).
+/// Public bind-spec API for PL/SQL OUT and IN OUT parameters.
 ///
-/// Use [OracleBind.out] inside the bind values map/list passed to
-/// `OracleConnection.execute()` to declare an OUT bind. The decoded value
-/// is exposed on [OracleResult.outBinds].
+/// Pass an [OracleBind] instance inside the bind values map/list of
+/// `OracleConnection.execute()` to declare an OUT or IN OUT bind. The
+/// decoded value is exposed on [OracleResult.outBinds]:
+///
+/// ```dart
+/// final result = await connection.execute(
+///   'BEGIN story_get_employee(:id, :name, :salary); END;',
+///   {
+///     'id': 159,
+///     'name': OracleBind.out(type: OracleDbType.varchar, maxSize: 80),
+///     'salary': OracleBind.out(type: OracleDbType.number),
+///   },
+/// );
+/// expect(result.outBinds['name'], equals('Smith'));
+/// ```
 library;
 
 import 'errors.dart';
 import 'protocol/constants.dart' as oc;
+import 'protocol/messages/execute_message.dart' show BindDir;
 
-/// Dart-facing Oracle data type for output binds.
+/// Dart-facing Oracle data type for binds.
 ///
-/// Maps to the internal Oracle type indicator used on the wire. Only the
-/// subset required for Story 3.2 function return values is exposed.
+/// Maps to the internal Oracle type indicator used on the wire.
 enum OracleDbType {
   /// Oracle NUMBER (decoded as Dart `int` or `double`).
   number,
@@ -29,64 +41,80 @@ enum OracleDbType {
   raw,
 }
 
-/// Direction of a bind variable. Story 3.2 implements OUT only.
-enum BindDirection {
-  /// IN bind — value flows client → server.
-  input,
-
-  /// OUT bind — value flows server → client.
-  output,
-}
-
-/// Specification for an output bind variable.
+/// Specification for an OUT or IN OUT bind variable.
 ///
-/// Example:
+/// Use [OracleBind.out] for a pure OUT parameter (procedure or function
+/// return) and [OracleBind.inOut] for a parameter that takes an input value
+/// and may have it modified by the procedure:
+///
 /// ```dart
 /// final result = await connection.execute(
-///   'BEGIN :ret := story32_add(:a, :b); END;',
-///   {
-///     'ret': OracleBind.out(type: OracleDbType.number),
-///     'a': 2,
-///     'b': 3,
-///   },
+///   'BEGIN story_increment(:value); END;',
+///   {'value': OracleBind.inOut(value: 41, type: OracleDbType.number)},
 /// );
-/// expect(result.outBinds['ret'], equals(5));
+/// expect(result.outBinds['value'], equals(42));
 /// ```
 ///
-/// For `OracleDbType.varchar` and `OracleDbType.raw`, callers must supply
-/// [maxSize] (in bytes) so the server allocates a return buffer large enough
-/// for the function result.
+/// For [OracleDbType.varchar] and [OracleDbType.raw], callers must supply
+/// [maxSize] so the server allocates a return buffer large enough for the
+/// returned value.
 class OracleBind {
-  /// Declares an OUT bind for the given Oracle type.
+  /// Declares an OUT-only bind for the given Oracle [type].
   ///
-  /// [maxSize] is required for [OracleDbType.varchar] and [OracleDbType.raw]
-  /// to bound the return buffer; for numeric and date/timestamp types it is
-  /// ignored (the protocol uses a fixed size).
+  /// [maxSize] is required for [OracleDbType.varchar] and [OracleDbType.raw];
+  /// numeric and date/timestamp binds use fixed protocol sizes.
   OracleBind.out({required this.type, this.maxSize})
-      : direction = BindDirection.output {
-    if (maxSize != null && maxSize! <= 0) {
+      : value = null,
+        direction = BindDir.output {
+    _validate(type, maxSize);
+  }
+
+  /// Declares an IN OUT bind: sends [value] to the server and reads the
+  /// (possibly modified) value back through [OracleResult.outBinds].
+  ///
+  /// [type] is required even when [value] is `null`, because the Oracle type
+  /// cannot be inferred reliably from a null Dart value.
+  ///
+  /// For [OracleDbType.varchar] and [OracleDbType.raw], [maxSize] is required
+  /// and must be large enough to hold the largest value the procedure may
+  /// return — undersized buffers surface a server-side ORA-06502 error.
+  OracleBind.inOut({
+    required this.value,
+    required this.type,
+    this.maxSize,
+  }) : direction = BindDir.inputOutput {
+    _validate(type, maxSize);
+  }
+
+  static void _validate(OracleDbType type, int? maxSize) {
+    if (maxSize != null && maxSize <= 0) {
       throw OracleException(
         errorCode: oraBindTypeError,
-        message: 'OracleBind.out maxSize must be > 0 (got $maxSize)',
+        message: 'OracleBind maxSize must be > 0 (got $maxSize)',
       );
     }
     if ((type == OracleDbType.varchar || type == OracleDbType.raw) &&
         maxSize == null) {
       throw OracleException(
         errorCode: oraBindTypeError,
-        message: 'OracleBind.out(type: $type) requires maxSize',
+        message: 'OracleBind(type: $type) requires maxSize',
       );
     }
   }
 
+  /// Input value sent to the server. `null` for OUT-only binds.
+  final Object? value;
+
   /// The Oracle type expected on the wire.
   final OracleDbType type;
 
-  /// Maximum return buffer size in bytes (required for varchar/raw).
+  /// Maximum buffer size in bytes (required for varchar/raw).
   final int? maxSize;
 
-  /// Direction of this bind. Story 3.2 supports OUT only.
-  final BindDirection direction;
+  /// Direction on the wire. Only [BindDir.output] and [BindDir.inputOutput]
+  /// are produced by the public constructors; [BindDir.input] binds are
+  /// supplied as raw Dart values, not [OracleBind] instances.
+  final BindDir direction;
 
   /// The Oracle wire-protocol type indicator for [type].
   int get oracleTypeCode {
@@ -107,12 +135,12 @@ class OracleBind {
 
 /// Container for output bind values returned by a PL/SQL execution.
 ///
-/// Access values by name (for named binds) or by zero-based index (for
-/// positional binds):
+/// Access values by name (for named binds) or by zero-based index over the
+/// returned outputs only (positional binds):
 ///
 /// ```dart
 /// result.outBinds['ret'];   // named lookup
-/// result.outBinds[0];       // positional lookup
+/// result.outBinds[0];       // positional lookup over OUT/IN OUT outputs
 /// ```
 ///
 /// Returns `null` when the bind name/index does not exist or the server
