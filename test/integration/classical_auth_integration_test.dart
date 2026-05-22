@@ -19,7 +19,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:oracledb/dart_oracledb.dart';
+import 'package:oracledb/oracledb.dart';
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';

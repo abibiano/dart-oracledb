@@ -1,0 +1,14 @@
+# Reference implementations (node-oracledb, python-oracledb) — dev only
+reference/
+
+# BMAD planning and output artifacts
+_bmad/
+_bmad-output/
+
+# Release scripts — not needed by package consumers
+scripts/
+
+# Local dev tooling
+docker-compose.yml
+docker-compose.override.yml
+coverage/

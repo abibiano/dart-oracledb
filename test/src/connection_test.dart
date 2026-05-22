@@ -1,4 +1,4 @@
-import 'package:oracledb/dart_oracledb.dart';
+import 'package:oracledb/oracledb.dart';
 import 'package:oracledb/src/statement_cache.dart';
 import 'package:test/test.dart';
 

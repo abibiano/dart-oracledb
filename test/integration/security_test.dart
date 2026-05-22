@@ -14,7 +14,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:logging/logging.dart';
-import 'package:oracledb/dart_oracledb.dart';
+import 'package:oracledb/oracledb.dart';
 import 'package:test/test.dart';
 
 import 'test_helper.dart';

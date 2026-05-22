@@ -60,7 +60,7 @@ dart pub get
 ## Quick Start
 
 ```dart
-import 'package:oracledb/dart_oracledb.dart';
+import 'package:oracledb/oracledb.dart';
 
 Future<void> main() async {
   final connection = await OracleConnection.connect(
@@ -179,7 +179,7 @@ try {
 ### TLS/SSL Connections
 
 ```dart
-import 'package:oracledb/dart_oracledb.dart';
+import 'package:oracledb/oracledb.dart';
 
 // TLS with certificate validation (recommended for production)
 final conn = await OracleConnection.connect(

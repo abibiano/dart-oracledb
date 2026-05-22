@@ -4,7 +4,7 @@ library;
 import 'dart:io';
 
 import 'package:test/test.dart';
-import 'package:oracledb/dart_oracledb.dart';
+import 'package:oracledb/oracledb.dart';
 
 import 'test_helper.dart';
 
