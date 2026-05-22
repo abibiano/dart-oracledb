@@ -102,17 +102,19 @@ Uint8List aes256CbcEncrypt({
   return encrypted;
 }
 
-/// Decrypts data using AES-256 in CBC mode with PKCS7 padding.
+/// Decrypts data using AES-256 in CBC mode (raw, no padding removal).
 ///
-/// This is the reverse operation of [aes256CbcEncrypt]. Used to decrypt
-/// the server's AUTH_SESSKEY during authentication.
+/// Used to decrypt the server's AUTH_SESSKEY during authentication.
+/// Oracle does not add PKCS7 padding to AUTH_SESSKEY — the server
+/// encrypts a block-aligned random key without padding, so the caller
+/// receives the raw decrypted bytes of the same length as [data].
 ///
 /// Parameters:
 /// - [key]: 32-byte AES-256 key (derived from password hash).
 /// - [iv]: 16-byte initialization vector (typically zeros for Oracle auth).
-/// - [data]: The encrypted data to decrypt.
+/// - [data]: The encrypted data to decrypt (must be a multiple of 16 bytes).
 ///
-/// Returns the decrypted data with PKCS7 padding removed.
+/// Returns the raw decrypted bytes (same length as [data]).
 Uint8List aes256CbcDecrypt({
   required Uint8List key,
   required Uint8List iv,
@@ -120,28 +122,12 @@ Uint8List aes256CbcDecrypt({
 }) {
   const blockSize = 16;
 
-  // Initialize AES-CBC cipher for decryption
   final cipher = CBCBlockCipher(AESEngine())
     ..init(false, ParametersWithIV(KeyParameter(key), iv));
 
-  // Decrypt block by block
   final decrypted = Uint8List(data.length);
   for (var offset = 0; offset < data.length; offset += blockSize) {
     cipher.processBlock(data, offset, decrypted, offset);
-  }
-
-  // Remove PKCS7 padding
-  final paddingLength = decrypted[decrypted.length - 1];
-  if (paddingLength > 0 && paddingLength <= blockSize) {
-    // Verify padding is valid
-    for (var i = decrypted.length - paddingLength; i < decrypted.length; i++) {
-      if (decrypted[i] != paddingLength) {
-        // Invalid padding, return as-is
-        return decrypted;
-      }
-    }
-    // Valid padding, remove it
-    return decrypted.sublist(0, decrypted.length - paddingLength);
   }
 
   return decrypted;
