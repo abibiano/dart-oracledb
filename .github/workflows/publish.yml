@@ -1,0 +1,54 @@
+name: Publish to pub.dev
+
+# Triggers on version tags pushed by scripts/bump_version.sh
+# e.g. v0.1.0-alpha.2, v0.1.0-beta.1, v0.1.0
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+
+# id-token: write  — required for pub.dev OIDC (no PUB_CREDENTIALS secret needed)
+# contents: read   — required for actions/checkout (overriding permissions resets all others to none)
+# Configure OIDC once on pub.dev: package settings → Automated publishing → add this repo.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Verify formatting and analyzer
+        run: dart analyze --fatal-infos --fatal-warnings
+
+      - name: Run unit tests
+        run: dart test --exclude-tags=integration
+
+      - name: Verify pubspec version matches tag
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PUBSPEC_VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: *//')
+          if [ "$TAG" != "$PUBSPEC_VERSION" ]; then
+            echo "::error::Tag '$TAG' does not match pubspec version '$PUBSPEC_VERSION'."
+            echo "Run scripts/bump_version.sh to keep them in sync."
+            exit 1
+          fi
+          echo "Version check passed: $PUBSPEC_VERSION"
+
+      - name: Publish to pub.dev
+        run: dart pub publish --force

@@ -1,0 +1,222 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Avoid wasted CI cycles when force-pushing or pushing rapid follow-ups.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Linux: analyze + unit tests with coverage.
+  quality:
+    name: Analyze & Unit Tests (Linux + coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Verify formatting / analyzer (zero warnings)
+        run: dart analyze --fatal-infos --fatal-warnings
+
+      - name: Run non-integration tests with coverage
+        run: dart test --exclude-tags=integration --coverage-path=./coverage/lcov.info
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload coverage to Codecov
+        # Codecov tokenless / OIDC works for repo pushes and same-repo PRs.
+        # Fork PRs intentionally skipped: artifact upload above is sufficient
+        # and avoids requiring secrets for external contributors.
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: codecov/codecov-action@v6
+        with:
+          files: coverage/lcov.info
+          fail_ci_if_error: false
+          verbose: false
+
+  # Cross-platform validation for analyzer + unit tests.
+  # Oracle integration is intentionally Linux-only (separate job below).
+  platform:
+    name: Unit Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Analyzer
+        run: dart analyze --fatal-infos --fatal-warnings
+
+      - name: Run non-integration tests
+        run: dart test --exclude-tags=integration
+
+  # Oracle 23ai Free service container — Linux only.
+  # Mirrors local docker-compose: image, ORACLE_PWD, FREEPDB1 service,
+  # and host port 1521. Integration tests in this repo currently
+  # hardcode localhost:1521/FREEPDB1 with system/testpassword, so the
+  # service container must expose the same surface.
+  integration:
+    name: Oracle 23ai Integration Tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      oracle:
+        image: container-registry.oracle.com/database/free:latest
+        credentials:
+          username: ${{ secrets.ORACLE_REGISTRY_USER }}
+          password: ${{ secrets.ORACLE_REGISTRY_PASSWORD }}
+        env:
+          ORACLE_PWD: testpassword
+        ports:
+          - 1521:1521
+        # The image ships its own HEALTHCHECK (/opt/oracle/checkDBStatus.sh).
+        # We only override the timing: start_period=600s to account for Oracle
+        # 23ai Free cold-start latency on GitHub Actions (~8-10 min); retries
+        # keep polling for up to 500s after the start period ends.
+        options: >-
+          --health-interval 20s
+          --health-timeout 15s
+          --health-retries 25
+          --health-start-period 600s
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      # Even though `services:` waits for the container healthcheck before
+      # starting steps, we add a bounded TCP probe so logs clearly show
+      # the failure mode (container vs. listener) if Oracle never becomes
+      # ready. Total budget here stays under the job timeout-minutes.
+      - name: Wait for Oracle listener on localhost:1521
+        run: |
+          set -eu
+          attempts=60
+          for i in $(seq 1 $attempts); do
+            if bash -c "cat < /dev/tcp/localhost/1521" >/dev/null 2>&1; then
+              echo "Oracle listener accepting connections on localhost:1521 (after ${i} attempts)"
+              # Give FREEPDB1 a brief moment to fully register with the listener.
+              sleep 5
+              exit 0
+            fi
+            echo "Oracle not ready yet (attempt ${i}/${attempts})..."
+            sleep 10
+          done
+          echo "::error::Oracle did not become ready within timeout"
+          # Surface service-container logs without leaking credentials.
+          docker ps --no-trunc || true
+          exit 1
+
+      - name: Run integration tests (Oracle-backed)
+        env:
+          RUN_INTEGRATION_TESTS: 'true'
+          ORACLE_HOST: localhost
+          ORACLE_PORT: '1521'
+          ORACLE_SERVICE: FREEPDB1
+          ORACLE_USER: system
+          # Matches docker-compose.yml and hardcoded tests; not a secret
+          # since it only protects an ephemeral CI database instance.
+          ORACLE_PASSWORD: testpassword
+        run: dart test --tags=integration --reporter=expanded
+
+  # Pre-23 Oracle XE for non-23ai protocol-path validation (gvenzl community
+  # image — no registry credentials required). Originally specced as
+  # gvenzl/oracle-xe:19, but that tag does not exist on Docker Hub
+  # (gvenzl/oracle-xe ships 21c/18c/11g only). 21c is the closest available
+  # image and exercises the same pre-23 code path 19c would.
+  integration-21c:
+    name: Oracle 21c Integration Tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      oracle:
+        image: gvenzl/oracle-xe:21
+        env:
+          ORACLE_PASSWORD: testpassword
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd "sqlplus -L system/testpassword@//localhost:1521/XEPDB1 @/dev/null"
+          --health-interval 20s
+          --health-timeout 10s
+          --health-retries 20
+          --health-start-period 300s
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Wait for Oracle 21c listener on localhost:1521
+        run: |
+          set -eu
+          attempts=60
+          for i in $(seq 1 $attempts); do
+            if bash -c "cat < /dev/tcp/localhost/1521" >/dev/null 2>&1; then
+              echo "Oracle listener accepting connections on localhost:1521 (after ${i} attempts)"
+              sleep 5
+              exit 0
+            fi
+            echo "Oracle 21c not ready yet (attempt ${i}/${attempts})..."
+            sleep 10
+          done
+          echo "::error::Oracle 21c did not become ready within timeout"
+          docker ps --no-trunc || true
+          exit 1
+
+      - name: Run integration tests (Oracle 21c)
+        env:
+          RUN_INTEGRATION_TESTS: 'true'
+          ORACLE_HOST: localhost
+          ORACLE_PORT: '1521'
+          ORACLE_SERVICE: XEPDB1
+          ORACLE_USER: system
+          ORACLE_PASSWORD: testpassword
+        run: dart test --tags=integration --reporter=expanded

@@ -1,0 +1,3 @@
+[submodule "reference/node-oracledb"]
+	path = reference/node-oracledb
+	url = https://github.com/oracle/node-oracledb.git

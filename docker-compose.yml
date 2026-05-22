@@ -1,0 +1,48 @@
+# Docker Compose for Oracle 23ai Free for integration testing
+#
+# Usage:
+#   docker-compose up -d
+#   RUN_INTEGRATION_TESTS=true dart test test/integration/
+#   docker-compose down
+#
+# Note: Oracle 23ai Free requires accepting the license agreement
+# and may take several minutes to initialize on first run.
+
+services:
+  oracle:
+    image: container-registry.oracle.com/database/free:latest
+    container_name: oracle23ai
+    ports:
+      - "1521:1521"
+    environment:
+      - ORACLE_PWD=testpassword
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD", "sqlplus", "-L", "system/testpassword@//localhost:1521/FREEPDB1", "AS", "SYSDBA", "@/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+
+  # Older Oracle XE for non-23ai protocol validation. Originally specced as
+  # gvenzl/oracle-xe:19, but that tag does not exist on Docker Hub
+  # (gvenzl/oracle-xe ships 21c/18c/11g only). 21c is the closest available
+  # image and exercises the same pre-23 code path as 19c would.
+  oracle21c:
+    image: gvenzl/oracle-xe:21
+    profiles:
+      - oracle21c
+    ports:
+      - "1522:1521"
+    environment:
+      - ORACLE_PASSWORD=testpassword
+    healthcheck:
+      test: ["CMD", "sqlplus", "-L", "system/testpassword@//localhost:1521/XEPDB1", "@/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+
+volumes:
+  oracle-data:
