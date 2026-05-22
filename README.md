@@ -4,7 +4,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 
 [![Pub Version](https://img.shields.io/pub/v/oracledb)](https://pub.dev/packages/oracledb)
 [![pub pre-release](https://img.shields.io/pub/v/oracledb?label=pre-release&include_prereleases)](https://pub.dev/packages/oracledb)
-[![CI](https://github.com/abibiano/dart-oracledb/actions/workflows/ci.yml/badge.svg)](https://github.com/abibiano/dart-oracledb/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/abibiano/dart-oracledb/ci.yml?branch=main&label=CI)](https://github.com/abibiano/dart-oracledb/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.3.0-blue)](https://dart.dev)
 
