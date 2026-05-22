@@ -5,7 +5,9 @@ import 'package:logging/logging.dart';
 
 import 'crypto/auth.dart';
 import 'errors.dart';
+import 'oracle_bind.dart';
 import 'protocol/bind_parser.dart';
+import 'protocol/constants.dart' as oc;
 import 'protocol/messages/execute_message.dart';
 import 'result.dart';
 import 'sql_classifier.dart';
@@ -83,6 +85,57 @@ class OracleConnection {
     return '${sql.substring(0, _maxSqlSnippetLength)}...';
   }
 
+  /// Builds an [OracleOutBinds] from the decoded execute response.
+  ///
+  /// For named binds, OUT values are mapped by their first-occurrence name in
+  /// SQL order; for positional or no binds, they are indexed by their original
+  /// position in the SQL.
+  static OracleOutBinds _buildOutBinds({
+    required ExecuteResponse response,
+    required List<String>? bindNames,
+    required Map<String, int>? outBindNameIndex,
+  }) {
+    if (response.outBindIndices.isEmpty) {
+      return const OracleOutBinds.empty();
+    }
+    final values = response.outBindValues;
+    if (outBindNameIndex == null) {
+      return OracleOutBinds(values: values);
+    }
+    // Map original bind index → name. Multiple SQL positions can share a
+    // name; the OUT bind metadata uses the first-occurrence position so the
+    // reverse map can be authoritative.
+    final indexToName = <int, String>{};
+    outBindNameIndex.forEach((name, idx) {
+      indexToName[idx] = name;
+    });
+    final names = <String, int>{};
+    for (var i = 0; i < response.outBindIndices.length; i++) {
+      final bindIdx = response.outBindIndices[i];
+      final name = indexToName[bindIdx];
+      if (name != null) {
+        names[name] = i;
+      }
+    }
+    return OracleOutBinds(values: values, names: names);
+  }
+
+  /// Infers the Oracle wire-protocol type indicator for a raw Dart bind value.
+  /// Used to populate decoder-side bind metadata for IN binds (they never
+  /// appear in OUT decode paths, but keeping the list aligned simplifies
+  /// indexing).
+  static int _inferOraType(Object? value) {
+    if (value == null) return oc.oraTypeVarchar;
+    if (value is String) return oc.oraTypeVarchar;
+    if (value is int) return oc.oraTypeNumber;
+    if (value is double) return oc.oraTypeNumber;
+    if (value is DateTime) return oc.oraTypeDate;
+    if (value is Uint8List) return oc.oraTypeRaw;
+    // Unknown types still flow through; ExecuteRequest will raise a clearer
+    // error if encoding fails downstream.
+    return oc.oraTypeVarchar;
+  }
+
   /// Throws [OracleException] if connection is closed.
   ///
   /// This guard method is called by operations that require an open connection
@@ -143,6 +196,9 @@ class OracleConnection {
     // Validate and prepare bind values
     List<dynamic>? bindList;
     List<String>? bindNames;
+    // Maps each bind position (in SQL order) → the user-supplied name, when
+    // named binds are used. Lets us reconstruct `result.outBinds` by name.
+    Map<String, int>? outBindNameIndex;
 
     if (bindValues != null) {
       if (bindValues is Map<String, dynamic>) {
@@ -168,6 +224,13 @@ class OracleConnection {
           }
           return bindValues[name];
         }).toList();
+        // Track first-occurrence index per name for OUT bind lookup. Repeated
+        // names (e.g. `:a + :a`) map to their first SQL position, mirroring
+        // Story 3.1 named-bind semantics.
+        outBindNameIndex = <String, int>{};
+        for (var i = 0; i < bindNames.length; i++) {
+          outBindNameIndex.putIfAbsent(bindNames[i], () => i);
+        }
       } else if (bindValues is List) {
         // Positional binds
         final placeholderCount = BindParser.parsePositionalBinds(sql);
@@ -178,7 +241,7 @@ class OracleConnection {
                 'placeholders but ${bindValues.length} values provided',
           );
         }
-        bindList = bindValues;
+        bindList = List<dynamic>.of(bindValues);
       } else {
         throw OracleException(
           errorCode: oraBindTypeError,
@@ -191,6 +254,40 @@ class OracleConnection {
     final isQuery = isQuerySql(sql);
     final isPlSql = !isQuery && isPlSqlSql(sql);
     final eligible = isCacheEligibleSql(sql);
+
+    // Convert any OracleBind specs into wire-level BindVariable objects and
+    // build the parallel metadata list the decoder needs to decode OUT binds.
+    List<BindMetadata>? bindMetadata;
+    if (bindList != null) {
+      bindMetadata = <BindMetadata>[];
+      for (var i = 0; i < bindList.length; i++) {
+        final raw = bindList[i];
+        if (raw is OracleBind) {
+          if (!isPlSql) {
+            throw const OracleException(
+              errorCode: oraBindTypeError,
+              message: 'OracleBind specs are only supported in PL/SQL blocks',
+            );
+          }
+          final dir = raw.direction == BindDirection.output
+              ? BindDir.output
+              : BindDir.input;
+          bindList[i] = BindVariable(
+            value: null,
+            oraType: raw.oracleTypeCode,
+            maxSize: raw.maxSize,
+            dir: dir,
+          );
+          bindMetadata.add(BindMetadata(
+            oraType: raw.oracleTypeCode,
+            maxSize: raw.maxSize,
+            dir: dir,
+          ));
+        } else {
+          bindMetadata.add(BindMetadata(oraType: _inferOraType(raw)));
+        }
+      }
+    }
 
     // Try to acquire a cached cursor.
     StatementCacheEntry? cacheEntry;
@@ -216,6 +313,7 @@ class OracleConnection {
         isPlSql: isPlSql,
         bindValues: bindList,
         bindNames: bindNames,
+        bindMetadata: bindMetadata,
         cursorId: cursorId,
         expectedColumns: expectedColumns,
         cursorsToClose: cursorsToClose,
@@ -264,6 +362,11 @@ class OracleConnection {
         columnMetadata: response.columnMetadata,
         rowData: response.rows,
         rowsAffected: isPlSql ? null : response.rowsAffected,
+        outBinds: _buildOutBinds(
+          response: response,
+          bindNames: bindNames,
+          outBindNameIndex: outBindNameIndex,
+        ),
       );
     } catch (e) {
       if (cacheEntry != null) {

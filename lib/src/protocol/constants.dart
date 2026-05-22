@@ -245,6 +245,19 @@ const int ttcExecOptionImplicitResultset = 0x8000;
 const int ttcExecOptionPlSqlBind = 0x400;
 
 // ============================================================================
+// TTC Bind Directions (IO_VECTOR direction byte)
+// ============================================================================
+
+/// IN bind — value flows client → server only.
+const int tnsBindDirInput = 32;
+
+/// OUT bind — value flows server → client (function/procedure return values).
+const int tnsBindDirOutput = 16;
+
+/// IN OUT bind — value flows both directions (Story 3.3+).
+const int tnsBindDirInputOutput = 48;
+
+// ============================================================================
 // TTC Bind Flags
 // ============================================================================
 

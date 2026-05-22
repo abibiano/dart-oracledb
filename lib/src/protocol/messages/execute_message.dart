@@ -15,17 +15,36 @@ import '../constants.dart';
 import '../data_types.dart' as dt;
 import 'base.dart';
 
+/// Direction of a [BindVariable] on the wire.
+///
+/// Distinct from [BindVariable.value] semantics: an OUT bind has no input
+/// value, but its type/maxSize metadata is still written so the server knows
+/// how large a return buffer to allocate.
+enum BindDir {
+  /// Client → server (IN).
+  input,
+
+  /// Server → client (OUT, function return values).
+  output,
+}
+
 /// One bind variable supplied to an [ExecuteRequest].
 ///
 /// The Dart-level [value] is paired with the Oracle [oraType] expected on the
 /// wire. The [oraType] is inferred from the Dart type when callers do not set
-/// it explicitly.
+/// it explicitly. For OUT binds (function returns) pass [dir]: `BindDir.output`
+/// and a `null` value — the server allocates a return buffer sized by
+/// [maxSize].
 class BindVariable {
   /// Creates a bind variable.
-  BindVariable({required this.value, int? oraType, this.maxSize})
-      : oraType = oraType ?? _inferType(value);
+  BindVariable({
+    required this.value,
+    int? oraType,
+    this.maxSize,
+    this.dir = BindDir.input,
+  }) : oraType = oraType ?? _inferType(value);
 
-  /// The Dart value to send (or null for SQL NULL).
+  /// The Dart value to send (or null for SQL NULL / OUT bind).
   final Object? value;
 
   /// The Oracle data type indicator.
@@ -34,6 +53,13 @@ class BindVariable {
   /// Maximum buffer size declared to the server. Optional; defaults to a
   /// type-appropriate value.
   final int? maxSize;
+
+  /// Direction (IN, OUT). IN is the default; OUT is used for PL/SQL return
+  /// values such as `BEGIN :ret := func(...); END;`.
+  final BindDir dir;
+
+  /// Whether this bind is purely an output (no input value written).
+  bool get isOutput => dir == BindDir.output;
 
   static int _inferType(Object? value) {
     if (value == null) return oraTypeVarchar;
@@ -70,7 +96,20 @@ class ExecuteRequest extends Message {
     super.sequence = 1,
   })  : assert(!(isQuery && isPlSql),
             'a statement cannot be both query and PL/SQL'),
-        super(messageType: ttcMsgTypeFunction);
+        super(messageType: ttcMsgTypeFunction) {
+    // OUT binds are only meaningful in PL/SQL. Refuse mid-build rather than
+    // emit malformed bytes that would surface as a confusing server error.
+    if (bindValues != null) {
+      for (final v in bindValues!) {
+        if (v is BindVariable && v.isOutput && !isPlSql) {
+          throw const OracleException(
+            errorCode: oraBindTypeError,
+            message: 'OUT binds are only supported in PL/SQL blocks',
+          );
+        }
+      }
+    }
+  }
 
   /// The SQL text to execute.
   final String sql;
@@ -422,6 +461,26 @@ class ColumnMetadata {
   final int csfrm;
 }
 
+/// Decoder-side bind metadata used to interpret OUT bind values returned in
+/// the response stream. Order must match the order of binds sent on the wire.
+class BindMetadata {
+  /// Creates bind metadata for one bind variable.
+  const BindMetadata({
+    required this.oraType,
+    this.maxSize,
+    this.dir = BindDir.input,
+  });
+
+  /// Oracle wire-protocol type indicator.
+  final int oraType;
+
+  /// Maximum buffer size declared to the server (optional).
+  final int? maxSize;
+
+  /// Requested direction (IN or OUT) as declared by the client.
+  final BindDir dir;
+}
+
 /// Result of an EXECUTE / FETCH response cycle.
 class ExecuteResponse {
   /// Creates an execute response.
@@ -430,6 +489,8 @@ class ExecuteResponse {
     this.cursorId = 0,
     this.columnMetadata = const [],
     this.rows = const [],
+    this.outBindValues = const [],
+    this.outBindIndices = const [],
     this.rowsAffected,
     this.moreRowsToFetch = false,
     this.errorCode,
@@ -448,6 +509,15 @@ class ExecuteResponse {
 
   /// Decoded rows (one `List<dynamic>` per row).
   List<List<Object?>> rows;
+
+  /// Decoded OUT bind values in the order they appear in the SQL. For
+  /// non-PL/SQL responses this is always empty.
+  List<Object?> outBindValues;
+
+  /// Index (in the bind list sent to the server) of each value in
+  /// [outBindValues]. Lets higher layers map decoded values back to the
+  /// original bind name or position.
+  List<int> outBindIndices;
 
   /// Rows affected by DML (null for SELECT before FETCH end).
   int? rowsAffected;
@@ -479,13 +549,15 @@ class ExecuteResponse {
 bool ttcStreamIsComplete(Uint8List data,
     {int ttcFieldVersion = 24,
     bool endOfRequestSupport = true,
-    List<ColumnMetadata>? expectedColumns}) {
+    List<ColumnMetadata>? expectedColumns,
+    List<BindMetadata>? bindMetadata}) {
   final buffer = ReadBuffer(data);
   final state = _DecodeState(
     isQuery: false,
     ttcFieldVersion: ttcFieldVersion,
     columns:
         expectedColumns != null ? List.of(expectedColumns) : <ColumnMetadata>[],
+    bindMetadata: bindMetadata ?? const [],
     endOfRequestSupport: endOfRequestSupport,
   );
   try {
@@ -506,13 +578,15 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
     {required bool isQuery,
     int ttcFieldVersion = 24,
     bool endOfRequestSupport = true,
-    List<ColumnMetadata>? expectedColumns}) {
+    List<ColumnMetadata>? expectedColumns,
+    List<BindMetadata>? bindMetadata}) {
   final buffer = ReadBuffer(data);
   final state = _DecodeState(
     isQuery: isQuery,
     ttcFieldVersion: ttcFieldVersion,
     columns:
         expectedColumns != null ? List.of(expectedColumns) : <ColumnMetadata>[],
+    bindMetadata: bindMetadata ?? const [],
     endOfRequestSupport: endOfRequestSupport,
   );
 
@@ -541,6 +615,8 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
     cursorId: state.cursorId,
     columnMetadata: state.columns,
     rows: state.rows,
+    outBindValues: state.outBindValues,
+    outBindIndices: state.outBindIndices,
     rowsAffected: state.rowsAffected,
     moreRowsToFetch: state.moreRowsToFetch,
     errorCode: isSuccess ? null : state.errorNum,
@@ -553,11 +629,15 @@ class _DecodeState {
   _DecodeState(
       {required this.isQuery,
       required this.columns,
+      this.bindMetadata = const [],
       this.ttcFieldVersion = 24,
       this.endOfRequestSupport = true});
 
   final bool isQuery;
   final int ttcFieldVersion;
+  final List<BindMetadata> bindMetadata;
+  final List<int> outBindIndices = [];
+  final List<Object?> outBindValues = [];
 
   /// Server-side TNS_CCAP_END_OF_REQUEST capability. On pre-23.4 servers
   /// (false), an ERROR TTC message terminates the response — no STATUS or
@@ -731,6 +811,33 @@ void _processRowHeader(ReadBuffer buf, _DecodeState s) {
 }
 
 void _processRowData(ReadBuffer buf, _DecodeState s) {
+  // PL/SQL responses use ROW_DATA after IO_VECTOR to ship OUT bind values.
+  // SELECT responses use ROW_DATA after DESCRIBE_INFO + ROW_HEADER to ship
+  // result rows. The two never mix on the same statement.
+  if (!s.isQuery && s.outBindIndices.isNotEmpty) {
+    // Guard against double-decode: a single PL/SQL execution produces exactly
+    // one ROW_DATA with all OUT bind values; if called again, skip.
+    if (s.outBindValues.isEmpty) {
+      for (final bindIdx in s.outBindIndices) {
+        if (bindIdx >= s.bindMetadata.length) {
+          // Server returned more OUT slots than the client declared binds.
+          // Consume bytes conservatively so the stream stays aligned.
+          buf.readBytesWithLength();
+          buf.skipSB4();
+          s.outBindValues.add(null);
+          continue;
+        }
+        final meta = s.bindMetadata[bindIdx];
+        final value = _decodeValueByOraType(buf, meta.oraType);
+        // After the value bytes, an OUT bind carries an SB4 "actual num bytes"
+        // trailer (matches node-oracledb processColumnData !inFetch path).
+        buf.skipSB4();
+        s.outBindValues.add(value);
+      }
+    }
+    return;
+  }
+
   final row = <Object?>[];
   for (var i = 0; i < s.columns.length; i++) {
     final col = s.columns[i];
@@ -746,24 +853,16 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
   // ROW_HEADER or BIT_VECTOR message arrives.
 }
 
-bool _isDuplicate(Uint8List? bitVector, int colIndex) {
-  if (bitVector == null) return false;
-  final byteNum = colIndex ~/ 8;
-  final bitNum = colIndex % 8;
-  if (byteNum >= bitVector.length) return false;
-  return (bitVector[byteNum] & (1 << bitNum)) == 0;
-}
-
-Object? _decodeColumnValue(ReadBuffer buf, ColumnMetadata col) {
-  switch (col.oracleType) {
+/// Decodes one length-prefixed value from [buf] using the Oracle type indicator
+/// [oraType]. Shared by the OUT bind decode path and the SELECT column decode
+/// path so both stay consistent under future type-handling changes.
+Object? _decodeValueByOraType(ReadBuffer buf, int oraType) {
+  switch (oraType) {
     case oraTypeVarchar:
     case oraTypeVarchar2:
     case oraTypeString:
-    case oraTypeLong:
-      final bytes = buf.readBytesWithLength();
-      if (bytes.isEmpty) return null;
-      return utf8.decode(bytes, allowMalformed: true);
     case oraTypeChar:
+    case oraTypeLong:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
       return utf8.decode(bytes, allowMalformed: true);
@@ -790,11 +889,21 @@ Object? _decodeColumnValue(ReadBuffer buf, ColumnMetadata col) {
       if (bytes.isEmpty) return null;
       return dt.decodeTimestamp(ReadBuffer(bytes));
     default:
-      // Best-effort: consume length-prefixed bytes and return null.
       buf.readBytesWithLength();
       return null;
   }
 }
+
+bool _isDuplicate(Uint8List? bitVector, int colIndex) {
+  if (bitVector == null) return false;
+  final byteNum = colIndex ~/ 8;
+  final bitNum = colIndex % 8;
+  if (byteNum >= bitVector.length) return false;
+  return (bitVector[byteNum] & (1 << bitNum)) == 0;
+}
+
+Object? _decodeColumnValue(ReadBuffer buf, ColumnMetadata col) =>
+    _decodeValueByOraType(buf, col.oracleType);
 
 void _processBitVector(ReadBuffer buf, _DecodeState s) {
   final numColsSent = buf.readUB2();
@@ -816,8 +925,17 @@ void _processIoVector(ReadBuffer buf, _DecodeState s) {
   if (fastFetchLen > 0) buf.skip(fastFetchLen);
   final rowidLen = buf.readUB2();
   if (rowidLen > 0) buf.skip(rowidLen);
+  // Build the ordered list of OUT bind indices declared by the server. Reset
+  // first so a re-decode pass (e.g. ttcStreamIsComplete + decodeExecuteResponse)
+  // does not double-count entries.
+  s.outBindIndices.clear();
   for (var i = 0; i < numBinds; i++) {
-    buf.readUint8(); // bind dir
+    final dir = buf.readUint8();
+    // tnsBindDirOutput (16) and tnsBindDirInputOutput (48) both mean the
+    // server will return a value for this bind in a subsequent ROW_DATA.
+    if (dir != tnsBindDirInput) {
+      s.outBindIndices.add(i);
+    }
   }
 }
 

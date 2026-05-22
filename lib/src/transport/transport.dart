@@ -251,6 +251,7 @@ class Transport {
     bool isPlSql = false,
     List<Object?>? bindValues,
     List<String>? bindNames,
+    List<BindMetadata>? bindMetadata,
     int prefetchRows = 50,
     Duration? timeout = const Duration(minutes: 2),
     int cursorId = 0,
@@ -295,6 +296,7 @@ class Transport {
       ttcFieldVersion: _ttcFieldVersion,
       endOfRequestSupport: _supportsEndOfRequest,
       expectedColumns: expectedColumns,
+      bindMetadata: bindMetadata,
     );
 
     // If this is a SELECT and the server kept the cursor open with more rows

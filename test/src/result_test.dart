@@ -1,5 +1,6 @@
 import 'package:test/test.dart';
 
+import 'package:oracledb/src/oracle_bind.dart';
 import 'package:oracledb/src/result.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/protocol/constants.dart';
@@ -74,6 +75,30 @@ void main() {
       );
 
       expect(result.rowsAffected, equals(5));
+    });
+
+    test('outBinds defaults to an empty container (Story 3.2)', () {
+      final result = OracleResult(
+        columnMetadata: const [],
+        rowData: const [],
+      );
+      expect(result.outBinds.isEmpty, isTrue);
+      expect(result.outBinds['ret'], isNull);
+      expect(result.outBinds[0], isNull);
+    });
+
+    test('outBinds carries decoded values when supplied', () {
+      final result = OracleResult(
+        columnMetadata: const [],
+        rowData: const [],
+        outBinds: OracleOutBinds(
+          values: const [42],
+          names: const {'ret': 0},
+        ),
+      );
+      expect(result.outBinds['ret'], equals(42));
+      expect(result.outBinds[0], equals(42));
+      expect(result.outBinds.length, equals(1));
     });
   });
 

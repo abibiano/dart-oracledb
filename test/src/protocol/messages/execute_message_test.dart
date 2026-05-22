@@ -11,6 +11,7 @@ import 'dart:typed_data';
 
 import 'package:test/test.dart';
 
+import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
@@ -319,7 +320,208 @@ void main() {
       expect(r.errorOffset, isNull);
     });
   });
+
+  group('Story 3.2 — OUT bind encoding', () {
+    test('PL/SQL with OUT bind writes metadata and null indicator for OUT', () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN :ret := myfunc(:a); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: null,
+            oraType: oraTypeNumber,
+            maxSize: 22,
+            dir: BindDir.output,
+          ),
+          BindVariable(value: 5),
+        ],
+        bindNames: const ['ret', 'a'],
+      );
+      // Should not throw and should produce a non-empty payload.
+      final bytes = req.toBytes();
+      expect(bytes.length, greaterThan(0));
+      // PL/SQL+binds: PLSQL_BIND must be set, NOT_PLSQL cleared.
+      final buf = ReadBuffer(bytes);
+      buf.readUint8(); // msg
+      buf.readUint8(); // func
+      buf.readUint8(); // seq
+      buf.skipUB8(); // token
+      final options = buf.readUB4();
+      expect(options & ttcExecOptionPlSqlBind, isNonZero);
+      expect(options & ttcExecOptionNotPlSql, equals(0));
+    });
+
+    test('OUT bind in non-PL/SQL statement throws OracleException', () {
+      expect(
+        () => ExecuteRequest(
+          sql: 'SELECT :ret FROM dual',
+          isQuery: true,
+          bindValues: [
+            BindVariable(
+              value: null,
+              oraType: oraTypeNumber,
+              dir: BindDir.output,
+            ),
+          ],
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(6502))),
+      );
+    });
+
+    test('OUT bind: ROW_DATA writes the null-indicator byte (length 0)', () {
+      // For pure OUT binds, the input row data carries only a length=0
+      // indicator byte — no value bytes follow. This mirrors node-oracledb
+      // writeBindParamsColumn for null values.
+      final req = ExecuteRequest(
+        sql: 'BEGIN :ret := myfunc; END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: null,
+            oraType: oraTypeNumber,
+            maxSize: 22,
+            dir: BindDir.output,
+          ),
+        ],
+        bindNames: const ['ret'],
+      );
+      final bytes = req.toBytes();
+      // Scan for ROW_DATA marker (7). The value byte right after the marker
+      // for a NULL/OUT bind must be 0.
+      final rowDataIdx = bytes.indexOf(ttcMsgTypeRowData);
+      expect(rowDataIdx, greaterThan(0),
+          reason: 'ROW_DATA segment must be present for binds');
+      // Byte after ROW_DATA marker is the length indicator for the first bind.
+      expect(bytes[rowDataIdx + 1], equals(0),
+          reason: 'OUT bind must serialize as null-indicator (length 0)');
+    });
+  });
+
+  group('Story 3.2 — OUT bind decoding', () {
+    test('IO_VECTOR + ROW_DATA decodes a NUMBER OUT bind', () {
+      // bind 0: OUT NUMBER (return), bind 1: IN NUMBER. Server reports
+      // direction 16 for OUT, direction 32 for IN.
+      final payload = _buildPayload([
+        _ioVector([16, 32]),
+        // ROW_DATA for OUT bind: NUMBER (Oracle encodes 0 as a single 0x80
+        // byte, but easier to send 5: encoded as [193, 6]). Then SB4 trailer.
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._ub4(0), // SB4 actualNumBytes
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(
+              oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+          BindMetadata(oraType: oraTypeNumber),
+        ],
+      );
+
+      expect(r.isSuccess, isTrue);
+      expect(r.outBindIndices, equals([0]));
+      expect(r.outBindValues, hasLength(1));
+      expect(r.outBindValues.first, equals(5));
+    });
+
+    test('IO_VECTOR + ROW_DATA decodes a VARCHAR OUT bind', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength('hello'.codeUnits),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(
+              oraType: oraTypeVarchar, maxSize: 100, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindValues, equals(['hello']));
+    });
+
+    test('NULL OUT bind decodes as null', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          0, // length 0 (null indicator)
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(
+              oraType: oraTypeVarchar, maxSize: 100, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindValues, equals([null]));
+    });
+
+    test('no OUT binds: outBindValues stays empty', () {
+      // A bind list with only IN binds produces no OUT decode work even when
+      // an IO_VECTOR is present (server only reports IN directions).
+      final payload = _buildPayload([
+        _ioVector([32, 32]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeNumber),
+          BindMetadata(oraType: oraTypeVarchar),
+        ],
+      );
+      expect(r.outBindIndices, isEmpty);
+      expect(r.outBindValues, isEmpty);
+    });
+  });
 }
+
+/// Builds a minimal TTC IO_VECTOR message carrying the supplied directions.
+///
+/// Wire layout (matches node-oracledb processIOVector):
+///   [type=11, flag(UB1), temp16(UB2)=numBinds, temp32(UB4)=0,
+///    iters(UB4)=0, uacLen(UB2)=0, fastFetchLen(UB2)=0, rowidLen(UB2)=0,
+///    direction(UB1) x numBinds]
+List<int> _ioVector(List<int> directions) {
+  return [
+    ttcMsgTypeIoVector,
+    0, // flag
+    ..._ub2(directions.length), // temp16 = numBinds (low 16 bits)
+    ..._ub4(0), // temp32 = 0 (high bits)
+    ..._ub4(0), // num iters this time
+    ..._ub2(0), // uac buffer length
+    ..._ub2(0), // fast-fetch bitvector length
+    ..._ub2(0), // rowid length
+    ...directions,
+  ];
+}
+
+/// Oracle base-100 encoding for the integer 5 (positive, 1 digit).
+/// Format: exponent byte = 0xC1, then digit + 1 = 6.
+List<int> _oracleNumberFiveBytes() => [0xC1, 6];
 
 /// Builds a minimal TTC ROW_HEADER message with no bit-vector and no rowid.
 List<int> _rowHeader() {

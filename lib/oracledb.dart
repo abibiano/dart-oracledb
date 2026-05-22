@@ -36,5 +36,8 @@ export 'src/connection.dart' show OracleConnection;
 export 'src/result.dart' show OracleResult, OracleRow;
 export 'src/protocol/messages/execute_message.dart' show ColumnMetadata;
 
+// Output bind API (Story 3.2)
+export 'src/oracle_bind.dart' show OracleBind, OracleDbType, OracleOutBinds;
+
 // TLS/SSL Configuration
 export 'src/transport/tls.dart' show TlsConfig;

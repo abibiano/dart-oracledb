@@ -4,6 +4,7 @@
 /// handling SELECT query results and DML operation outcomes.
 library;
 
+import 'oracle_bind.dart';
 import 'protocol/messages/execute_message.dart';
 
 /// The result of executing a SQL query.
@@ -29,6 +30,7 @@ class OracleResult {
     required List<ColumnMetadata> columnMetadata,
     required List<List<dynamic>> rowData,
     int? rowsAffected,
+    OracleOutBinds? outBinds,
   }) {
     final nameToIndex = _buildNameMap(columnMetadata);
     final rows = rowData
@@ -42,12 +44,14 @@ class OracleResult {
       columnMetadata: columnMetadata,
       rows: rows,
       rowsAffected: rowsAffected,
+      outBinds: outBinds ?? const OracleOutBinds.empty(),
     );
   }
 
   const OracleResult._({
     required List<ColumnMetadata> columnMetadata,
     required List<OracleRow> rows,
+    required this.outBinds,
     this.rowsAffected,
   })  : _columnMetadata = columnMetadata,
         _rows = rows;
@@ -59,6 +63,18 @@ class OracleResult {
   ///
   /// This is `null` for SELECT queries.
   final int? rowsAffected;
+
+  /// Decoded OUT bind values from PL/SQL execution. Empty for non-PL/SQL
+  /// statements and for PL/SQL blocks that declare no OUT binds.
+  ///
+  /// Access values by bind name (case-insensitive) for named binds, or by
+  /// zero-based index for positional binds:
+  ///
+  /// ```dart
+  /// result.outBinds['ret'];   // named
+  /// result.outBinds[0];       // positional
+  /// ```
+  final OracleOutBinds outBinds;
 
   /// The rows returned by a SELECT query.
   ///
