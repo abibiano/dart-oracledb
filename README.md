@@ -3,8 +3,12 @@
 A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire protocol. No Oracle Client libraries required.
 
 [![Pub Version](https://img.shields.io/pub/v/oracledb)](https://pub.dev/packages/oracledb)
+[![pub pre-release](https://img.shields.io/pub/v/oracledb?label=pre-release&include_prereleases)](https://pub.dev/packages/oracledb)
+[![CI](https://github.com/abibiano/dart-oracledb/actions/workflows/ci.yml/badge.svg)](https://github.com/abibiano/dart-oracledb/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.3.0-blue)](https://dart.dev)
+
+> **Alpha — public API may change between releases.** Epics 1 & 2 (connection, auth, queries, DML, transactions) are stable. PL/SQL, LOBs, and connection pooling are not yet implemented. Pin to an exact version (`oracledb: 0.1.0-alpha.1`) until 1.0.
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
