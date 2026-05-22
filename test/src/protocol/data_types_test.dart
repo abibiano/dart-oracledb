@@ -181,6 +181,39 @@ void main() {
       }
     });
 
+    test('decodes truncated 7-byte TIMESTAMP (zero fractional seconds)', () {
+      // Oracle truncates trailing zero bytes on the wire — a TIMESTAMP with
+      // zero fractional seconds arrives as 7 bytes (DATE portion only).
+      final dt = DateTime(2024, 3, 15, 10, 30, 0);
+      final dateBytes = encodeDate(dt);
+      expect(dateBytes.length, equals(7));
+
+      final decoded = decodeTimestamp(ReadBuffer(dateBytes));
+      expect(decoded, equals(dt));
+      expect(decoded.millisecond, equals(0));
+      expect(decoded.microsecond, equals(0));
+    });
+
+    test('decodes 13-byte TIMESTAMP WITH TZ payload', () {
+      // 7 DATE bytes + 4 nano bytes + 2 TZ bytes. TZ bytes are currently
+      // discarded — locks in the new branch semantics.
+      final dt = DateTime(2024, 3, 15, 10, 30, 45, 123);
+      final tsBytes = encodeTimestamp(dt);
+      expect(tsBytes.length, equals(11));
+      final wire = Uint8List.fromList([...tsBytes, 32, 60]); // TZ +0:00 region
+      final decoded = decodeTimestamp(ReadBuffer(wire));
+      expect(decoded.millisecond, equals(123));
+    });
+
+    test('rejects malformed TIMESTAMP payload length', () {
+      // 9 bytes is not a valid Oracle TIMESTAMP wire length (must be 7/11/13).
+      final wire = Uint8List(9)..[0] = 120;
+      expect(
+        () => decodeTimestamp(ReadBuffer(wire)),
+        throwsA(isA<BufferException>()),
+      );
+    });
+
     test('distinguishes TIMESTAMP (11 bytes) from DATE (7 bytes)', () {
       final dt = DateTime(2025, 12, 16, 14, 30, 45, 123, 456);
       final timestampEncoded = encodeTimestamp(dt);

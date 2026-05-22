@@ -309,13 +309,17 @@ Uint8List encodeTimestamp(DateTime dt) {
 
 /// Decodes Oracle TIMESTAMP format to DateTime.
 ///
-/// Oracle TIMESTAMP is 11 bytes:
-/// - Bytes 0-6: DATE portion
-/// - Bytes 7-10: Nanoseconds (big-endian)
+/// Oracle TIMESTAMP wire format:
+/// - Bytes 0-6: DATE portion (always present)
+/// - Bytes 7-10: Nanoseconds (big-endian) — omitted by the server when zero
+/// - Bytes 11-12: Timezone offset (TZ variants only) — omitted when zero
+///
+/// Oracle truncates trailing zero bytes in date/timestamp wire payloads, so a
+/// TIMESTAMP whose fractional-seconds (and TZ) are all zero arrives as 7 bytes.
+/// Treat the fractional and TZ bytes as optional, defaulting to zero.
 ///
 /// Note: Oracle nanoseconds are truncated to microseconds for Dart DateTime.
 DateTime decodeTimestamp(ReadBuffer buffer) {
-  // First 7 bytes are DATE
   final century = buffer.readUint8() - 100;
   final year = buffer.readUint8() - 100;
   final month = buffer.readUint8();
@@ -324,13 +328,31 @@ DateTime decodeTimestamp(ReadBuffer buffer) {
   final minute = buffer.readUint8() - 1;
   final second = buffer.readUint8() - 1;
 
-  // Bytes 7-10: Nanoseconds (4 bytes, big-endian)
-  final nanos = (buffer.readUint8() << 24) |
-      (buffer.readUint8() << 16) |
-      (buffer.readUint8() << 8) |
-      buffer.readUint8();
+  // Oracle sends exactly 7 (DATE-shaped), 11 (with nanos), or 13 (with nanos
+  // + TZ) bytes. Any other payload length means the wire format drifted —
+  // throw rather than silently produce a corrupt DateTime.
+  final remaining = buffer.remaining;
+  if (remaining != 0 && remaining != 4 && remaining != 6) {
+    throw BufferException(
+      'Unexpected TIMESTAMP payload length: '
+      'expected 7, 11, or 13 bytes total, got ${7 + remaining}',
+    );
+  }
 
-  // Convert nanoseconds to microseconds (Dart DateTime precision limit)
+  var nanos = 0;
+  if (remaining >= 4) {
+    nanos = (buffer.readUint8() << 24) |
+        (buffer.readUint8() << 16) |
+        (buffer.readUint8() << 8) |
+        buffer.readUint8();
+  }
+
+  // TZ-variant trailing bytes (when present) are not surfaced to Dart DateTime.
+  if (remaining == 6) {
+    buffer.readUint8();
+    buffer.readUint8();
+  }
+
   final micros = nanos ~/ 1000;
   final millisecond = micros ~/ 1000;
   final microsecond = micros % 1000;
