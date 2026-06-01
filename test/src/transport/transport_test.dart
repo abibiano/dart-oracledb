@@ -317,6 +317,87 @@ void main() {
       });
     });
 
+    // Story 7.7 AC10: the receive loop must be bounded. A server that keeps
+    // sending non-terminal DATA packets (a stream that never satisfies the TTC
+    // completion probe) must trip the packet cap, poison the transport, and
+    // throw oraProtocolError rather than spin forever. Driven by a local
+    // ServerSocket with the cap lowered via the test-only seam.
+    group('receive-loop iteration cap (AC10)', () {
+      test('non-terminating DATA stream trips the cap and poisons', () async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((s) {
+          s.listen((_) {
+            // Flood the client with non-terminal DATA packets: each carries the
+            // 2-byte data-flags (0x0000) and NO TTC payload, so the completion
+            // probe never reports the stream complete. Send well past the cap.
+            for (var i = 0; i < 12; i++) {
+              const payloadLen = 2; // data flags only
+              const packetLen = tnsHeaderSize + payloadLen;
+              s.add(<int>[
+                (packetLen >> 8) & 0xFF, packetLen & 0xFF, // length (BE)
+                0x00, 0x00, // checksum
+                tnsPacketData, // type = 6
+                0x00, // marker
+                0x00, 0x00, // header checksum
+                0x00, 0x00, // data flags = 0x0000 (non-terminal)
+              ]);
+            }
+          });
+        });
+
+        final transport = Transport()..debugMaxReceivePackets = 5;
+        await transport.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+
+        await expectLater(
+          transport.sendCommit(timeout: const Duration(seconds: 5)),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('receive-loop'))),
+        );
+
+        // Cap exhaustion is a framing hazard: the transport must be poisoned.
+        expect(transport.isCorrupted, isTrue);
+        expect(transport.isConnected, isFalse);
+
+        await transport.disconnect();
+        await server.close();
+      });
+    });
+
+    // Story 7.7 AC12: sendConnectReceiveAccept must honor a poisoned transport
+    // and fail fast before reading stale bytes off the wire.
+    group('poisoned-state guard on CONNECT/ACCEPT (AC12)', () {
+      test('sendConnectReceiveAccept fails fast on a poisoned transport',
+          () async {
+        // Poison the transport via the existing timeout seam: a server that
+        // accepts but never replies makes sendPing time out and poison.
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((s) => s.listen((_) {}, onError: (_) {}));
+
+        final transport = Transport();
+        await transport.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+
+        await expectLater(
+          transport.sendPing(timeout: const Duration(milliseconds: 200)),
+          throwsA(isA<OracleException>()),
+        );
+        expect(transport.isCorrupted, isTrue);
+
+        // The poisoned transport must reject a CONNECT/ACCEPT attempt with the
+        // distinct connection-closed error, not attempt to read the wire.
+        await expectLater(
+          transport.sendConnectReceiveAccept(Uint8List.fromList([0x01])),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+        );
+
+        await transport.disconnect();
+        await server.close();
+      });
+    });
+
     group('send', () {
       test('throws when not connected', () async {
         final transport = Transport();

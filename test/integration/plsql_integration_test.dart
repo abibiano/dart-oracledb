@@ -788,7 +788,8 @@ void main() {
     });
 
     // AC7 — Epic 2 regression: SELECT and DML still work after Story 3.3 plumbing
-    test('AC7-epic2-regression: SELECT and DML still work alongside Story 3.3 binds',
+    test(
+        'AC7-epic2-regression: SELECT and DML still work alongside Story 3.3 binds',
         () async {
       final sel = await conn.execute('SELECT 7 FROM dual');
       expect(sel.rows.first[0], equals(7));
@@ -1057,8 +1058,7 @@ void main() {
 
     test(
         'AC8 — repeated named IN bind reuses the same value in both '
-        'placeholders (first-occurrence contract)',
-        () async {
+        'placeholders (first-occurrence contract)', () async {
       // Oracle's PL/SQL parser rejects the strictest AC8 shape — repeating
       // an OUT placeholder (e.g. `BEGIN p(:v); p(:v); END;`) raises
       // ORA-01006 "Bind variable does not exist", so we cannot construct

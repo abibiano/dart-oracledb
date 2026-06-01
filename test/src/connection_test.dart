@@ -490,8 +490,7 @@ void main() {
         final conn = OracleConnection.forTesting(transport: t);
         const col1 = ColumnMetadata(
             name: 'X', oracleType: 2, maxLength: 22, precision: 10, scale: 0);
-        const col2 = ColumnMetadata(
-            name: 'Y', oracleType: 1, maxLength: 100);
+        const col2 = ColumnMetadata(name: 'Y', oracleType: 1, maxLength: 100);
 
         // First execute: server parses the query, assigns cursor 100, and sends
         // DESCRIBE_INFO with one column [X].
@@ -536,8 +535,7 @@ void main() {
         // SELECT ... FOR UPDATE is not cache-eligible (AC6) — it must not
         // add a second entry even though it looks like a query.
         t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
-        await conn.execute(
-            'SELECT id FROM t WHERE id = :1 FOR UPDATE', [1]);
+        await conn.execute('SELECT id FROM t WHERE id = :1 FOR UPDATE', [1]);
         expect(conn.debugCacheSize, equals(1),
             reason: 'FOR UPDATE must not populate the statement cache; '
                 'cursor reuse across lock acquisitions is unsafe');

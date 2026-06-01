@@ -207,7 +207,8 @@ void main() {
   });
 
   group('Story 7.2 — OracleBind value/type validation (AC6)', () {
-    test('AC6 example: inOut(value: DateTime, type: number) throws '
+    test(
+        'AC6 example: inOut(value: DateTime, type: number) throws '
         'ArgumentError at construction', () {
       // The exact AC example: value's runtime type (DateTime) does not match
       // the declared Oracle type (number). This must surface as an
@@ -229,8 +230,8 @@ void main() {
 
     test('varchar type rejects an int value', () {
       expect(
-        () => OracleBind.inOut(
-            value: 5, type: OracleDbType.varchar, maxSize: 10),
+        () =>
+            OracleBind.inOut(value: 5, type: OracleDbType.varchar, maxSize: 10),
         throwsA(isA<ArgumentError>()),
       );
     });
@@ -251,8 +252,8 @@ void main() {
 
     test('raw type rejects a String value', () {
       expect(
-        () => OracleBind.inOut(
-            value: 'abc', type: OracleDbType.raw, maxSize: 10),
+        () =>
+            OracleBind.inOut(value: 'abc', type: OracleDbType.raw, maxSize: 10),
         throwsA(isA<ArgumentError>()),
       );
     });
@@ -284,16 +285,15 @@ void main() {
       // patch adds a finite-double check to `_validate` so the error happens
       // at the call site.
       expect(
-        () => OracleBind.inOut(
-            value: double.nan, type: OracleDbType.number),
+        () => OracleBind.inOut(value: double.nan, type: OracleDbType.number),
         throwsArgumentError,
       );
     });
 
     test('Review patch — number type rejects +Infinity and -Infinity', () {
       expect(
-        () => OracleBind.inOut(
-            value: double.infinity, type: OracleDbType.number),
+        () =>
+            OracleBind.inOut(value: double.infinity, type: OracleDbType.number),
         throwsArgumentError,
       );
       expect(
@@ -307,8 +307,7 @@ void main() {
       // Smoke-test the happy paths so the new validation does not over-reject.
       expect(() => OracleBind.inOut(value: 42, type: OracleDbType.number),
           returnsNormally);
-      expect(
-          () => OracleBind.inOut(value: 1.5, type: OracleDbType.number),
+      expect(() => OracleBind.inOut(value: 1.5, type: OracleDbType.number),
           returnsNormally);
       expect(
           () => OracleBind.inOut(

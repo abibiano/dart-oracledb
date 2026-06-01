@@ -72,5 +72,49 @@ void main() {
           reason: 'per-packet TTC completion probe must stay cheap; took '
               '${sw.elapsedMilliseconds}ms for $packets full scans');
     });
+
+    // Story 7.7 AC11: the 23ai `flags == 0x0000` error sub-path keeps reading
+    // until the payload ends with the single-byte END_OF_REQUEST marker (0x1D)
+    // AND the accumulation parses complete. This bounds that branch's cost,
+    // which re-concatenates and re-walks the buffer once per packet just like
+    // the pre-23.4 probe.
+    group('23ai flags=0x0000 error sub-path (AC11)', () {
+      // A benign run terminated by the END_OF_REQUEST (0x1D) marker — the shape
+      // the 23ai error sub-path scans for. The probe must walk the whole buffer
+      // to reach the terminal.
+      Uint8List buildErrorProbeStream(int warningCount) {
+        final buf = WriteBuffer();
+        for (var i = 0; i < warningCount; i++) {
+          buf.writeUint8(ttcMsgTypeWarning);
+          buf.writeUB2(0);
+          buf.writeUB2(0);
+          buf.writeUB2(0);
+        }
+        buf.writeUint8(ttcMsgTypeEndOfRequest); // 0x1D terminal marker
+        return buf.toBytes();
+      }
+
+      test('trailing 0x1D marks the stream complete under endOfRequestSupport',
+          () {
+        final stream = buildErrorProbeStream(100);
+        expect(stream.last, equals(ttcMsgTypeEndOfRequest));
+        expect(ttcStreamIsComplete(stream, endOfRequestSupport: true), isTrue);
+      });
+
+      test('per-packet re-walk of the 0x1D error path stays bounded', () {
+        final stream = buildErrorProbeStream(2000);
+        expect(ttcStreamIsComplete(stream, endOfRequestSupport: true), isTrue);
+
+        const packets = 200;
+        final sw = Stopwatch()..start();
+        for (var i = 0; i < packets; i++) {
+          ttcStreamIsComplete(stream, endOfRequestSupport: true);
+        }
+        sw.stop();
+        expect(sw.elapsedMilliseconds, lessThan(3000),
+            reason: '23ai error-probe re-walk must stay cheap; took '
+                '${sw.elapsedMilliseconds}ms for $packets full scans');
+      });
+    });
   });
 }

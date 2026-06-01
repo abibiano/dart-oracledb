@@ -190,8 +190,7 @@ void main() {
       expect(decodeNumber(ReadBuffer(encoded)), closeTo(v, 1e-15));
     });
 
-    test('encodes integer-valued double without collapsing trailing zeros',
-        () {
+    test('encodes integer-valued double without collapsing trailing zeros', () {
       // Regression guard: stripping trailing zeros from the full numeric
       // string would turn 100 into 1. After Story 7.1 the trim is fractional
       // only.

@@ -556,7 +556,14 @@ DateTime decodeTimestamp(ReadBuffer buffer) {
     // — this is the only way to surface a TZ-aware value through Dart's
     // offset-less DateTime without dropping information.
     final wallClock = DateTime.utc(
-      dateYear, month, day, hour, minute, second, millisecond, microsecond,
+      dateYear,
+      month,
+      day,
+      hour,
+      minute,
+      second,
+      millisecond,
+      microsecond,
     );
     return wallClock.subtract(
       Duration(hours: tzHourOffset, minutes: tzMinuteOffset!),
@@ -564,7 +571,14 @@ DateTime decodeTimestamp(ReadBuffer buffer) {
   }
 
   return DateTime(
-    dateYear, month, day, hour, minute, second, millisecond, microsecond,
+    dateYear,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    millisecond,
+    microsecond,
   );
 }
 

@@ -266,7 +266,9 @@ class OracleOutBinds {
       if (idx == null) return null;
       return _values[idx];
     }
-    throw ArgumentError.value(key, 'key',
+    throw ArgumentError.value(
+        key,
+        'key',
         'OracleOutBinds keys must be int (index) or String (name); '
             'got ${key.runtimeType}');
   }

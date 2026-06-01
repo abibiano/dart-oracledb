@@ -454,7 +454,16 @@ class ColumnMetadata {
   /// Oracle data type code.
   final int oracleType;
 
-  /// Maximum size in bytes.
+  /// Maximum column size in bytes.
+  ///
+  /// Meaningful for byte-sized types — `VARCHAR2`, `CHAR`, `NVARCHAR2`,
+  /// `NCHAR`, and `RAW` — where it reflects the column's declared width
+  /// (`RAW` uses the wire `maxSize` field; all other byte-sized types use the
+  /// `size` field, matching node-oracledb `processColumnInfo`). For `NUMBER`,
+  /// `DATE`, and other non-byte-sized types Oracle reports `size == 0`, so this
+  /// value is **not meaningful** and must not be used to size allocations for
+  /// those types — their precision/scale (NUMBER) or fixed wire width
+  /// (DATE/TIMESTAMP) govern decoding instead (AC7).
   final int maxLength;
 
   /// Numeric precision.
@@ -571,6 +580,10 @@ bool ttcStreamIsComplete(Uint8List data,
         expectedColumns != null ? List.of(expectedColumns) : <ColumnMetadata>[],
     bindMetadata: bindMetadata ?? const [],
     endOfRequestSupport: endOfRequestSupport,
+    // The probe only needs to locate the terminal message; decode unsupported
+    // types leniently here so an unsupported LONG column cannot make the probe
+    // throw (the real decode pass raises the clear error — AC5).
+    strictTypes: false,
   );
   try {
     while (buffer.hasRemaining && !state.endOfResponse) {
@@ -643,10 +656,19 @@ class _DecodeState {
       required this.columns,
       this.bindMetadata = const [],
       this.ttcFieldVersion = 24,
-      this.endOfRequestSupport = true});
+      this.endOfRequestSupport = true,
+      this.strictTypes = true});
 
   final bool isQuery;
   final int ttcFieldVersion;
+
+  /// When true (the real [decodeExecuteResponse] pass), decoding an
+  /// unsupported column/bind type — currently LONG and LONG RAW — raises a
+  /// clear [OracleException] (AC5). When false (the [ttcStreamIsComplete]
+  /// completion probe), the same bytes are consumed leniently so the probe can
+  /// still locate the terminal message; the real decode pass surfaces the
+  /// unsupported error afterwards.
+  final bool strictTypes;
   final List<BindMetadata> bindMetadata;
   final List<int> outBindIndices = [];
   final List<Object?> outBindValues = [];
@@ -756,8 +778,14 @@ ColumnMetadata _processColumnInfo(ReadBuffer buf, int ttcFieldVersion) {
   buf.skipUB2(); // charset id
   final csfrm = buf.readUint8();
   final size = buf.readUB4();
-  // 12.2 oaccolid
-  buf.skipUB4();
+  // 12.2 oaccolid — only present when the server negotiated field version
+  // >= 12.2. This mirrors the encode-side gate in
+  // `ExecuteRequest._writeBindMetadata` and node-oracledb `processColumnInfo`
+  // (base.js). Reading it unconditionally would misalign the buffer against a
+  // pre-12.2 server that never sent the field (AC2).
+  if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
+    buf.skipUB4(); // oaccolid
+  }
   buf.skipUB1(); // nullable
   buf.skipUB1(); // v7 name length
   // name
@@ -850,7 +878,8 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
           continue;
         }
         final meta = s.bindMetadata[bindIdx];
-        final value = _decodeValueByOraType(buf, meta.oraType);
+        final value =
+            _decodeValueByOraType(buf, meta.oraType, strict: s.strictTypes);
         // After the value bytes, an OUT bind carries an SB4 "actual num bytes"
         // trailer (matches node-oracledb processColumnData !inFetch path).
         buf.skipSB4();
@@ -868,7 +897,7 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
       row.add(s.rows.last[i]);
       continue;
     }
-    row.add(_decodeColumnValue(buf, col));
+    row.add(_decodeColumnValue(buf, col, strict: s.strictTypes));
   }
   s.rows.add(row);
   // bitVector intentionally NOT cleared here — it persists for all ROW_DATA
@@ -879,18 +908,35 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
 /// Decodes one length-prefixed value from [buf] using the Oracle type indicator
 /// [oraType]. Shared by the OUT bind decode path and the SELECT column decode
 /// path so both stay consistent under future type-handling changes.
-Object? _decodeValueByOraType(ReadBuffer buf, int oraType) {
+Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
+    {required bool strict}) {
   switch (oraType) {
+    case oraTypeLong:
+    case oraTypeLongRaw:
+      // AC5: LONG / LONG RAW are not supported until Epic 4 implements proper
+      // LONG/LOB streaming semantics. Decoding them through the generic
+      // length-prefix path (which treats a 0xFF prefix as null) would silently
+      // corrupt a 255-byte LONG payload, so fail loud with a clear unsupported
+      // error instead. The completion probe (strict == false) still consumes
+      // the bytes so it can reach the terminal message.
+      if (strict) {
+        throw OracleException(
+          errorCode: oraUnsupportedType,
+          message: 'LONG and LONG RAW columns are not supported yet (Oracle '
+              'type $oraType). Support is planned for Epic 4 (LOB/LONG '
+              'streaming); until then these columns cannot be fetched.',
+        );
+      }
+      buf.readBytesWithLength();
+      return null;
     case oraTypeVarchar:
     case oraTypeVarchar2:
     case oraTypeString:
     case oraTypeChar:
-    case oraTypeLong:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
       return utf8.decode(bytes, allowMalformed: true);
     case oraTypeRaw:
-    case oraTypeLongRaw:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
       return Uint8List.fromList(bytes);
@@ -929,8 +975,9 @@ bool _isDuplicate(Uint8List? bitVector, int colIndex) {
   return (bitVector[byteNum] & (1 << bitNum)) == 0;
 }
 
-Object? _decodeColumnValue(ReadBuffer buf, ColumnMetadata col) =>
-    _decodeValueByOraType(buf, col.oracleType);
+Object? _decodeColumnValue(ReadBuffer buf, ColumnMetadata col,
+        {required bool strict}) =>
+    _decodeValueByOraType(buf, col.oracleType, strict: strict);
 
 void _processBitVector(ReadBuffer buf, _DecodeState s) {
   final numColsSent = buf.readUB2();
@@ -953,6 +1000,15 @@ void _processIoVector(ReadBuffer buf, _DecodeState s) {
   final numBinds = temp32 * 256 + temp16;
   buf.skipUB4(); // num iters this time
   buf.skipUB2(); // uac buffer length
+  // AC3: fast-fetch bit-vector length and rowid length are Oracle UB2
+  // *variable-length* integers (a size byte then that many big-endian bytes),
+  // NOT fixed two-byte raw lengths — confirmed against node-oracledb
+  // processIOVector (reference/node-oracledb/lib/thin/protocol/messages/
+  // withData.js:264-271), which reads both with `readUB2()` and then
+  // `skipBytes(numBytes)`. Despite the "Len" suffix they must be read with
+  // readUB2(), not readUint16BE(). The payloads (when present) are opaque
+  // here — Story 3.1 OUT-parameter handling does not consume fast-fetch or
+  // rowid bytes — so they are skipped before the direction bytes are read.
   final fastFetchLen = buf.readUB2();
   if (fastFetchLen > 0) buf.skip(fastFetchLen);
   final rowidLen = buf.readUB2();
@@ -1097,8 +1153,12 @@ void _processError(ReadBuffer buf, _DecodeState s) {
     }
   }
   final num = buf.readUB4(); // extended error number
-  // Extended row count and 20.1+ extras are version-gated (matches node-oracledb)
-  var rowCount = 0;
+  // Extended row count and 20.1+ extras are version-gated (matches node-oracledb).
+  // AC8: a pre-12.2 server does not send the UB8 row-count field at all, so
+  // leave [rowCount] null rather than defaulting it to 0 — "the server reported
+  // 0 rows" and "the server reported nothing" are distinct, and the public
+  // `OracleResult.rowsAffected` contract surfaces the absence as null.
+  int? rowCount;
   if (s.ttcFieldVersion >= ttcCcapFieldVersion12_2) {
     rowCount = buf.readUB8();
     if (s.ttcFieldVersion >= ttcCcapFieldVersion20_1) {

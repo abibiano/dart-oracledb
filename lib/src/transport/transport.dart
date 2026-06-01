@@ -370,6 +370,31 @@ class Transport {
   // Safety cap: prevent infinite FETCH loops when moreRowsToFetch stays true.
   static const int _maxFetchIterations = 1000;
 
+  /// Safety cap (AC10): the maximum number of TNS packets a single
+  /// [_receiveAllTtcData] call will read while assembling one TTC response.
+  ///
+  /// On the pre-23.4 path there is no TNS-level end-of-response marker — the
+  /// loop keeps reading packets until [ttcStreamIsComplete] returns true. A
+  /// server that never sends a response satisfying the completion probe (a
+  /// protocol drift or a corrupted stream) would otherwise loop forever. The
+  /// 23.4+ path trusts explicit data-flags, but it shares the same loop and is
+  /// bounded by the same cap as a backstop.
+  ///
+  /// The bound is deliberately enormous relative to any real response: a single
+  /// execute/fetch round returns at most `prefetchRows` rows (default 50) and
+  /// almost always fits in one ≤8 KB SDU packet (LONG/LOB streaming, which
+  /// could span many packets, is not yet supported). Reaching this many packets
+  /// means the stream is not terminating, not that a legitimate response is
+  /// large. Overridable in tests via [debugMaxReceivePackets].
+  static const int _defaultMaxReceivePackets = 100000;
+  int _maxReceivePackets = _defaultMaxReceivePackets;
+
+  /// Test-only seam to lower the receive-loop packet cap (AC10) so the
+  /// never-terminating-stream guard can be exercised deterministically without
+  /// flooding the loop with 100k packets. Not part of the public API.
+  @visibleForTesting
+  set debugMaxReceivePackets(int value) => _maxReceivePackets = value;
+
   /// Count of EXECUTE messages sent with `cursorId == 0` (a full parse — the
   /// SQL text and a fresh parse are sent). See [debugFullParseExecutes].
   int _fullParseExecutes = 0;
@@ -637,13 +662,41 @@ class Transport {
   Future<Uint8List> _receiveAllTtcData(
       {List<ColumnMetadata>? expectedColumns}) async {
     final chunks = <Uint8List>[];
+    var packetsRead = 0;
     while (true) {
+      // AC10: bound the loop so a server response that never satisfies the
+      // completion probe cannot spin forever. Poison the transport before
+      // throwing — a partially-read, non-terminating stream is a framing hazard
+      // and the connection must not be reused.
+      if (++packetsRead > _maxReceivePackets) {
+        _poison();
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message: 'Protocol receive-loop exhaustion: read $_maxReceivePackets '
+              'TNS packets without a complete TTC response; the server stream '
+              'is not terminating. Transport poisoned — close this connection '
+              'and open a new one.',
+        );
+      }
       var packet = await receive();
       while (packet.type == tnsPacketMarker) {
         // Marker payload: [markerType(1B), pad(1B), dataType(1B)]
         // dataType: 1=BREAK(NIQBMARK), 2=RESET(NIQRMARK), 3=INTERRUPT(NIQIMARK)
         // When Oracle sends a BREAK marker it means "I have an error; acknowledge
         // with a RESET marker before I send the DATA response."
+        //
+        // Count MARKER packets against the cap (review patch): a server that
+        // floods MARKER packets would otherwise bypass the AC10 guard entirely.
+        if (++packetsRead > _maxReceivePackets) {
+          _poison();
+          throw OracleException(
+            errorCode: oraProtocolError,
+            message: 'Protocol receive-loop exhaustion: read $_maxReceivePackets '
+                'TNS packets without a complete TTC response; the server stream '
+                'is not terminating. Transport poisoned — close this connection '
+                'and open a new one.',
+          );
+        }
         if (packet.payload.length >= 3 && packet.payload[2] == 1) {
           await _sendResetMarker();
         }
@@ -688,6 +741,17 @@ class Transport {
         // could terminate a multi-packet response early. AC5 follow-up guard:
         // only treat a trailing 0x1D as terminal once the accumulated TTC stream
         // actually parses to a complete response; otherwise keep reading.
+        //
+        // AC11 cost note: like the pre-23.4 probe below, this sub-path
+        // re-concatenates and re-walks the full accumulation once per packet
+        // when a flags=0x0000 error response spans multiple packets — O(N x
+        // bytes). The trailing-0x1D check short-circuits the expensive probe so
+        // the re-walk only runs on packets that *look* terminal, and error
+        // responses on 23ai are small (a single ORA-xxxxx message, almost
+        // always one packet), so N is effectively 1. The same bound that covers
+        // the pre-23.4 probe is exercised for this branch by the benchmark in
+        // test/src/transport/ttc_stream_benchmark_test.dart. The long-term fix
+        // (a stateful/lazy parser) is the shared follow-up tracked below.
         if (ttcData.isNotEmpty &&
             ttcData.last == ttcMsgTypeEndOfRequest &&
             ttcStreamIsComplete(_concatChunks(chunks),
@@ -821,6 +885,14 @@ class Transport {
     var resendCount = 0;
 
     while (true) {
+      // AC12: fail fast if the transport was poisoned by a prior timeout on
+      // this instance. `_receiveRawPacket` reads directly from the socket and,
+      // unlike `send`/`receive`, has no built-in poisoned-state check; without
+      // this guard a reused-after-timeout transport could read stale bytes left
+      // on the wire and misframe the handshake. Normal connects never hit this
+      // (CONNECT/ACCEPT precedes any RPC timeout); it is an invariant guard
+      // against accidental transport reuse.
+      _ensureUsable();
       // Wait for response - receive raw packet to parse ACCEPT fields
       final rawPacketData = await _receiveRawPacket();
       final response = decodeTnsPacket(rawPacketData, useLargeSdu: false);

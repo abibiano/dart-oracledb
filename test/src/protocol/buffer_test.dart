@@ -181,6 +181,82 @@ void main() {
         );
       });
     });
+
+    // Story 7.7 AC6: Oracle variable-length integers are sign-magnitude — the
+    // size byte's high bit is the sign, the low 7 bits are the value-byte count.
+    // A size byte of 0x80 is "negative sign set, zero value bytes": the
+    // documented sentinel decodes to 0 for every signed width (negative zero ==
+    // zero in Dart ints). Unsigned reads must reject any sign bit outright.
+    group('sign-magnitude variable integers (AC6)', () {
+      test('readSB1 decodes the 0x80 negative-zero sentinel as 0', () {
+        expect(ReadBuffer(Uint8List.fromList([0x80])).readSB1(), equals(0));
+      });
+
+      test('readSB2 decodes the 0x80 negative-zero sentinel as 0', () {
+        expect(ReadBuffer(Uint8List.fromList([0x80])).readSB2(), equals(0));
+      });
+
+      test('readSB4 decodes the 0x80 negative-zero sentinel as 0', () {
+        expect(ReadBuffer(Uint8List.fromList([0x80])).readSB4(), equals(0));
+      });
+
+      test('signed reads still decode a genuine negative value', () {
+        // 0x81 = sign bit + 1 value byte; value byte 0x05 → -5.
+        expect(
+            ReadBuffer(Uint8List.fromList([0x81, 0x05])).readSB2(), equals(-5));
+      });
+
+      test('readUB2 rejects a sign-bit size byte (0x81) with BufferException',
+          () {
+        expect(() => ReadBuffer(Uint8List.fromList([0x81, 0x05])).readUB2(),
+            throwsA(isA<BufferException>()));
+      });
+
+      test('readUB4 rejects a sign-bit size byte (0x81) with BufferException',
+          () {
+        expect(() => ReadBuffer(Uint8List.fromList([0x81, 0x05])).readUB4(),
+            throwsA(isA<BufferException>()));
+      });
+
+      test('readUB8 rejects a sign-bit size byte (0x81) with BufferException',
+          () {
+        expect(() => ReadBuffer(Uint8List.fromList([0x81, 0x05])).readUB8(),
+            throwsA(isA<BufferException>()));
+      });
+
+      test('readUB4 rejects the bare 0x80 sentinel too', () {
+        expect(() => ReadBuffer(Uint8List.fromList([0x80])).readUB4(),
+            throwsA(isA<BufferException>()));
+      });
+    });
+
+    // Story 7.7 AC4: readUB8 returns a native Dart int. The package is declared
+    // native-only (pubspec `platforms:` excludes web) precisely because dart2js
+    // would lose precision past 2^53 here; on the VM the full 8-byte range
+    // round-trips exactly. These pin the native contract.
+    group('readUB8 native-safe values (AC4)', () {
+      test('reads an 8-byte value below the 2^53 web-precision boundary', () {
+        // 0x000FFFFFFFFFFFFF = 2^52 - 1, representable on web AND native.
+        final data = Uint8List.fromList(
+            [8, 0x00, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        expect(ReadBuffer(data).readUB8(), equals(0x000FFFFFFFFFFFFF));
+      });
+
+      test('reads a large 8-byte value exactly on the native VM', () {
+        // 0x0123456789ABCDEF exceeds 2^53; exact only on a 64-bit native int.
+        final data = Uint8List.fromList(
+            [8, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]);
+        expect(ReadBuffer(data).readUB8(), equals(0x0123456789ABCDEF));
+      });
+
+      test('reads a single-byte UB8', () {
+        expect(ReadBuffer(Uint8List.fromList([1, 0x2A])).readUB8(), equals(42));
+      });
+
+      test('reads a zero-length UB8 as 0', () {
+        expect(ReadBuffer(Uint8List.fromList([0])).readUB8(), equals(0));
+      });
+    });
   });
 
   group('WriteBuffer', () {

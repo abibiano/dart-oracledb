@@ -321,6 +321,163 @@ void main() {
     });
   });
 
+  // Story 7.7 AC1, AC2: column-metadata decode gates must mirror what each
+  // negotiated TTC field version actually sends. A fixture built for version V
+  // must decode without buffer misalignment when decoded at version V.
+  group('Story 7.7 — column metadata version gating (AC1, AC2)', () {
+    // Decodes a single-column DESCRIBE_INFO built for [version] and asserts the
+    // column survived round-trip intact (a misaligned gate corrupts the name or
+    // throws). Uses a query response terminated by ORA-01403 + STATUS.
+    void expectColumnDecodes(int version) {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(
+              name: 'C1',
+              oraType: oraTypeVarchar,
+              maxSize: 10,
+              ttcFieldVersion: version),
+        ]),
+        _errorMessage(errorNum: 1403, ttcFieldVersion: version),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload,
+          isQuery: true, ttcFieldVersion: version);
+      expect(r.isSuccess, isTrue);
+      expect(r.columnMetadata, hasLength(1));
+      expect(r.columnMetadata.single.name, equals('C1'),
+          reason: 'column name must survive decode at field version $version');
+      expect(r.columnMetadata.single.oracleType, equals(oraTypeVarchar));
+    }
+
+    test('AC2: pre-12.2 server sends no oaccolid — decode stays aligned', () {
+      // Field version 7 is below the 12.2 threshold (8); the server omits
+      // oaccolid. The decoder must skip the oaccolid read or it over-reads.
+      expectColumnDecodes(7);
+    });
+
+    test('AC2: 12.2 server sends oaccolid — decode consumes it', () {
+      expectColumnDecodes(ttcCcapFieldVersion12_2); // 8
+    });
+
+    test('AC1: pre-23.4 server sends no vector tail — decode stays aligned',
+        () {
+      // Version 23 has 12.2 + 23.1 + 23.1-ext3 fields but NOT the 23.4 vector
+      // tail; reading the vector bytes here would misalign the buffer.
+      expectColumnDecodes(23);
+    });
+
+    test('AC1: 23.4 server sends the vector tail — decode consumes it', () {
+      expectColumnDecodes(ttcCcapFieldVersion23_4); // 24
+    });
+  });
+
+  // Story 7.7 AC3: fast-fetch and rowid lengths in IO_VECTOR are UB2
+  // variable-length integers; their payloads must be skipped exactly before
+  // the direction bytes are read.
+  group('Story 7.7 — IO_VECTOR fast-fetch / rowid skip (AC3)', () {
+    test('non-zero fast-fetch and rowid payloads are skipped before directions',
+        () {
+      // One OUT NUMBER bind. Inject a 3-byte fast-fetch payload and a 2-byte
+      // rowid payload via UB2 length prefixes. If the decoder mis-reads those
+      // lengths (e.g. as fixed 2-byte raw) or fails to skip the payloads, the
+      // single direction byte and the ROW_DATA value will misalign and the OUT
+      // bind will not decode to 5.
+      final payload = _buildPayload([
+        _ioVector([16],
+            fastFetch: const [0xAA, 0xBB, 0xCC], rowid: const [0x01, 0x02]),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._ub4(0), // SB4 actualNumBytes trailer
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(
+              oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindIndices, equals([0]));
+      expect(r.outBindValues, equals([5]),
+          reason: 'fast-fetch and rowid payloads must be skipped exactly');
+    });
+  });
+
+  // Story 7.7 AC5: LONG / LONG RAW are not supported until Epic 4. Decoding one
+  // must surface a clear unsupported-type error, not silently corrupt via the
+  // 0xFF-as-null length heuristic.
+  group('Story 7.7 — LONG / LONG RAW unsupported (AC5)', () {
+    Uint8List longColumnResponse(int oraType) => _buildPayload([
+          _describeInfo([
+            _columnInfo(name: 'BODY', oraType: oraType, maxSize: 0),
+          ]),
+          _rowHeader(),
+          [ttcMsgTypeRowData, ..._bytesWithLength('payload'.codeUnits)],
+          _errorMessage(errorNum: 1403),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+
+    test('LONG column decode raises an unsupported-type OracleException', () {
+      expect(
+        () => decodeExecuteResponse(longColumnResponse(oraTypeLong),
+            isQuery: true),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+            .having((e) => e.message, 'message', contains('LONG'))),
+      );
+    });
+
+    test('LONG RAW column decode raises an unsupported-type OracleException',
+        () {
+      expect(
+        () => decodeExecuteResponse(longColumnResponse(oraTypeLongRaw),
+            isQuery: true),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
+      );
+    });
+
+    test('ttcStreamIsComplete still reaches the terminal past a LONG column',
+        () {
+      // The completion probe must NOT throw on an unsupported type — it decodes
+      // leniently so it can locate the terminal STATUS. (The real decode pass
+      // raises the error, asserted above.)
+      final payload = longColumnResponse(oraTypeLong);
+      expect(ttcStreamIsComplete(payload), isTrue);
+    });
+  });
+
+  // Story 7.7 AC8: a pre-12.2 server sends no extended row-count field, so an
+  // absent count must surface as null (distinct from a confirmed 0).
+  group('Story 7.7 — pre-12.2 DML row-count is null (AC8)', () {
+    test('pre-12.2 DML success leaves rowsAffected null, not 0', () {
+      final payload = _buildPayload([
+        _errorMessage(errorNum: 0, ttcFieldVersion: 7),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r =
+          decodeExecuteResponse(payload, isQuery: false, ttcFieldVersion: 7);
+      expect(r.isSuccess, isTrue);
+      expect(r.rowsAffected, isNull,
+          reason: 'absent pre-12.2 row count must be null, not 0');
+    });
+
+    test('12.2 DML success still returns the decoded UB8 row count', () {
+      final payload = _buildPayload([
+        _errorMessage(
+            errorNum: 0, rowCount: 5, ttcFieldVersion: ttcCcapFieldVersion12_2),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload,
+          isQuery: false, ttcFieldVersion: ttcCcapFieldVersion12_2);
+      expect(r.rowsAffected, equals(5));
+    });
+  });
+
   group('Story 3.2 — OUT bind encoding', () {
     test('PL/SQL with OUT bind writes metadata and null indicator for OUT', () {
       final req = ExecuteRequest(
@@ -651,8 +808,8 @@ void main() {
             BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
           ],
         ),
-        throwsA(isA<OracleException>().having(
-            (e) => e.errorCode, 'errorCode', equals(oraProtocolError))),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))),
       );
     });
 
@@ -675,7 +832,8 @@ void main() {
         ),
         throwsA(isA<OracleException>()
             .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
-            .having((e) => e.message, 'message', contains('client declared IN'))),
+            .having(
+                (e) => e.message, 'message', contains('client declared IN'))),
       );
     });
 
@@ -878,9 +1036,14 @@ void main() {
 ///
 /// Wire layout (matches node-oracledb processIOVector):
 ///   [type=11, flag(UB1), temp16(UB2)=numBinds, temp32(UB4)=0,
-///    iters(UB4)=0, uacLen(UB2)=0, fastFetchLen(UB2)=0, rowidLen(UB2)=0,
-///    direction(UB1) x numBinds]
-List<int> _ioVector(List<int> directions) {
+///    iters(UB4)=0, uacLen(UB2)=0, fastFetchLen(UB2), fastFetch bytes,
+///    rowidLen(UB2), rowid bytes, direction(UB1) x numBinds]
+///
+/// [fastFetch] and [rowid] inject non-zero variable-length (UB2) payloads so a
+/// test can prove `_processIoVector` skips exactly those bytes before reading
+/// the direction bytes (AC3). Both default to empty (UB2 length 0).
+List<int> _ioVector(List<int> directions,
+    {List<int> fastFetch = const [], List<int> rowid = const []}) {
   return [
     ttcMsgTypeIoVector,
     0, // flag
@@ -888,8 +1051,10 @@ List<int> _ioVector(List<int> directions) {
     ..._ub4(0), // temp32 = 0 (high bits)
     ..._ub4(0), // num iters this time
     ..._ub2(0), // uac buffer length
-    ..._ub2(0), // fast-fetch bitvector length
-    ..._ub2(0), // rowid length
+    ..._ub2(fastFetch.length), // fast-fetch bitvector length (UB2)
+    ...fastFetch,
+    ..._ub2(rowid.length), // rowid length (UB2)
+    ...rowid,
     ...directions,
   ];
 }
@@ -933,12 +1098,18 @@ List<int> _describeInfo(List<List<int>> columns) {
 
 /// Builds a single column-info entry for DESCRIBE_INFO.
 ///
-/// Matches the layout read by [_processColumnInfo] with ttcFieldVersion = 24
-/// (the default used by [decodeExecuteResponse]).
+/// Emits exactly the fields a server at [ttcFieldVersion] would send, so the
+/// fixture stays byte-aligned with what [_processColumnInfo] reads at that
+/// negotiated version: the 12.2 `oaccolid` (>= 8), 23.1 domain schema/name
+/// (>= 17), 23.1-ext3 annotations (>= 20), and 23.4 vector tail (>= 24) are
+/// each present only at or above their threshold. Defaults to 24 (the value
+/// [decodeExecuteResponse] uses unless told otherwise). When overriding
+/// [ttcFieldVersion] here, pass the same value to [decodeExecuteResponse].
 List<int> _columnInfo({
   required String name,
   required int oraType,
   required int maxSize,
+  int ttcFieldVersion = 24,
 }) {
   final nameBytes = name.codeUnits;
   return [
@@ -954,7 +1125,7 @@ List<int> _columnInfo({
     ..._ub2(0), // charset id
     0, // csfrm
     ..._ub4(maxSize), // size
-    ..._ub4(0), // oaccolid (12.2)
+    if (ttcFieldVersion >= ttcCcapFieldVersion12_2) ..._ub4(0), // oaccolid
     0, // nullable
     0, // v7 name length
     ..._ub4(nameBytes.length), // nameLen
@@ -963,13 +1134,17 @@ List<int> _columnInfo({
     ..._ub4(0), // type name len = 0
     ..._ub2(0), // column position
     ..._ub4(0), // uds flags
-    ..._ub4(0), // domain schema len = 0
-    ..._ub4(0), // domain name len = 0
-    ..._ub4(0), // annotations len = 0
-    // ttcFieldVersion >= 24 (23.4) vector fields:
-    ..._ub4(0), // dimensions
-    0, // format
-    0, // flags
+    if (ttcFieldVersion >= ttcCcapFieldVersion23_1) ...[
+      ..._ub4(0), // domain schema len = 0
+      ..._ub4(0), // domain name len = 0
+    ],
+    if (ttcFieldVersion >= ttcCcapFieldVersion23_1Ext3)
+      ..._ub4(0), // annotations len = 0
+    if (ttcFieldVersion >= ttcCcapFieldVersion23_4) ...[
+      ..._ub4(0), // dimensions
+      0, // vector format
+      0, // vector flags
+    ],
   ];
 }
 
@@ -1028,6 +1203,7 @@ List<int> _errorMessage({
   int rowCount = 0,
   int errorOffset = 0,
   String? errorMessage,
+  int ttcFieldVersion = 24,
 }) {
   final out = <int>[ttcMsgTypeError];
   out.addAll(_ub4(0)); // end of call status
@@ -1061,9 +1237,16 @@ List<int> _errorMessage({
   out.addAll(_ub4(0)); // batch error offsets count
   out.addAll(_ub2(0)); // batch error messages count
   out.addAll(_ub4(errorNum)); // extended error number
-  out.addAll(_ub8(rowCount)); // extended row count
-  out.addAll(_ub4(0)); // 20.1 sql type
-  out.addAll(_ub4(0)); // 20.1 checksum
+  // Extended row count (UB8) is only sent by 12.2+ servers; 20.1+ adds the
+  // sql-type + checksum pair. A pre-12.2 fixture omits both, matching what an
+  // older server would send (AC8).
+  if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
+    out.addAll(_ub8(rowCount)); // extended row count
+    if (ttcFieldVersion >= ttcCcapFieldVersion20_1) {
+      out.addAll(_ub4(0)); // 20.1 sql type
+      out.addAll(_ub4(0)); // 20.1 checksum
+    }
+  }
   if (errorNum != 0) {
     final msg = errorMessage ?? 'ORA-${errorNum.toString().padLeft(5, '0')}';
     out.addAll(_bytesWithLength(msg.codeUnits));
