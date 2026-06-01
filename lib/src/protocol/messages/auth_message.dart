@@ -12,6 +12,7 @@ import 'dart:typed_data';
 import 'package:logging/logging.dart';
 
 import '../../crypto/auth.dart';
+import '../../errors.dart';
 import '../buffer.dart';
 import '../constants.dart';
 
@@ -20,6 +21,55 @@ final _log = Logger('AuthMessage');
 /// Helper to convert bytes to hex string for debugging.
 String _bytesToHex(Uint8List bytes) {
   return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+}
+
+/// Parses the body of a TTC ERROR (0x04) message into an Oracle error code and
+/// an optional human-readable message. The 1-byte message type must already be
+/// consumed from [buffer].
+///
+/// Shared by [AuthPhaseOneResponse.decode] (which fails loud) and
+/// [AuthPhaseTwoResponse.decode] (which records the failure) so both auth
+/// phases use one TTC ERROR parser rather than two divergent inlined copies.
+({int errorCode, String? message}) _parseAuthTtcError(ReadBuffer buffer) {
+  try {
+    buffer.readUB4(); // call status
+    buffer.readUB2(); // end-to-end seq
+    buffer.readUB4(); // current row
+    buffer.readUB2(); // error number (short)
+    buffer.readUB2(); // array elem error
+    buffer.readUB2(); // array elem error
+    buffer.readUB2(); // cursor id
+    buffer.readUint16BE(); // error position (signed)
+    buffer.readUint8(); // sql type
+    buffer.readUint8(); // fatal
+    buffer.readUint8(); // flags
+    buffer.readUint8(); // user cursor options
+    buffer.readUint8(); // UPI parameter
+    buffer.readUint8(); // warning flag
+  } catch (e) {
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message:
+          'Truncated TTC ERROR response; could not parse auth error fields.',
+      cause: e is Exception ? e : null,
+    );
+  }
+
+  var errorCode = buffer.readUB4();
+  if (errorCode == 0) {
+    errorCode = oraInvalidCredentials; // Default to ORA-01017
+  }
+
+  String? message;
+  if (buffer.hasRemaining) {
+    try {
+      final raw = buffer.readStringWithLength();
+      message = raw.isEmpty ? null : raw;
+    } catch (_) {
+      message = null;
+    }
+  }
+  return (errorCode: errorCode, message: message);
 }
 
 /// Client information for authentication messages.
@@ -174,9 +224,19 @@ class AuthPhaseOneResponse {
             'Session param: $key = ${value.length > 50 ? '${value.substring(0, 50)}...' : value}');
       }
     } else if (msgType == ttcMsgTypeError) {
-      // Error message
-      _log.warning('Received error in AUTH_PHASE_ONE response');
-      // Parse error - will be handled by caller
+      // AC9: fail loud. A TTC ERROR during AUTH_PHASE_ONE carries a real Oracle
+      // error (account locked, password expired, protocol failure, ...).
+      // Previously this only logged a warning and returned empty sessionData,
+      // silently masking the failure as "no verifier params". Raise an
+      // OracleException carrying the parsed Oracle error code instead.
+      final parsed = _parseAuthTtcError(buffer);
+      _log.warning('AUTH_PHASE_ONE error: ORA-${parsed.errorCode}');
+      throw OracleException(
+        errorCode: parsed.errorCode,
+        message: parsed.message != null
+            ? 'AUTH_PHASE_ONE failed: ${parsed.message}'
+            : 'AUTH_PHASE_ONE failed with ORA-${parsed.errorCode}',
+      );
     } else if (msgType == ttcMsgTypeStatus) {
       // Status message - may have more data following
       final status = buffer.readUB4();
@@ -362,8 +422,15 @@ class AuthPhaseTwoRequest {
     //       SESSION_CLIENT_VERSION, AUTH_ALTER_SESSION, AUTH_PASSWORD
     int numPairs = 6;
 
-    // Add extra pair for 12c verifier only when speedyKey is actually provided.
-    // Incrementing numPairs without writing the pair creates a wire format desync.
+    // AC6 — speedy-key wire decision: AUTH_PBKDF2_SPEEDY_KEY is written ONLY for
+    // the 12c verifier type (0x4815). This matches node-oracledb
+    // (`if (!verifier11G) buf.writeKeyValue("AUTH_PBKDF2_SPEEDY_KEY", ...)`),
+    // whose only valid wire verifier types are 11g (0xb152 / 0x1b25, no speedy
+    // key) and 12c (0x4815, speedy key). The driver's internal
+    // `verifierTypePbkdf2` (0xB92) is a key-derivation routing flag, NOT a wire
+    // verifier type, so it intentionally omits the speedy key here. numPairs is
+    // only incremented when the pair is actually written — counting without
+    // writing would desync the wire format.
     final bool is12c = verifierType == ttcVerifierType12c;
     if (is12c && speedyKey != null) {
       numPairs += 1;
@@ -458,38 +525,13 @@ class AuthPhaseTwoResponse {
       _log.fine('Auth phase 2 response message type: $msgType');
 
       if (msgType == ttcMsgTypeError) {
-        // Error response
+        // Error response. Unlike AUTH_PHASE_ONE this records the failure on the
+        // returned response (the caller maps it to a sanitized credential
+        // error) rather than throwing. Uses the shared TTC ERROR parser.
         isSuccess = false;
-        buffer.readUB4(); // call status
-        buffer.readUB2(); // end to end seq
-        buffer.readUB4(); // current row
-        buffer.readUB2(); // error number
-        buffer.readUB2(); // array elem error
-        buffer.readUB2(); // array elem error
-        buffer.readUB2(); // cursor id
-        buffer.readUint16BE(); // error position (signed)
-        buffer.readUint8(); // sql type
-        buffer.readUint8(); // fatal
-        buffer.readUint8(); // flags
-        buffer.readUint8(); // user cursor options
-        buffer.readUint8(); // UPI parameter
-        buffer.readUint8(); // warning flag
-
-        // Extended error info
-        errorCode = buffer.readUB4();
-        if (errorCode == 0) {
-          errorCode = 1017; // Default to invalid credentials
-        }
-
-        // Try to read error message
-        if (buffer.hasRemaining) {
-          try {
-            errorMessage = buffer.readStringWithLength();
-          } catch (_) {
-            errorMessage = 'Authentication failed';
-          }
-        }
-
+        final parsed = _parseAuthTtcError(buffer);
+        errorCode = parsed.errorCode;
+        errorMessage = parsed.message ?? 'Authentication failed';
         _log.warning('AUTH_PHASE_TWO error: ORA-$errorCode');
         break;
       } else if (msgType == ttcMsgTypeParameter) {

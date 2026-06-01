@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:oracledb/src/errors.dart';
+import 'package:oracledb/src/protocol/messages/auth_message.dart';
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
@@ -177,6 +178,142 @@ void main() {
         expect(transport.shouldWriteTokenNumber, isTrue,
             reason:
                 'Default ttcFieldVersion is 24, which exceeds the 18 threshold');
+      });
+
+      // AC3: the one-byte TTC sequence must wrap at 256, matching node-oracledb
+      // `writeSeqNum` (`seq = (seq + 1) % 256`, starting at 1). The cycle is
+      // 1,2,…,255,0,1,… and the counter never grows beyond one byte.
+      test('nextSequence() wraps to a one-byte cycle after 0xFF', () {
+        final transport = Transport();
+        // 257 calls: indices 0..256.
+        final seq = List.generate(257, (_) => transport.nextSequence());
+
+        // First 255 calls produce 1..255.
+        expect(seq.sublist(0, 255), equals(List.generate(255, (i) => i + 1)));
+        // 256th call (index 255) wraps through 0...
+        expect(seq[255], equals(0),
+            reason: '0 is a valid value in Oracle\'s mod-256 sequence cycle');
+        // ...and the 257th call (index 256) returns to 1 (0x01).
+        expect(seq[256], equals(1),
+            reason: 'After 0x00 the counter wraps back to 0x01');
+        // The counter is always one byte.
+        expect(seq.every((s) => s >= 0 && s <= 0xFF), isTrue);
+      });
+
+      // AC4: shouldWriteTokenNumber boundary at the field-version threshold (18).
+      test('shouldWriteTokenNumber boundary at negotiated field versions', () {
+        final transport = Transport();
+
+        transport.debugTtcFieldVersion = 18;
+        expect(transport.shouldWriteTokenNumber, isTrue,
+            reason: 'version 18 is the inclusive threshold');
+
+        transport.debugTtcFieldVersion = 17;
+        expect(transport.shouldWriteTokenNumber, isFalse,
+            reason: 'version 17 is below the threshold');
+
+        transport.debugTtcFieldVersion = 0;
+        expect(transport.shouldWriteTokenNumber, isFalse,
+            reason: 'version 0 is below the threshold');
+
+        transport.debugTtcFieldVersion = 24;
+        expect(transport.shouldWriteTokenNumber, isTrue,
+            reason: 'default version 24 exceeds the threshold');
+      });
+
+      // AC8: AUTH_PHASE_TWO 23ai token must be gated on FAST_AUTH presence so a
+      // pre-23 server (default field version 24, no compileCaps) never receives
+      // use23aiFormat=true.
+      test('shouldWriteAuthPhaseTwoToken is gated on supportsFastAuth (AC8)',
+          () {
+        final transport = Transport();
+
+        // 23ai server: FAST_AUTH advertised + field version high → token.
+        transport.debugSupportsFastAuth = true;
+        transport.debugTtcFieldVersion = 24;
+        expect(transport.shouldWriteAuthPhaseTwoToken, isTrue);
+
+        // 23ai server but low field version → no token.
+        transport.debugTtcFieldVersion = 17;
+        expect(transport.shouldWriteAuthPhaseTwoToken, isFalse);
+
+        // Pre-23 classical server: no FAST_AUTH even though field version is
+        // still at its default 24 → MUST NOT write the 23ai token.
+        transport.debugSupportsFastAuth = false;
+        transport.debugTtcFieldVersion = 24;
+        expect(transport.shouldWriteAuthPhaseTwoToken, isFalse,
+            reason:
+                'AC8: a pre-23 server must never be given use23aiFormat=true');
+
+        transport.debugTtcFieldVersion = 18;
+        expect(transport.shouldWriteAuthPhaseTwoToken, isFalse);
+      });
+    });
+
+    // Story 7.6 AC4 — close-cursor piggyback must stay within the negotiated
+    // SDU; the chunk limit bounds how many cursor ids ride one execute.
+    group('closeCursorChunkLimit (Story 7.6 AC4)', () {
+      test('defaults to a large bound at the default SDU', () {
+        final transport = Transport();
+        // Default SDU (8192) → (4096 - 32) / 5 = 812.
+        expect(transport.closeCursorChunkLimit, equals(812));
+      });
+
+      test('scales down with a smaller negotiated SDU', () {
+        // SDU=84: budget = (84÷2) - 32 = 42 - 32 = 10; limit = 10÷5 = 2.
+        // If _closeCursorPiggybackHeader or _closeCursorIdBytes change,
+        // update this derivation and the expected value together.
+        final transport = Transport()..debugSdu = 84;
+        expect(transport.closeCursorChunkLimit, equals(2));
+      });
+
+      test('never drops below 1 even for a pathologically small SDU', () {
+        final transport = Transport()..debugSdu = 8;
+        expect(transport.closeCursorChunkLimit, greaterThanOrEqualTo(1));
+      });
+
+      test('a larger SDU yields a proportionally larger bound', () {
+        final small = Transport()..debugSdu = 8192;
+        final large = Transport()..debugSdu = 65535;
+        expect(large.closeCursorChunkLimit,
+            greaterThan(small.closeCursorChunkLimit));
+      });
+    });
+
+    // AC12: deterministic classical AUTH_PHASE_ONE timeout coverage. A local
+    // ServerSocket accepts and drains input but never replies, so the
+    // transport-layer timeout fires without needing a wedged live Oracle.
+    group('classical AUTH_PHASE_ONE timeout (AC12)', () {
+      test('sendAuthPhaseOne times out, throws oraConnectTimeout, and poisons',
+          () async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((s) => s.listen((_) {}, onError: (_) {}));
+
+        final transport = Transport();
+        await transport.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+        expect(transport.isConnected, isTrue);
+
+        final request = AuthPhaseOneRequest(
+          username: 'someuser',
+          clientNonce: Uint8List(16),
+          sequence: transport.nextSequence(),
+        );
+
+        await expectLater(
+          transport.sendAuthPhaseOne(request,
+              timeout: const Duration(milliseconds: 200)),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectTimeout)
+              .having((e) => e.message, 'message', contains('AUTH_PHASE_ONE'))),
+        );
+
+        // Transport must be poisoned and reporting disconnected after timeout.
+        expect(transport.isCorrupted, isTrue);
+        expect(transport.isConnected, isFalse);
+
+        await transport.disconnect();
+        await server.close();
       });
     });
 

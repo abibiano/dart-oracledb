@@ -1,10 +1,12 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:oracledb/src/crypto/auth.dart';
 import 'package:oracledb/src/crypto/verifier.dart';
 import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
+import 'package:oracledb/src/protocol/messages/protocol_message.dart';
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
@@ -29,6 +31,39 @@ class MockTransport extends Transport {
       throw StateError('No responses queued in MockTransport');
     }
     return responseQueue.removeAt(0);
+  }
+}
+
+/// Minimal test-only transport seam for driving [AuthFlow.authenticate] down a
+/// specific failure path (AC10, AC11) without a live Oracle server. Only the
+/// methods needed to reach the failure point are overridden; each is wired to
+/// throw a caller-supplied error.
+class _FakeAuthTransport extends Transport {
+  _FakeAuthTransport({
+    required this.fastAuth,
+    this.protocolNegotiationError,
+    this.fastAuthError,
+  });
+
+  final bool fastAuth;
+  final Object? protocolNegotiationError;
+  final Object? fastAuthError;
+
+  @override
+  bool get supportsFastAuth => fastAuth;
+
+  @override
+  Future<ProtocolResponse> sendProtocolNegotiation() async {
+    throw protocolNegotiationError ??
+        StateError('sendProtocolNegotiation not configured');
+  }
+
+  @override
+  Future<ProtocolResponse> sendFastAuth({
+    required String username,
+    required Uint8List clientNonce,
+  }) async {
+    throw fastAuthError ?? StateError('sendFastAuth not configured');
   }
 }
 
@@ -579,6 +614,186 @@ void main() {
           reason: 'Different passwords should produce different session keys');
       expect(speedyKey1, isNot(equals(speedyKey2)),
           reason: 'Different passwords should produce different speedy keys');
+    });
+  });
+
+  group('PBKDF2 hash-slice guard (AC1)', () {
+    test(
+        'requirePasswordHashPrefix returns the first N bytes of a 64-byte hash',
+        () {
+      final full = Uint8List.fromList(List.generate(64, (i) => i));
+      final prefix = requirePasswordHashPrefix(full, 32);
+      expect(prefix.length, equals(32));
+      expect(prefix, equals(Uint8List.fromList(List.generate(32, (i) => i))),
+          reason: 'Valid hashes must keep byte-for-byte behaviour');
+    });
+
+    test('requirePasswordHashPrefix on exactly N bytes returns them unchanged',
+        () {
+      final exact = Uint8List.fromList(List.generate(32, (i) => i + 1));
+      expect(requirePasswordHashPrefix(exact, 32), equals(exact));
+    });
+
+    test('requirePasswordHashPrefix on a short hash raises OracleException',
+        () {
+      expect(
+        () => requirePasswordHashPrefix(Uint8List(31), 32),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+        reason:
+            'AC1: a hash shorter than 32 bytes must fail loud, not RangeError',
+      );
+    });
+
+    test('short-hash exception names the hash-length problem without secrets',
+        () {
+      try {
+        requirePasswordHashPrefix(Uint8List(10), 32);
+        fail('expected OracleException');
+      } on OracleException catch (e) {
+        expect(e.message.toLowerCase(), contains('hash'));
+        expect(e.message, contains('32'),
+            reason: 'Message should state the required length');
+        // No password/salt/key/proof material should leak — the input here is
+        // all zeros, so just assert the message is the fixed diagnostic text.
+        expect(e.message, contains('too short'));
+      }
+    });
+  });
+
+  group('SHA512 verifier path (AC7)', () {
+    test(
+        'generatePasswordProof for SHA512 (0x939) does not crash on AES key length',
+        () {
+      final auth = AuthFlow();
+      final params = VerifierParams(
+        verifierType: verifierTypeSha512, // 0x939
+        salt: Uint8List.fromList(List.generate(16, (i) => i)),
+        iterations: 1,
+        // 48-byte (AES block-aligned) server key, as a real server sends.
+        serverNonce: Uint8List.fromList(List.generate(48, (i) => i + 10)),
+        authPasswordMode: 0,
+        mixingSalt: Uint8List.fromList(List.generate(16, (i) => i + 60)),
+        mixingIterations: 1,
+      );
+      final clientNonce = auth.generateClientNonce();
+
+      // The pre-fix code used the full 64-byte SHA-512 digest as the AES-256
+      // key, which throws inside pointycastle. This must now succeed.
+      final proof = auth.generatePasswordProof(
+        password: 'sha512pw',
+        params: params,
+        clientNonce: clientNonce,
+      );
+
+      expect(params.isSha512, isTrue);
+      expect(params.isPbkdf2, isFalse);
+
+      final passwordHex = utf8.decode(proof);
+      expect(passwordHex, matches(r'^[0-9A-F]+$'),
+          reason: 'AUTH_PASSWORD must be uppercase hex UTF-8');
+      expect(auth.sessionKey, isNotNull,
+          reason: 'session key must be derived on the SHA512 path');
+      expect(auth.speedyKey, isNull,
+          reason: 'AC6/AC7: SHA512 path must never generate a speedy key; '
+              'only the 12c verifier (0x4815) emits AUTH_PBKDF2_SPEEDY_KEY');
+    });
+  });
+
+  group('Malformed server nonce guard (AC5)', () {
+    test('short AUTH_SESSKEY raises OracleException, not a raw crypto error',
+        () {
+      final auth = AuthFlow();
+      final params = VerifierParams(
+        verifierType: verifierTypePbkdf2,
+        salt: Uint8List.fromList(List.generate(16, (i) => i)),
+        iterations: 1,
+        serverNonce: Uint8List(8), // 8 bytes: not a multiple of 16, and < 32
+        authPasswordMode: 0,
+      );
+      expect(
+        () => auth.generatePasswordProof(
+          password: 'pw',
+          params: params,
+          clientNonce: auth.generateClientNonce(),
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+        reason:
+            'AC5: a non-block-aligned server key must surface a guarded error',
+      );
+    });
+
+    test('non-block-aligned (multiple of, but odd) AUTH_SESSKEY is rejected',
+        () {
+      final auth = AuthFlow();
+      final params = VerifierParams(
+        verifierType: verifierTypePbkdf2,
+        salt: Uint8List(16),
+        iterations: 1,
+        serverNonce: Uint8List(40), // multiple of 8 but not of 16
+        authPasswordMode: 0,
+      );
+      expect(
+        () => auth.generatePasswordProof(
+          password: 'pw',
+          params: params,
+          clientNonce: auth.generateClientNonce(),
+        ),
+        throwsA(isA<OracleException>()),
+      );
+    });
+  });
+
+  group('Auth state transitions on failure (AC10, AC11)', () {
+    test(
+        'classical path: protocol-negotiation failure does not advance to phaseOneSent',
+        () async {
+      final transport = _FakeAuthTransport(
+        fastAuth: false,
+        protocolNegotiationError: const OracleException(
+          errorCode: oraProtocolError,
+          message: 'negotiation failed',
+        ),
+      );
+      final auth = AuthFlow();
+
+      await expectLater(
+        auth.authenticate(
+          transport: transport,
+          username: 'u',
+          password: 'p',
+        ),
+        throwsA(isA<OracleException>()),
+      );
+
+      expect(auth.state, isNot(equals(AuthState.phaseOneSent)),
+          reason: 'AC10: phaseOneSent must not be entered before the phase-one '
+              'packet is written');
+      expect(auth.state, equals(AuthState.notStarted),
+          reason: 'state must remain notStarted on negotiation failure');
+    });
+
+    test('FAST_AUTH path: a SocketException marks auth failed', () async {
+      final transport = _FakeAuthTransport(
+        fastAuth: true,
+        fastAuthError: const SocketException('connection reset by peer'),
+      );
+      final auth = AuthFlow();
+
+      await expectLater(
+        auth.authenticate(
+          transport: transport,
+          username: 'u',
+          password: 'p',
+        ),
+        throwsA(isA<SocketException>()),
+      );
+
+      expect(auth.state, equals(AuthState.failed),
+          reason:
+              'AC11: a non-OracleException from FAST_AUTH must leave AuthState '
+              'at failed, never stuck at phaseOneSent');
     });
   });
 }

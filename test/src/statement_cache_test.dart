@@ -1,6 +1,10 @@
 import 'package:test/test.dart';
 
+import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/statement_cache.dart';
+
+/// Bind-free key helper for the legacy exact-SQL tests.
+StatementCacheKey _k(String sql) => StatementCacheKey.noBinds(sql);
 
 void main() {
   group('StatementCache', () {
@@ -21,29 +25,44 @@ void main() {
         expect(() => StatementCache(-1), throwsArgumentError);
         expect(() => StatementCache(-100), throwsArgumentError);
       });
+
+      // AC7: pathological sizes are rejected, never silently clamped.
+      test('accepts maxSize exactly at maxStatementCacheSize cap', () {
+        final cache = StatementCache(maxStatementCacheSize);
+        expect(cache.maxSize, equals(maxStatementCacheSize));
+      });
+
+      test('rejects maxSize one above the cap with ArgumentError', () {
+        expect(() => StatementCache(maxStatementCacheSize + 1),
+            throwsArgumentError);
+      });
+
+      test('rejects pathological maxSize (1 << 31) with ArgumentError', () {
+        expect(() => StatementCache(1 << 31), throwsArgumentError);
+      });
     });
 
     group('acquire / store / release', () {
       test('returns null on cache miss', () {
         final cache = StatementCache(10);
-        expect(cache.acquire('SELECT 1 FROM dual'), isNull);
+        expect(cache.acquire(_k('SELECT 1 FROM dual')), isNull);
       });
 
       test('returns null when caching is disabled', () {
         final cache = StatementCache(0);
         final entry =
-            StatementCacheEntry(sql: 'SELECT 1 FROM dual', cursorId: 5);
+            StatementCacheEntry(key: _k('SELECT 1 FROM dual'), cursorId: 5);
         cache.store(entry);
-        expect(cache.acquire('SELECT 1 FROM dual'), isNull);
+        expect(cache.acquire(_k('SELECT 1 FROM dual')), isNull);
       });
 
       test('hit after store returns the entry and marks it inUse', () {
         final cache = StatementCache(10);
         final entry =
-            StatementCacheEntry(sql: 'SELECT 1 FROM dual', cursorId: 5);
+            StatementCacheEntry(key: _k('SELECT 1 FROM dual'), cursorId: 5);
         cache.store(entry);
 
-        final hit = cache.acquire('SELECT 1 FROM dual');
+        final hit = cache.acquire(_k('SELECT 1 FROM dual'));
         expect(hit, isNotNull);
         expect(hit!.cursorId, equals(5));
         expect(hit.inUse, isTrue);
@@ -52,44 +71,126 @@ void main() {
       test('second acquire returns null while entry is inUse', () {
         final cache = StatementCache(10);
         final entry =
-            StatementCacheEntry(sql: 'SELECT 1 FROM dual', cursorId: 5);
+            StatementCacheEntry(key: _k('SELECT 1 FROM dual'), cursorId: 5);
         cache.store(entry);
 
-        cache.acquire('SELECT 1 FROM dual'); // first acquirer holds it
-        expect(cache.acquire('SELECT 1 FROM dual'), isNull);
+        cache.acquire(_k('SELECT 1 FROM dual')); // first acquirer holds it
+        expect(cache.acquire(_k('SELECT 1 FROM dual')), isNull);
       });
 
       test('acquire available again after release', () {
         final cache = StatementCache(10);
         final entry =
-            StatementCacheEntry(sql: 'SELECT 1 FROM dual', cursorId: 5);
+            StatementCacheEntry(key: _k('SELECT 1 FROM dual'), cursorId: 5);
         cache.store(entry);
 
-        final held = cache.acquire('SELECT 1 FROM dual')!;
+        final held = cache.acquire(_k('SELECT 1 FROM dual'))!;
         cache.release(held);
 
-        final hit2 = cache.acquire('SELECT 1 FROM dual');
+        final hit2 = cache.acquire(_k('SELECT 1 FROM dual'));
         expect(hit2, isNotNull);
         expect(hit2!.inUse, isTrue);
       });
 
       test('store with cursorId == 0 does not cache the entry', () {
         final cache = StatementCache(10);
-        final entry = StatementCacheEntry(sql: 'SELECT 1 FROM dual');
+        final entry = StatementCacheEntry(key: _k('SELECT 1 FROM dual'));
         cache.store(entry); // cursorId defaults to 0
-        expect(cache.acquire('SELECT 1 FROM dual'), isNull);
+        expect(cache.acquire(_k('SELECT 1 FROM dual')), isNull);
       });
 
-      test('exact SQL string is the cache key (different whitespace = miss)',
-          () {
+      test('exact SQL string is part of the cache key (whitespace = miss)', () {
         final cache = StatementCache(10);
         final entry =
-            StatementCacheEntry(sql: 'SELECT 1 FROM dual', cursorId: 7);
+            StatementCacheEntry(key: _k('SELECT 1 FROM dual'), cursorId: 7);
         cache.store(entry);
 
-        expect(cache.acquire('SELECT  1 FROM dual'), isNull);
-        expect(cache.acquire('select 1 from dual'), isNull);
-        expect(cache.acquire('SELECT 1 FROM dual'), isNotNull);
+        expect(cache.acquire(_k('SELECT  1 FROM dual')), isNull);
+        expect(cache.acquire(_k('select 1 from dual')), isNull);
+        expect(cache.acquire(_k('SELECT 1 FROM dual')), isNotNull);
+      });
+    });
+
+    // AC3: the bind signature participates in cache identity.
+    group('bind-signature keys (AC3)', () {
+      StatementCacheKey numberKey(String sql) => StatementCacheKey(sql, const [
+            BindSlotSignature(oraType: 2, dir: BindDir.input), // NUMBER
+          ]);
+      StatementCacheKey varcharKey(String sql) => StatementCacheKey(sql, const [
+            BindSlotSignature(oraType: 1, dir: BindDir.input), // VARCHAR2
+          ]);
+
+      test('same SQL with different bind signatures are separate entries', () {
+        final cache = StatementCache(10);
+        const sql = 'SELECT :1 AS VAL FROM DUAL';
+        cache.store(StatementCacheEntry(key: numberKey(sql), cursorId: 11));
+        cache.store(StatementCacheEntry(key: varcharKey(sql), cursorId: 22));
+
+        expect(cache.size, equals(2),
+            reason: 'distinct signatures must not collide on SQL text alone');
+
+        final numberHit = cache.acquire(numberKey(sql));
+        final varcharHit = cache.acquire(varcharKey(sql));
+        expect(numberHit!.cursorId, equals(11));
+        expect(varcharHit!.cursorId, equals(22));
+      });
+
+      test('a number-bind key does not hit a varchar-bind entry', () {
+        final cache = StatementCache(10);
+        const sql = 'SELECT :1 AS VAL FROM DUAL';
+        cache.store(StatementCacheEntry(key: numberKey(sql), cursorId: 11));
+
+        // Same SQL text, different bind type → must reparse (cache miss).
+        expect(cache.acquire(varcharKey(sql)), isNull);
+      });
+
+      test('bind direction is part of the signature', () {
+        const sql = 'BEGIN :1 := 1; END;'; // shape only — testing key identity
+        final inKey = StatementCacheKey(
+            sql, const [BindSlotSignature(oraType: 2, dir: BindDir.input)]);
+        final outKey = StatementCacheKey(
+            sql, const [BindSlotSignature(oraType: 2, dir: BindDir.output)]);
+        expect(inKey == outKey, isFalse);
+        expect(inKey.hashCode == outKey.hashCode, isFalse,
+            reason: 'distinct directions should (practically) differ in hash');
+      });
+
+      test('declared max size participates in the signature', () {
+        const sql = 'SELECT :1 FROM DUAL';
+        final small = StatementCacheKey(sql, const [
+          BindSlotSignature(oraType: 1, dir: BindDir.input, maxSize: 10)
+        ]);
+        final large = StatementCacheKey(sql, const [
+          BindSlotSignature(oraType: 1, dir: BindDir.input, maxSize: 4000)
+        ]);
+        expect(small == large, isFalse);
+      });
+
+      test('value equality: identical keys are equal and hash equally', () {
+        const sql = 'SELECT :1 FROM DUAL';
+        final a = numberKey(sql);
+        final b = numberKey(sql);
+        expect(a == b, isTrue);
+        expect(a.hashCode, equals(b.hashCode));
+      });
+
+      test(
+          'LRU eviction stays deterministic across signatures, cursor queued '
+          'exactly once', () {
+        final cache = StatementCache(2);
+        const sql = 'SELECT :1 FROM DUAL';
+        cache.store(StatementCacheEntry(key: numberKey(sql), cursorId: 1));
+        cache.store(StatementCacheEntry(key: varcharKey(sql), cursorId: 2));
+        // Third distinct signature evicts the LRU (number, cursorId 1).
+        final thirdKey = StatementCacheKey(sql,
+            const [BindSlotSignature(oraType: 12, dir: BindDir.input)]); // DATE
+        cache.store(StatementCacheEntry(key: thirdKey, cursorId: 3));
+
+        expect(cache.size, equals(2));
+        expect(cache.acquire(numberKey(sql)), isNull, reason: 'number evicted');
+        final toClose = cache.drainCursorsToClose();
+        expect(toClose, equals([1]),
+            reason: 'evicted cursor queued exactly once');
       });
     });
 
@@ -97,49 +198,49 @@ void main() {
       test('acquire refreshes recency — later-used entry survives eviction',
           () {
         final cache = StatementCache(2);
-        final e1 = StatementCacheEntry(sql: 'A', cursorId: 1);
-        final e2 = StatementCacheEntry(sql: 'B', cursorId: 2);
+        final e1 = StatementCacheEntry(key: _k('A'), cursorId: 1);
+        final e2 = StatementCacheEntry(key: _k('B'), cursorId: 2);
         cache.store(e1);
         cache.store(e2);
 
         // Acquire A to refresh it to most-recently-used.
-        final held = cache.acquire('A')!;
+        final held = cache.acquire(_k('A'))!;
         cache.release(held);
 
         // Add C — should evict B (LRU), not A.
-        final e3 = StatementCacheEntry(sql: 'C', cursorId: 3);
+        final e3 = StatementCacheEntry(key: _k('C'), cursorId: 3);
         cache.store(e3);
 
-        expect(cache.acquire('A'), isNotNull, reason: 'A should survive');
-        expect(cache.acquire('B'), isNull, reason: 'B should be evicted');
-        expect(cache.acquire('C'), isNotNull, reason: 'C should be cached');
+        expect(cache.acquire(_k('A')), isNotNull, reason: 'A should survive');
+        expect(cache.acquire(_k('B')), isNull, reason: 'B should be evicted');
+        expect(cache.acquire(_k('C')), isNotNull, reason: 'C should be cached');
       });
     });
 
     group('LRU eviction order', () {
       test('oldest-inserted entry is evicted first', () {
         final cache = StatementCache(2);
-        final e1 = StatementCacheEntry(sql: 'SQL1', cursorId: 1);
-        final e2 = StatementCacheEntry(sql: 'SQL2', cursorId: 2);
+        final e1 = StatementCacheEntry(key: _k('SQL1'), cursorId: 1);
+        final e2 = StatementCacheEntry(key: _k('SQL2'), cursorId: 2);
         cache.store(e1);
         cache.store(e2);
 
         // size is 2 == maxSize; storing SQL3 must evict SQL1.
-        final e3 = StatementCacheEntry(sql: 'SQL3', cursorId: 3);
+        final e3 = StatementCacheEntry(key: _k('SQL3'), cursorId: 3);
         cache.store(e3);
 
         expect(cache.size, equals(2));
-        expect(cache.acquire('SQL1'), isNull, reason: 'SQL1 evicted');
-        expect(cache.acquire('SQL2'), isNotNull);
-        expect(cache.acquire('SQL3'), isNotNull);
+        expect(cache.acquire(_k('SQL1')), isNull, reason: 'SQL1 evicted');
+        expect(cache.acquire(_k('SQL2')), isNotNull);
+        expect(cache.acquire(_k('SQL3')), isNotNull);
       });
 
       test('eviction queues cursor id for close', () {
         final cache = StatementCache(1);
-        final e1 = StatementCacheEntry(sql: 'OLD', cursorId: 99);
+        final e1 = StatementCacheEntry(key: _k('OLD'), cursorId: 99);
         cache.store(e1);
 
-        final e2 = StatementCacheEntry(sql: 'NEW', cursorId: 42);
+        final e2 = StatementCacheEntry(key: _k('NEW'), cursorId: 42);
         cache.store(e2); // evicts OLD (cursorId=99)
 
         final toClose = cache.drainCursorsToClose();
@@ -149,8 +250,8 @@ void main() {
 
       test('drainCursorsToClose clears the queue', () {
         final cache = StatementCache(1);
-        cache.store(StatementCacheEntry(sql: 'A', cursorId: 1));
-        cache.store(StatementCacheEntry(sql: 'B', cursorId: 2));
+        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 1));
+        cache.store(StatementCacheEntry(key: _k('B'), cursorId: 2));
 
         expect(cache.drainCursorsToClose(), isNotEmpty);
         expect(cache.drainCursorsToClose(), isEmpty);
@@ -158,11 +259,8 @@ void main() {
 
       test('evicted entry with cursorId == 0 does not queue for close', () {
         final cache = StatementCache(1);
-        // cursorId == 0 means never stored via store(); simulate via a fresh
-        // entry where we bypass the store guard by using maxSize=0 trick —
-        // actually just verify store() ignores cursorId==0 entries.
-        final e1 = StatementCacheEntry(sql: 'A', cursorId: 10);
-        final e2 = StatementCacheEntry(sql: 'B', cursorId: 0);
+        final e1 = StatementCacheEntry(key: _k('A'), cursorId: 10);
+        final e2 = StatementCacheEntry(key: _k('B'), cursorId: 0);
         cache.store(e1); // stored (cursorId=10)
         cache.store(e2); // NOT stored (cursorId==0 guard)
 
@@ -175,36 +273,67 @@ void main() {
     group('invalidate', () {
       test('removes entry and queues cursor id for close', () {
         final cache = StatementCache(10);
-        final entry = StatementCacheEntry(sql: 'BAD SQL', cursorId: 77);
+        final entry = StatementCacheEntry(key: _k('BAD SQL'), cursorId: 77);
         cache.store(entry);
 
-        cache.invalidate('BAD SQL');
+        cache.invalidate(_k('BAD SQL'));
 
-        expect(cache.acquire('BAD SQL'), isNull);
+        expect(cache.acquire(_k('BAD SQL')), isNull);
         expect(cache.drainCursorsToClose(), contains(77));
       });
 
       test('invalidate on missing key is a no-op', () {
         final cache = StatementCache(10);
-        expect(() => cache.invalidate('MISSING'), returnsNormally);
+        expect(() => cache.invalidate(_k('MISSING')), returnsNormally);
         expect(cache.drainCursorsToClose(), isEmpty);
       });
 
       test('double invalidate does not double-queue cursor id', () {
         final cache = StatementCache(10);
-        cache.store(StatementCacheEntry(sql: 'S', cursorId: 55));
-        cache.invalidate('S'); // removes from cache
-        cache.invalidate('S'); // entry already gone — no-op
+        cache.store(StatementCacheEntry(key: _k('S'), cursorId: 55));
+        cache.invalidate(_k('S')); // removes from cache
+        cache.invalidate(_k('S')); // entry already gone — no-op
         expect(cache.drainCursorsToClose(), equals([55]));
+      });
+    });
+
+    // AC2: DDL invalidates the whole per-connection cache.
+    group('invalidateAll (AC2)', () {
+      test('queues all non-inUse cursors and clears cache, stays usable', () {
+        final cache = StatementCache(10);
+        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 1));
+        cache.store(StatementCacheEntry(key: _k('B'), cursorId: 2));
+
+        cache.invalidateAll();
+
+        expect(cache.size, equals(0));
+        expect(cache.drainCursorsToClose(), containsAll([1, 2]));
+        // Still usable afterwards (unlike closeAll on a closing connection).
+        cache.store(StatementCacheEntry(key: _k('C'), cursorId: 3));
+        expect(cache.acquire(_k('C')), isNotNull);
+      });
+
+      test('inUse entry is dropped but its cursor is queued on later release',
+          () {
+        final cache = StatementCache(10);
+        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 5));
+        final held = cache.acquire(_k('A'))!; // mark inUse
+
+        cache.invalidateAll();
+        expect(cache.drainCursorsToClose(), isNot(contains(5)),
+            reason: 'in-use cursor not queued until released');
+
+        cache.release(held); // returnToCache was cleared → queue now
+        expect(cache.drainCursorsToClose(), contains(5));
       });
     });
 
     group('closeAll', () {
       test('queues all non-inUse cursors and clears cache', () {
         final cache = StatementCache(10);
-        cache.store(StatementCacheEntry(sql: 'A', cursorId: 1));
-        cache.store(StatementCacheEntry(sql: 'B', cursorId: 2));
-        cache.store(StatementCacheEntry(sql: 'C', cursorId: 3));
+        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 1));
+        cache.store(StatementCacheEntry(key: _k('B'), cursorId: 2));
+        cache.store(StatementCacheEntry(key: _k('C'), cursorId: 3));
 
         cache.closeAll();
 
@@ -215,8 +344,8 @@ void main() {
 
       test('inUse entry is not queued for close by closeAll', () {
         final cache = StatementCache(10);
-        cache.store(StatementCacheEntry(sql: 'A', cursorId: 5));
-        final held = cache.acquire('A')!; // mark inUse
+        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 5));
+        final held = cache.acquire(_k('A'))!; // mark inUse
 
         cache.closeAll();
 
@@ -230,16 +359,16 @@ void main() {
     group('maxSize == 1 edge cases', () {
       test('stores and retrieves single entry', () {
         final cache = StatementCache(1);
-        cache.store(StatementCacheEntry(sql: 'S', cursorId: 9));
-        expect(cache.acquire('S'), isNotNull);
+        cache.store(StatementCacheEntry(key: _k('S'), cursorId: 9));
+        expect(cache.acquire(_k('S')), isNotNull);
       });
 
       test('second store evicts first', () {
         final cache = StatementCache(1);
-        cache.store(StatementCacheEntry(sql: 'A', cursorId: 1));
-        cache.store(StatementCacheEntry(sql: 'B', cursorId: 2));
-        expect(cache.acquire('A'), isNull);
-        expect(cache.acquire('B'), isNotNull);
+        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 1));
+        cache.store(StatementCacheEntry(key: _k('B'), cursorId: 2));
+        expect(cache.acquire(_k('A')), isNull);
+        expect(cache.acquire(_k('B')), isNotNull);
         expect(cache.drainCursorsToClose(), contains(1));
       });
     });

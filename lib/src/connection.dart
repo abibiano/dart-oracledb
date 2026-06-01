@@ -61,8 +61,7 @@ class OracleConnection {
     int statementCacheSize = 30,
   })  : _transport = transport,
         _connectionInfo = connectionInfo ??
-            const ConnectionInfo(
-                host: 'test', port: 0, serviceName: 'test'),
+            const ConnectionInfo(host: 'test', port: 0, serviceName: 'test'),
         _cache = StatementCache(statementCacheSize),
         _isClosed = false;
 
@@ -71,6 +70,16 @@ class OracleConnection {
   final StatementCache _cache;
   bool _isClosed;
   bool _inTransaction = false;
+
+  /// Guards against overlapping [execute] calls on a single connection (AC1).
+  ///
+  /// A connection multiplexes a single TTC byte stream over one socket. Two
+  /// `execute()` calls in flight at once would interleave their request writes
+  /// and read each other's responses, corrupting cursor ids, the close-cursor
+  /// piggyback queue, and the sequence counter. This driver therefore does NOT
+  /// serialize overlapping calls — it rejects the second one fast. Callers that
+  /// need concurrency must use separate connections (e.g. a future pool).
+  bool _executeInProgress = false;
 
   /// The configured statement cache size for this connection.
   int get statementCacheSize => _cache.maxSize;
@@ -83,6 +92,22 @@ class OracleConnection {
   /// on it — it exists solely to support test instrumentation.
   @visibleForTesting
   int get debugCacheSize => _cache.size;
+
+  /// Number of cursor ids currently queued for close (close-cursor piggyback
+  /// backlog). Exposed for Story 7.6 AC4 chunking tests; not a public API.
+  @visibleForTesting
+  int get debugPendingCloseCount => _cache.pendingCloseCount;
+
+  /// Number of full-parse EXECUTEs sent on this connection (cursorId == 0).
+  ///
+  /// AC8 instrumentation: proves cursor reuse / parse skipping from integration
+  /// tests without privileged Oracle views. Not part of the public API.
+  @visibleForTesting
+  int get debugFullParseExecutes => _transport.debugFullParseExecutes;
+
+  /// Number of cursor-reuse EXECUTEs sent on this connection (cursorId != 0).
+  @visibleForTesting
+  int get debugReuseExecutes => _transport.debugReuseExecutes;
 
   /// Whether the connection is currently open and usable.
   ///
@@ -166,6 +191,38 @@ class OracleConnection {
     return oc.oraTypeVarchar;
   }
 
+  /// Validates a requested statement cache size against the documented bounds
+  /// (AC7) before any network work, so a misconfiguration fails loudly at the
+  /// call site rather than after a connection is established. The same bound is
+  /// re-enforced inside [StatementCache] so the test-only [forTesting]
+  /// constructor cannot diverge.
+  static void _checkStatementCacheSize(int statementCacheSize) {
+    if (statementCacheSize < 0) {
+      throw ArgumentError.value(
+          statementCacheSize, 'statementCacheSize', 'must be >= 0');
+    }
+    if (statementCacheSize > maxStatementCacheSize) {
+      throw ArgumentError.value(statementCacheSize, 'statementCacheSize',
+          'must be <= $maxStatementCacheSize (the maximum statement cache size)');
+    }
+  }
+
+  /// Builds the ordered bind signature that participates in the cache key (AC3).
+  ///
+  /// Each slot contributes its wire type, direction, and any declared max size
+  /// so the same SQL text run with a different bind shape resolves to a distinct
+  /// cache key and reparses instead of reusing an incompatible cursor. Returns a
+  /// const empty list for bind-free statements.
+  static List<BindSlotSignature> _bindSignature(List<BindMetadata>? metadata) {
+    if (metadata == null || metadata.isEmpty) {
+      return const <BindSlotSignature>[];
+    }
+    return <BindSlotSignature>[
+      for (final m in metadata)
+        BindSlotSignature(oraType: m.oraType, dir: m.dir, maxSize: m.maxSize),
+    ];
+  }
+
   /// Throws [OracleException] if connection is closed.
   ///
   /// This guard method is called by operations that require an open connection
@@ -229,13 +286,47 @@ class OracleConnection {
   /// print('Updated ${result.rowsAffected} rows');
   /// ```
   ///
+  /// ## Concurrency contract (AC1)
+  ///
+  /// A single [OracleConnection] is **not** safe for overlapping calls. The
+  /// connection owns one TTC byte stream over one socket; two `execute()` calls
+  /// in flight simultaneously would interleave their wire writes and read each
+  /// other's responses. This method does not serialize overlapping calls — it
+  /// rejects a second call that begins while a prior `execute()` (or its row
+  /// fetches) has not yet resolved, throwing [OracleException] (ORA-protocol
+  /// error). Always `await` each call before issuing the next, and use separate
+  /// connections for concurrent work.
+  ///
   /// Throws [OracleException] if:
+  /// - Another `execute()` is already in progress on this connection (AC1)
   /// - Bind value count doesn't match placeholder count (ORA-01008)
   /// - Unsupported bind value type (ORA-06502)
   /// - Query execution fails
   Future<OracleResult> execute(String sql, [Object? bindValues]) async {
     _ensureOpen();
 
+    // AC1: reject overlapping execute() calls before any wire write. The flag
+    // is set after _ensureOpen so a closed-connection error still wins, and
+    // cleared in the finally below so a thrown call does not wedge the
+    // connection.
+    if (_executeInProgress) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message: 'Concurrent execute() on a single OracleConnection is not '
+            'supported: another statement is still in progress. Await the '
+            'previous execute() before starting another, or use a separate '
+            'connection for concurrent work.',
+      );
+    }
+    _executeInProgress = true;
+    try {
+      return await _executeGuarded(sql, bindValues);
+    } finally {
+      _executeInProgress = false;
+    }
+  }
+
+  Future<OracleResult> _executeGuarded(String sql, Object? bindValues) async {
     _log.fine(
         'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}');
 
@@ -331,12 +422,19 @@ class OracleConnection {
       }
     }
 
+    // Build the bind-signature-aware cache key (AC3). The exact SQL text is
+    // preserved verbatim; the signature (type + direction + declared max size
+    // per slot) makes the same SQL with a different bind shape a distinct key
+    // so a cursor parsed for a NUMBER bind is never reused for a VARCHAR2 bind
+    // (which would cause ORA-01007 / stale metadata / silent coercion).
+    final cacheKey = StatementCacheKey(sql, _bindSignature(bindMetadata));
+
     // Try to acquire a cached cursor.
     StatementCacheEntry? cacheEntry;
     int cursorId = 0;
     List<ColumnMetadata>? expectedColumns;
     if (eligible) {
-      cacheEntry = _cache.acquire(sql);
+      cacheEntry = _cache.acquire(cacheKey);
       if (cacheEntry != null) {
         cursorId = cacheEntry.cursorId;
         if (cacheEntry.columnMetadata.isNotEmpty) {
@@ -345,8 +443,21 @@ class OracleConnection {
       }
     }
 
-    // Drain any cursor IDs queued from prior LRU evictions or errors.
-    final cursorsToClose = _cache.drainCursorsToClose();
+    // Drain cursor IDs queued from prior LRU evictions, errors, or DDL
+    // invalidation, and flush at most one SDU-bounded chunk on this execute
+    // (AC4). The piggyback rides the execute in a single un-fragmented packet,
+    // so an unbounded list could overflow the negotiated SDU. Any remainder is
+    // requeued (deduplicated) and piggybacks on later executes — no standalone
+    // close-cursor RPC is sent, and no ID is dropped.
+    final drained = _cache.drainCursorsToClose();
+    final chunkLimit = _transport.closeCursorChunkLimit;
+    final List<int> cursorsToClose;
+    if (drained.length <= chunkLimit) {
+      cursorsToClose = drained;
+    } else {
+      cursorsToClose = drained.sublist(0, chunkLimit);
+      _cache.requeueCursorsToClose(drained.sublist(chunkLimit));
+    }
 
     try {
       final response = await _transport.sendExecute(
@@ -363,7 +474,7 @@ class OracleConnection {
 
       if (!response.isSuccess) {
         if (cacheEntry != null) {
-          _cache.invalidate(sql);
+          _cache.invalidate(cacheKey);
           cacheEntry = null;
         }
         final serverMessage = response.errorMessage ?? 'Query execution failed';
@@ -378,26 +489,54 @@ class OracleConnection {
         );
       }
 
-      // Update cache from response.
-      if (eligible && response.cursorId != 0) {
-        if (cacheEntry != null) {
+      // Update cache from a successful response.
+      if (eligible && cacheEntry != null) {
+        // Re-executed a cached cursor. AC5: a successful re-execute often echoes
+        // cursorId == 0 in the end-of-call message while the original cursor
+        // stays valid — node-oracledb (withData.js processErrorInfo) only
+        // overwrites the cursor id when the server returns a non-zero one.
+        // Mirror that: preserve the cached cursor on cursorId == 0 rather than
+        // invalidating a still-usable cursor; only an actual error (handled
+        // above) invalidates.
+        if (response.cursorId != 0) {
           cacheEntry.cursorId = response.cursorId;
-          if (response.columnMetadata.isNotEmpty) {
-            cacheEntry.columnMetadata = response.columnMetadata;
-          }
-          _cache.release(cacheEntry);
-          cacheEntry = null;
-        } else {
-          _cache.store(StatementCacheEntry(
-            sql: sql,
-            cursorId: response.cursorId,
-            columnMetadata: response.columnMetadata,
-          ));
         }
-      } else if (cacheEntry != null) {
-        // Server returned cursorId == 0; cannot cache this execution.
-        _cache.invalidate(sql);
+        if (response.columnMetadata.isNotEmpty) {
+          // Server re-DESCRIBEd (e.g. shape changed): adopt fresh metadata so
+          // rows decode against the current shape, never the stale cached one
+          // (AC2).
+          cacheEntry.columnMetadata = response.columnMetadata;
+        }
+        _cache.release(cacheEntry);
         cacheEntry = null;
+      } else if (eligible && response.cursorId != 0) {
+        // First execution of this statement — store the freshly parsed cursor.
+        _cache.store(StatementCacheEntry(
+          key: cacheKey,
+          cursorId: response.cursorId,
+          columnMetadata: response.columnMetadata,
+        ));
+      }
+
+      // AC2: a successful DDL can alter the result shape or invalidate
+      // server-side cursors of ANY cached SELECT/DML on this connection. There
+      // is no cheap way to map arbitrary SQL back to the schema objects it
+      // touches, so conservatively drop the whole per-connection cache: the next
+      // execution of each statement reparses and re-DESCRIBEs against the new
+      // shape rather than decoding rows with stale metadata.
+      //
+      // The trigger is "DDL-shaped": not a query, not PL/SQL, and not
+      // cache-eligible. Queries are excluded so a non-cacheable but still
+      // read-only statement — notably `SELECT ... FOR UPDATE` (eligible == false
+      // by AC6) — does not wipe the cache. PL/SQL is excluded so ordinary
+      // procedure calls do not thrash it.
+      //
+      // ORDERING DEPENDENCY: the `!isQuery` guard is load-bearing. A
+      // `SELECT ... FOR UPDATE` satisfies both `!eligible` and `!isPlSql` but
+      // must NOT invalidate the cache. Removing or reordering `!isQuery` here
+      // would silently allow FOR UPDATE to wipe all cached cursors.
+      if (!eligible && !isPlSql && !isQuery) {
+        _cache.invalidateAll();
       }
 
       return OracleResult(
@@ -412,7 +551,7 @@ class OracleConnection {
       );
     } catch (e) {
       if (cacheEntry != null) {
-        _cache.invalidate(sql);
+        _cache.invalidate(cacheKey);
       }
       // sendExecute may have thrown before the close-cursor piggyback hit the
       // wire. Put the drained IDs back so the next call (or close()) retries.
@@ -657,6 +796,13 @@ class OracleConnection {
   /// );
   /// ```
   ///
+  /// [statementCacheSize] bounds the per-connection cursor cache. The default is
+  /// `30` (matching node-oracledb); `0` disables caching. Valid range is
+  /// `0..maxStatementCacheSize` (65535) — a value outside it throws
+  /// [ArgumentError] before any network work, never silently clamped, since an
+  /// unbounded cache cannot exceed Oracle's `OPEN_CURSORS` limit usefully and
+  /// would grow memory without practical bound.
+  ///
   /// Throws [OracleException] if connection fails with:
   /// - `errorCode`: ORA-xxxxx error code
   /// - `message`: Human-readable error description
@@ -669,10 +815,7 @@ class OracleConnection {
     TlsConfig? tls,
     int statementCacheSize = 30,
   }) async {
-    if (statementCacheSize < 0) {
-      throw ArgumentError.value(
-          statementCacheSize, 'statementCacheSize', 'must be >= 0');
-    }
+    _checkStatementCacheSize(statementCacheSize);
     _log.info(
         'Connecting to: $connectionString${tls?.enabled == true ? ' (TLS)' : ''}');
 

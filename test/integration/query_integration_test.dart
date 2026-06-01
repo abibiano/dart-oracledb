@@ -1356,6 +1356,171 @@ void main() {
     });
   });
 
+  // Story 7.6 — Statement cache correctness.
+  //
+  // Uses the transport-level parse/reuse instrumentation
+  // (`debugFullParseExecutes` / `debugReuseExecutes`) so the evidence does not
+  // depend on V$OPEN_CURSOR or any privileged view — it runs identically on
+  // Oracle 23ai and 21c with the default test user.
+  group('Story 7.6 — statement cache correctness',
+      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+    Future<OracleConnection> openConn({int statementCacheSize = 50}) {
+      return OracleConnection.connect(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        statementCacheSize: statementCacheSize,
+      );
+    }
+
+    Future<void> dropQuietly(OracleConnection c, String table) async {
+      try {
+        await c.execute('DROP TABLE $table');
+      } on OracleException catch (e) {
+        if (e.errorCode != 942) rethrow; // ORA-00942: already absent.
+      }
+    }
+
+    test(
+        'cursor reuse and reparse-after-eviction proven by instrumentation '
+        '(AC8)', () async {
+      final c = await openConn(statementCacheSize: 1);
+      addTearDown(() async {
+        try {
+          await c.close();
+        } catch (_) {}
+      });
+
+      const a = 'SELECT 1 AS A FROM DUAL';
+      const b = 'SELECT 2 AS B FROM DUAL';
+
+      // First execute of A: full parse, no reuse.
+      await c.execute(a);
+      expect(c.debugFullParseExecutes, equals(1));
+      expect(c.debugReuseExecutes, equals(0));
+
+      // Second execute of A: the cached server cursor is reused (parse skipped).
+      await c.execute(a);
+      expect(c.debugReuseExecutes, equals(1),
+          reason: 'second A must reuse the cached cursor');
+      expect(c.debugFullParseExecutes, equals(1));
+
+      // B evicts A (cache size 1) and is itself a full parse.
+      await c.execute(b);
+      expect(c.debugFullParseExecutes, equals(2));
+
+      // A was evicted → it must reparse, not reuse.
+      await c.execute(a);
+      expect(c.debugFullParseExecutes, equals(3),
+          reason: 'A must reparse after LRU eviction');
+      expect(c.debugReuseExecutes, equals(1),
+          reason: 'no reuse occurred for the post-eviction A');
+    });
+
+    test(
+        'same SQL with number then string bind does not reuse an incompatible '
+        'cursor (AC3)', () async {
+      final c = await openConn();
+      addTearDown(() async {
+        try {
+          await c.close();
+        } catch (_) {}
+      });
+
+      const sql = 'SELECT :1 AS VAL FROM DUAL';
+
+      // Number bind → cached under the NUMBER signature.
+      final r1 = await c.execute(sql, [7]);
+      expect(r1.rows.single['VAL'], equals(7));
+      final reuseAfterNumber = c.debugReuseExecutes;
+
+      // Same SQL text, String bind → different signature → must NOT reuse the
+      // NUMBER cursor; result must still be correct (no ORA-01007 / coercion).
+      final r2 = await c.execute(sql, ['hello']);
+      expect(r2.rows.single['VAL'], equals('hello'));
+      expect(c.debugReuseExecutes, equals(reuseAfterNumber),
+          reason: 'string bind must reparse, not reuse the NUMBER cursor');
+
+      // The number signature still has its own cached cursor and reuses it.
+      final r3 = await c.execute(sql, [9]);
+      expect(r3.rows.single['VAL'], equals(9));
+      expect(c.debugReuseExecutes, equals(reuseAfterNumber + 1),
+          reason: 'the NUMBER signature keeps its own reusable cursor');
+    });
+
+    test(
+        'DDL changing result shape forces fresh metadata, not stale decode '
+        '(AC2)', () async {
+      final c = await openConn();
+      const table = 'test_story76_ddl';
+      addTearDown(() async {
+        try {
+          await dropQuietly(c, table);
+        } finally {
+          await c.close();
+        }
+      });
+
+      await dropQuietly(c, table);
+      await c.execute(
+          'CREATE TABLE $table (id NUMBER PRIMARY KEY, label VARCHAR2(50))');
+      await c.execute('INSERT INTO $table (id, label) VALUES (1, :1)', ['x']);
+
+      // Cache a SELECT * with the original 2-column shape.
+      final r1 = await c.execute('SELECT * FROM $table');
+      expect(r1.columns.length, equals(2));
+      expect(c.debugCacheSize, greaterThanOrEqualTo(1));
+
+      // DDL alters the result shape; AC2 requires the whole cache be dropped.
+      await c.execute('ALTER TABLE $table DROP COLUMN label');
+      expect(c.debugCacheSize, equals(0),
+          reason: 'DDL must invalidate the per-connection statement cache');
+
+      // Re-execute identical SQL text — it must DESCRIBE the NEW 1-column shape
+      // rather than decode against the stale cached 2-column metadata.
+      final r2 = await c.execute('SELECT * FROM $table');
+      expect(r2.columns.length, equals(1),
+          reason: 'fresh metadata after DDL, not stale 2-column decode');
+      expect(r2.columnNames.single.toUpperCase(), equals('ID'));
+    });
+
+    test('SELECT ... FOR UPDATE is not cached but still returns rows (AC6)',
+        () async {
+      final c = await openConn();
+      const table = 'test_story76_forupd';
+      addTearDown(() async {
+        try {
+          try {
+            await c.rollback();
+          } catch (_) {}
+          await dropQuietly(c, table);
+        } finally {
+          await c.close();
+        }
+      });
+
+      await dropQuietly(c, table);
+      await c.execute('CREATE TABLE $table (id NUMBER PRIMARY KEY)');
+      await c.execute('INSERT INTO $table (id) VALUES (1)');
+      await c.commit();
+
+      final before = c.debugCacheSize;
+      final locked =
+          await c.execute('SELECT id FROM $table WHERE id = 1 FOR UPDATE');
+      expect(locked.rows.single['ID'], equals(1),
+          reason: 'FOR UPDATE must still return the locked row');
+      expect(c.debugCacheSize, equals(before),
+          reason:
+              'SELECT ... FOR UPDATE must be excluded from the cache (AC6)');
+      await c.rollback(); // release the row lock
+
+      // A plain (non-locking) SELECT on the same table IS cacheable.
+      await c.execute('SELECT id FROM $table WHERE id = 1');
+      expect(c.debugCacheSize, greaterThan(before),
+          reason: 'a non-locking SELECT remains cache-eligible');
+    });
+  });
+
   // Story 7.3 — SQL classification across CTE and MERGE shapes.
   //
   // Confirms that the classifier changes in Story 7.3 preserve the user-

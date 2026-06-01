@@ -11,9 +11,66 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:oracledb/src/crypto/verifier.dart';
+import 'package:oracledb/src/errors.dart';
+import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/messages/auth_message.dart';
 import 'package:test/test.dart';
+
+/// Returns true if [key]'s UTF-8 bytes appear anywhere in [bytes].
+bool _containsKey(Uint8List bytes, String key) {
+  final needle = utf8.encode(key);
+  for (var i = 0; i <= bytes.length - needle.length; i++) {
+    var match = true;
+    for (var j = 0; j < needle.length; j++) {
+      if (bytes[i + j] != needle[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return true;
+  }
+  return false;
+}
+
+/// Decodes the key-value pair count from an AUTH_PHASE_TWO message built with
+/// the default `use23aiFormat: true` (so an 8-byte token field is present).
+int _decodeNumPairs(Uint8List bytes) {
+  final buf = ReadBuffer(bytes);
+  buf.readUint8(); // message type (3)
+  buf.readUint8(); // function code (0x73)
+  buf.readUint8(); // sequence
+  buf.readUB8(); // 23ai token number (0)
+  buf.readUint8(); // username-present flag
+  buf.readUB4(); // username byte length
+  buf.readUB4(); // auth mode flags
+  buf.readUint8(); // unknown (1)
+  return buf.readUB4(); // number of key-value pairs
+}
+
+/// Builds a minimal AUTH_PHASE_ONE TTC ERROR (0x04) body with the given
+/// extended error code and no trailing message.
+Uint8List _buildPhaseOneError({required int errorCode}) {
+  final buffer = WriteBuffer();
+  buffer.writeUint8(ttcMsgTypeError); // 4
+  buffer.writeUB4(0); // call status
+  buffer.writeUB2(0); // end-to-end seq
+  buffer.writeUB4(0); // current row
+  buffer.writeUB2(0); // error number (short)
+  buffer.writeUB2(0); // array elem error
+  buffer.writeUB2(0); // array elem error
+  buffer.writeUB2(0); // cursor id
+  buffer.writeUint16BE(0); // error position
+  buffer.writeUint8(0); // sql type
+  buffer.writeUint8(0); // fatal
+  buffer.writeUint8(0); // flags
+  buffer.writeUint8(0); // user cursor options
+  buffer.writeUint8(0); // UPI parameter
+  buffer.writeUint8(0); // warning flag
+  buffer.writeUB4(errorCode); // extended error code
+  return buffer.toBytes();
+}
 
 void main() {
   group('AuthPhaseOneRequest', () {
@@ -475,6 +532,150 @@ void main() {
       );
       final params = response.toVerifierParams();
       expect(params.mixingSalt, isNull);
+    });
+  });
+
+  group('Speedy-key wire encoding (AC6)', () {
+    final mockSessionKey = Uint8List.fromList(utf8.encode('A' * 64));
+    final mockProof = Uint8List.fromList(utf8.encode('B' * 64));
+    final mockSpeedyKey = Uint8List.fromList(utf8.encode('C' * 160));
+
+    test('12c verifier (0x4815) writes the speedy key and counts 7 pairs', () {
+      final request = AuthPhaseTwoRequest(
+        encryptedProof: mockProof,
+        sessionKey: mockSessionKey,
+        speedyKey: mockSpeedyKey,
+        sequence: 2,
+        verifierType: ttcVerifierType12c, // 0x4815
+      );
+      final bytes = request.toBytes();
+      expect(_containsKey(bytes, 'AUTH_PBKDF2_SPEEDY_KEY'), isTrue);
+      expect(_decodeNumPairs(bytes), equals(7),
+          reason: 'base 6 pairs + the speedy key pair');
+    });
+
+    test(
+        '0xB92 omits the speedy key and counts 6 pairs even if one is supplied',
+        () {
+      // Decision (AC6): 0xB92 (verifierTypePbkdf2) is an internal key-derivation
+      // routing flag, NOT a wire verifier type. node-oracledb only emits the
+      // speedy key for the 12c verifier (0x4815), so 0xB92 must omit it. A
+      // speedyKey is deliberately supplied here to prove it is ignored.
+      final request = AuthPhaseTwoRequest(
+        encryptedProof: mockProof,
+        sessionKey: mockSessionKey,
+        speedyKey: mockSpeedyKey,
+        sequence: 2,
+        verifierType: verifierTypePbkdf2, // 0xB92
+      );
+      final bytes = request.toBytes();
+      expect(_containsKey(bytes, 'AUTH_PBKDF2_SPEEDY_KEY'), isFalse);
+      expect(_decodeNumPairs(bytes), equals(6),
+          reason: 'pair count must match the pairs actually written');
+    });
+
+    test('12c verifier with null speedy key counts 6 pairs (no desync)', () {
+      final request = AuthPhaseTwoRequest(
+        encryptedProof: mockProof,
+        sessionKey: mockSessionKey,
+        sequence: 2,
+        verifierType: ttcVerifierType12c,
+        // speedyKey omitted
+      );
+      final bytes = request.toBytes();
+      expect(_containsKey(bytes, 'AUTH_PBKDF2_SPEEDY_KEY'), isFalse);
+      expect(_decodeNumPairs(bytes), equals(6));
+    });
+  });
+
+  group('AuthPhaseOneResponse TTC ERROR fail-loud (AC9)', () {
+    test('decode raises OracleException carrying the parsed Oracle error code',
+        () {
+      final data = _buildPhaseOneError(errorCode: oraAccountLocked); // 28000
+      expect(
+        () => AuthPhaseOneResponse.decode(data),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraAccountLocked)),
+        reason: 'AC9: a TTC ERROR in AUTH_PHASE_ONE must fail loud, not return '
+            'empty session data',
+      );
+    });
+
+    test('decode error with extended code 0 defaults to ORA-01017', () {
+      final data = _buildPhaseOneError(errorCode: 0);
+      expect(
+        () => AuthPhaseOneResponse.decode(data),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraInvalidCredentials)),
+      );
+    });
+
+    test('decode error message names the phase and leaks no secrets', () {
+      final data = _buildPhaseOneError(errorCode: oraInvalidCredentials);
+      try {
+        AuthPhaseOneResponse.decode(data);
+        fail('expected OracleException');
+      } on OracleException catch (e) {
+        expect(e.message, contains('AUTH_PHASE_ONE'));
+        expect(e.message, contains('ORA-$oraInvalidCredentials'));
+      }
+    });
+  });
+
+  group('Verifier parameter fallbacks are length-safe (AC5)', () {
+    test('missing AUTH_VFR_DATA → 16-byte salt fallback', () {
+      const response =
+          AuthPhaseOneResponse(sessionData: {}, verifierType: 0x4815);
+      final params = response.toVerifierParams();
+      expect(params.salt.length, equals(16));
+    });
+
+    test('missing AUTH_SESSKEY → 16-byte serverNonce fallback', () {
+      const response =
+          AuthPhaseOneResponse(sessionData: {}, verifierType: 0x4815);
+      final params = response.toVerifierParams();
+      expect(params.serverNonce.length, equals(16));
+    });
+
+    test('malformed AUTH_SESSKEY hex → 16-byte serverNonce fallback, no leak',
+        () {
+      const response = AuthPhaseOneResponse(
+        sessionData: {'AUTH_SESSKEY': 'ZZZZ_not_hex'},
+        verifierType: 0x4815,
+      );
+      final params = response.toVerifierParams();
+      expect(params.serverNonce.length, equals(16),
+          reason:
+              'malformed server key must fall back, not throw a parse error');
+    });
+
+    test('malformed AUTH_PBKDF2_CSK_SALT hex → mixingSalt stays null', () {
+      const response = AuthPhaseOneResponse(
+        sessionData: {'AUTH_PBKDF2_CSK_SALT': 'GG_not_hex'},
+        verifierType: 0x4815,
+      );
+      final params = response.toVerifierParams();
+      expect(params.mixingSalt, isNull);
+    });
+
+    test('mixingSalt and mixingIterations are null unless supplied', () {
+      const response =
+          AuthPhaseOneResponse(sessionData: {}, verifierType: 0x4815);
+      final params = response.toVerifierParams();
+      expect(params.mixingSalt, isNull);
+      expect(params.mixingIterations, isNull);
+    });
+
+    test('valid AUTH_PBKDF2_CSK_SALT decodes to its byte length', () {
+      const response = AuthPhaseOneResponse(
+        sessionData: {
+          'AUTH_PBKDF2_CSK_SALT': '0102030405060708090a0b0c0d0e0f10',
+        },
+        verifierType: 0x4815,
+      );
+      final params = response.toVerifierParams();
+      expect(params.mixingSalt, isNotNull);
+      expect(params.mixingSalt!.length, equals(16));
     });
   });
 }

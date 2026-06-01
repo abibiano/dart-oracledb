@@ -193,8 +193,7 @@ void main() {
     });
 
     test('WITH ... INSERT is DML, not a query', () {
-      const sql =
-          'WITH src AS (SELECT 1 AS id FROM dual) '
+      const sql = 'WITH src AS (SELECT 1 AS id FROM dual) '
           'INSERT INTO t (id) SELECT id FROM src';
       expect(isQuerySql(sql), isFalse,
           reason: 'CTE-backed INSERT must classify as DML so rowsAffected is '
@@ -203,24 +202,21 @@ void main() {
     });
 
     test('WITH ... UPDATE is DML, not a query', () {
-      const sql =
-          'WITH src AS (SELECT 1 AS id FROM dual) '
+      const sql = 'WITH src AS (SELECT 1 AS id FROM dual) '
           'UPDATE t SET val = val + 1 WHERE id IN (SELECT id FROM src)';
       expect(isQuerySql(sql), isFalse);
       expect(isCacheEligibleSql(sql), isTrue);
     });
 
     test('WITH ... DELETE is DML, not a query', () {
-      const sql =
-          'WITH src AS (SELECT 1 AS id FROM dual) '
+      const sql = 'WITH src AS (SELECT 1 AS id FROM dual) '
           'DELETE FROM t WHERE id IN (SELECT id FROM src)';
       expect(isQuerySql(sql), isFalse);
       expect(isCacheEligibleSql(sql), isTrue);
     });
 
     test('WITH ... MERGE is DML, not a query', () {
-      const sql =
-          'WITH src AS (SELECT 1 AS id, 2 AS val FROM dual) '
+      const sql = 'WITH src AS (SELECT 1 AS id, 2 AS val FROM dual) '
           'MERGE INTO t USING src ON (t.id = src.id) '
           'WHEN MATCHED THEN UPDATE SET t.val = src.val';
       expect(isQuerySql(sql), isFalse);
@@ -228,8 +224,7 @@ void main() {
     });
 
     test('multiple CTEs followed by SELECT still classify as query', () {
-      const sql =
-          'WITH a AS (SELECT 1 AS x FROM dual), '
+      const sql = 'WITH a AS (SELECT 1 AS x FROM dual), '
           'b AS (SELECT 2 AS y FROM dual) '
           'SELECT a.x, b.y FROM a, b';
       expect(isQuerySql(sql), isTrue);
@@ -237,8 +232,7 @@ void main() {
     });
 
     test('multiple CTEs followed by INSERT classify as DML', () {
-      const sql =
-          'WITH a AS (SELECT 1 AS id FROM dual), '
+      const sql = 'WITH a AS (SELECT 1 AS id FROM dual), '
           'b AS (SELECT 2 AS id FROM dual) '
           'INSERT INTO t (id) SELECT id FROM a UNION ALL SELECT id FROM b';
       expect(isQuerySql(sql), isFalse);
@@ -248,8 +242,7 @@ void main() {
     test('CTE inner SELECT keywords do not steal terminal-verb match', () {
       // The inner SELECT lives inside parens; the scanner must keep paren
       // depth >0 throughout and only match the terminal INSERT at depth 0.
-      const sql =
-          'WITH src AS (SELECT id FROM (SELECT 1 AS id FROM dual)) '
+      const sql = 'WITH src AS (SELECT id FROM (SELECT 1 AS id FROM dual)) '
           'INSERT INTO t (id) SELECT id FROM src';
       expect(isQuerySql(sql), isFalse);
       expect(isCacheEligibleSql(sql), isTrue);
@@ -261,8 +254,7 @@ void main() {
       // interpreted as a real paren — otherwise the depth tracker would
       // never return to zero (or would return early) and the terminal verb
       // would not be found.
-      const sql =
-          "WITH src AS (SELECT '(' || ')' AS s FROM dual) "
+      const sql = "WITH src AS (SELECT '(' || ')' AS s FROM dual) "
           'INSERT INTO t (s) SELECT s FROM src';
       expect(isCacheEligibleSql(sql), isTrue);
       expect(isQuerySql(sql), isFalse);
@@ -358,6 +350,113 @@ void main() {
 
     test('LF-terminated -- comment still works (regression)', () {
       expect(isQuerySql('-- comment\nSELECT 1 FROM dual'), isTrue);
+    });
+  });
+
+  // Story 7.6 AC6 — SELECT ... FOR UPDATE is a query but is NOT cache-eligible.
+  group('SELECT ... FOR UPDATE cache eligibility (Story 7.6 AC6)', () {
+    test('plain SELECT remains cache-eligible', () {
+      expect(isCacheEligibleSql('SELECT id FROM emp WHERE id = :1'), isTrue);
+    });
+
+    test('SELECT ... FOR UPDATE is still a query', () {
+      expect(isQuerySql('SELECT id FROM emp WHERE id = :1 FOR UPDATE'), isTrue);
+    });
+
+    test('SELECT ... FOR UPDATE is excluded from caching', () {
+      expect(
+        isCacheEligibleSql('SELECT id FROM emp WHERE id = :1 FOR UPDATE'),
+        isFalse,
+      );
+    });
+
+    test('FOR UPDATE OF / NOWAIT / WAIT variants are all excluded', () {
+      expect(isCacheEligibleSql('SELECT * FROM t FOR UPDATE OF c'), isFalse);
+      expect(isCacheEligibleSql('SELECT * FROM t FOR UPDATE NOWAIT'), isFalse);
+      expect(isCacheEligibleSql('SELECT * FROM t FOR UPDATE WAIT 5'), isFalse);
+    });
+
+    test('case-insensitive: lowercase for update is excluded', () {
+      expect(isCacheEligibleSql('select * from t for update'), isFalse);
+    });
+
+    test('FOR UPDATE inside a subquery does not exclude the outer SELECT', () {
+      // The locking clause belongs to the subquery (paren depth > 0); the outer
+      // statement is an ordinary cacheable SELECT.
+      expect(
+        isCacheEligibleSql(
+            'SELECT * FROM (SELECT id FROM t FOR UPDATE) WHERE id > 0'),
+        isTrue,
+      );
+    });
+
+    test("the literal 'FOR UPDATE' in a string does not exclude the SELECT",
+        () {
+      expect(
+          isCacheEligibleSql("SELECT 'FOR UPDATE' AS note FROM dual"), isTrue);
+    });
+
+    test('WITH ... SELECT ... FOR UPDATE is excluded but stays a query', () {
+      const sql = 'WITH c AS (SELECT 1 AS x FROM dual) '
+          'SELECT x FROM c FOR UPDATE';
+      expect(isQuerySql(sql), isTrue);
+      expect(isCacheEligibleSql(sql), isFalse);
+    });
+
+    test('a column merely named FORWARD does not trip FOR detection', () {
+      expect(isCacheEligibleSql('SELECT forward FROM t'), isTrue);
+    });
+  });
+
+  // Story 7.6 AC9 — the three classifiers share one verb resolver and cannot
+  // drift apart on any WITH shape.
+  group('WITH classifier drift prevention (Story 7.6 AC9)', () {
+    const withSelect = 'WITH c AS (SELECT 1 AS x FROM dual) SELECT x FROM c';
+    const withInsert =
+        'WITH c AS (SELECT 1 AS x FROM dual) INSERT INTO t SELECT x FROM c';
+    const withUpdate = 'WITH c AS (SELECT 1 FROM dual) UPDATE t SET x = 1';
+    const withMerge = 'WITH c AS (SELECT 1 FROM dual) '
+        'MERGE INTO t USING c ON (1=1) WHEN MATCHED THEN UPDATE SET x = 1';
+
+    test('WITH ... SELECT: query AND cache-eligible (aligned)', () {
+      expect(isQuerySql(withSelect), isTrue);
+      expect(isCacheEligibleSql(withSelect), isTrue);
+    });
+
+    test('WITH ... INSERT: not a query but cache-eligible (aligned)', () {
+      expect(isQuerySql(withInsert), isFalse);
+      expect(isCacheEligibleSql(withInsert), isTrue);
+    });
+
+    test('WITH ... UPDATE: not a query but cache-eligible (aligned)', () {
+      expect(isQuerySql(withUpdate), isFalse);
+      expect(isCacheEligibleSql(withUpdate), isTrue);
+    });
+
+    test('WITH ... MERGE: not a query but cache-eligible (aligned)', () {
+      expect(isQuerySql(withMerge), isFalse);
+      expect(isCacheEligibleSql(withMerge), isTrue);
+    });
+
+    test('leading paren stays unclassified across all three helpers', () {
+      const sql = '(WITH c AS (SELECT 1 FROM dual) SELECT x FROM c)';
+      expect(isQuerySql(sql), isFalse);
+      expect(isPlSqlSql(sql), isFalse);
+      expect(isCacheEligibleSql(sql), isFalse);
+    });
+
+    test('isQuerySql implies isCacheEligibleSql for any non-FOR-UPDATE query',
+        () {
+      // Property check: for the WITH ... SELECT shape the two helpers must agree
+      // — the whole point of sharing _leadingVerb (no independent CTE scans).
+      for (final sql in const [
+        'SELECT 1 FROM dual',
+        withSelect,
+        '  /* c */ WITH c AS (SELECT 1 FROM dual) SELECT x FROM c',
+      ]) {
+        expect(isQuerySql(sql) && !isCacheEligibleSql(sql), isFalse,
+            reason: 'drift detected for: $sql');
+      }
     });
   });
 }

@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:oracledb/oracledb.dart';
+import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/statement_cache.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
@@ -304,8 +307,8 @@ void main() {
         final conn = OracleConnection.forTesting(transport: Transport());
         await expectLater(
           conn.execute('SELECT 1 FROM dual'),
-          throwsA(isA<OracleException>().having(
-              (e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
         );
       });
 
@@ -313,8 +316,8 @@ void main() {
         final conn = OracleConnection.forTesting(transport: Transport());
         await expectLater(
           conn.commit(),
-          throwsA(isA<OracleException>().having(
-              (e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
         );
       });
 
@@ -322,8 +325,8 @@ void main() {
         final conn = OracleConnection.forTesting(transport: Transport());
         await expectLater(
           conn.rollback(),
-          throwsA(isA<OracleException>().having(
-              (e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
         );
       });
 
@@ -333,5 +336,360 @@ void main() {
         expect(conn.isHealthy, isFalse);
       });
     });
+
+    group('concurrency contract (AC1)', () {
+      test('rejects a second execute() while the first is in flight', () async {
+        final t = _FakeTransport();
+        final gate = Completer<void>();
+        t.executeGate = gate; // park the first call inside sendExecute
+        final conn = OracleConnection.forTesting(transport: t);
+
+        // Start the first execute but do NOT await it — it parks on the gate.
+        final first = conn.execute('SELECT 1 FROM dual');
+
+        // The overlapping call must fail fast with a protocol error.
+        await expectLater(
+          conn.execute('SELECT 2 FROM dual'),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having(
+                  (e) => e.message, 'message', contains('Concurrent execute'))),
+        );
+
+        // Release the first call; it completes normally and clears the guard.
+        gate.complete();
+        await first;
+        expect(t.executeCalls, equals(1),
+            reason: 'the rejected call never reached the transport');
+
+        // After the in-flight call resolves, a new execute() works again.
+        await conn.execute('SELECT 3 FROM dual');
+        expect(t.executeCalls, equals(2));
+      });
+
+      test('guard is cleared when execute() throws', () async {
+        final t = _FakeTransport()
+          ..nextResponses.add(ExecuteResponse(
+              isSuccess: false, errorCode: 942, errorMessage: 'ORA-00942'));
+        final conn = OracleConnection.forTesting(transport: t);
+
+        await expectLater(conn.execute('SELECT 1 FROM dual'),
+            throwsA(isA<OracleException>()));
+        // A failed call must not wedge the connection — the next call proceeds.
+        await conn.execute('SELECT 1 FROM dual');
+        expect(t.executeCalls, equals(2));
+      });
+    });
+
+    group('cached re-execute cursorId == 0 (AC5)', () {
+      test(
+          'successful re-execute with cursorId == 0 preserves the cached entry',
+          () async {
+        final t = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: t);
+
+        // First execute: server assigns cursor 100 → entry is cached.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 100));
+        await conn.execute('SELECT 1 FROM dual');
+        expect(conn.debugCacheSize, equals(1));
+        expect(t.lastCursorId, equals(0), reason: 'first execute is a parse');
+
+        // Second execute: server echoes cursorId == 0 (end-of-call) on success.
+        // The cached cursor must be PRESERVED, not invalidated.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+        await conn.execute('SELECT 1 FROM dual');
+        expect(t.lastCursorId, equals(100),
+            reason: 're-execute reused the cached cursor');
+        expect(conn.debugCacheSize, equals(1),
+            reason: 'cursorId == 0 success must not drop the cached cursor');
+
+        // Third execute still reuses the same cached cursor.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+        await conn.execute('SELECT 1 FROM dual');
+        expect(t.lastCursorId, equals(100));
+        expect(conn.debugCacheSize, equals(1));
+      });
+
+      test('failed re-execute invalidates the cached entry', () async {
+        final t = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: t);
+
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 100));
+        await conn.execute('SELECT 1 FROM dual');
+        expect(conn.debugCacheSize, equals(1));
+
+        t.nextResponses.add(ExecuteResponse(
+            isSuccess: false, errorCode: 1, errorMessage: 'ORA-00001'));
+        await expectLater(conn.execute('SELECT 1 FROM dual'),
+            throwsA(isA<OracleException>()));
+        expect(conn.debugCacheSize, equals(0),
+            reason: 'an actual error must drop the cached cursor');
+      });
+    });
+
+    group('bind-signature cache identity (AC3)', () {
+      test('same SQL with different bind types do not share a cached cursor',
+          () async {
+        final t = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: t);
+
+        // Number bind → cursor 100 cached under the NUMBER signature.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 100));
+        await conn.execute('SELECT :1 AS VAL FROM DUAL', [42]);
+        expect(conn.debugCacheSize, equals(1));
+
+        // Same SQL, String bind → different signature → cache MISS → reparse
+        // (cursorId sent must be 0, not the number cursor 100).
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 200));
+        await conn.execute('SELECT :1 AS VAL FROM DUAL', ['hello']);
+        expect(t.lastCursorId, equals(0),
+            reason: 'incompatible bind signature must not reuse cursor 100');
+        expect(conn.debugCacheSize, equals(2),
+            reason: 'each signature is a distinct cache entry');
+      });
+    });
+
+    group('DDL invalidates the statement cache (AC2)', () {
+      test('successful non-cacheable statement clears all cached cursors',
+          () async {
+        final t = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: t);
+
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 100));
+        await conn.execute('SELECT 1 FROM dual');
+        expect(conn.debugCacheSize, equals(1));
+
+        // A DDL statement (not query, not PL/SQL, not cache-eligible) succeeds.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, rowsAffected: 0));
+        await conn.execute('CREATE TABLE story76_t (x NUMBER)');
+        expect(conn.debugCacheSize, equals(0),
+            reason: 'DDL must drop the per-connection statement cache');
+      });
+
+      test('a PL/SQL call does NOT clear the cache', () async {
+        final t = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: t);
+
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 100));
+        await conn.execute('SELECT 1 FROM dual');
+        expect(conn.debugCacheSize, equals(1));
+
+        t.nextResponses.add(ExecuteResponse(isSuccess: true));
+        await conn.execute('BEGIN NULL; END;');
+        expect(conn.debugCacheSize, equals(1),
+            reason: 'PL/SQL must not thrash the statement cache');
+      });
+    });
+
+    group('server re-DESCRIBE on cached re-execute (AC2)', () {
+      test(
+          'server-sent columnMetadata on a cached re-execute updates the cached '
+          'entry so subsequent executes receive the new shape as expectedColumns',
+          () async {
+        final t = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: t);
+        const col1 = ColumnMetadata(
+            name: 'X', oracleType: 2, maxLength: 22, precision: 10, scale: 0);
+        const col2 = ColumnMetadata(
+            name: 'Y', oracleType: 1, maxLength: 100);
+
+        // First execute: server parses the query, assigns cursor 100, and sends
+        // DESCRIBE_INFO with one column [X].
+        t.nextResponses.add(ExecuteResponse(
+            isSuccess: true, cursorId: 100, columnMetadata: [col1]));
+        await conn.execute('SELECT x FROM t');
+        expect(conn.debugCacheSize, equals(1));
+
+        // Second execute: re-execute of the cached cursor. Server sends a fresh
+        // DESCRIBE_INFO with a different column [Y] — simulating a shape change
+        // that Oracle surfaced during decode (e.g. implicit re-parse).
+        // cursorId echoed as 0 (normal for cached re-execute per AC5).
+        t.nextResponses.add(ExecuteResponse(
+            isSuccess: true, cursorId: 0, columnMetadata: [col2]));
+        await conn.execute('SELECT x FROM t');
+        expect(conn.debugCacheSize, equals(1),
+            reason: 're-DESCRIBE must not drop the cached entry');
+
+        // Third execute: the cached entry must now carry [col2] as the expected
+        // columns. _FakeTransport records what it received as expectedColumns.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+        await conn.execute('SELECT x FROM t');
+        expect(t.lastExpectedColumns, equals([col2]),
+            reason: 'cache must adopt the server-sent metadata, not the stale '
+                'initial shape');
+      });
+    });
+
+    group('SELECT ... FOR UPDATE is not cached (AC6)', () {
+      test(
+          'FOR UPDATE statement does not populate the cache, '
+          'while a plain SELECT does', () async {
+        final t = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: t);
+
+        // A plain SELECT is cache-eligible and must be stored.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 100));
+        await conn.execute('SELECT id FROM t WHERE id = :1', [1]);
+        expect(conn.debugCacheSize, equals(1),
+            reason: 'plain SELECT must be cached');
+
+        // SELECT ... FOR UPDATE is not cache-eligible (AC6) — it must not
+        // add a second entry even though it looks like a query.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+        await conn.execute(
+            'SELECT id FROM t WHERE id = :1 FOR UPDATE', [1]);
+        expect(conn.debugCacheSize, equals(1),
+            reason: 'FOR UPDATE must not populate the statement cache; '
+                'cursor reuse across lock acquisitions is unsafe');
+      });
+    });
+
+    group('close-cursor piggyback chunking (AC4)', () {
+      test('a large close backlog is flushed in SDU-bounded chunks, none lost',
+          () async {
+        // SDU=84: budget = (84÷2) - 32 = 10; limit = 10÷5 = 2.
+        // If _closeCursorPiggybackHeader or _closeCursorIdBytes change,
+        // update this derivation and statementCacheSize to match.
+        final t = _FakeTransport()..debugSdu = 84; // chunk limit == 2
+        final conn =
+            OracleConnection.forTesting(transport: t, statementCacheSize: 5);
+        expect(t.closeCursorChunkLimit, equals(2));
+
+        // Fill the cache with 5 distinct cached cursors (1..5).
+        for (var i = 1; i <= 5; i++) {
+          t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: i));
+          await conn.execute('SELECT $i FROM dual');
+        }
+        expect(conn.debugCacheSize, equals(5));
+
+        // DDL invalidates the whole cache → queues cursors 1..5 for close.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, rowsAffected: 0));
+        await conn.execute('CREATE TABLE story76_chunk (x NUMBER)');
+        expect(conn.debugPendingCloseCount, equals(5));
+
+        // Drain the backlog across successive executes; each flush is bounded.
+        final flushed = <int>[];
+        var nextCursor = 6;
+        while (conn.debugPendingCloseCount > 0) {
+          t.nextResponses
+              .add(ExecuteResponse(isSuccess: true, cursorId: nextCursor++));
+          await conn.execute('SELECT 100 + $nextCursor FROM dual');
+          expect(t.lastCursorsToClose.length, lessThanOrEqualTo(2),
+              reason: 'each close-cursor piggyback must stay within the SDU');
+          flushed.addAll(t.lastCursorsToClose);
+        }
+
+        flushed.sort();
+        expect(flushed, equals([1, 2, 3, 4, 5]),
+            reason: 'every queued cursor id is flushed exactly once');
+      });
+    });
+
+    group('statementCacheSize upper bound (AC7)', () {
+      test('value above the cap rejects before network', () {
+        expect(
+          () => OracleConnection.connect(
+            '10.255.255.1:1521/TEST',
+            user: 'u',
+            password: 'p',
+            statementCacheSize: maxStatementCacheSize + 1,
+            timeout: const Duration(milliseconds: 1),
+          ),
+          throwsA(isA<ArgumentError>().having((e) => e.message, 'message',
+              contains('maximum statement cache size'))),
+        );
+      });
+
+      test('pathological 1 << 31 rejects before network', () {
+        expect(
+          () => OracleConnection.connect(
+            '10.255.255.1:1521/TEST',
+            user: 'u',
+            password: 'p',
+            statementCacheSize: 1 << 31,
+            timeout: const Duration(milliseconds: 1),
+          ),
+          throwsA(isA<ArgumentError>()),
+        );
+      });
+
+      test('value exactly at the cap does not throw ArgumentError', () async {
+        try {
+          await OracleConnection.connect(
+            '10.255.255.1:1521/TEST',
+            user: 'u',
+            password: 'p',
+            statementCacheSize: maxStatementCacheSize,
+            timeout: const Duration(seconds: 1),
+          );
+        } on ArgumentError {
+          fail('ArgumentError must not fire for size == the cap');
+        } on OracleException {
+          // Expected — network unreachable.
+        }
+      });
+
+      test('forTesting also enforces the cap', () {
+        expect(
+          () => OracleConnection.forTesting(
+              transport: Transport(), statementCacheSize: 1 << 31),
+          throwsA(isA<ArgumentError>()),
+        );
+      });
+    });
   });
+}
+
+/// Minimal in-process [Transport] stand-in for connection-level cache and
+/// concurrency tests. Overrides only the surface [OracleConnection.execute]
+/// touches; everything else inherits the unconnected base behavior.
+class _FakeTransport extends Transport {
+  /// Responses returned by successive [sendExecute] calls, in order. When empty
+  /// a default successful response (cursorId 0) is returned.
+  final List<ExecuteResponse> nextResponses = <ExecuteResponse>[];
+
+  /// When set, [sendExecute] awaits this gate before returning, letting a test
+  /// hold a call "in flight" to exercise the overlap guard (AC1).
+  Completer<void>? executeGate;
+
+  int executeCalls = 0;
+  int lastCursorId = -1;
+  List<int> lastCursorsToClose = const <int>[];
+  List<ColumnMetadata>? lastExpectedColumns;
+
+  @override
+  bool get isConnected => true;
+
+  @override
+  bool get isCorrupted => false;
+
+  @override
+  Future<void> disconnect() async {}
+
+  @override
+  Future<ExecuteResponse> sendExecute(
+    String sql, {
+    required bool isQuery,
+    bool isPlSql = false,
+    List<Object?>? bindValues,
+    List<String>? bindNames,
+    List<BindMetadata>? bindMetadata,
+    int prefetchRows = 50,
+    Duration? timeout = const Duration(minutes: 2),
+    int cursorId = 0,
+    List<ColumnMetadata>? expectedColumns,
+    List<int> cursorsToClose = const <int>[],
+  }) async {
+    executeCalls++;
+    lastCursorId = cursorId;
+    lastCursorsToClose = cursorsToClose;
+    lastExpectedColumns = expectedColumns;
+    final gate = executeGate;
+    if (gate != null) {
+      executeGate = null; // only the first call parks
+      await gate.future;
+    }
+    if (nextResponses.isNotEmpty) return nextResponses.removeAt(0);
+    return ExecuteResponse(isSuccess: true);
+  }
 }

@@ -89,6 +89,97 @@ bool matchesKeyword(String sql, int pos, String keyword) {
   return !_isIdentChar(sql.codeUnitAt(pos + klen));
 }
 
+/// If [pos] begins a string literal (`'...'`), quoted identifier (`"..."`),
+/// line comment (`-- …`), or block comment (`/* … */`), returns the offset just
+/// past it; otherwise returns [pos] unchanged.
+///
+/// Single shared skipper for every depth-aware scanner below so literals and
+/// comments can never be mistaken for keywords — and so the skipping rules
+/// (`''`/`""` escapes, CR-or-LF line-comment termination, unterminated-block
+/// clamping) live in exactly one place.
+int _skipNonCode(String sql, int pos) {
+  final n = sql.length;
+  final c = sql.codeUnitAt(pos);
+
+  // Single-quoted string literal with '' escape sequence.
+  if (c == 0x27) {
+    pos++;
+    while (pos < n) {
+      if (sql.codeUnitAt(pos) == 0x27) {
+        if (pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x27) {
+          pos += 2; // '' inside the literal: skip both quotes.
+          continue;
+        }
+        return pos + 1;
+      }
+      pos++;
+    }
+    return pos;
+  }
+
+  // Double-quoted identifier with "" escape sequence.
+  if (c == 0x22) {
+    pos++;
+    while (pos < n) {
+      if (sql.codeUnitAt(pos) == 0x22) {
+        if (pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x22) {
+          pos += 2;
+          continue;
+        }
+        return pos + 1;
+      }
+      pos++;
+    }
+    return pos;
+  }
+
+  // Line comment — terminates on LF or CR.
+  if (c == 0x2D && pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x2D) {
+    pos += 2;
+    while (pos < n) {
+      final ch = sql.codeUnitAt(pos);
+      if (ch == 0x0A || ch == 0x0D) break;
+      pos++;
+    }
+    return pos;
+  }
+
+  // Block comment — clamps to end-of-string when unterminated.
+  if (c == 0x2F && pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x2A) {
+    pos += 2;
+    while (pos + 1 < n) {
+      if (sql.codeUnitAt(pos) == 0x2A && sql.codeUnitAt(pos + 1) == 0x2F) {
+        return pos + 2;
+      }
+      pos++;
+    }
+    return n;
+  }
+
+  return pos;
+}
+
+/// Verbs that can appear directly at the head of a statement.
+const List<String> _directVerbs = [
+  'SELECT',
+  'INSERT',
+  'UPDATE',
+  'DELETE',
+  'MERGE',
+  'BEGIN',
+  'DECLARE',
+  'CALL',
+];
+
+/// Verbs that can terminate a `WITH … ` CTE header.
+const List<String> _cteVerbs = [
+  'SELECT',
+  'INSERT',
+  'UPDATE',
+  'DELETE',
+  'MERGE'
+];
+
 /// Scans past a `WITH` CTE header to locate the terminal statement verb.
 ///
 /// [pos] is the offset immediately after the `WITH` keyword. Returns the
@@ -96,77 +187,20 @@ bool matchesKeyword(String sql, int pos, String keyword) {
 /// `UPDATE`, `DELETE`, or `MERGE`) at paren-depth 0, or `-1` if no
 /// recognized verb is found before the end of [sql].
 ///
-/// The scanner tracks paren depth and skips string literals (`'...'` with
-/// `''` escapes), quoted identifiers (`"..."`), and SQL comments so they
-/// cannot confuse the keyword search. It is deliberately not a full SQL
-/// parser — just enough to traverse `WITH name [(...)] AS (...) [, ...]`
-/// reliably for the CTE shapes Oracle accepts.
+/// The scanner tracks paren depth and uses [_skipNonCode] to skip string
+/// literals, quoted identifiers, and SQL comments so they cannot confuse the
+/// keyword search. It is deliberately not a full SQL parser — just enough to
+/// traverse `WITH name [(...)] AS (...) [, ...]` reliably.
 int _findCteTerminalVerb(String sql, int pos) {
   final n = sql.length;
   var depth = 0;
   while (pos < n) {
+    final skipped = _skipNonCode(sql, pos);
+    if (skipped != pos) {
+      pos = skipped;
+      continue;
+    }
     final c = sql.codeUnitAt(pos);
-
-    // Single-quoted string literal with '' escape sequence.
-    if (c == 0x27) {
-      pos++;
-      while (pos < n) {
-        if (sql.codeUnitAt(pos) == 0x27) {
-          if (pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x27) {
-            // '' inside the literal: skip both quotes and continue.
-            pos += 2;
-            continue;
-          }
-          pos++;
-          break;
-        }
-        pos++;
-      }
-      continue;
-    }
-
-    // Double-quoted identifier with "" escape sequence.
-    if (c == 0x22) {
-      pos++;
-      while (pos < n) {
-        if (sql.codeUnitAt(pos) == 0x22) {
-          if (pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x22) {
-            pos += 2;
-            continue;
-          }
-          pos++;
-          break;
-        }
-        pos++;
-      }
-      continue;
-    }
-
-    // Line comment — stops on LF or CR.
-    if (c == 0x2D && pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x2D) {
-      pos += 2;
-      while (pos < n) {
-        final ch = sql.codeUnitAt(pos);
-        if (ch == 0x0A || ch == 0x0D) break;
-        pos++;
-      }
-      continue;
-    }
-
-    // Block comment.
-    if (c == 0x2F && pos + 1 < n && sql.codeUnitAt(pos + 1) == 0x2A) {
-      pos += 2;
-      while (pos + 1 < n) {
-        if (sql.codeUnitAt(pos) == 0x2A && sql.codeUnitAt(pos + 1) == 0x2F) {
-          pos += 2;
-          break;
-        }
-        pos++;
-      }
-      if (pos + 1 >= n) pos = n;
-      continue;
-    }
-
     if (c == 0x28) {
       depth++;
       pos++;
@@ -177,13 +211,10 @@ int _findCteTerminalVerb(String sql, int pos) {
       pos++;
       continue;
     }
-
     if (depth == 0 && _isIdentStart(c)) {
-      if (matchesKeyword(sql, pos, 'SELECT')) return pos;
-      if (matchesKeyword(sql, pos, 'INSERT')) return pos;
-      if (matchesKeyword(sql, pos, 'UPDATE')) return pos;
-      if (matchesKeyword(sql, pos, 'DELETE')) return pos;
-      if (matchesKeyword(sql, pos, 'MERGE')) return pos;
+      for (final kw in _cteVerbs) {
+        if (matchesKeyword(sql, pos, kw)) return pos;
+      }
       // Skip the rest of this identifier so we don't re-test mid-word.
       pos++;
       while (pos < n && _isIdentChar(sql.codeUnitAt(pos))) {
@@ -191,37 +222,94 @@ int _findCteTerminalVerb(String sql, int pos) {
       }
       continue;
     }
-
     pos++;
   }
   return -1;
+}
+
+/// Resolves the effective leading verb of [sql] and the offset at which it
+/// starts. Returns `(verb: '', pos: -1)` when nothing is recognized (including
+/// a leading `(` — see library doc).
+///
+/// This is the single source of truth shared by [isQuerySql], [isPlSqlSql], and
+/// [isCacheEligibleSql] (AC9): for `WITH … ` it resolves the CTE terminal verb
+/// exactly once, so the three public helpers can never drift apart on how a SQL
+/// shape is classified.
+({String verb, int pos}) _leadingVerb(String sql) {
+  final i = skipSqlPrefixes(sql, 0);
+  if (i >= sql.length) return (verb: '', pos: -1);
+  for (final kw in _directVerbs) {
+    if (matchesKeyword(sql, i, kw)) return (verb: kw, pos: i);
+  }
+  if (matchesKeyword(sql, i, 'WITH')) {
+    final v = _findCteTerminalVerb(sql, i + 'WITH'.length);
+    if (v < 0) return (verb: '', pos: -1);
+    for (final kw in _cteVerbs) {
+      if (matchesKeyword(sql, v, kw)) return (verb: kw, pos: v);
+    }
+    return (verb: '', pos: -1);
+  }
+  return (verb: '', pos: -1);
+}
+
+/// Returns true when the SELECT body beginning at [pos] carries a top-level
+/// `FOR UPDATE` clause (AC6).
+///
+/// Scans at paren-depth 0 (so `FOR UPDATE` inside a subquery, string literal, or
+/// comment is ignored) for the keyword `FOR` immediately followed — across
+/// whitespace/comments — by `UPDATE`. A top-level `FOR` only ever introduces the
+/// row-locking clause in a SELECT, so the `FOR UPDATE` pair reliably identifies
+/// a locking query.
+bool _hasForUpdateClause(String sql, int pos) {
+  final n = sql.length;
+  var depth = 0;
+  while (pos < n) {
+    final skipped = _skipNonCode(sql, pos);
+    if (skipped != pos) {
+      pos = skipped;
+      continue;
+    }
+    final c = sql.codeUnitAt(pos);
+    if (c == 0x28) {
+      depth++;
+      pos++;
+      continue;
+    }
+    if (c == 0x29) {
+      if (depth > 0) depth--;
+      pos++;
+      continue;
+    }
+    if (depth == 0 && _isIdentStart(c)) {
+      if (matchesKeyword(sql, pos, 'FOR')) {
+        final next = skipSqlPrefixes(sql, pos + 3);
+        if (next < n && matchesKeyword(sql, next, 'UPDATE')) return true;
+      }
+      // Skip the rest of this identifier so we don't re-test mid-word.
+      pos++;
+      while (pos < n && _isIdentChar(sql.codeUnitAt(pos))) {
+        pos++;
+      }
+      continue;
+    }
+    pos++;
+  }
+  return false;
 }
 
 /// Returns true when [sql] is a SELECT or a `WITH ... SELECT` query.
 ///
 /// CTE-backed DML (`WITH cte AS (...) INSERT/UPDATE/DELETE/MERGE ...`) is
 /// classified by its terminal verb and reported as not-a-query so that
-/// `OracleResult.rowsAffected` is populated for the execution.
-bool isQuerySql(String sql) {
-  final i = skipSqlPrefixes(sql, 0);
-  if (i >= sql.length) return false;
-  if (matchesKeyword(sql, i, 'SELECT')) return true;
-  if (matchesKeyword(sql, i, 'WITH')) {
-    final verb = _findCteTerminalVerb(sql, i + 'WITH'.length);
-    if (verb < 0) return false;
-    return matchesKeyword(sql, verb, 'SELECT');
-  }
-  return false;
-}
+/// `OracleResult.rowsAffected` is populated for the execution. `SELECT ... FOR
+/// UPDATE` is still a query (only its cache eligibility differs — see
+/// [isCacheEligibleSql]).
+bool isQuerySql(String sql) => _leadingVerb(sql).verb == 'SELECT';
 
 /// Returns true when [sql] is a PL/SQL block: BEGIN, DECLARE, or CALL.
 bool isPlSqlSql(String sql) {
-  final i = skipSqlPrefixes(sql, 0);
-  if (i >= sql.length) return false;
-  if (matchesKeyword(sql, i, 'BEGIN')) return true;
-  if (matchesKeyword(sql, i, 'DECLARE')) return true;
-  if (matchesKeyword(sql, i, 'CALL')) return true;
-  return false;
+  final verb = _leadingVerb(sql).verb;
+  return verb == 'BEGIN' || verb == 'DECLARE' || verb == 'CALL';
 }
 
 /// Returns true when [sql] is eligible for statement caching.
@@ -229,22 +317,21 @@ bool isPlSqlSql(String sql) {
 /// SELECT, `WITH ... SELECT`, INSERT, UPDATE, DELETE, MERGE, and
 /// `WITH ... {INSERT|UPDATE|DELETE|MERGE}` are eligible. DDL and PL/SQL
 /// (BEGIN, DECLARE, CALL) are not.
+///
+/// AC6: `SELECT ... FOR UPDATE` is intentionally excluded. It remains a query
+/// ([isQuerySql] is unchanged), but the locking clause is kept out of the cursor
+/// cache so a reused cursor can never interact subtly with row-lock semantics.
+/// Locking selects are rarely hot-looped, so reparsing each time costs little
+/// while keeping correctness obvious. Shares [_leadingVerb] with the other
+/// classifiers (AC9) so the `WITH … SELECT` branch cannot drift.
 bool isCacheEligibleSql(String sql) {
-  final i = skipSqlPrefixes(sql, 0);
-  if (i >= sql.length) return false;
-  if (matchesKeyword(sql, i, 'SELECT')) return true;
-  if (matchesKeyword(sql, i, 'INSERT')) return true;
-  if (matchesKeyword(sql, i, 'UPDATE')) return true;
-  if (matchesKeyword(sql, i, 'DELETE')) return true;
-  if (matchesKeyword(sql, i, 'MERGE')) return true;
-  if (matchesKeyword(sql, i, 'WITH')) {
-    final verb = _findCteTerminalVerb(sql, i + 'WITH'.length);
-    if (verb < 0) return false;
-    return matchesKeyword(sql, verb, 'SELECT') ||
-        matchesKeyword(sql, verb, 'INSERT') ||
-        matchesKeyword(sql, verb, 'UPDATE') ||
-        matchesKeyword(sql, verb, 'DELETE') ||
-        matchesKeyword(sql, verb, 'MERGE');
+  final r = _leadingVerb(sql);
+  if (r.verb.isEmpty) return false;
+  if (r.verb == 'BEGIN' || r.verb == 'DECLARE' || r.verb == 'CALL') {
+    return false;
   }
-  return false;
+  if (r.verb == 'SELECT' && _hasForUpdateClause(sql, r.pos)) {
+    return false; // SELECT ... FOR UPDATE excluded from caching (AC6).
+  }
+  return _cteVerbs.contains(r.verb);
 }

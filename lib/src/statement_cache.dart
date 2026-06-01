@@ -1,6 +1,116 @@
 import 'dart:collection';
 
+import 'package:meta/meta.dart';
+
 import 'protocol/messages/execute_message.dart';
+
+/// Hard upper bound on the per-connection statement cache size (AC7).
+///
+/// A statement cache is fundamentally a pool of *open server cursors*: every
+/// cached entry pins one Oracle cursor for reuse. Oracle limits simultaneously
+/// open cursors per session with the `OPEN_CURSORS` init parameter (default 50
+/// on a fresh database, a few thousand when tuned). A client cache larger than
+/// `OPEN_CURSORS` cannot help — it just guarantees `ORA-01000: maximum open
+/// cursors exceeded` — and an unbounded value (e.g. `1 << 31`) lets the
+/// per-connection [LinkedHashMap] grow without practical limit and exhaust
+/// memory long before it is useful.
+///
+/// 65535 is therefore a deliberate sanity ceiling, not a tuning recommendation:
+/// it is far above any realistic `OPEN_CURSORS`, keeps the key/entry bookkeeping
+/// bounded, and still leaves the value expressible in 16 bits for any future
+/// wire use. Values above it are rejected with [ArgumentError] rather than
+/// silently clamped, so a misconfiguration fails loudly at connect time.
+const int maxStatementCacheSize = 65535;
+
+/// One bind slot's contribution to a statement's cache identity (AC3).
+///
+/// Two executions of the *same* SQL text are only cursor-compatible when their
+/// binds agree on type, direction, and any declared max size that affects the
+/// server-side buffer the cursor was parsed with. Reusing a cursor parsed for a
+/// NUMBER bind to run the same SQL with a VARCHAR2 bind is exactly what produces
+/// `ORA-01007`, stale bind metadata, or silent coercion — so the slot signature
+/// participates in the cache key instead of the raw SQL alone.
+@immutable
+class BindSlotSignature {
+  /// Creates a bind slot signature.
+  const BindSlotSignature({
+    required this.oraType,
+    required this.dir,
+    this.maxSize,
+  });
+
+  /// Oracle wire-protocol type indicator for this slot.
+  final int oraType;
+
+  /// Declared bind direction (IN / OUT / IN OUT).
+  final BindDir dir;
+
+  /// Declared max buffer size, when the caller pinned one. `null` means the
+  /// driver inferred a type-default size; a later non-null hint that changes
+  /// the wire allocation therefore reparses rather than reusing the cursor.
+  final int? maxSize;
+
+  @override
+  bool operator ==(Object other) =>
+      other is BindSlotSignature &&
+      other.oraType == oraType &&
+      other.dir == dir &&
+      other.maxSize == maxSize;
+
+  @override
+  int get hashCode => Object.hash(oraType, dir, maxSize);
+
+  @override
+  String toString() =>
+      'BindSlotSignature(oraType: $oraType, dir: $dir, maxSize: $maxSize)';
+}
+
+/// Immutable composite cache identity: exact SQL text plus bind signature (AC3).
+///
+/// The SQL text is preserved verbatim — no whitespace, comment, or case
+/// normalization (a cursor is parsed for the exact text Oracle saw). The bind
+/// signature is an ordered list of per-slot [BindSlotSignature]s; an empty list
+/// represents a bind-free statement. Equality and hashing are value-based and
+/// deep over the signature so the key can back a [LinkedHashMap] directly.
+@immutable
+class StatementCacheKey {
+  /// Creates a cache key for [sql] with the given ordered [bindSignature].
+  StatementCacheKey(this.sql, List<BindSlotSignature> bindSignature)
+      : bindSignature = List<BindSlotSignature>.unmodifiable(bindSignature),
+        _hash = Object.hash(sql, Object.hashAll(bindSignature));
+
+  /// Convenience key for a statement with no binds.
+  StatementCacheKey.noBinds(String sql)
+      : this(sql, const <BindSlotSignature>[]);
+
+  /// Exact SQL text (never normalized).
+  final String sql;
+
+  /// Ordered per-slot bind signature; empty for bind-free statements.
+  final List<BindSlotSignature> bindSignature;
+
+  final int _hash;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    if (other is! StatementCacheKey) return false;
+    if (other.sql != sql) return false;
+    final a = bindSignature;
+    final b = other.bindSignature;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  @override
+  int get hashCode => _hash;
+
+  @override
+  String toString() => 'StatementCacheKey($sql, $bindSignature)';
+}
 
 /// An entry in the per-connection statement cache.
 ///
@@ -8,13 +118,17 @@ import 'protocol/messages/execute_message.dart';
 /// so that re-execution can skip the parse phase and avoid resending SQL bytes.
 class StatementCacheEntry {
   StatementCacheEntry({
-    required this.sql,
+    required this.key,
     this.cursorId = 0,
     List<ColumnMetadata>? columnMetadata,
   }) : columnMetadata = columnMetadata ?? <ColumnMetadata>[];
 
-  /// The exact SQL text used as the cache key.
-  final String sql;
+  /// The composite cache key (exact SQL + bind signature) identifying this
+  /// entry.
+  final StatementCacheKey key;
+
+  /// The exact SQL text used as part of the cache key.
+  String get sql => key.sql;
 
   /// Server-assigned cursor id (0 until first successful execution).
   int cursorId;
@@ -32,24 +146,37 @@ class StatementCacheEntry {
 
 /// A per-connection LRU statement cache for Oracle cursor reuse.
 ///
-/// Keyed by exact SQL text — no normalization, no whitespace collapsing.
-/// LRU order is maintained by using [LinkedHashMap] and doing a remove +
-/// reinsert on every cache hit (matching node-oracledb thin behavior).
+/// Keyed by [StatementCacheKey] — exact SQL text plus bind signature, no
+/// normalization or whitespace collapsing. LRU order is maintained by using
+/// [LinkedHashMap] and doing a remove + reinsert on every cache hit (matching
+/// node-oracledb thin behavior).
 ///
 /// Evicted cursor ids are queued in [_cursorsToClose]; callers drain
 /// this queue and piggyback the IDs onto the next execute to avoid ORA-01000.
 class StatementCache {
   /// Creates a statement cache.
   ///
-  /// [maxSize] = 0 disables caching; any positive value sets the capacity.
-  /// Throws [ArgumentError] if [maxSize] is negative.
-  StatementCache(int maxSize)
-      : _maxSize = maxSize >= 0
-            ? maxSize
-            : throw ArgumentError.value(maxSize, 'maxSize', 'must be >= 0');
+  /// [maxSize] = 0 disables caching; any positive value up to
+  /// [maxStatementCacheSize] sets the capacity. Throws [ArgumentError] if
+  /// [maxSize] is negative or exceeds [maxStatementCacheSize] (AC7) — the bound
+  /// is enforced here so production ([OracleConnection.connect]) and test-only
+  /// ([OracleConnection.forTesting]) constructors cannot diverge.
+  StatementCache(int maxSize) : _maxSize = _checkSize(maxSize);
+
+  static int _checkSize(int maxSize) {
+    if (maxSize < 0) {
+      throw ArgumentError.value(maxSize, 'maxSize', 'must be >= 0');
+    }
+    if (maxSize > maxStatementCacheSize) {
+      throw ArgumentError.value(maxSize, 'maxSize',
+          'must be <= $maxStatementCacheSize (the maximum statement cache size)');
+    }
+    return maxSize;
+  }
 
   final int _maxSize;
-  final LinkedHashMap<String, StatementCacheEntry> _entries = LinkedHashMap();
+  final LinkedHashMap<StatementCacheKey, StatementCacheEntry> _entries =
+      LinkedHashMap();
   // LinkedHashSet preserves insertion order AND de-duplicates cursor ids so a
   // pathological invalidate→store→evict sequence cannot enqueue the same id
   // twice (which would cause the server to fail the second close).
@@ -64,7 +191,7 @@ class StatementCache {
   /// Number of entries currently held in the cache.
   int get size => _entries.length;
 
-  /// Tries to acquire a cached entry for [sql].
+  /// Tries to acquire a cached entry for [key].
   ///
   /// On a cache hit for a non-in-use entry, removes and reinserts the entry
   /// to refresh LRU recency, marks it [inUse], and returns it.
@@ -72,16 +199,16 @@ class StatementCache {
   /// Returns `null` on a cache miss or if the matching entry is already [inUse].
   /// The caller must then execute with [cursorId] = 0. The busy entry's LRU
   /// position is NOT refreshed — a denied acquire doesn't count as a hit.
-  StatementCacheEntry? acquire(String sql) {
+  StatementCacheEntry? acquire(StatementCacheKey key) {
     if (!isEnabled) return null;
-    final entry = _entries[sql];
+    final entry = _entries[key];
     if (entry == null) return null;
     if (entry.inUse) {
       return null;
     }
     // Hit: refresh recency by removing and reinserting.
-    _entries.remove(sql);
-    _entries[sql] = entry;
+    _entries.remove(key);
+    _entries[key] = entry;
     entry.inUse = true;
     return entry;
   }
@@ -93,8 +220,8 @@ class StatementCache {
   /// Evicts the least recently used entry when [maxSize] is exceeded.
   void store(StatementCacheEntry entry) {
     if (!isEnabled || entry.cursorId == 0) return;
-    _entries.remove(entry.sql); // Remove stale copy if present.
-    _entries[entry.sql] = entry;
+    _entries.remove(entry.key); // Remove stale copy if present.
+    _entries[entry.key] = entry;
     _evictIfNeeded();
   }
 
@@ -107,7 +234,7 @@ class StatementCache {
     if (entry.returnToCache) {
       entry.inUse = false;
     } else {
-      _entries.remove(entry.sql);
+      _entries.remove(entry.key);
       if (entry.cursorId != 0) {
         _cursorsToClose.add(entry.cursorId);
       }
@@ -115,15 +242,37 @@ class StatementCache {
     }
   }
 
-  /// Removes [sql] from the cache and queues its cursor id for close.
+  /// Removes [key] from the cache and queues its cursor id for close.
   ///
   /// Called when execution fails for a cached statement so the next attempt
   /// re-parses rather than reusing a potentially corrupt cursor.
-  void invalidate(String sql) {
-    final entry = _entries.remove(sql);
+  void invalidate(StatementCacheKey key) {
+    final entry = _entries.remove(key);
     if (entry != null && entry.cursorId != 0) {
       _cursorsToClose.add(entry.cursorId);
     }
+  }
+
+  /// Invalidates every cached statement, queuing all reusable cursor ids for
+  /// close (AC2).
+  ///
+  /// Called after a successful DDL statement: DDL can alter the result shape or
+  /// invalidate server-side cursors of *any* cached SELECT/DML, and there is no
+  /// cheap way to map arbitrary SQL back to the schema objects it touches.
+  /// Dropping the whole per-connection cache forces the next execution of each
+  /// statement to reparse and re-DESCRIBE against the new shape rather than
+  /// decode rows with stale metadata. Unlike [closeAll] this keeps the cache
+  /// usable afterwards (the connection is not closing).
+  void invalidateAll() {
+    for (final entry in _entries.values) {
+      if (entry.inUse) {
+        // A concurrent execution still owns the cursor; release() queues it.
+        entry.returnToCache = false;
+      } else if (entry.cursorId != 0) {
+        _cursorsToClose.add(entry.cursorId);
+      }
+    }
+    _entries.clear();
   }
 
   /// Re-queues [cursorIds] for close after a failed flush attempt.
@@ -150,6 +299,12 @@ class StatementCache {
     return result;
   }
 
+  /// Number of cursor ids currently queued for close, without draining them.
+  ///
+  /// Used by the connection's close-cursor chunking (AC4) and its test seam to
+  /// observe the piggyback backlog.
+  int get pendingCloseCount => _cursorsToClose.length;
+
   /// Clears the cache and queues all reusable cursor ids for close.
   ///
   /// Called from [OracleConnection.close]. For non-in-use entries the cursor
@@ -172,8 +327,8 @@ class StatementCache {
   void _evictIfNeeded() {
     while (_entries.length > _maxSize) {
       // LinkedHashMap iterates in insertion order — first key is LRU.
-      final sql = _entries.keys.first;
-      final evicted = _entries.remove(sql)!;
+      final key = _entries.keys.first;
+      final evicted = _entries.remove(key)!;
       if (evicted.inUse) {
         // Cursor is still active; prevent it from returning to the cache.
         evicted.returnToCache = false;

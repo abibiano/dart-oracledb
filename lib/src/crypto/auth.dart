@@ -10,6 +10,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
+import 'package:meta/meta.dart';
 
 import '../errors.dart';
 import '../protocol/messages/auth_message.dart';
@@ -18,6 +19,32 @@ import 'session_key.dart';
 import 'verifier.dart';
 
 final _log = Logger('AuthFlow');
+
+/// Returns the first [length] bytes of [fullHash], guarding against a hash
+/// buffer that is unexpectedly shorter than required.
+///
+/// Oracle's password-proof derivation slices a SHA-512 digest down to the
+/// 32-byte AES-256 key. A healthy SHA-512 digest is always 64 bytes, but a
+/// corrupted or truncated crypto result would make the bare `sublist(0, 32)`
+/// throw an opaque `RangeError (end): Invalid value: Not in inclusive range
+/// 0..31: 32`. This helper converts that latent crash into a meaningful
+/// [OracleException] that names the auth/hash-length problem without leaking
+/// any password, salt, key, or proof material.
+///
+/// Exposed via [visibleForTesting] so the short-hash branch can be exercised
+/// directly without injecting a fake digest through the whole auth flow.
+@visibleForTesting
+Uint8List requirePasswordHashPrefix(Uint8List fullHash, int length) {
+  if (fullHash.length < length) {
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message: 'Authentication verifier hash too short: expected at least '
+          '$length bytes for AES-256 key derivation but got '
+          '${fullHash.length}. The server auth response may be corrupted.',
+    );
+  }
+  return Uint8List.fromList(fullHash.sublist(0, length));
+}
 
 /// Authentication state machine states.
 enum AuthState {
@@ -195,26 +222,49 @@ class AuthFlow {
       hashInput.setRange(0, passwordKey.length, passwordKey);
       hashInput.setRange(passwordKey.length, hashInput.length, params.salt);
       final fullHash = sha512Hash(hashInput);
-      passwordHash = Uint8List.fromList(
-          fullHash.sublist(0, 32)); // First 32 bytes for AES-256
+      // AC1: guard the slice so a short/corrupted digest raises a meaningful
+      // OracleException instead of an opaque RangeError.
+      passwordHash =
+          requirePasswordHashPrefix(fullHash, 32); // First 32 bytes for AES-256
       _log.fine(
           'Password hash derived (${passwordHash.length} bytes from ${fullHash.length} byte hash)');
     } else {
-      // 11g verifier: SHA512 simple hash
+      // SHA512 (O5LOGON / pre-12c) verifier: simple salted hash.
+      //
+      // AC7: SHA-512 produces a 64-byte digest, but AES-256-CBC requires a
+      // 32-byte key. Using the full 64-byte hash as the AES key throws an
+      // "Invalid key length" error inside pointycastle. Slice to the first 32
+      // bytes — consistent with the PBKDF2 branch above and node-oracledb's
+      // 32-byte keyLen for the modern verifier — so this defensive branch can
+      // never crash on block/key misalignment.
       final saltedPassword =
           Uint8List(passwordBytes.length + params.salt.length);
       saltedPassword.setRange(0, passwordBytes.length, passwordBytes);
       saltedPassword.setRange(
           passwordBytes.length, saltedPassword.length, params.salt);
-      passwordHash = sha512Hash(saltedPassword);
-      passwordKey = passwordHash; // For 11g, they're the same
+      passwordHash = requirePasswordHashPrefix(sha512Hash(saltedPassword), 32);
+      passwordKey = passwordHash; // For the SHA512 path, key == hash (32 bytes)
       _log.fine('SHA512 hash complete');
     }
 
     // Step 3: Decrypt server's AUTH_SESSKEY with passwordHash to get sessionKeyParta
     final encodedServerKey = params.serverNonce; // AUTH_SESSKEY from server
+    // AC5: the server key must be a positive multiple of the 16-byte AES block
+    // AND at least 32 bytes so the downstream `sublist(0, 32)` mixing step is
+    // safe. A malformed/short AUTH_SESSKEY (e.g. odd-length hex falling back to
+    // a 16-byte placeholder) would otherwise surface as a raw pointycastle
+    // ArgumentError or a RangeError. Normalize to a guarded OracleException.
+    if (encodedServerKey.length < 32 || encodedServerKey.length % 16 != 0) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'Server session key (AUTH_SESSKEY) has an invalid length '
+            '(${encodedServerKey.length}); expected a multiple of 16 and at '
+            'least 32 bytes for AES-CBC. The server auth response may be '
+            'corrupted.',
+      );
+    }
     _log.fine(
-        'DEBUG: passwordHash.length=${passwordHash.length}, encodedServerKey.length=${encodedServerKey.length}');
+        'passwordHash.length=${passwordHash.length}, encodedServerKey.length=${encodedServerKey.length}');
     final sessionKeyParta = aes256CbcDecrypt(
       key: passwordHash,
       iv: Uint8List(16), // IV is zeros for session key decryption
@@ -273,26 +323,40 @@ class AuthFlow {
     );
     _log.fine('Derived comboKey (${comboKey.length} bytes)');
 
-    // Step 7: Generate speedy key
-    final speedyKeySalt = generateNonce(16);
-    final speedyKeyInput = Uint8List(16 + passwordKey.length);
-    speedyKeyInput.setRange(0, 16, speedyKeySalt);
-    speedyKeyInput.setRange(16, speedyKeyInput.length, passwordKey);
-    final speedyKeyEncrypted = aes256CbcEncrypt(
-      key: comboKey,
-      iv: Uint8List(16), // IV is zeros
-      data: speedyKeyInput,
-    );
-    // Take first 80 bytes and convert to hex string (uppercase)
-    final speedyKeyBytes = speedyKeyEncrypted.sublist(0, 80);
-    final speedyKeyHex = speedyKeyBytes
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join()
-        .toUpperCase();
-    _speedyKey = Uint8List.fromList(
-        utf8.encode(speedyKeyHex)); // Store as UTF-8 string bytes
-    _log.fine(
-        'Generated speedy key (${speedyKeyBytes.length} bytes → ${speedyKeyHex.length} hex chars)');
+    // Step 7: Generate speedy key — PBKDF2/12c verifier only.
+    //
+    // node-oracledb only derives a speedy key for the non-11g (12c) verifier
+    // (`if (!verifier11G) { ... authObj.speedyKey ... }`). The SHA512/O5LOGON
+    // path produces a 32-byte passwordKey, so its speedy-key plaintext would be
+    // 48 bytes → 64 bytes encrypted, and the `sublist(0, 80)` slice (sized for
+    // the PBKDF2 path's 64-byte passwordKey) would throw. Gating here both
+    // prevents that crash (AC7) and matches the reference: the speedy key is
+    // never even written to the wire for non-12c verifiers (AC6).
+    if (params.isPbkdf2) {
+      final speedyKeySalt = generateNonce(16);
+      final speedyKeyInput = Uint8List(16 + passwordKey.length);
+      speedyKeyInput.setRange(0, 16, speedyKeySalt);
+      speedyKeyInput.setRange(16, speedyKeyInput.length, passwordKey);
+      final speedyKeyEncrypted = aes256CbcEncrypt(
+        key: comboKey,
+        iv: Uint8List(16), // IV is zeros
+        data: speedyKeyInput,
+      );
+      // Take first 80 bytes and convert to hex string (uppercase)
+      final speedyKeyBytes = speedyKeyEncrypted.sublist(0, 80);
+      final speedyKeyHex = speedyKeyBytes
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join()
+          .toUpperCase();
+      _speedyKey = Uint8List.fromList(
+          utf8.encode(speedyKeyHex)); // Store as UTF-8 string bytes
+      _log.fine(
+          'Generated speedy key (${speedyKeyBytes.length} bytes → ${speedyKeyHex.length} hex chars)');
+    } else {
+      // SHA512/11g path: no speedy key (mirrors node-oracledb's verifier11G).
+      _speedyKey = null;
+      _log.fine('SHA512 verifier: no speedy key generated');
+    }
 
     // Step 8: Encrypt password with comboKey (Oracle 12c protocol)
     // Add random 16-byte salt prefix before encryption (matches node-oracledb)
@@ -358,24 +422,40 @@ class AuthFlow {
     // Step 2: Send AUTH_PHASE_ONE. Branch on the server-advertised FAST_AUTH
     // capability — 23ai uses the combined FAST_AUTH envelope; pre-23 runs the
     // classical Protocol + DataTypes + AUTH_PHASE_ONE sequence.
-    updateState(AuthState.phaseOneSent);
+    //
+    // State-transition contract (AC10, AC11): `phaseOneSent` is only entered
+    // once we are actually sending the phase-one packet — never before the
+    // preceding negotiation succeeds — and any failure escaping either branch
+    // leaves AuthState at `failed`, never stuck at `phaseOneSent`.
     Uint8List phaseOneResponseData;
     if (transport.supportsFastAuth) {
       _log.fine('Sending FAST_AUTH with AUTH_PHASE_ONE');
-      await transport.sendFastAuth(
-        username: username,
-        clientNonce: clientNonce,
-      );
-      phaseOneResponseData = await transport.receiveData();
+      updateState(AuthState.phaseOneSent);
+      try {
+        await transport.sendFastAuth(
+          username: username,
+          clientNonce: clientNonce,
+        );
+        phaseOneResponseData = await transport.receiveData();
+      } catch (e) {
+        // AC11: sendFastAuth or the buffered phase-one receiveData can throw a
+        // non-OracleException (e.g. SocketException). Mark auth failed before
+        // the error propagates so state is never left at phaseOneSent.
+        updateState(AuthState.failed);
+        rethrow;
+      }
     } else {
       _log.fine(
           'Server does not advertise FAST_AUTH; using classical AUTH_PHASE_ONE/TWO');
+      // AC10: protocol negotiation runs BEFORE any state advance. If it throws,
+      // the phase-one packet was never written, so state stays `notStarted`.
       await transport.sendProtocolNegotiation();
       final phaseOneRequest = AuthPhaseOneRequest(
         username: username,
         clientNonce: clientNonce,
         sequence: transport.nextSequence(),
       );
+      updateState(AuthState.phaseOneSent);
       // AC4: bound the classical AUTH_PHASE_ONE receive with the same
       // authTimeout used for AUTH_PHASE_TWO. The timeout is passed into the
       // transport so it can poison the socket on expiry — a plain Future.timeout
@@ -402,12 +482,28 @@ class AuthFlow {
           );
         }
         rethrow;
+      } catch (e) {
+        // Any other failure (e.g. SocketException) must also not leave state
+        // stranded at phaseOneSent.
+        updateState(AuthState.failed);
+        rethrow;
       }
     }
     _log.fine(
         'Received AUTH_PHASE_ONE response (${phaseOneResponseData.length} bytes)');
 
-    final phaseOneResponse = AuthPhaseOneResponse.decode(phaseOneResponseData);
+    // AC9: AuthPhaseOneResponse.decode now raises on a TTC ERROR message.
+    // Mark auth failed so a fail-loud server error does not strand state.
+    // Catch all exceptions (not only OracleException) so a BufferException
+    // from a malformed packet also transitions to failed rather than leaving
+    // AuthState stuck at phaseOneSent.
+    final AuthPhaseOneResponse phaseOneResponse;
+    try {
+      phaseOneResponse = AuthPhaseOneResponse.decode(phaseOneResponseData);
+    } catch (e) {
+      updateState(AuthState.failed);
+      rethrow;
+    }
     final verifierParams = phaseOneResponse.toVerifierParams();
     _log.fine(
         'Received verifier params: type=0x${verifierParams.verifierType.toRadixString(16)}, '
@@ -433,8 +529,13 @@ class AuthFlow {
       verifierType: verifierParams.verifierType,
     );
 
-    // Write token number if ttcFieldVersion >= 18 (TNS_CCAP_FIELD_VERSION_23_1_EXT_1)
-    final use23aiFormat = transport.shouldWriteTokenNumber;
+    // AC8: write the 23ai token-number field only when BOTH the negotiated
+    // field version allows it AND the server advertised FAST_AUTH. A pre-23
+    // classical server can leave `_ttcFieldVersion` at its default 24 (no
+    // compileCaps to lower it), so gating on field version alone would wrongly
+    // emit the token. `supportsFastAuth` is the server-presence signal that a
+    // pre-23 server is never given `use23aiFormat=true`.
+    final use23aiFormat = transport.shouldWriteAuthPhaseTwoToken;
     final phaseTwoBytes = phaseTwoRequest.toBytes(use23aiFormat: use23aiFormat);
     _log.fine('Sending AUTH_PHASE_TWO request (${phaseTwoBytes.length} bytes)');
     await transport.sendData(

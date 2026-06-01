@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
+import 'package:meta/meta.dart';
 
 import '../errors.dart';
 import '../protocol/buffer.dart';
@@ -47,6 +48,14 @@ class Transport {
   /// Set after parsing ACCEPT packet if server version >= 315.
   bool _useLargeSdu = false;
 
+  /// Negotiated SDU (Session Data Unit) size in bytes.
+  ///
+  /// Captured from the ACCEPT packet ([sendConnectReceiveAccept]); defaults to
+  /// [tnsDefaultSdu] until then. A single [sendData] call is emitted as one TNS
+  /// packet (no fragmentation), so the SDU bounds how large a single TTC message
+  /// — including any prepended close-cursor piggyback — may be (AC4).
+  int _sdu = tnsDefaultSdu;
+
   /// Whether the server supports end-of-request markers.
   /// Set after parsing ACCEPT packet flag2 field.
   bool _supportsEndOfRequest = false;
@@ -87,8 +96,80 @@ class Transport {
   /// Token numbers are written when ttcFieldVersion >= 18.
   bool get shouldWriteTokenNumber => _ttcFieldVersion >= 18;
 
-  /// Gets and increments the sequence number for the next TTC function message.
-  int nextSequence() => _sequence++;
+  /// AC8: whether the AUTH_PHASE_TWO 23ai token-number field should be written.
+  ///
+  /// Gated on BOTH the negotiated field version ([shouldWriteTokenNumber]) AND
+  /// the server-advertised FAST_AUTH capability ([supportsFastAuth]). A pre-23
+  /// (classical) server may leave [ttcFieldVersion] at its default 24 when it
+  /// sends no — or too short — compile capabilities, so the field-version check
+  /// alone would incorrectly emit the 23ai token. FAST_AUTH is the protocol
+  /// presence signal that a pre-23 server is never given the 23ai format.
+  bool get shouldWriteAuthPhaseTwoToken =>
+      _supportsFastAuth && shouldWriteTokenNumber;
+
+  /// AC3: gets the one-byte TTC function sequence number for the next message
+  /// and advances the counter.
+  ///
+  /// Oracle's TTC sequence is a single byte: node-oracledb's `writeSeqNum`
+  /// writes the current value then advances `(seq + 1) % 256`, starting at 1.
+  /// The cycle is therefore `1, 2, …, 255, 0, 1, …` (0 is a valid value the
+  /// counter passes through). Pinning the wrap here keeps the counter inside
+  /// one byte for long-lived connections rather than growing unbounded and
+  /// relying solely on `& 0xFF` masking at each encode callsite.
+  int nextSequence() {
+    final current = _sequence;
+    _sequence = (_sequence + 1) % 256;
+    return current;
+  }
+
+  /// Test-only seam to drive [ttcFieldVersion] without a live negotiation.
+  ///
+  /// Used to exercise the token-number gating boundaries (AC4) and the pre-23
+  /// classical-server case (AC8) deterministically. Not part of the public API.
+  @visibleForTesting
+  set debugTtcFieldVersion(int version) => _ttcFieldVersion = version;
+
+  /// Test-only seam to drive [supportsFastAuth] without a live ACCEPT packet.
+  ///
+  /// Used to exercise the AUTH_PHASE_TWO token gating for both 23ai (FAST_AUTH)
+  /// and pre-23 classical servers (AC8). Not part of the public API.
+  @visibleForTesting
+  set debugSupportsFastAuth(bool value) => _supportsFastAuth = value;
+
+  /// Test-only seam to drive the negotiated SDU without a live ACCEPT packet,
+  /// used to exercise [closeCursorChunkLimit] boundaries (AC4).
+  @visibleForTesting
+  set debugSdu(int value) => _sdu = value;
+
+  /// Worst-case bytes a single cursor id occupies in a close-cursor piggyback:
+  /// a UB4 is encoded as a 1-byte length plus up to 4 value bytes.
+  static const int _closeCursorIdBytes = 5;
+
+  /// Fixed overhead of a close-cursor piggyback before the cursor-id list:
+  /// message type + function + sequence (3) + optional UB8 token (up to 9) +
+  /// pointer (1) + UB4 count (up to 5), rounded up for safety.
+  ///
+  /// The UB8 token (9 bytes) is only written on 23ai servers
+  /// (`shouldWriteAuthPhaseTwoToken == true`), but this constant uses the
+  /// worst-case size unconditionally so [closeCursorChunkLimit] is always
+  /// conservative — better to chunk slightly earlier than to overflow the SDU.
+  static const int _closeCursorPiggybackHeader = 32;
+
+  /// Maximum number of cursor ids to flush in a single close-cursor piggyback so
+  /// the combined packet stays within the negotiated SDU (AC4).
+  ///
+  /// The piggyback is prepended to the execute message and the two travel in one
+  /// un-fragmented TNS packet, so the cursor list must leave room for the execute
+  /// itself. Half the SDU is reserved for the execute message and headers; the
+  /// remainder is divided by the worst-case [_closeCursorIdBytes]. Returns at
+  /// least 1 so progress is always made. Callers flush this many per execute and
+  /// requeue the rest, draining a large backlog across successive round trips
+  /// without ever sending a standalone close-cursor RPC.
+  int get closeCursorChunkLimit {
+    final budget = (_sdu ~/ 2) - _closeCursorPiggybackHeader;
+    final limit = budget ~/ _closeCursorIdBytes;
+    return limit < 1 ? 1 : limit;
+  }
 
   /// Set once an RPC has timed out (or another unrecoverable framing hazard has
   /// occurred). Because `Future.timeout` does not cancel the in-flight socket
@@ -289,6 +370,26 @@ class Transport {
   // Safety cap: prevent infinite FETCH loops when moreRowsToFetch stays true.
   static const int _maxFetchIterations = 1000;
 
+  /// Count of EXECUTE messages sent with `cursorId == 0` (a full parse — the
+  /// SQL text and a fresh parse are sent). See [debugFullParseExecutes].
+  int _fullParseExecutes = 0;
+
+  /// Count of EXECUTE messages sent with `cursorId != 0` (parse bit cleared —
+  /// the cached server cursor is reused and no SQL text is resent). See
+  /// [debugReuseExecutes].
+  int _reuseExecutes = 0;
+
+  /// Number of full-parse EXECUTEs sent (cursorId == 0).
+  ///
+  /// AC8 instrumentation: lets integration tests prove cursor reuse / parse
+  /// skipping at the transport layer without requiring `V$OPEN_CURSOR` or other
+  /// privileged views. Surfaced to callers via
+  /// `OracleConnection.debugFullParseExecutes`; not a public API.
+  int get debugFullParseExecutes => _fullParseExecutes;
+
+  /// Number of cursor-reuse EXECUTEs sent (cursorId != 0, parse skipped).
+  int get debugReuseExecutes => _reuseExecutes;
+
   Future<ExecuteResponse> sendExecute(
     String sql, {
     required bool isQuery,
@@ -304,6 +405,15 @@ class Transport {
   }) async {
     _log.fine('Sending execute request (isQuery=$isQuery, isPlSql=$isPlSql, '
         'cursorId=$cursorId)...');
+
+    // AC8: record whether this execute reuses a cached server cursor (parse bit
+    // cleared) or performs a full parse. The cursorId sent on the wire is the
+    // authoritative signal — a non-zero id skips parse and omits the SQL bytes.
+    if (cursorId == 0) {
+      _fullParseExecutes++;
+    } else {
+      _reuseExecutes++;
+    }
 
     final request = ExecuteRequest(
       sql: sql,
@@ -724,6 +834,7 @@ class Transport {
           _useLargeSdu = acceptInfo.useLargeSdu;
           _supportsEndOfRequest = acceptInfo.supportsEndOfRequest;
           _supportsFastAuth = acceptInfo.supportsFastAuth;
+          if (acceptInfo.sdu > 0) _sdu = acceptInfo.sdu;
           _log.info('Negotiated version=${acceptInfo.version}, '
               'sdu=${acceptInfo.sdu}, largeSdu=$_useLargeSdu, '
               'endOfRequest=$_supportsEndOfRequest, '

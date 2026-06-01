@@ -143,5 +143,30 @@ void main() {
       expect(result.length, equals(4));
       expect(result, equals(Uint8List.fromList([5, 1, 1, 5])));
     });
+
+    // AC2: the length-mismatch guard (verifier.dart lines 51-54) was the
+    // uncovered defensive branch flagged by LCOV. Exercise it directly.
+    test('xorBytes throws ArgumentError when lengths differ', () {
+      final a = Uint8List.fromList([1, 2, 3]);
+      final b = Uint8List.fromList([1, 2]);
+      expect(() => xorBytes(a, b), throwsA(isA<ArgumentError>()));
+    });
+
+    test('xorBytes mismatch error message reports both lengths', () {
+      final a = Uint8List(5);
+      final b = Uint8List(3);
+      try {
+        xorBytes(a, b);
+        fail('expected ArgumentError');
+      } on ArgumentError catch (e) {
+        expect(e.message.toString(), contains('5'));
+        expect(e.message.toString(), contains('3'));
+      }
+    });
+
+    test('xorBytes mismatch is symmetric (shorter first)', () {
+      expect(() => xorBytes(Uint8List(2), Uint8List(8)),
+          throwsA(isA<ArgumentError>()));
+    });
   });
 }
