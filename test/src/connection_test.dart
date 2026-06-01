@@ -1,5 +1,6 @@
 import 'package:oracledb/oracledb.dart';
 import 'package:oracledb/src/statement_cache.dart';
+import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -291,6 +292,45 @@ void main() {
         final str = exception.toString();
         expect(str, contains('Caused by:'));
         expect(str, contains('underlying cause'));
+      });
+    });
+
+    group('_ensureOpen liveness guard (Story 7.4 AC3)', () {
+      test('execute() fails fast when transport is not connected', () async {
+        // forTesting injects an unconnected Transport: isConnected is false even
+        // though the connection was never explicitly closed. The new liveness
+        // check must surface ORA-03113 immediately instead of entering the
+        // transport and waiting on a doomed socket read.
+        final conn = OracleConnection.forTesting(transport: Transport());
+        await expectLater(
+          conn.execute('SELECT 1 FROM dual'),
+          throwsA(isA<OracleException>().having(
+              (e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+        );
+      });
+
+      test('commit() fails fast when transport is not connected', () async {
+        final conn = OracleConnection.forTesting(transport: Transport());
+        await expectLater(
+          conn.commit(),
+          throwsA(isA<OracleException>().having(
+              (e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+        );
+      });
+
+      test('rollback() fails fast when transport is not connected', () async {
+        final conn = OracleConnection.forTesting(transport: Transport());
+        await expectLater(
+          conn.rollback(),
+          throwsA(isA<OracleException>().having(
+              (e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+        );
+      });
+
+      test('isConnected reflects the unconnected transport', () {
+        final conn = OracleConnection.forTesting(transport: Transport());
+        expect(conn.isConnected, isFalse);
+        expect(conn.isHealthy, isFalse);
       });
     });
   });

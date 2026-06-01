@@ -90,8 +90,50 @@ class Transport {
   /// Gets and increments the sequence number for the next TTC function message.
   int nextSequence() => _sequence++;
 
+  /// Set once an RPC has timed out (or another unrecoverable framing hazard has
+  /// occurred). Because `Future.timeout` does not cancel the in-flight socket
+  /// read, a poisoned transport may still have an orphaned server response
+  /// queued on the wire; reusing it would misalign the next request/response
+  /// pair. Once poisoned, every send/receive fails fast via [_ensureUsable].
+  bool _corrupted = false;
+
+  /// Whether this transport has been poisoned by a timed-out RPC and can no
+  /// longer be safely reused. The owning connection must be closed and a new
+  /// one opened.
+  bool get isCorrupted => _corrupted;
+
   /// Whether the transport is currently connected.
-  bool get isConnected => _socket.isConnected;
+  ///
+  /// A corrupted transport reports `false` even before its socket finishes
+  /// tearing down, so callers fail fast instead of issuing an RPC that could
+  /// read a previous call's orphaned response.
+  bool get isConnected => _socket.isConnected && !_corrupted;
+
+  /// Poisons the transport and forcibly destroys the socket.
+  ///
+  /// Called when an RPC times out: the pending socket read is not cancellable,
+  /// so we destroy the socket to guarantee a late response can never be
+  /// delivered, and flag the transport corrupted so any further use fails fast.
+  void _poison() {
+    _corrupted = true;
+    _socket.destroy();
+  }
+
+  /// Throws if the transport has been poisoned by a previous timed-out RPC.
+  ///
+  /// The error code ([oraConnectionClosed]) is intentionally distinct from the
+  /// timeout error ([oraConnectTimeout]) so callers and tests can tell that the
+  /// transport itself is no longer usable, not merely that one call was slow.
+  void _ensureUsable() {
+    if (_corrupted) {
+      throw const OracleException(
+        errorCode: oraConnectionClosed,
+        message: 'Transport is no longer usable: a previous RPC timed out and '
+            'may have left an unread response on the connection. Close this '
+            'connection and open a new one.',
+      );
+    }
+  }
 
   /// Connects to an Oracle database at the specified host and port.
   ///
@@ -133,6 +175,7 @@ class Transport {
   ///
   /// Throws [OracleException] if the send fails or if not connected.
   Future<void> send(TnsPacket packet) async {
+    _ensureUsable();
     final bytes = encodeTnsPacket(packet, useLargeSdu: _useLargeSdu);
     _log.fine(
         'Sending TNS packet: type=${packet.type}, length=${bytes.length}, '
@@ -148,6 +191,7 @@ class Transport {
   ///
   /// Throws [OracleException] if receiving fails or the packet is invalid.
   Future<TnsPacket> receive() async {
+    _ensureUsable();
     _log.fine('Waiting for TNS packet (largeSdu=$_useLargeSdu)...');
 
     // Read header first (8 bytes)
@@ -442,17 +486,26 @@ class Transport {
   Future<Uint8List> _receiveDataWithTimeout(Duration? timeout,
       {String operation = 'Query',
       List<ColumnMetadata>? expectedColumns}) async {
+    _ensureUsable();
     final future = _receiveAllTtcData(expectedColumns: expectedColumns);
     if (timeout == null) return future;
-    // NOTE: on timeout the underlying socket read continues; subsequent
-    // operations may receive stale data. Disconnect and reconnect if that
-    // matters (tracked as deferred tech-debt in deferred-work.md).
     return future.timeout(
       timeout,
-      onTimeout: () => throw OracleException(
-        errorCode: oraConnectTimeout,
-        message: '$operation timeout after ${timeout.inMilliseconds}ms',
-      ),
+      onTimeout: () {
+        // `Future.timeout` abandons the returned future but does NOT cancel the
+        // underlying socket read: the server's (late) response may still arrive
+        // and would otherwise be misread as the reply to the next RPC. Poison
+        // the transport and destroy the socket so that can never happen. The
+        // message carries the operation name and elapsed wait (AC1); the
+        // poisoned state makes every subsequent send/receive fail fast (AC2).
+        _poison();
+        throw OracleException(
+          errorCode: oraConnectTimeout,
+          message: '$operation timed out after ${timeout.inMilliseconds}ms; '
+              'transport poisoned — no further RPCs are permitted on this '
+              'connection',
+        );
+      },
     );
   }
 
@@ -487,10 +540,14 @@ class Transport {
         packet = await receive();
       }
       if (packet.type == tnsPacketRefuse) {
-        throw const OracleException(
-          errorCode: oraInvalidCredentials,
-          message: 'Authentication failed: invalid username or password',
-        );
+        // A REFUSE arriving mid-query (post-auth) is NOT a credential failure —
+        // mapping it to ORA-01017 would mislead the caller. Surface the actual
+        // refuse reason carried in the packet instead (AC7). Auth-time REFUSE is
+        // handled separately in receiveData() where ORA-01017 is correct.
+        // Poison the transport — the server has unilaterally terminated the
+        // session; subsequent RPCs must fail fast rather than read stale bytes.
+        _poison();
+        throw _refusePacketException(packet);
       }
       if (packet.type != tnsPacketData) {
         throw OracleException(
@@ -507,22 +564,44 @@ class Transport {
       chunks.add(ttcData);
       if (_supportsEndOfRequest) {
         // Oracle 23.4+: the server provides explicit end-of-request markers.
-        // For success responses, Oracle sets flags=0x2000 and embeds 0x1D as
-        // the last payload byte. For error responses (e.g. ORA-00001), Oracle
-        // uses flags=0x0000 but still ends the payload with 0x1D. Terminate
-        // whenever the last byte of the received TTC data is 0x1D — this
-        // covers both cases and avoids waiting for a packet that never comes.
-        if (ttcData.isNotEmpty && ttcData.last == ttcMsgTypeEndOfRequest) {
-          break;
-        }
+        // The TNS-level data-flags are authoritative — a success response sets
+        // END_OF_REQUEST (0x2000) and EOF (0x0040) is terminal too. Trust them
+        // directly; this is the common path and is unaffected by data content.
         if ((flags & _tnsDataFlagsEof) != 0 ||
             (flags & _tnsDataFlagsEndOfRequest) != 0) {
+          break;
+        }
+        // Error responses (e.g. ORA-00001) instead carry flags=0x0000 and end
+        // the payload with the single-byte END_OF_REQUEST marker (0x1D). But
+        // 0x1D can also occur legitimately as the final data byte of a NON-final
+        // packet (e.g. inside NUMBER/RAW column data), so trusting it blindly
+        // could terminate a multi-packet response early. AC5 follow-up guard:
+        // only treat a trailing 0x1D as terminal once the accumulated TTC stream
+        // actually parses to a complete response; otherwise keep reading.
+        if (ttcData.isNotEmpty &&
+            ttcData.last == ttcMsgTypeEndOfRequest &&
+            ttcStreamIsComplete(_concatChunks(chunks),
+                ttcFieldVersion: _ttcFieldVersion,
+                endOfRequestSupport: _supportsEndOfRequest,
+                expectedColumns: expectedColumns)) {
           break;
         }
       } else {
         // Pre-23.4 (Oracle 21c / 19c): no TNS-level boundary. Scan the
         // accumulated TTC bytes for STATUS / END_OF_REQUEST. If the response
         // is complete, stop; otherwise wait for the next packet.
+        //
+        // AC6 cost note: this probe re-walks the full accumulated buffer once
+        // per inbound packet, so a response spanning N packets costs
+        // O(N x bytes) — quadratic in the worst case. That worst case does not
+        // arise in practice on the pre-23.4 path: fetches are batched by
+        // `prefetchRows` (default 50) and a single fetch round's rows almost
+        // always fit in one SDU (<= 8 KB), so N is typically 1 and rarely more
+        // than a handful. The bound is exercised by the regression benchmark in
+        // test/src/transport/ttc_stream_benchmark_test.dart. A full lazy /
+        // stateful-parser refactor (node-oracledb `waitForPackets` style) is the
+        // long-term fix and is tracked as a follow-up; it is intentionally NOT
+        // done here to avoid destabilising the working decode path.
         if (ttcStreamIsComplete(_concatChunks(chunks),
             ttcFieldVersion: _ttcFieldVersion,
             endOfRequestSupport: _supportsEndOfRequest,
@@ -546,6 +625,48 @@ class Transport {
     return result;
   }
 
+  /// Builds a protocol-level [OracleException] describing a mid-query REFUSE
+  /// packet, surfacing the server's actual refuse reason (AC7).
+  ///
+  /// REFUSE payload layout (offsets relative to the stripped TNS payload, i.e.
+  /// node-oracledb's absolute offsets minus the 8-byte header):
+  ///   [0]    user (application) refuse reason
+  ///   [1]    system (NS) refuse reason
+  ///   [2..3] refuse data length (big-endian)
+  ///   [4..]  refuse data (ASCII, typically a `(DESCRIPTION=(ERR=...)...)` blob)
+  ///
+  /// The data is a server-generated diagnostic descriptor; it never contains
+  /// client credentials, so it is safe to include verbatim.
+  static OracleException _refusePacketException(TnsPacket packet) {
+    final p = packet.payload;
+    final userReason = p.isNotEmpty ? p[0] : 0;
+    final systemReason = p.length > 1 ? p[1] : 0;
+    String detail;
+    if (p.length >= 4) {
+      // Read the declared data length from bytes [2..3] (big-endian), clamped
+      // to the actual payload bounds to guard against a malformed packet.
+      final declaredLen = (p[2] << 8) | p[3];
+      final end = (4 + declaredLen).clamp(4, p.length);
+      // Decode the data region as printable ASCII; drop control bytes so a
+      // malformed payload cannot inject newlines/escapes into the message.
+      final sb = StringBuffer();
+      for (var i = 4; i < end; i++) {
+        final b = p[i];
+        if (b >= 0x20 && b < 0x7F) sb.writeCharCode(b);
+      }
+      final text = sb.toString().trim();
+      detail = text.isEmpty ? '<no reason text>' : text;
+    } else {
+      detail = '<no reason text>';
+    }
+    return OracleException(
+      errorCode: oraProtocolError,
+      message: 'Server refused the request mid-session '
+          '(REFUSE userReason=0x${userReason.toRadixString(16)}, '
+          'systemReason=0x${systemReason.toRadixString(16)}): $detail',
+    );
+  }
+
   /// Sends a TTC PING message to verify connection health.
   ///
   /// Throws [OracleException] if ping fails or times out.
@@ -558,16 +679,18 @@ class Transport {
     final packet = TnsPacket(type: tnsPacketData, payload: pingData);
     await send(packet);
 
-    // Wait for response with timeout
-    // Note: onTimeout callback throws OracleException directly, no need
-    // to catch TimeoutException separately
+    // Wait for response with timeout; poison the transport on timeout so the
+    // orphaned server response cannot be misread as the reply to a subsequent RPC.
     final response = await receive().timeout(
       timeout,
-      onTimeout: () => throw OracleException(
-        errorCode: oraConnectTimeout,
-        message:
-            'Ping timeout after ${timeout.inSeconds}s - connection may be broken',
-      ),
+      onTimeout: () {
+        _poison();
+        throw OracleException(
+          errorCode: oraConnectTimeout,
+          message:
+              'Ping timed out after ${timeout.inMilliseconds}ms; transport poisoned',
+        );
+      },
     );
     _log.fine('Ping response received: type=${response.type}');
   }
@@ -715,10 +838,23 @@ class Transport {
   /// Sends a standalone AUTH_PHASE_ONE message and returns the raw TTC
   /// response data. Used by the classical (pre-23) authentication path, after
   /// [sendProtocolNegotiation] has completed.
-  Future<Uint8List> sendAuthPhaseOne(AuthPhaseOneRequest request) async {
+  Future<Uint8List> sendAuthPhaseOne(AuthPhaseOneRequest request,
+      {Duration? timeout}) async {
     final bytes = request.toBytes();
     await sendData(bytes, dataFlags: 0x0000);
-    return receiveData();
+    final future = receiveData();
+    if (timeout == null) return future;
+    // Mirror the timeout-poisoning contract of _receiveDataWithTimeout: on
+    // timeout the in-flight socket read is not cancelled, so destroy the socket
+    // to guarantee the orphaned response cannot be misread as a later reply.
+    return future.timeout(timeout, onTimeout: () {
+      _poison();
+      throw OracleException(
+        errorCode: oraConnectTimeout,
+        message:
+            'AUTH_PHASE_ONE timed out after ${timeout.inMilliseconds}ms; transport poisoned',
+      );
+    });
   }
 
   /// Sends FAST_AUTH message containing protocol negotiation, data types
@@ -1488,12 +1624,24 @@ class Transport {
   ///
   /// TNS DATA packets have a 2-byte data flags field at the start of
   /// the payload, followed by the actual TTC message data.
+  ///
+  /// DATA-flags contract (AC9 — the default is intentionally version-gated, not
+  /// a constant, and is the Oracle-protocol-required behaviour):
+  ///   * Oracle 23ai (`serverMajorVersion >= 23`): the default is
+  ///     `_tnsDataFlagsEndOfRpc` (0x0800). 23ai requires the END_OF_RPC bit on
+  ///     every client request; without it the server waits for more client data
+  ///     after its first response and ignores subsequent commands.
+  ///   * Pre-23ai servers: the default is `0x0000` — they do not understand the
+  ///     END_OF_RPC bit.
+  ///   * Bootstrap callsites (protocol negotiation, data-types negotiation,
+  ///     classical AUTH_PHASE_ONE, FAST_AUTH) run before the server version is
+  ///     known and therefore pass `dataFlags: 0x0000` explicitly to override
+  ///     this default safely. AUTH_PHASE_TWO passes `0x0800` only on the
+  ///     FAST_AUTH path (see [AuthFlow.authenticate]).
+  /// Callers that need a non-default flag must pass [dataFlags] explicitly; the
+  /// default deliberately encodes the per-version steady-state requirement so
+  /// ordinary execute/commit/rollback/fetch callsites do not have to repeat it.
   Future<void> sendData(Uint8List ttcData, {int? dataFlags}) async {
-    // 0x0800 signals end-of-RPC to Oracle 23ai; without it, Oracle waits for
-    // more client data after its first response and ignores subsequent commands.
-    // Pre-23ai servers do not understand this flag, so gate it on the negotiated
-    // server version. Bootstrap packets (sent before the version is known) must
-    // pass dataFlags: 0x0000 explicitly to override this default safely.
     dataFlags ??= _serverMajorVersion >= 23 ? _tnsDataFlagsEndOfRpc : 0x0000;
 
     // Build payload with 2-byte data flags prefix

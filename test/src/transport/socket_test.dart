@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -109,6 +110,49 @@ void main() {
           expect(e.message, contains('100'));
           expect(e.message, contains('0'));
         }
+      });
+    });
+
+    group('liveness (Story 7.4 AC3)', () {
+      test('isConnected becomes false after remote close', () async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        // Accept then immediately tear the peer down so the client observes a
+        // remote close/error via its onDone/onError listeners.
+        server.listen((s) => s.destroy());
+
+        final socket = OracleSocket();
+        await socket.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+
+        // Let the event loop deliver the close event; liveness is event-driven,
+        // not polled, so it flips without us issuing a read.
+        final deadline = DateTime.now().add(const Duration(seconds: 2));
+        while (socket.isConnected && DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+
+        expect(socket.isConnected, isFalse,
+            reason: 'remote close must be reflected without a failed read');
+        await socket.close();
+        await server.close();
+      });
+
+      test('destroy() makes the socket not connected immediately', () async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((s) => s.listen((_) {}));
+
+        final socket = OracleSocket();
+        await socket.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+        expect(socket.isConnected, isTrue);
+
+        socket.destroy();
+        expect(socket.isConnected, isFalse);
+
+        // destroy() is idempotent and safe after close.
+        socket.destroy();
+        await socket.close();
+        await server.close();
       });
     });
 

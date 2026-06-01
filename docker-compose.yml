@@ -18,8 +18,13 @@ services:
       - ORACLE_PWD=testpassword
     volumes:
       - oracle-data:/opt/oracle/oradata
+    # Connects as a normal `system` session (NOT "AS SYSDBA" — the system user
+    # is not authorized for a SYSDBA logon, which made this probe fail with
+    # ORA-01017 and report the container unhealthy even though the DB was up).
+    # A plain connect to FREEPDB1 also only succeeds once the PDB is open, which
+    # is exactly the readiness signal we want.
     healthcheck:
-      test: ["CMD", "sqlplus", "-L", "system/testpassword@//localhost:1521/FREEPDB1", "AS", "SYSDBA", "@/dev/null"]
+      test: ["CMD", "sqlplus", "-L", "system/testpassword@//localhost:1521/FREEPDB1", "@/dev/null"]
       interval: 30s
       timeout: 10s
       retries: 10
@@ -29,8 +34,29 @@ services:
   # gvenzl/oracle-xe:19, but that tag does not exist on Docker Hub
   # (gvenzl/oracle-xe ships 21c/18c/11g only). 21c is the closest available
   # image and exercises the same pre-23 code path as 19c would.
+  #
+  # Apple Silicon (M-series): Oracle never shipped ARM64 binaries for 21c, so
+  # this image is amd64-only and must run under x86_64 emulation. Docker
+  # Desktop's built-in emulation is unreliable for Oracle (init hangs); use a
+  # dedicated Colima x86_64 VM instead (per gvenzl's docs):
+  #
+  #   brew install colima qemu lima-additional-guestagents
+  #   colima start --arch x86_64 --cpu 6 --memory 8
+  #   docker compose --profile oracle21c up -d oracle21c
+  #
+  # Note the explicit `oracle21c` service name above: a bare
+  # `docker compose --profile oracle21c up -d` ALSO starts the profile-less
+  # 23ai service inside the Colima x86_64 VM (emulated, wasteful, and two
+  # Oracle instances starve a small VM). Always name the service.
+  #
+  # Resources matter: at the Colima default (2 CPU / 4 GB) the emulated 21c
+  # init crashes with ORA-04021 (lock timeout) during password setup. 6 CPU /
+  # 8 GB completes cleanly. The platform pin below ensures the amd64 image is
+  # selected on any host. 23ai runs natively on ARM, so leave it on your
+  # default Docker context and only use the Colima x86_64 context for 21c.
   oracle21c:
     image: gvenzl/oracle-xe:21
+    platform: linux/amd64
     profiles:
       - oracle21c
     ports:

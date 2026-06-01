@@ -376,7 +376,33 @@ class AuthFlow {
         clientNonce: clientNonce,
         sequence: transport.nextSequence(),
       );
-      phaseOneResponseData = await transport.sendAuthPhaseOne(phaseOneRequest);
+      // AC4: bound the classical AUTH_PHASE_ONE receive with the same
+      // authTimeout used for AUTH_PHASE_TWO. The timeout is passed into the
+      // transport so it can poison the socket on expiry — a plain Future.timeout
+      // here would not cancel the in-flight socket read.
+      try {
+        phaseOneResponseData = await transport.sendAuthPhaseOne(
+          phaseOneRequest,
+          timeout: authTimeout,
+        );
+      } on OracleException catch (e) {
+        // A timeout (oraConnectTimeout, transport-poisoned and socket destroyed)
+        // or a silent socket close (oraNetworkError) during phase one is how
+        // Oracle rejects an unknown user on the classical path — surface a
+        // sanitized credential error. Errors the server *clearly reports*
+        // (protocol mismatches, REFUSE with a real reason) are preserved for
+        // diagnostics rather than masked as ORA-01017.
+        updateState(AuthState.failed);
+        if (e.errorCode == oraNetworkError ||
+            e.errorCode == oraInvalidCredentials ||
+            e.errorCode == oraConnectTimeout) {
+          throw const OracleException(
+            errorCode: oraInvalidCredentials,
+            message: 'Authentication failed: invalid username or password',
+          );
+        }
+        rethrow;
+      }
     }
     _log.fine(
         'Received AUTH_PHASE_ONE response (${phaseOneResponseData.length} bytes)');

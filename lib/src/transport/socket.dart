@@ -22,8 +22,22 @@ class OracleSocket {
   final _pendingData = <int>[];
   Completer<void>? _dataAvailable;
 
-  /// Whether the socket is currently connected.
-  bool get isConnected => _socket != null;
+  /// Known-liveness flag for the connection.
+  ///
+  /// Set `true` once a socket is established and cleared the moment a remote
+  /// close (`onDone`), socket error (`onError`), or a local [close]/[destroy]
+  /// has been observed. This is event-driven — no polling — so [isConnected]
+  /// reflects a peer disconnect as soon as the stream event is delivered,
+  /// rather than only after the next failed read/write.
+  bool _alive = false;
+
+  /// Whether the socket is currently connected and known to be alive.
+  ///
+  /// Returns `false` after a remote close/error has been observed, even though
+  /// teardown of the underlying socket is asynchronous. Callers can use this as
+  /// a cheap local guard before attempting an RPC instead of waiting for a long
+  /// receive timeout.
+  bool get isConnected => _alive;
 
   /// Connects to the specified host and port.
   ///
@@ -48,6 +62,7 @@ class OracleSocket {
 
     try {
       _socket = await Socket.connect(host, port, timeout: timeout);
+      _alive = true;
       _log.info('Connected to $host:$port');
 
       // Set up data listener
@@ -279,6 +294,10 @@ class OracleSocket {
   /// Closes the socket connection.
   ///
   /// This method is safe to call on an already closed or unconnected socket.
+  /// [close] performs a graceful shutdown (the outbound direction is closed and
+  /// the socket is allowed to drain). To guarantee no further inbound bytes can
+  /// arrive — for example after an RPC timeout left an orphaned response on the
+  /// wire — use [destroy] instead.
   Future<void> close() async {
     if (_socket != null) {
       _log.fine('Closing socket');
@@ -291,7 +310,28 @@ class OracleSocket {
     _cleanup();
   }
 
+  /// Forcibly destroys the socket in both directions immediately.
+  ///
+  /// Unlike [close], which only shuts down the outbound direction and lets the
+  /// inbound side drain, [destroy] tears the connection down so that no further
+  /// bytes can be delivered. This is the correct primitive after an RPC timeout:
+  /// `Future.timeout` does not cancel the pending socket read, so the server's
+  /// (late) response could otherwise be delivered and misread as the reply to a
+  /// subsequent RPC. Safe to call when already closed or never connected.
+  void destroy() {
+    if (_socket != null) {
+      _log.fine('Destroying socket');
+      try {
+        _socket!.destroy();
+      } catch (e) {
+        _log.warning('Error destroying socket: $e');
+      }
+    }
+    _cleanup();
+  }
+
   void _cleanup() {
+    _alive = false;
     _subscription?.cancel();
     _subscription = null;
     _socket = null;

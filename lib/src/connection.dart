@@ -47,6 +47,25 @@ class OracleConnection {
         _cache = StatementCache(statementCacheSize),
         _isClosed = false;
 
+  /// Test-only constructor that injects a [Transport] directly, bypassing the
+  /// network handshake performed by [connect].
+  ///
+  /// Used to exercise connection-level guards ([_ensureOpen]) deterministically
+  /// against a transport in a known state (e.g. unconnected or poisoned) without
+  /// a live Oracle server. Not part of the public API — production code must use
+  /// [connect] / [withConnection].
+  @visibleForTesting
+  OracleConnection.forTesting({
+    required Transport transport,
+    ConnectionInfo? connectionInfo,
+    int statementCacheSize = 30,
+  })  : _transport = transport,
+        _connectionInfo = connectionInfo ??
+            const ConnectionInfo(
+                host: 'test', port: 0, serviceName: 'test'),
+        _cache = StatementCache(statementCacheSize),
+        _isClosed = false;
+
   final Transport _transport;
   final ConnectionInfo _connectionInfo;
   final StatementCache _cache;
@@ -151,11 +170,27 @@ class OracleConnection {
   ///
   /// This guard method is called by operations that require an open connection
   /// (execute, query, etc.) to provide consistent "connection closed" errors.
+  ///
+  /// It checks both the local `_isClosed` flag and the live transport state
+  /// (`_transport.isConnected`). The transport reports `false` as soon as a
+  /// remote close/error has been observed or after a timed-out RPC poisoned it,
+  /// so an already-dead connection fails fast here (AC3) instead of stalling
+  /// for a full RPC timeout while the socket layer waits for data that will
+  /// never arrive. This is a cheap local check — it never sends network traffic
+  /// (no ping), so it cannot itself hang.
   void _ensureOpen() {
     if (_isClosed) {
       throw const OracleException(
         errorCode: oraConnectionClosed,
         message: 'Connection is closed',
+      );
+    }
+    if (!_transport.isConnected) {
+      throw const OracleException(
+        errorCode: oraConnectionClosed,
+        message: 'Connection lost: the underlying transport is no longer '
+            'connected (the server may have closed the socket, or a previous '
+            'operation timed out and poisoned the connection).',
       );
     }
   }

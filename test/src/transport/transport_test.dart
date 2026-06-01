@@ -1,5 +1,8 @@
+import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
@@ -211,6 +214,136 @@ void main() {
           () => transport.sendConnectReceiveAccept(Uint8List.fromList([0x01])),
           throwsException,
         );
+      });
+    });
+
+    // Story 7.4: deterministic lifecycle behaviour exercised against a local
+    // loopback ServerSocket (no Oracle required). Each test owns its server and
+    // tears it down so the suite stays hermetic.
+    group('RPC timeout poisoning (Story 7.4 AC1, AC2)', () {
+      test('timed-out commit poisons the transport and fails subsequent RPCs',
+          () async {
+        // A server that accepts the connection, drains input, but never replies.
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((s) => s.listen((_) {}, onError: (_) {}));
+
+        final transport = Transport();
+        await transport.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+        expect(transport.isConnected, isTrue);
+        expect(transport.isCorrupted, isFalse);
+
+        // AC1: the timeout error names the operation and the elapsed wait.
+        await expectLater(
+          transport.sendCommit(timeout: const Duration(milliseconds: 200)),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectTimeout)
+              .having((e) => e.message, 'message', contains('Commit'))
+              .having((e) => e.message, 'message', contains('200ms'))),
+        );
+
+        // AC2: the transport is poisoned and its socket force-destroyed.
+        expect(transport.isCorrupted, isTrue);
+        expect(transport.isConnected, isFalse);
+
+        // AC2: a subsequent RPC fails fast with a DISTINCT error (not a second
+        // timeout) so callers know the transport itself is unusable.
+        await expectLater(
+          transport.sendRollback(timeout: const Duration(seconds: 5)),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+        );
+
+        await transport.disconnect();
+        await server.close();
+      });
+    });
+
+    group('sendData DATA-flags contract (Story 7.4 AC9)', () {
+      Future<Uint8List> captureFirstPacket(
+          Future<void> Function(Transport t) act) async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        final firstPacket = Completer<Uint8List>();
+        server.listen((s) {
+          s.listen((data) {
+            if (!firstPacket.isCompleted) {
+              firstPacket.complete(Uint8List.fromList(data));
+            }
+          });
+        });
+        final transport = Transport();
+        await transport.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+        await act(transport);
+        final bytes =
+            await firstPacket.future.timeout(const Duration(seconds: 2));
+        await transport.disconnect();
+        await server.close();
+        return bytes;
+      }
+
+      test('defaults to 0x0800 END_OF_RPC flag for Oracle 23ai', () async {
+        // Default serverMajorVersion is 23, so the version-gated default applies.
+        final bytes = await captureFirstPacket(
+            (t) => t.sendData(Uint8List.fromList([0xAA, 0xBB])));
+        // 8-byte TNS header, then the 2-byte big-endian data-flags field.
+        expect(bytes[8], equals(0x08));
+        expect(bytes[9], equals(0x00));
+      });
+
+      test('honours an explicit dataFlags override', () async {
+        final bytes = await captureFirstPacket((t) =>
+            t.sendData(Uint8List.fromList([0xAA, 0xBB]), dataFlags: 0x0000));
+        expect(bytes[8], equals(0x00));
+        expect(bytes[9], equals(0x00));
+      });
+    });
+
+    group('mid-query REFUSE handling (Story 7.4 AC7)', () {
+      test('surfaces the real refuse reason, not invalid-credentials',
+          () async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((s) {
+          s.listen((_) {
+            // Reply to the commit with a REFUSE packet carrying a real reason.
+            const reason = '(ERR=12514)';
+            final reasonBytes = reason.codeUnits;
+            final payload = <int>[
+              0x22, // user refuse reason
+              0x00, // system refuse reason
+              (reasonBytes.length >> 8) & 0xFF, // data length (BE) high
+              reasonBytes.length & 0xFF, // data length (BE) low
+              ...reasonBytes,
+            ];
+            final packetLen = tnsHeaderSize + payload.length;
+            final packet = <int>[
+              (packetLen >> 8) & 0xFF, packetLen & 0xFF, // length (BE)
+              0x00, 0x00, // checksum
+              tnsPacketRefuse, // type = 4
+              0x00, // marker
+              0x00, 0x00, // header checksum
+              ...payload,
+            ];
+            s.add(packet);
+          });
+        });
+
+        final transport = Transport();
+        await transport.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+
+        await expectLater(
+          transport.sendCommit(timeout: const Duration(seconds: 3)),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('REFUSE'))
+              .having((e) => e.message, 'message', contains('(ERR=12514)'))
+              .having((e) => e.errorCode, 'not invalid creds',
+                  isNot(oraInvalidCredentials))),
+        );
+
+        await transport.disconnect();
+        await server.close();
       });
     });
   });

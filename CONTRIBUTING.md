@@ -36,8 +36,31 @@ Integration tests require Oracle Database instances running in Docker.
 docker compose up -d
 
 # Oracle 21c (secondary target — required for all new features)
-docker compose --profile oracle21c up -d
+# On Apple Silicon, run inside a Colima x86_64 VM (see below); always name
+# the service to avoid accidentally spinning up 23ai inside Colima too.
+docker compose --profile oracle21c up -d oracle21c
 ```
+
+**Apple Silicon (M-series Macs):** Oracle has no native ARM64 build for 21c, so
+the `gvenzl/oracle-xe:21` image runs under x86_64 emulation. Docker Desktop's
+built-in emulation is unreliable for Oracle (init crashes), so run 21c inside a
+dedicated Colima x86_64 VM:
+
+```bash
+brew install colima qemu lima-additional-guestagents
+colima start --arch x86_64 --cpu 6 --memory 8   # 2 CPU / 4 GB crashes init (ORA-04021)
+docker context use colima                        # 21c lives in this VM
+docker compose --profile oracle21c up -d oracle21c
+```
+
+- **Name the service** (`... up -d oracle21c`). A bare `--profile oracle21c up -d`
+  also starts the profile-less 23ai service inside Colima (emulated, wasteful).
+- **23ai stays on Docker Desktop** (native ARM64 image). Switch back with
+  `docker context use desktop-linux` and `docker compose up -d`.
+- Both DBs can run at once — they're separate VMs publishing different host
+  ports (23ai → `localhost:1521`, 21c → `localhost:1522`), so tests reach both.
+- `docker context` only changes which daemon the `docker` CLI targets; it does
+  not stop the other VM's containers.
 
 Wait up to 5 minutes for the databases to initialize. You can check readiness with:
 

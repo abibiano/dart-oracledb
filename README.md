@@ -261,7 +261,10 @@ docker compose up -d
 RUN_INTEGRATION_TESTS=true dart test test/integration/
 
 # Integration tests — Oracle 21c
-docker compose --profile oracle21c up -d
+#   On Apple Silicon, 21c has no native ARM build — run it under a Colima
+#   x86_64 VM (see CONTRIBUTING.md for full setup):
+#     colima start --arch x86_64 --cpu 6 --memory 8 && docker context use colima
+docker compose --profile oracle21c up -d oracle21c
 RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test/integration/
 ```
 
