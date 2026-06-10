@@ -43,7 +43,7 @@ jobs:
       # job on unrelated score factors (e.g. pre-existing formatting deductions).
       - name: pana platform-compatibility check
         run: |
-          dart pub global activate pana 0.23.12 --quiet
+          dart pub global activate pana 0.23.12
           dart pub global run pana . --no-dartdoc
 
       - name: Run non-integration tests with coverage
