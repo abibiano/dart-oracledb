@@ -132,6 +132,54 @@ void main() {
       });
     });
 
+    // Story 7.9 AC1: code is range-safe — never emits malformed forms like
+    // ORA-000-1; negative codes are rejected, >=100000 keeps full digits.
+    group('range-safe ORA code formatting (Story 7.9 AC1)', () {
+      test('code throws ArgumentError for negative errorCode', () {
+        const exception = OracleException(
+          errorCode: -1,
+          message: 'bogus negative code',
+        );
+        expect(() => exception.code, throwsArgumentError);
+      });
+
+      test('code formats 0 as ORA-00000', () {
+        const exception = OracleException(
+          errorCode: 0,
+          message: 'success placeholder',
+        );
+        expect(exception.code, equals('ORA-00000'));
+      });
+
+      test('code formats 99999 as ORA-99999', () {
+        const exception = OracleException(
+          errorCode: 99999,
+          message: 'upper bound of five-digit range',
+        );
+        expect(exception.code, equals('ORA-99999'));
+      });
+
+      test('code emits full digits for errorCode >= 100000 (floor, not cap)',
+          () {
+        const exception = OracleException(
+          errorCode: 100000,
+          message: 'six-digit code passes through unpadded',
+        );
+        expect(exception.code, equals('ORA-100000'));
+      });
+
+      test('toString never throws for negative errorCode', () {
+        const exception = OracleException(
+          errorCode: -1,
+          message: 'bogus negative code',
+        );
+        final str = exception.toString();
+        expect(str, contains('-1'));
+        expect(str, contains('bogus negative code'));
+        expect(str, isNot(contains('ORA-000-1')));
+      });
+    });
+
     group('query error context (Story 2.8)', () {
       test('sql and offset are null by default', () {
         const exception = OracleException(

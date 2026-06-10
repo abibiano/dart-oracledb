@@ -427,6 +427,7 @@ class Transport {
     int cursorId = 0,
     List<ColumnMetadata>? expectedColumns,
     List<int> cursorsToClose = const [],
+    bool preserveTimestampTimeZone = false,
   }) async {
     _log.fine('Sending execute request (isQuery=$isQuery, isPlSql=$isPlSql, '
         'cursorId=$cursorId)...');
@@ -476,42 +477,64 @@ class Transport {
       endOfRequestSupport: _supportsEndOfRequest,
       expectedColumns: expectedColumns,
       bindMetadata: bindMetadata,
+      preserveTimestampTimeZone: preserveTimestampTimeZone,
     );
 
     // If this is a SELECT and the server kept the cursor open with more rows
-    // pending, drain them via FETCH calls until EOF.
+    // pending, drain them via FETCH calls until EOF. ExecuteResponse is
+    // immutable (Story 7.9 AC3), so rows accumulate in a local list and a
+    // single final response is built after the loop — on both the success
+    // and the fetch-failure paths.
     if (isQuery && response.cursorId != 0 && response.isSuccess) {
       // Use column metadata from this response (populated from DESCRIBE or
       // expectedColumns) so fetch rounds can decode rows without DESCRIBE.
       final fetchColumns = response.columnMetadata.isNotEmpty
           ? response.columnMetadata
           : expectedColumns;
+      final allRows = List<List<Object?>>.of(response.rows);
+      var moreRowsToFetch = response.moreRowsToFetch;
       var fetchCount = 0;
-      while (_needsMoreRows(response)) {
+      while (moreRowsToFetch) {
         if (++fetchCount > _maxFetchIterations) {
-          _log.warning(
-              'Reached max fetch iterations ($_maxFetchIterations); stopping');
-          response.moreRowsToFetch = false;
+          // Backstop against an unbounded drain. Leave moreRowsToFetch as-is
+          // (true) so the returned response is honestly reported as
+          // incomplete rather than indistinguishable from a fully-drained
+          // result set (which would silently truncate rows).
+          _log.warning('Reached max fetch iterations ($_maxFetchIterations); '
+              'stopping with rows still pending — result is incomplete');
           break;
         }
         final fetched = await _sendFetch(
             response.cursorId, prefetchRows, timeout,
-            expectedColumns: fetchColumns);
-        response.rows.addAll(fetched.rows);
-        response.moreRowsToFetch = fetched.moreRowsToFetch;
+            expectedColumns: fetchColumns,
+            preserveTimestampTimeZone: preserveTimestampTimeZone);
+        allRows.addAll(fetched.rows);
+        moreRowsToFetch = fetched.moreRowsToFetch;
         if (!fetched.isSuccess) {
           return ExecuteResponse(
             isSuccess: false,
             cursorId: response.cursorId,
             columnMetadata: response.columnMetadata,
-            rows: response.rows,
+            rows: allRows,
             rowsAffected: fetched.rowsAffected,
             moreRowsToFetch: fetched.moreRowsToFetch,
             errorCode: fetched.errorCode,
             errorMessage: fetched.errorMessage,
+            errorOffset: fetched.errorOffset,
           );
         }
-        if (!fetched.moreRowsToFetch) break;
+      }
+      if (fetchCount > 0) {
+        return ExecuteResponse(
+          isSuccess: true,
+          cursorId: response.cursorId,
+          columnMetadata: response.columnMetadata,
+          rows: allRows,
+          outBindValues: response.outBindValues,
+          outBindIndices: response.outBindIndices,
+          rowsAffected: response.rowsAffected,
+          moreRowsToFetch: moreRowsToFetch,
+        );
       }
     }
 
@@ -539,8 +562,6 @@ class Transport {
     }
     return buf.toBytes();
   }
-
-  bool _needsMoreRows(ExecuteResponse r) => r.moreRowsToFetch;
 
   /// Sends a TTC COMMIT message and waits for the server's acknowledgement.
   ///
@@ -599,7 +620,8 @@ class Transport {
 
   Future<ExecuteResponse> _sendFetch(
       int cursorId, int numRows, Duration? timeout,
-      {List<ColumnMetadata>? expectedColumns}) async {
+      {List<ColumnMetadata>? expectedColumns,
+      bool preserveTimestampTimeZone = false}) async {
     final fetch = FetchRequest(
       cursorId: cursorId,
       numRows: numRows,
@@ -615,6 +637,7 @@ class Transport {
       ttcFieldVersion: _ttcFieldVersion,
       endOfRequestSupport: _supportsEndOfRequest,
       expectedColumns: expectedColumns,
+      preserveTimestampTimeZone: preserveTimestampTimeZone,
     );
   }
 

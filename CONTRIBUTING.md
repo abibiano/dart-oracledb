@@ -88,6 +88,19 @@ dart analyze
 
 All code must produce zero warnings.
 
+### Coverage
+
+CI gathers line coverage from the unit-test run (integration-tagged tests are
+excluded) and enforces a no-regression floor in the `quality` job — the build
+fails if total line coverage drops below the floor declared in
+`.github/workflows/ci.yml`.
+
+For pull requests from forks, the Codecov upload is intentionally skipped
+(tokenless/OIDC upload only works for same-repo pushes and PRs, and we don't
+want external contributors to need secrets). Fork-PR coverage is still
+available: download the `coverage-lcov` artifact from the workflow run. The
+trade-off is that Codecov trend tracking does not include fork PRs.
+
 ## Code Style
 
 - Use single quotes for strings

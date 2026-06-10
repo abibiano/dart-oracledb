@@ -129,8 +129,28 @@ ${GIT_LOG}
 
 Respond with ONLY the markdown — no explanation, no code fences."
 
-  NEW_ENTRY=$(claude -p "$PROMPT" 2>/dev/null)
+  # Capture stderr and check the exit code explicitly (Story 7.9 AC12):
+  # under `set -e` a failing command substitution would abort the script
+  # with no context, and the old `2>/dev/null` discarded the actual error.
+  CLAUDE_STDERR=$(mktemp)
+  set +e
+  NEW_ENTRY=$(claude -p "$PROMPT" 2>"$CLAUDE_STDERR")
+  CLAUDE_STATUS=$?
+  set -e
+  if [ "$CLAUDE_STATUS" -ne 0 ]; then
+    echo "error: 'claude -p' exited with status ${CLAUDE_STATUS}." >&2
+    if [ -s "$CLAUDE_STDERR" ]; then
+      echo "──── claude stderr ────" >&2
+      cat "$CLAUDE_STDERR" >&2
+      echo "───────────────────────" >&2
+    fi
+    rm -f "$CLAUDE_STDERR"
+    echo "Add an entry for ## ${NEW_VERSION} to $CHANGELOG manually, then re-run." >&2
+    exit 1
+  fi
+  rm -f "$CLAUDE_STDERR"
 
+  # Secondary guard: a zero exit with empty output is still unusable.
   if [ -z "$NEW_ENTRY" ]; then
     echo "error: Claude did not return a changelog entry." >&2
     echo "Add an entry for ## ${NEW_VERSION} to $CHANGELOG manually, then re-run." >&2

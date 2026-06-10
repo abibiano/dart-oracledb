@@ -50,6 +50,7 @@ final Logger _log = Logger('oracledb.test_helper');
 Future<OracleConnection> connectForTest({
   Duration timeout = const Duration(seconds: 5),
   int statementCacheSize = 30,
+  bool preserveTimestampTimeZone = false,
 }) {
   return OracleConnection.connect(
     testConnectString,
@@ -57,6 +58,7 @@ Future<OracleConnection> connectForTest({
     password: testPassword,
     timeout: timeout,
     statementCacheSize: statementCacheSize,
+    preserveTimestampTimeZone: preserveTimestampTimeZone,
   );
 }
 

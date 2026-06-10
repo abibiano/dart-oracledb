@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:oracledb/src/errors.dart';
+import 'package:oracledb/src/oracle_timestamp_tz.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/data_types.dart';
@@ -442,12 +443,18 @@ void main() {
       expect(dateEncoded.length, equals(7));
     });
 
-    // Story 7.1 - AC1: TZ offset extraction
-    test('decodes 13-byte TZ payload with +05:30 offset to UTC', () {
-      // Wall-clock 2024-03-15 10:30:45.123 at +05:30 == 05:00:45.123 UTC.
-      // Build the wire bytes by hand: DATE portion + nanos + TZ.
+    // Story 7.1 - AC1: TSTZ decodes to a UTC DateTime.
+    // Story 7.9 corrected the field interpretation: the server sends the
+    // date/time fields already normalized to UTC (verified live + against
+    // node-oracledb parseOracleDate); the offset bytes are presentation
+    // metadata. The old `fields - offset` arithmetic double-applied the
+    // offset and shifted every TSTZ instant.
+    test('decodes 13-byte TZ payload: fields ARE the UTC instant (+05:30)',
+        () {
+      // Fields 05:00:45.123 + zone bytes +05:30 == instant 05:00:45.123 UTC
+      // (rendered by Oracle as wall-clock 10:30:45.123 at +05:30).
       final dateBytes = encodeTimestamp(
-        DateTime.utc(2024, 3, 15, 10, 30, 45, 123),
+        DateTime.utc(2024, 3, 15, 5, 0, 45, 123),
       );
       final wire = Uint8List.fromList([
         ...dateBytes,
@@ -459,12 +466,14 @@ void main() {
       expect(
         decoded,
         equals(DateTime.utc(2024, 3, 15, 5, 0, 45, 123)),
+        reason: 'offset bytes must not be re-applied to UTC fields',
       );
     });
 
-    test('decodes 13-byte TZ payload with -08:00 offset to UTC', () {
+    test('decodes 13-byte TZ payload: fields ARE the UTC instant (-08:00)',
+        () {
       final dateBytes = encodeTimestamp(
-        DateTime.utc(2024, 3, 15, 10, 30, 45),
+        DateTime.utc(2024, 3, 15, 18, 30, 45),
       );
       // -8:00 means hour byte = 20 + (-8) = 12, minute byte = 60 + 0 = 60.
       final wire = Uint8List.fromList([...dateBytes, 12, 60]);
@@ -532,6 +541,128 @@ void main() {
         throwsA(isA<OracleException>()
             .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
       );
+    });
+  });
+
+  // Story 7.9 AC13: opt-in TZ-preserving wrapper codec.
+  group('OracleTimestampTz codec (Story 7.9 AC13)', () {
+    Uint8List tzWire(DateTime wallClockUtc, int tzByte11, int tzByte12) =>
+        Uint8List.fromList(
+            [...encodeTimestamp(wallClockUtc), tzByte11, tzByte12]);
+
+    test('decodeTimestampTz preserves a +05:30 offset and the UTC instant',
+        () {
+      // The wire fields are the UTC instant; the zone bytes are metadata.
+      // Instant 05:00:45.123 UTC at zone +05:30 == wall-clock 10:30:45.123.
+      final wire =
+          tzWire(DateTime.utc(2024, 3, 15, 5, 0, 45, 123), 20 + 5, 60 + 30);
+      final decoded = decodeTimestampTz(ReadBuffer(wire));
+      expect(decoded.utc, equals(DateTime.utc(2024, 3, 15, 5, 0, 45, 123)));
+      expect(decoded.tzHourOffset, equals(5));
+      expect(decoded.tzMinuteOffset, equals(30));
+      expect(decoded.timeZoneOffset,
+          equals(const Duration(hours: 5, minutes: 30)));
+      expect(decoded.wallClock,
+          equals(DateTime.utc(2024, 3, 15, 10, 30, 45, 123)));
+    });
+
+    test('decodeTimestampTz preserves a -08:00 offset', () {
+      final wire = tzWire(DateTime.utc(2024, 3, 15, 18, 30, 45), 20 - 8, 60);
+      final decoded = decodeTimestampTz(ReadBuffer(wire));
+      expect(decoded.utc, equals(DateTime.utc(2024, 3, 15, 18, 30, 45)));
+      expect(decoded.tzHourOffset, equals(-8));
+      expect(decoded.tzMinuteOffset, equals(0));
+      expect(decoded.wallClock, equals(DateTime.utc(2024, 3, 15, 10, 30, 45)));
+    });
+
+    test('decodeTimestampTz agrees with decodeTimestamp on the instant', () {
+      final wire =
+          tzWire(DateTime.utc(2024, 3, 15, 10, 30, 45, 123), 20 + 5, 60 + 30);
+      final viaDefault = decodeTimestamp(ReadBuffer(wire));
+      final viaWrapper = decodeTimestampTz(ReadBuffer(wire));
+      expect(viaWrapper.utc, equals(viaDefault));
+    });
+
+    test('decodeTimestampTz treats a truncated 7-byte payload as +00:00', () {
+      final wire = encodeDate(DateTime.utc(2024, 3, 15, 10, 30, 45));
+      expect(wire.length, equals(7));
+      final decoded = decodeTimestampTz(ReadBuffer(wire));
+      expect(decoded.utc, equals(DateTime.utc(2024, 3, 15, 10, 30, 45)));
+      expect(decoded.tzHourOffset, equals(0));
+      expect(decoded.tzMinuteOffset, equals(0));
+    });
+
+    test('decodeTimestampTz treats an 11-byte payload as +00:00', () {
+      final wire = encodeTimestamp(DateTime.utc(2024, 3, 15, 10, 30, 45, 123));
+      expect(wire.length, equals(11));
+      final decoded = decodeTimestampTz(ReadBuffer(wire));
+      expect(decoded.utc, equals(DateTime.utc(2024, 3, 15, 10, 30, 45, 123)));
+      expect(decoded.tzHourOffset, equals(0));
+    });
+
+    test('decodeTimestampTz rejects region-id zones like decodeTimestamp', () {
+      final wire = tzWire(DateTime.utc(2024, 3, 15, 10, 30, 45), 0x80, 0x01);
+      expect(
+        () => decodeTimestampTz(ReadBuffer(wire)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
+      );
+    });
+
+    test('encodeTimestampTz writes 13 bytes with the original offset', () {
+      final value = OracleTimestampTz(
+        DateTime.utc(2024, 3, 15, 5, 0, 45, 123),
+        tzHourOffset: 5,
+        tzMinuteOffset: 30,
+      );
+      final wire = encodeTimestampTz(value);
+      expect(wire.length, equals(13));
+      expect(wire[11], equals(20 + 5));
+      expect(wire[12], equals(60 + 30));
+    });
+
+    test('decode → re-encode reproduces identical wire bytes (re-bind)', () {
+      final original =
+          tzWire(DateTime.utc(2024, 3, 15, 10, 30, 45, 123), 20 + 5, 60 + 30);
+      final decoded = decodeTimestampTz(ReadBuffer(original));
+      final reEncoded = encodeTimestampTz(decoded);
+      expect(reEncoded, equals(original),
+          reason: 'a SELECT → bind round-trip must not shift the zone');
+    });
+
+    test('encode → decode round-trips a negative offset value', () {
+      final value = OracleTimestampTz(
+        DateTime.utc(2024, 6, 1, 18, 30, 0),
+        tzHourOffset: -8,
+        tzMinuteOffset: 0,
+      );
+      final decoded = decodeTimestampTz(ReadBuffer(encodeTimestampTz(value)));
+      expect(decoded, equals(value));
+    });
+
+    test('encodeValue accepts OracleTimestampTz for the TZ oraType', () {
+      final value = OracleTimestampTz(
+        DateTime.utc(2024, 3, 15, 5, 0, 45),
+        tzHourOffset: 5,
+        tzMinuteOffset: 30,
+      );
+      final wire = encodeValue(value, oraTypeTimestampTz);
+      expect(wire.length, equals(13));
+      expect(wire[11], equals(25));
+      expect(wire[12], equals(90));
+    });
+
+    test('decodeValue returns the wrapper only when opted in', () {
+      final wire =
+          tzWire(DateTime.utc(2024, 3, 15, 10, 30, 45), 20 + 5, 60 + 30);
+      final byDefault =
+          decodeValue(ReadBuffer(wire), oraTypeTimestampTz, wire.length);
+      expect(byDefault, isA<DateTime>(),
+          reason: 'default decode contract (Story 7.1 AC1) is unchanged');
+      final optedIn = decodeValue(
+          ReadBuffer(wire), oraTypeTimestampTz, wire.length,
+          preserveTimestampTimeZone: true);
+      expect(optedIn, isA<OracleTimestampTz>());
     });
   });
 

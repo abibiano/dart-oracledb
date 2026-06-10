@@ -10,6 +10,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import '../../errors.dart';
+import '../../oracle_timestamp_tz.dart';
 import '../buffer.dart';
 import '../constants.dart';
 import '../data_types.dart' as dt;
@@ -72,11 +73,13 @@ class BindVariable {
     if (value is int) return oraTypeNumber;
     if (value is double) return oraTypeNumber;
     if (value is DateTime) return oraTypeDate;
+    if (value is OracleTimestampTz) return oraTypeTimestampTz;
     if (value is Uint8List) return oraTypeRaw;
     throw OracleException(
       errorCode: oraBindTypeError,
       message: 'Unsupported bind value type: ${value.runtimeType}. '
-          'Supported types: String, int, double, DateTime, Uint8List, null',
+          'Supported types: String, int, double, DateTime, '
+          'OracleTimestampTz, Uint8List, null',
     );
   }
 }
@@ -351,6 +354,16 @@ class ExecuteRequest extends Message {
       case oraTypeTimestamp:
         buffer.writeBytesWithLength(dt.encodeTimestamp(value as DateTime));
         return;
+      case oraTypeTimestampTz:
+        // OracleTimestampTz binds carry their original offset on the wire
+        // (Story 7.9 AC13); a plain DateTime under an explicit TZ oraType
+        // falls back to the offset-less encoding.
+        if (value is OracleTimestampTz) {
+          buffer.writeBytesWithLength(dt.encodeTimestampTz(value));
+          return;
+        }
+        buffer.writeBytesWithLength(dt.encodeTimestamp(value as DateTime));
+        return;
       default:
         throw OracleException(
           errorCode: oraBindTypeError,
@@ -388,6 +401,8 @@ class ExecuteRequest extends Message {
         return 7;
       case oraTypeTimestamp:
         return 11;
+      case oraTypeTimestampTz:
+        return 13;
       default:
         return 1;
     }
@@ -503,48 +518,59 @@ class BindMetadata {
 }
 
 /// Result of an EXECUTE / FETCH response cycle.
+///
+/// Immutable (Story 7.9 AC3): all fields are `final` and the list fields are
+/// unmodifiable defensive copies, so decode state ([_DecodeState]) or any
+/// caller-held list is never aliased into a response. Multi-round FETCH
+/// accumulation happens in transport-local lists, never by mutating a
+/// constructed response.
 class ExecuteResponse {
-  /// Creates an execute response.
+  /// Creates an execute response. List arguments are defensively copied into
+  /// unmodifiable views.
   ExecuteResponse({
     required this.isSuccess,
     this.cursorId = 0,
-    this.columnMetadata = const [],
-    this.rows = const [],
-    this.outBindValues = const [],
-    this.outBindIndices = const [],
+    List<ColumnMetadata> columnMetadata = const [],
+    List<List<Object?>> rows = const [],
+    List<Object?> outBindValues = const [],
+    List<int> outBindIndices = const [],
     this.rowsAffected,
     this.moreRowsToFetch = false,
     this.errorCode,
     this.errorMessage,
     this.errorOffset,
-  });
+  })  : columnMetadata = List.unmodifiable(columnMetadata),
+        rows = List.unmodifiable(rows),
+        outBindValues = List.unmodifiable(outBindValues),
+        outBindIndices = List.unmodifiable(outBindIndices);
 
   /// Whether the call succeeded (no Oracle error).
   final bool isSuccess;
 
   /// Server-assigned cursor id (0 if none).
-  int cursorId;
+  final int cursorId;
 
-  /// Result column metadata (empty for DML).
-  List<ColumnMetadata> columnMetadata;
+  /// Result column metadata (empty for DML). Unmodifiable.
+  final List<ColumnMetadata> columnMetadata;
 
-  /// Decoded rows (one `List<dynamic>` per row).
-  List<List<Object?>> rows;
+  /// Decoded rows (one `List<dynamic>` per row). The outer list is
+  /// unmodifiable.
+  final List<List<Object?>> rows;
 
   /// Decoded OUT bind values in the order they appear in the SQL. For
-  /// non-PL/SQL responses this is always empty.
-  List<Object?> outBindValues;
+  /// non-PL/SQL responses this is always empty. Unmodifiable.
+  final List<Object?> outBindValues;
 
   /// Index (in the bind list sent to the server) of each value in
   /// [outBindValues]. Lets higher layers map decoded values back to the
-  /// original bind name or position.
-  List<int> outBindIndices;
+  /// original bind name or position. Unmodifiable.
+  final List<int> outBindIndices;
 
   /// Rows affected by DML (null for SELECT before FETCH end).
-  int? rowsAffected;
+  final int? rowsAffected;
 
   /// Whether the server reported more rows are available beyond [rows].
-  bool moreRowsToFetch;
+  final bool moreRowsToFetch;
 
   /// Oracle error code if [isSuccess] is false.
   final int? errorCode;
@@ -604,7 +630,8 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
     int ttcFieldVersion = 24,
     bool endOfRequestSupport = true,
     List<ColumnMetadata>? expectedColumns,
-    List<BindMetadata>? bindMetadata}) {
+    List<BindMetadata>? bindMetadata,
+    bool preserveTimestampTimeZone = false}) {
   final buffer = ReadBuffer(data);
   final state = _DecodeState(
     isQuery: isQuery,
@@ -613,6 +640,7 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
         expectedColumns != null ? List.of(expectedColumns) : <ColumnMetadata>[],
     bindMetadata: bindMetadata ?? const [],
     endOfRequestSupport: endOfRequestSupport,
+    preserveTimestampTimeZone: preserveTimestampTimeZone,
   );
 
   try {
@@ -657,10 +685,17 @@ class _DecodeState {
       this.bindMetadata = const [],
       this.ttcFieldVersion = 24,
       this.endOfRequestSupport = true,
-      this.strictTypes = true});
+      this.strictTypes = true,
+      this.preserveTimestampTimeZone = false});
 
   final bool isQuery;
   final int ttcFieldVersion;
+
+  /// Opt-in (Story 7.9 AC13): when true, `TIMESTAMP WITH TIME ZONE` columns
+  /// decode to `OracleTimestampTz` instead of a UTC `DateTime`. Byte
+  /// consumption is identical either way, so the completion probe can leave
+  /// this false.
+  final bool preserveTimestampTimeZone;
 
   /// When true (the real [decodeExecuteResponse] pass), decoding an
   /// unsupported column/bind type — currently LONG and LONG RAW — raises a
@@ -903,7 +938,9 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
       row.add(s.rows.last[i]);
       continue;
     }
-    row.add(_decodeColumnValue(buf, col, strict: s.strictTypes));
+    row.add(_decodeColumnValue(buf, col,
+        strict: s.strictTypes,
+        preserveTimestampTimeZone: s.preserveTimestampTimeZone));
   }
   s.rows.add(row);
   // bitVector intentionally NOT cleared here — it persists for all ROW_DATA
@@ -921,7 +958,7 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
 /// AC7 fixed-scale-forces-double contract — they keep the int-vs-double
 /// heuristic (documented limitation, Story 7.8 AC7).
 Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
-    {required bool strict, int? scale}) {
+    {required bool strict, int? scale, bool preserveTimestampTimeZone = false}) {
   switch (oraType) {
     case oraTypeLong:
     case oraTypeLongRaw:
@@ -969,8 +1006,15 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
       return dt.decodeDate(ReadBuffer(bytes));
-    case oraTypeTimestamp:
     case oraTypeTimestampTz:
+      final bytes = buf.readBytesWithLength();
+      if (bytes.isEmpty) return null;
+      // Story 7.9 AC13: opt-in wrapper preserves the wire offset; default
+      // stays the UTC DateTime contract (Story 7.1 AC1).
+      return preserveTimestampTimeZone
+          ? dt.decodeTimestampTz(ReadBuffer(bytes))
+          : dt.decodeTimestamp(ReadBuffer(bytes));
+    case oraTypeTimestamp:
     case oraTypeTimestampLtz:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
@@ -990,9 +1034,11 @@ bool _isDuplicate(Uint8List? bitVector, int colIndex) {
 }
 
 Object? _decodeColumnValue(ReadBuffer buf, ColumnMetadata col,
-        {required bool strict}) =>
+        {required bool strict, bool preserveTimestampTimeZone = false}) =>
     _decodeValueByOraType(buf, col.oracleType,
-        strict: strict, scale: col.scale);
+        strict: strict,
+        scale: col.scale,
+        preserveTimestampTimeZone: preserveTimestampTimeZone);
 
 void _processBitVector(ReadBuffer buf, _DecodeState s) {
   final numColsSent = buf.readUB2();
@@ -1191,8 +1237,14 @@ void _processError(ReadBuffer buf, _DecodeState s) {
     s.errorNum = 0;
     s.moreRowsToFetch = false;
   } else if (s.isQuery && num == 0) {
-    // Successful end of query response. moreRowsToFetch defaults false.
-    s.moreRowsToFetch = false;
+    // ERROR num=0 on a query is a batch boundary, not end of fetch: the
+    // requested iteration count was delivered and the cursor remains open
+    // (node-oracledb thin only clears moreRowsToFetch on ORA-01403 —
+    // statement.js defaults it true). Signal the transport to keep FETCHing
+    // unless the server reported no open cursor (Story 7.9 AC3 — the prior
+    // unconditional `false` here silently capped every SELECT at one
+    // prefetch window).
+    s.moreRowsToFetch = s.cursorId != 0;
   }
   if (!s.isQuery && num == 0) {
     s.rowsAffected = rowCount;

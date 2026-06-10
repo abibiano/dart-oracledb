@@ -10,6 +10,7 @@ import 'dart:typed_data';
 import 'package:logging/logging.dart';
 
 import '../errors.dart';
+import '../oracle_timestamp_tz.dart';
 import 'buffer.dart';
 import 'constants.dart';
 
@@ -470,6 +471,27 @@ Uint8List encodeTimestamp(DateTime dt) {
   return Uint8List.fromList(result);
 }
 
+/// Encodes an [OracleTimestampTz] to the 13-byte Oracle `TIMESTAMP WITH TIME
+/// ZONE` wire format, preserving the original offset (Story 7.9 AC13).
+///
+/// Bytes 0-10 carry the **UTC instant** (the server interprets TSTZ fields
+/// as UTC — same convention as the decode direction and node-oracledb's
+/// `writeOracleDate`, which writes `getUTC*()` components for TSTZ); byte 11
+/// is `tzHour + 20` and byte 12 is `tzMinute + 60`. node-oracledb always
+/// writes `+00:00` zone bytes for a bound Date; carrying the wrapper's
+/// original offset instead is exactly what preserves the zone across a
+/// SELECT → bind round-trip.
+Uint8List encodeTimestampTz(OracleTimestampTz value) {
+  // value.utc is UTC-flagged, so encodeTimestamp's component reads
+  // (.year/.hour/…) yield the UTC field values the server expects.
+  final utcFieldBytes = encodeTimestamp(value.utc);
+  final result = Uint8List(13);
+  result.setRange(0, 11, utcFieldBytes);
+  result[11] = value.tzHourOffset + 20;
+  result[12] = value.tzMinuteOffset + 60;
+  return result;
+}
+
 /// Decodes Oracle TIMESTAMP format to [DateTime].
 ///
 /// Oracle TIMESTAMP wire format:
@@ -482,11 +504,17 @@ Uint8List encodeTimestamp(DateTime dt) {
 /// Fractional and TZ bytes are therefore treated as optional, defaulting to
 /// zero.
 ///
-/// **Time-zone handling (13-byte payload):** byte 11 encodes the TZ hour as
-/// `tzHour + 20` and byte 12 encodes the TZ minute as `tzMinute + 60`. The
-/// returned [DateTime] is constructed in UTC with the offset applied
-/// (`wallClock - offset`), so a `TIMESTAMP WITH [LOCAL] TIME ZONE` round-trips
-/// to the same absolute instant rather than silently dropping the zone.
+/// **Time-zone handling (13-byte payload):** for `TIMESTAMP WITH TIME ZONE`
+/// the server sends the date/time fields **already normalized to UTC**; byte
+/// 11 (`tzHour + 20`) and byte 12 (`tzMinute + 60`) carry the original zone
+/// as presentation metadata only (verified against a live server and
+/// node-oracledb's `parseOracleDate`, which reads the fields as UTC and
+/// discards the zone bytes). The returned [DateTime] is therefore the field
+/// values constructed directly in UTC — the absolute instant is preserved
+/// and the zone is dropped. Use a `preserveTimestampTimeZone: true`
+/// connection ([decodeTimestampTz]) to keep the zone (Story 7.9 AC13).
+/// ⚠️ Story 7.1 shipped this path as `wallClock - offset`, double-applying
+/// the offset and shifting every TSTZ instant; Story 7.9 corrected it.
 /// When `byte11 & 0x80 != 0`, byte 11 encodes a *region id* (e.g.
 /// `'America/Los_Angeles'`) rather than a numeric offset; the region table is
 /// not bundled with the driver, so this case raises [OracleException]
@@ -504,6 +532,82 @@ Uint8List encodeTimestamp(DateTime dt) {
 /// (`oraUnsupportedType`) is thrown explicitly rather than silently producing
 /// a wrong-era DateTime.
 DateTime decodeTimestamp(ReadBuffer buffer) {
+  final w = _readTimestampWire(buffer);
+
+  if (w.tzHourOffset != null) {
+    // 13-byte TSTZ payload: the fields are already UTC (the offset bytes are
+    // presentation metadata — see the doc comment above). Return them as the
+    // UTC instant directly; subtracting the offset here would double-apply it.
+    return w.fieldsAsUtc;
+  }
+
+  return DateTime(
+    w.year,
+    w.month,
+    w.day,
+    w.hour,
+    w.minute,
+    w.second,
+    w.millisecond,
+    w.microsecond,
+  );
+}
+
+/// Decodes Oracle `TIMESTAMP WITH TIME ZONE` wire bytes into the opt-in
+/// [OracleTimestampTz] wrapper, preserving the original offset alongside the
+/// absolute UTC instant (Story 7.9 AC13).
+///
+/// Wire shape and validation are identical to [decodeTimestamp] (same parser:
+/// BCE rejection, payload-length check, region-id rejection, offset-range
+/// check). The fields are the UTC instant; bytes 11-12 are the zone. A
+/// truncated 7/11-byte payload — Oracle drops trailing zero bytes — decodes
+/// as offset `+00:00`.
+OracleTimestampTz decodeTimestampTz(ReadBuffer buffer) {
+  final w = _readTimestampWire(buffer);
+  return OracleTimestampTz(
+    w.fieldsAsUtc,
+    tzHourOffset: w.tzHourOffset ?? 0,
+    tzMinuteOffset: w.tzMinuteOffset ?? 0,
+  );
+}
+
+/// Parsed TIMESTAMP wire payload, shared by [decodeTimestamp] and
+/// [decodeTimestampTz] so validation cannot diverge.
+class _TimestampWire {
+  _TimestampWire({
+    required this.year,
+    required this.month,
+    required this.day,
+    required this.hour,
+    required this.minute,
+    required this.second,
+    required this.millisecond,
+    required this.microsecond,
+    required this.tzHourOffset,
+    required this.tzMinuteOffset,
+  });
+
+  final int year;
+  final int month;
+  final int day;
+  final int hour;
+  final int minute;
+  final int second;
+  final int millisecond;
+  final int microsecond;
+
+  /// Null when the payload carried no TZ bytes (7/11-byte form).
+  final int? tzHourOffset;
+  final int? tzMinuteOffset;
+
+  /// The date/time fields materialized as a UTC [DateTime]. For a 13-byte
+  /// TSTZ payload this IS the absolute instant (the server normalizes the
+  /// fields to UTC before sending).
+  DateTime get fieldsAsUtc => DateTime.utc(
+      year, month, day, hour, minute, second, millisecond, microsecond);
+}
+
+_TimestampWire _readTimestampWire(ReadBuffer buffer) {
   final centuryByte = buffer.readUint8();
   if (centuryByte < 100) {
     throw OracleException(
@@ -570,39 +674,17 @@ DateTime decodeTimestamp(ReadBuffer buffer) {
   }
 
   final micros = nanos ~/ 1000;
-  final millisecond = micros ~/ 1000;
-  final microsecond = micros % 1000;
-  final dateYear = century * 100 + year;
-
-  if (tzHourOffset != null) {
-    // Wire fields encode a wall-clock time at the recorded offset. Build that
-    // wall-clock in UTC, then subtract the offset to get the absolute instant
-    // — this is the only way to surface a TZ-aware value through Dart's
-    // offset-less DateTime without dropping information.
-    final wallClock = DateTime.utc(
-      dateYear,
-      month,
-      day,
-      hour,
-      minute,
-      second,
-      millisecond,
-      microsecond,
-    );
-    return wallClock.subtract(
-      Duration(hours: tzHourOffset, minutes: tzMinuteOffset!),
-    );
-  }
-
-  return DateTime(
-    dateYear,
-    month,
-    day,
-    hour,
-    minute,
-    second,
-    millisecond,
-    microsecond,
+  return _TimestampWire(
+    year: century * 100 + year,
+    month: month,
+    day: day,
+    hour: hour,
+    minute: minute,
+    second: second,
+    millisecond: micros ~/ 1000,
+    microsecond: micros % 1000,
+    tzHourOffset: tzHourOffset,
+    tzMinuteOffset: tzMinuteOffset,
   );
 }
 
@@ -695,6 +777,11 @@ Uint8List encodeValue(dynamic value, int oracleType) {
     case oraTypeTimestamp:
     case oraTypeTimestampTz:
     case oraTypeTimestampLtz:
+      // An OracleTimestampTz bind keeps its original offset on the wire
+      // (Story 7.9 AC13); a plain DateTime keeps the offset-less encoding.
+      if (value is OracleTimestampTz) {
+        return encodeTimestampTz(value);
+      }
       if (value is DateTime) {
         return encodeTimestamp(value);
       }
@@ -703,8 +790,8 @@ Uint8List encodeValue(dynamic value, int oracleType) {
       );
       throw OracleException(
         errorCode: oraDataTypeNotSupported,
-        message: 'Data type error: expected DateTime for TIMESTAMP type, '
-            'got ${value.runtimeType}',
+        message: 'Data type error: expected DateTime or OracleTimestampTz '
+            'for TIMESTAMP type, got ${value.runtimeType}',
       );
 
     default:
@@ -724,9 +811,13 @@ Uint8List encodeValue(dynamic value, int oracleType) {
 /// scale > 0 forces NUMBER results to [double] (Story 7.8 AC7). Pass null
 /// for bare `NUMBER` or when no column metadata is available.
 ///
+/// With [preserveTimestampTimeZone] set, `TIMESTAMP WITH TIME ZONE` values
+/// decode to [OracleTimestampTz] instead of a UTC [DateTime] (Story 7.9
+/// AC13); all other types are unaffected.
+///
 /// Throws [OracleException] if the type is not supported.
 dynamic decodeValue(ReadBuffer buffer, int oracleType, int length,
-    {int? scale}) {
+    {int? scale, bool preserveTimestampTimeZone = false}) {
   switch (oracleType) {
     case oraTypeVarchar:
     case oraTypeVarchar2:
@@ -743,8 +834,12 @@ dynamic decodeValue(ReadBuffer buffer, int oracleType, int length,
     case oraTypeDate:
       return decodeDate(buffer);
 
-    case oraTypeTimestamp:
     case oraTypeTimestampTz:
+      return preserveTimestampTimeZone
+          ? decodeTimestampTz(buffer)
+          : decodeTimestamp(buffer);
+
+    case oraTypeTimestamp:
     case oraTypeTimestampLtz:
       return decodeTimestamp(buffer);
 

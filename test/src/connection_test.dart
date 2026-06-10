@@ -635,6 +635,76 @@ void main() {
         );
       });
     });
+
+    // Story 7.9 AC10: negative statementCacheSize is rejected by BOTH
+    // constructors with ArgumentError (enforced once in StatementCache so the
+    // two paths cannot diverge — Story 7.6 lesson).
+    group('negative statementCacheSize rejected (Story 7.9 AC10)', () {
+      test('connect(..., statementCacheSize: -1) throws ArgumentError', () {
+        expect(
+          () => OracleConnection.connect(
+            '10.255.255.1:1521/TEST',
+            user: 'u',
+            password: 'p',
+            statementCacheSize: -1,
+            timeout: const Duration(milliseconds: 1),
+          ),
+          throwsA(isA<ArgumentError>().having(
+              (e) => e.message, 'message', contains('must be >= 0'))),
+        );
+      });
+
+      test('forTesting(statementCacheSize: -1) throws ArgumentError', () {
+        expect(
+          () => OracleConnection.forTesting(
+              transport: Transport(), statementCacheSize: -1),
+          throwsA(isA<ArgumentError>()),
+        );
+      });
+    });
+
+    // Story 7.9 AC2: SQL snippet truncation must not split a surrogate pair
+    // when a supplementary-plane character straddles the 200-char boundary.
+    group('rune-aware SQL truncation (Story 7.9 AC2)', () {
+      bool hasUnpairedSurrogate(String s) =>
+          s.runes.any((r) => r >= 0xD800 && r <= 0xDFFF);
+
+      test('short SQL is returned unchanged', () {
+        const sql = 'SELECT 1 FROM dual';
+        expect(OracleConnection.debugTruncateSql(sql), equals(sql));
+      });
+
+      test('SQL exactly at the cap is returned unchanged', () {
+        final sql = 'x' * 200;
+        expect(OracleConnection.debugTruncateSql(sql), equals(sql));
+      });
+
+      test('long ASCII SQL truncates to 200 chars plus ellipsis', () {
+        final sql = 'a' * 500;
+        final out = OracleConnection.debugTruncateSql(sql);
+        expect(out, equals('${'a' * 200}...'));
+      });
+
+      test('emoji straddling the boundary is not split into a lone surrogate',
+          () {
+        // 😀 (U+1F600) occupies code units 199-200: a naive substring(0, 200)
+        // would keep only its lead surrogate.
+        final sql = '${'a' * 199}\u{1F600}${'b' * 50}';
+        expect(sql.length, greaterThan(200));
+        final out = OracleConnection.debugTruncateSql(sql);
+        expect(hasUnpairedSurrogate(out), isFalse,
+            reason: 'truncation must slice on rune boundaries');
+        expect(out, endsWith('...'));
+      });
+
+      test('emoji fully inside the cap is preserved', () {
+        // 😀 occupies code units 197-198; the cut at 200 is a clean boundary.
+        final sql = '${'a' * 197}\u{1F600}${'b' * 50}';
+        final out = OracleConnection.debugTruncateSql(sql);
+        expect(out, contains('\u{1F600}'));
+        expect(hasUnpairedSurrogate(out), isFalse);
+      });
+    });
   });
 }
 
@@ -677,6 +747,7 @@ class _FakeTransport extends Transport {
     int cursorId = 0,
     List<ColumnMetadata>? expectedColumns,
     List<int> cursorsToClose = const <int>[],
+    bool preserveTimestampTimeZone = false,
   }) async {
     executeCalls++;
     lastCursorId = cursorId;

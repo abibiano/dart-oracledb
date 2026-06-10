@@ -249,6 +249,55 @@ void main() {
     });
   });
 
+  // Story 7.9 AC3: ExecuteResponse is immutable — list fields are
+  // unmodifiable and the constructor takes defensive copies, so decode
+  // state (or any caller-held list) is never aliased into the response.
+  group('ExecuteResponse immutability (Story 7.9 AC3)', () {
+    test('decoded response list fields are unmodifiable', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [ttcMsgTypeRowData, ..._bytesWithLength('hello'.codeUnits)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      const col = ColumnMetadata(
+          name: 'VAL', oracleType: oraTypeVarchar, maxLength: 100);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: [col],
+      );
+
+      expect(() => r.rows.add(<Object?>[]), throwsUnsupportedError);
+      expect(() => r.columnMetadata.add(col), throwsUnsupportedError);
+      expect(() => r.outBindValues.add(null), throwsUnsupportedError);
+      expect(() => r.outBindIndices.add(0), throwsUnsupportedError);
+    });
+
+    test('constructor takes defensive copies of caller-held lists', () {
+      final rows = <List<Object?>>[
+        <Object?>['a'],
+      ];
+      final cols = <ColumnMetadata>[
+        const ColumnMetadata(
+            name: 'VAL', oracleType: oraTypeVarchar, maxLength: 100),
+      ];
+      final response = ExecuteResponse(
+        isSuccess: true,
+        rows: rows,
+        columnMetadata: cols,
+      );
+
+      rows.add(<Object?>['b']);
+      cols.clear();
+
+      expect(response.rows, hasLength(1),
+          reason: 'mutating the source list must not leak into the response');
+      expect(response.columnMetadata, hasLength(1),
+          reason: 'mutating the source list must not leak into the response');
+    });
+  });
+
   group('decodeExecuteResponse', () {
     test('reports success on END_OF_REQUEST with no error message', () {
       final payload = _buildPayload([
@@ -287,6 +336,42 @@ void main() {
     test('ORA-01403 end-of-fetch is not treated as an error for queries', () {
       final payload = _buildPayload([
         _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.isSuccess, isTrue);
+      expect(r.moreRowsToFetch, isFalse);
+    });
+
+    // Story 7.9 AC3: ERROR num=0 on a query is a batch boundary — the cursor
+    // is still open and more rows are pending (node-oracledb thin only
+    // clears moreRowsToFetch on ORA-01403).
+    test('query batch boundary (num=0, open cursor) signals more rows', () {
+      final payload = _buildPayload([
+        _errorMessage(errorNum: 0, cursorId: 7),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.isSuccess, isTrue);
+      expect(r.cursorId, equals(7));
+      expect(r.moreRowsToFetch, isTrue,
+          reason: 'num=0 with an open cursor means the prefetch window was '
+              'filled — the transport must keep FETCHing');
+    });
+
+    test('query batch boundary without an open cursor does not fetch', () {
+      final payload = _buildPayload([
+        _errorMessage(errorNum: 0, cursorId: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.isSuccess, isTrue);
+      expect(r.moreRowsToFetch, isFalse);
+    });
+
+    test('ORA-01403 with open cursor still ends the fetch', () {
+      final payload = _buildPayload([
+        _errorMessage(errorNum: 1403, cursorId: 7),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
       final r = decodeExecuteResponse(payload, isQuery: true);
@@ -1481,6 +1566,7 @@ List<int> _errorMessage({
   int errorOffset = 0,
   String? errorMessage,
   int ttcFieldVersion = 24,
+  int cursorId = 0,
 }) {
   final out = <int>[ttcMsgTypeError];
   out.addAll(_ub4(0)); // end of call status
@@ -1489,7 +1575,7 @@ List<int> _errorMessage({
   out.addAll(_ub2(0)); // err num short
   out.addAll(_ub2(0)); // array elem
   out.addAll(_ub2(0)); // array elem
-  out.addAll(_ub4(0)); // cursor id (decoder reads readUB4)
+  out.addAll(_ub4(cursorId)); // cursor id (decoder reads readUB4)
   // error position (SB4 on wire); use _ub4 to match the 4-byte readSB4 read.
   out.addAll(_ub4(errorOffset));
   out.add(0); // sql type

@@ -459,4 +459,69 @@ void main() {
       }
     });
   });
+
+  // Story 7.9 AC15: Oracle q-quote (alternative quoting) literals inside a
+  // CTE header must not break the literal scan. An embedded raw ' inside
+  // q'[…]' previously exited the literal early, and a later real quote then
+  // opened a phantom literal that swallowed the terminal verb.
+  group('q-quote literals in CTE headers (Story 7.9 AC15)', () {
+    test("q'[…]' with embedded apostrophe: CTE DML classified by verb", () {
+      const sql = "WITH c AS (SELECT q'[it's fine]' AS v FROM dual) "
+          'INSERT INTO t SELECT v FROM c';
+      expect(isQuerySql(sql), isFalse);
+      expect(isCacheEligibleSql(sql), isTrue,
+          reason: 'terminal INSERT must be found past the q-quote literal');
+    });
+
+    test("q'{…}' brace delimiter pair", () {
+      const sql = "WITH c AS (SELECT q'{it's fine}' AS v FROM dual) "
+          'SELECT v FROM c';
+      expect(isQuerySql(sql), isTrue);
+    });
+
+    test("q'(…)' paren delimiter pair does not corrupt depth tracking", () {
+      const sql = "WITH c AS (SELECT q'(it's (fine))' AS v FROM dual) "
+          'SELECT v FROM c';
+      expect(isQuerySql(sql), isTrue);
+    });
+
+    test("q'!…!' arbitrary same-char delimiter", () {
+      const sql = "WITH c AS (SELECT q'!it's fine!' AS v FROM dual) "
+          'SELECT v FROM c';
+      expect(isQuerySql(sql), isTrue);
+    });
+
+    test("uppercase Q'[…]' is recognized too", () {
+      const sql = "WITH c AS (SELECT Q'[it's fine]' AS v FROM dual) "
+          'SELECT v FROM c';
+      expect(isQuerySql(sql), isTrue);
+    });
+
+    test('identifier merely starting with q is not treated as a q-quote', () {
+      const sql = 'WITH qcte AS (SELECT 1 AS q FROM dual) '
+          'SELECT q FROM qcte';
+      expect(isQuerySql(sql), isTrue);
+    });
+
+    test('unterminated q-quote clamps to end of string (no crash)', () {
+      const sql = "WITH c AS (SELECT q'[never closed FROM dual";
+      expect(isQuerySql(sql), isFalse);
+      expect(isCacheEligibleSql(sql), isFalse);
+    });
+  });
+
+  // Story 7.9 AC16: the CTE scanner has an explicit whitespace branch; a
+  // CR-terminated line comment inside the header must not swallow code.
+  group('CTE scanner whitespace handling (Story 7.9 AC16)', () {
+    test('CR-terminated line comment inside CTE header', () {
+      const sql = 'WITH c AS ( -- comment\r SELECT 1 AS v FROM dual) '
+          'SELECT v FROM c';
+      expect(isQuerySql(sql), isTrue);
+    });
+
+    test('CRLF and tab whitespace inside CTE header', () {
+      const sql = 'WITH c AS\r\n\t(SELECT 1 AS v FROM dual)\r\nSELECT v FROM c';
+      expect(isQuerySql(sql), isTrue);
+    });
+  });
 }

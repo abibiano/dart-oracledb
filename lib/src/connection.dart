@@ -8,6 +8,7 @@ import 'package:logging/logging.dart';
 import 'crypto/auth.dart';
 import 'errors.dart';
 import 'oracle_bind.dart';
+import 'oracle_timestamp_tz.dart';
 import 'protocol/bind_parser.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/messages/execute_message.dart';
@@ -42,9 +43,11 @@ class OracleConnection {
     required Transport transport,
     required ConnectionInfo connectionInfo,
     required int statementCacheSize,
+    bool preserveTimestampTimeZone = false,
   })  : _transport = transport,
         _connectionInfo = connectionInfo,
         _cache = StatementCache(statementCacheSize),
+        _preserveTimestampTimeZone = preserveTimestampTimeZone,
         _isClosed = false;
 
   /// Test-only constructor that injects a [Transport] directly, bypassing the
@@ -59,15 +62,23 @@ class OracleConnection {
     required Transport transport,
     ConnectionInfo? connectionInfo,
     int statementCacheSize = 30,
+    bool preserveTimestampTimeZone = false,
   })  : _transport = transport,
         _connectionInfo = connectionInfo ??
             const ConnectionInfo(host: 'test', port: 0, serviceName: 'test'),
         _cache = StatementCache(statementCacheSize),
+        _preserveTimestampTimeZone = preserveTimestampTimeZone,
         _isClosed = false;
 
   final Transport _transport;
   final ConnectionInfo _connectionInfo;
   final StatementCache _cache;
+
+  /// Opt-in (Story 7.9 AC13): when true, `TIMESTAMP WITH TIME ZONE` columns
+  /// decode to [OracleTimestampTz] (preserving the original offset) instead
+  /// of a UTC [DateTime]. Connection-level because [execute]'s optional
+  /// positional bind parameter rules out per-call named options.
+  final bool _preserveTimestampTimeZone;
   bool _isClosed;
   bool _inTransaction = false;
 
@@ -135,10 +146,22 @@ class OracleConnection {
   /// Returns [sql] unchanged when short, otherwise a length-bounded snippet
   /// suffixed with an ellipsis. Never substitutes bind values — only raw SQL
   /// with placeholders is exposed, preserving bind privacy (AC5).
+  ///
+  /// The cut is rune-aware (Story 7.9 AC2): when a supplementary-plane
+  /// character (a UTF-16 surrogate pair) straddles the boundary, the cut
+  /// backs off one code unit so the snippet never ends in a lone surrogate.
   static String _truncateSql(String sql) {
     if (sql.length <= _maxSqlSnippetLength) return sql;
-    return '${sql.substring(0, _maxSqlSnippetLength)}...';
+    var end = _maxSqlSnippetLength;
+    final lastUnit = sql.codeUnitAt(end - 1);
+    final isLeadSurrogate = lastUnit >= 0xD800 && lastUnit <= 0xDBFF;
+    if (isLeadSurrogate) end--;
+    return '${sql.substring(0, end)}...';
   }
+
+  /// Test-only access to [_truncateSql] (Story 7.9 AC2). Not a public API.
+  @visibleForTesting
+  static String debugTruncateSql(String sql) => _truncateSql(sql);
 
   /// Builds an [OracleOutBinds] from the decoded execute response.
   ///
@@ -185,6 +208,7 @@ class OracleConnection {
     if (value is int) return oc.oraTypeNumber;
     if (value is double) return oc.oraTypeNumber;
     if (value is DateTime) return oc.oraTypeDate;
+    if (value is OracleTimestampTz) return oc.oraTypeTimestampTz;
     if (value is Uint8List) return oc.oraTypeRaw;
     // Unknown types still flow through; ExecuteRequest will raise a clearer
     // error if encoding fails downstream.
@@ -296,6 +320,17 @@ class OracleConnection {
   /// fetches) has not yet resolved, throwing [OracleException] (ORA-protocol
   /// error). Always `await` each call before issuing the next, and use separate
   /// connections for concurrent work.
+  ///
+  /// ## Statement classification and leading parentheses (Story 7.9 AC14)
+  ///
+  /// The leading verb of [sql] decides how the statement is executed. A
+  /// statement that opens with `(` — e.g. `(SELECT … )` as emitted by some
+  /// JDBC-style shims — is deliberately left **unclassified**: it is not
+  /// treated as a query (no rows are fetched), not as PL/SQL, and not as
+  /// cache-eligible. JDBC-shim wrappers must strip the outer parentheses
+  /// before calling [execute]. See the classification contract in
+  /// `lib/src/sql_classifier.dart` for the full rules (comment skipping,
+  /// CTE terminal-verb resolution, q-quote handling).
   ///
   /// Throws [OracleException] if:
   /// - Another `execute()` is already in progress on this connection (AC1)
@@ -470,6 +505,7 @@ class OracleConnection {
         cursorId: cursorId,
         expectedColumns: expectedColumns,
         cursorsToClose: cursorsToClose,
+        preserveTimestampTimeZone: _preserveTimestampTimeZone,
       );
 
       if (!response.isSuccess) {
@@ -803,6 +839,15 @@ class OracleConnection {
   /// unbounded cache cannot exceed Oracle's `OPEN_CURSORS` limit usefully and
   /// would grow memory without practical bound.
   ///
+  /// With [preserveTimestampTimeZone] set (Story 7.9 AC13), `TIMESTAMP WITH
+  /// TIME ZONE` columns decode to [OracleTimestampTz] — exposing both the
+  /// absolute UTC instant and the original offset — instead of the default
+  /// UTC [DateTime] (which applies the offset, then discards it). The flag
+  /// only affects `TIMESTAMP WITH TIME ZONE` result columns; `DATE`,
+  /// `TIMESTAMP`, and `TIMESTAMP WITH LOCAL TIME ZONE` decoding and all bind
+  /// handling are unchanged. [OracleTimestampTz] values can be bound back on
+  /// any connection regardless of this flag.
+  ///
   /// Throws [OracleException] if connection fails with:
   /// - `errorCode`: ORA-xxxxx error code
   /// - `message`: Human-readable error description
@@ -814,6 +859,7 @@ class OracleConnection {
     Duration timeout = const Duration(seconds: 60),
     TlsConfig? tls,
     int statementCacheSize = 30,
+    bool preserveTimestampTimeZone = false,
   }) async {
     _checkStatementCacheSize(statementCacheSize);
     _log.info(
@@ -884,6 +930,7 @@ class OracleConnection {
       transport: transport,
       connectionInfo: connectionInfo,
       statementCacheSize: statementCacheSize,
+      preserveTimestampTimeZone: preserveTimestampTimeZone,
     );
   }
 

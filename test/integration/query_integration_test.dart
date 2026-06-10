@@ -55,6 +55,20 @@ void main() {
       );
     });
 
+    // Story 7.9 AC3: multi-round FETCH accumulation. With the default
+    // prefetch of 50 rows, 250 rows force at least 4 extra FETCH round
+    // trips — the path that accumulates rows across responses now that
+    // ExecuteResponse is immutable.
+    test('SELECT spanning multiple FETCH batches returns all rows', () async {
+      final result = await connection.execute(
+        'SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 250',
+      );
+      expect(result.rowCount, equals(250));
+      final values = [for (final row in result.rows) row['N'] as int];
+      expect(values, equals([for (var i = 1; i <= 250; i++) i]),
+          reason: 'every batch must be accumulated exactly once, in order');
+    });
+
     test('SELECT with multiple columns returns all values', () async {
       final result = await connection.execute(
         "SELECT 'a' as col1, 'b' as col2 FROM dual",

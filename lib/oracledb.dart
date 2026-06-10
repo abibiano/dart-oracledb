@@ -39,5 +39,8 @@ export 'src/protocol/messages/execute_message.dart' show ColumnMetadata;
 // Output bind API (Story 3.2)
 export 'src/oracle_bind.dart' show OracleBind, OracleDbType, OracleOutBinds;
 
+// Time-zone-preserving TIMESTAMP WITH TIME ZONE wrapper (Story 7.9 AC13)
+export 'src/oracle_timestamp_tz.dart' show OracleTimestampTz;
+
 // TLS/SSL Configuration
 export 'src/transport/tls.dart' show TlsConfig;

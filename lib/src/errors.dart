@@ -87,11 +87,28 @@ class OracleException implements Exception {
 
   /// Canonical Oracle error code formatted as `ORA-NNNNN` with five-digit
   /// zero padding (e.g., `ORA-00942`, `ORA-12170`).
-  String get code => 'ORA-${errorCode.toString().padLeft(5, '0')}';
+  ///
+  /// Valid Oracle error codes are non-negative; this getter throws
+  /// [ArgumentError] for a negative [errorCode] rather than emitting a
+  /// malformed string such as `ORA-000-1`. Codes of 100000 or above (never
+  /// produced by Oracle servers, which use at most five digits) are emitted
+  /// with their full digits (e.g., `ORA-100000`) — the five-digit padding is
+  /// a floor, not a cap.
+  String get code {
+    if (errorCode < 0) {
+      throw ArgumentError.value(errorCode, 'errorCode',
+          'Oracle error codes are non-negative (0..99999)');
+    }
+    return 'ORA-${errorCode.toString().padLeft(5, '0')}';
+  }
 
   @override
   String toString() {
-    final buffer = StringBuffer('OracleException: $code: $message');
+    // Negative (invalid) codes render raw instead of delegating to [code],
+    // which throws — toString must never throw.
+    final codeText =
+        errorCode < 0 ? 'ORA-invalid(errorCode: $errorCode)' : code;
+    final buffer = StringBuffer('OracleException: $codeText: $message');
     if (offset != null) {
       buffer.write(' [offset=$offset]');
     }

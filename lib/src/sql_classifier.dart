@@ -16,6 +16,13 @@
 ///     scanning past the CTE header to the terminal verb at paren-depth 0.
 ///   - `MERGE` is recognized as a cache-eligible DML verb (parity with
 ///     INSERT/UPDATE/DELETE).
+///
+/// Story 7.9 AC15: the depth-aware scanners recognize Oracle q-quote
+/// (alternative quoting) literals — `q'[…]'`, `q'{…}'`, `q'(…)'`, `q'<…>'`,
+/// and `q'X…X'` with any other delimiter — so an embedded raw `'` inside one
+/// cannot break the CTE-header scan. National literals (`n'…'`, `nq'…'`)
+/// remain unrecognized; their classification inside a CTE header is
+/// undefined.
 library;
 
 /// Skips leading whitespace, block comments, and line comments.
@@ -74,6 +81,10 @@ bool _isIdentStart(int c) {
       c == 0x23; // #
 }
 
+/// True when [c] is SQL whitespace (space, tab, LF, CR).
+bool _isWhitespace(int c) =>
+    c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D;
+
 /// Matches [keyword] at [pos] in [sql] case-insensitively, requiring the
 /// next character to be a non-identifier char or end-of-string (word boundary).
 bool matchesKeyword(String sql, int pos, String keyword) {
@@ -89,17 +100,51 @@ bool matchesKeyword(String sql, int pos, String keyword) {
   return !_isIdentChar(sql.codeUnitAt(pos + klen));
 }
 
-/// If [pos] begins a string literal (`'...'`), quoted identifier (`"..."`),
-/// line comment (`-- …`), or block comment (`/* … */`), returns the offset just
-/// past it; otherwise returns [pos] unchanged.
+/// If [pos] begins a string literal (`'...'`), q-quote literal
+/// (`q'[…]'` and friends), quoted identifier (`"..."`), line comment
+/// (`-- …`), or block comment (`/* … */`), returns the offset just past it;
+/// otherwise returns [pos] unchanged.
 ///
 /// Single shared skipper for every depth-aware scanner below so literals and
 /// comments can never be mistaken for keywords — and so the skipping rules
-/// (`''`/`""` escapes, CR-or-LF line-comment termination, unterminated-block
-/// clamping) live in exactly one place.
+/// (`''`/`""` escapes, q-quote delimiter pairs, CR-or-LF line-comment
+/// termination, unterminated-block clamping) live in exactly one place.
+///
+/// National-character literals (`n'…'`, `nq'…'`) are NOT recognized here:
+/// the identifier scan consumes the `n`/`nq` prefix and the remainder is
+/// treated as an ordinary `'…'` literal, so an `nq` literal with an embedded
+/// raw `'` can still mis-scan. They are vanishingly rare in CTE headers;
+/// classification of such statements is undefined (Story 7.9 AC15 covers
+/// plain q-quote only).
 int _skipNonCode(String sql, int pos) {
   final n = sql.length;
   final c = sql.codeUnitAt(pos);
+
+  // Oracle q-quote (alternative quoting) literal: q'X…X' where X is the
+  // delimiter; `[ { ( <` pair with `] } ) >`, any other char closes with
+  // itself. No escape sequence exists inside — the literal ends only at
+  // closing-delimiter + quote, so an embedded raw ' is plain content
+  // (Story 7.9 AC15). Clamps to end-of-string when unterminated.
+  if ((c == 0x71 || c == 0x51) && // q / Q
+      pos + 2 < n &&
+      sql.codeUnitAt(pos + 1) == 0x27) {
+    final open = sql.codeUnitAt(pos + 2);
+    final close = switch (open) {
+      0x28 => 0x29, // ( )
+      0x3C => 0x3E, // < >
+      0x5B => 0x5D, // [ ]
+      0x7B => 0x7D, // { }
+      _ => open,
+    };
+    pos += 3;
+    while (pos + 1 < n) {
+      if (sql.codeUnitAt(pos) == close && sql.codeUnitAt(pos + 1) == 0x27) {
+        return pos + 2;
+      }
+      pos++;
+    }
+    return n;
+  }
 
   // Single-quoted string literal with '' escape sequence.
   if (c == 0x27) {
@@ -222,6 +267,15 @@ int _findCteTerminalVerb(String sql, int pos) {
       }
       continue;
     }
+    // Explicit whitespace branch (Story 7.9 AC16): space/tab/LF/CR are
+    // consumed deliberately here, not via fallthrough, so a future early
+    // exit added below cannot silently regress CR handling.
+    if (_isWhitespace(c)) {
+      pos++;
+      continue;
+    }
+    // Any other character (operators, commas, digits, …) carries no
+    // classification signal at this level — consume and move on.
     pos++;
   }
   return -1;
@@ -290,6 +344,11 @@ bool _hasForUpdateClause(String sql, int pos) {
       while (pos < n && _isIdentChar(sql.codeUnitAt(pos))) {
         pos++;
       }
+      continue;
+    }
+    // Explicit whitespace branch (Story 7.9 AC16) — see _findCteTerminalVerb.
+    if (_isWhitespace(c)) {
+      pos++;
       continue;
     }
     pos++;
