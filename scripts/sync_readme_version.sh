@@ -57,12 +57,31 @@ if [ "$CHECK" = true ]; then
 $refs
 EOF
 
+  # Extract badge version: strip URL up to 'pub-v', then strip the trailing color
+  # suffix (e.g. '-orange') which is always all-lowercase letters with no digits or dots.
+  badge_version=$(grep -Eo 'img\.shields\.io/badge/pub-v[0-9][^)"#? ]*' "$README" \
+    | sed 's/.*pub-v//' | sed 's/-[a-z][a-z]*$//' \
+    | head -n 1 || true)
+  if [ -z "$badge_version" ]; then
+    echo "error: no pub badge matching 'img.shields.io/badge/pub-v<version>-<color>' found in README" >&2
+    exit 1
+  fi
+  if [ "$badge_version" != "$VERSION" ]; then
+    echo "error: README pub badge shows v$badge_version, but pubspec.yaml is $VERSION" >&2
+    echo "Run scripts/sync_readme_version.sh to update README.md." >&2
+    exit 1
+  fi
+
   echo "README version references match pubspec.yaml: $VERSION"
   exit 0
 fi
 
 PACKAGE_VERSION="$VERSION" perl -0pi -e \
   's/oracledb: \^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/oracledb: ^$ENV{PACKAGE_VERSION}/g' \
+  "$README"
+
+PACKAGE_VERSION="$VERSION" perl -0pi -e \
+  's%(img\.shields\.io/badge/pub-v)\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?=-[a-z]+(?:[\s)"#?\]]|$))%${1}$ENV{PACKAGE_VERSION}%g' \
   "$README"
 
 "$0" --check
