@@ -19,7 +19,7 @@ if [ "$#" -lt 3 ]; then
   exit 2
 fi
 
-set -eu
+set -euo pipefail
 
 image="$1"
 service="$2"

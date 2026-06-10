@@ -74,12 +74,43 @@ String _bytesToHex(Uint8List bytes) {
 
 /// Client information for authentication messages.
 class ClientInfo {
-  static final String terminal = Platform.environment['TERM'] ?? 'unknown';
-  static final String program = Platform.executable;
-  static final String machine = Platform.localHostname;
-  static final String processId = pid.toString();
-  static final String userName =
-      Platform.environment['USER'] ?? Platform.environment['USERNAME'] ?? '';
+  static final String terminal = () {
+    try {
+      return Platform.environment['TERM'] ?? 'unknown';
+    } catch (_) {
+      return 'unknown';
+    }
+  }();
+  static final String program = () {
+    try {
+      return Platform.executable;
+    } catch (_) {
+      return '';
+    }
+  }();
+  static final String machine = () {
+    try {
+      return Platform.localHostname;
+    } catch (_) {
+      return 'localhost';
+    }
+  }();
+  static final String processId = () {
+    try {
+      return pid.toString();
+    } catch (_) {
+      return '0';
+    }
+  }();
+  static final String userName = () {
+    try {
+      return Platform.environment['USER'] ??
+          Platform.environment['USERNAME'] ??
+          '';
+    } catch (_) {
+      return '';
+    }
+  }();
 }
 
 /// AUTH_PHASE_ONE request message (function code 0x76).

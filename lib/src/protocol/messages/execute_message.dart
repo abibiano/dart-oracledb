@@ -1114,9 +1114,18 @@ Object? _decodeColumnValue(ReadBuffer buf, ColumnMetadata col,
 
 void _processBitVector(ReadBuffer buf, _DecodeState s) {
   final numColsSent = buf.readUB2();
-  var numBytes = (s.columns.length / 8).floor();
-  if (s.columns.length % 8 > 0) numBytes++;
+  var numBytes = (s.columns.length + 7) ~/ 8;
   if (numBytes <= 0) numBytes = (numColsSent + 7) ~/ 8;
+  // A server-sent vector covering fewer columns than expected would leave
+  // out-of-range bits unset, causing _isDuplicate to return false for those
+  // columns — silently shearing the row decode instead of signalling the error.
+  if (s.columns.isNotEmpty && numColsSent < s.columns.length) {
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message: 'Duplicate-column bit vector covers $numColsSent column(s) but '
+          '${s.columns.length} were expected',
+    );
+  }
   s.bitVector = buf.readBytes(numBytes);
 }
 
