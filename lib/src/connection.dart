@@ -8,9 +8,9 @@ import 'package:logging/logging.dart';
 import 'crypto/auth.dart';
 import 'errors.dart';
 import 'oracle_bind.dart';
-import 'oracle_timestamp_tz.dart';
 import 'protocol/bind_parser.dart';
 import 'protocol/constants.dart' as oc;
+import 'protocol/data_types.dart' as dt;
 import 'protocol/messages/execute_message.dart';
 import 'result.dart';
 import 'sql_classifier.dart';
@@ -196,19 +196,11 @@ class OracleConnection {
   /// Infers the Oracle wire-protocol type indicator for a raw Dart bind value.
   /// Used to populate decoder-side bind metadata for IN binds (they never
   /// appear in OUT decode paths, but keeping the list aligned simplifies
-  /// indexing).
-  static int _inferOraType(Object? value) {
-    if (value == null) return oc.oraTypeVarchar;
-    if (value is String) return oc.oraTypeVarchar;
-    if (value is int) return oc.oraTypeNumber;
-    if (value is double) return oc.oraTypeNumber;
-    if (value is DateTime) return oc.oraTypeDate;
-    if (value is OracleTimestampTz) return oc.oraTypeTimestampTz;
-    if (value is Uint8List) return oc.oraTypeRaw;
-    // Unknown types still flow through; ExecuteRequest will raise a clearer
-    // error if encoding fails downstream.
-    return oc.oraTypeVarchar;
-  }
+  /// indexing). Delegates to the shared [dt.inferOraTypeForValue] table;
+  /// unknown types fall back to VARCHAR so they still flow through —
+  /// ExecuteRequest raises a clearer error if encoding fails downstream.
+  static int _inferOraType(Object? value) =>
+      dt.inferOraTypeForValue(value) ?? oc.oraTypeVarchar;
 
   /// Validates a requested statement cache size against the documented bounds
   /// (AC7) before any network work, so a misconfiguration fails loudly at the
@@ -579,6 +571,7 @@ class OracleConnection {
           bindNames: bindNames,
           outBindNameIndex: outBindNameIndex,
         ),
+        moreRowsAvailable: response.moreRowsToFetch,
       );
     } catch (e) {
       if (cacheEntry != null) {

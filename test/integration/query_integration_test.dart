@@ -89,6 +89,111 @@ void main() {
       expect(row['mycolumn'], equals('test'));
       expect(row['MyColumn'], equals('test'));
     });
+
+    test('fully drained multi-batch SELECT reports moreRowsAvailable false',
+        () async {
+      final result = await connection.execute(
+        'SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 250',
+      );
+      expect(result.rowCount, equals(250));
+      expect(result.moreRowsAvailable, isFalse,
+          reason: 'the flag is reserved for the fetch-iteration safety cap');
+    });
+  });
+
+  // F1: cached-cursor re-execution of a multi-batch SELECT. The server often
+  // echoes cursorId == 0 on the re-execute while the original cursor stays
+  // open; pre-fix the drain gate keyed on the echoed id and silently
+  // truncated the SECOND execution to one prefetch window (50 rows).
+  // F2/F3: low-cardinality ORDER BY validates end-to-end value correctness
+  // for a data shape that MAY trigger Oracle's duplicate-column bit-vector
+  // compression within and across fetch-batch boundaries. The test cannot
+  // assert the server actually used the optimization (that is the server's
+  // choice); the crafted-bytes unit tests pin the decoder mechanism itself.
+  group('Multi-batch fetch hardening (F1, F2, F3)',
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    final table = uniqueTableName('fetch_drain');
+    OracleConnection? connectionHandle;
+    late OracleConnection connection;
+
+    setUpAll(() async {
+      final setup = await connectForTest();
+      try {
+        await setup.execute(
+            'CREATE TABLE $table (id NUMBER PRIMARY KEY, status VARCHAR2(10))');
+        // 250 rows / 3 distinct statuses → multi-batch with long runs of
+        // adjacent duplicate status values once ordered.
+        await setup.execute('INSERT INTO $table (id, status) '
+            "SELECT LEVEL, 'S' || MOD(LEVEL, 3) FROM dual "
+            'CONNECT BY LEVEL <= 250');
+        await setup.commit();
+      } finally {
+        await setup.close();
+      }
+    });
+
+    tearDownAll(() async {
+      final cleanup = await connectForTest();
+      await cleanUpConnection(
+        cleanup,
+        dropStatements: ['DROP TABLE $table PURGE'],
+      );
+    });
+
+    setUp(() async {
+      connectionHandle = await connectForTest();
+      connection = connectionHandle!;
+    });
+
+    tearDown(() async {
+      final c = connectionHandle;
+      connectionHandle = null;
+      await cleanUpConnection(c);
+    });
+
+    test('re-executed multi-batch SELECT returns all rows BOTH times '
+        '(cache-hit cursor reuse)', () async {
+      final query = 'SELECT id FROM $table ORDER BY id';
+
+      final first = await connection.execute(query);
+      expect(first.rowCount, equals(250),
+          reason: 'first execution (full parse) must drain all batches');
+
+      final second = await connection.execute(query);
+      expect(second.rowCount, equals(250),
+          reason: 'second execution reuses the cached cursor — the server '
+              'echoes cursorId 0, which must not truncate the drain');
+      expect(connection.debugReuseExecutes, greaterThan(0),
+          reason: 'the second execution must actually hit the cursor cache');
+
+      final ids = [for (final row in second.rows) row['ID'] as int];
+      expect(ids, equals([for (var i = 1; i <= 250; i++) i]));
+    });
+
+    test('low-cardinality ORDER BY across batch boundaries decodes every '
+        'value exactly', () async {
+      final result = await connection
+          .execute('SELECT status, id FROM $table ORDER BY status, id');
+      expect(result.rowCount, equals(250));
+      // Recompute the expected (status, id) sequence and compare row by
+      // row. If the server chose duplicate-column compression at a batch
+      // boundary, any mishandling would shear values here — but this test
+      // can only prove value correctness, not that the compression was
+      // actually exercised (the crafted-bytes unit tests pin the decoder
+      // mechanism deterministically).
+      final expected = [
+        for (final status in ['S0', 'S1', 'S2'])
+          for (var id = 1; id <= 250; id++)
+            if ('S${id % 3}' == status) [status, id],
+      ];
+      for (var i = 0; i < 250; i++) {
+        final row = result.rows[i];
+        expect([row['STATUS'], row['ID']], equals(expected[i]),
+            reason: 'row $i must decode exactly (would catch '
+                'duplicate-column bit-vector mishandling if the server '
+                'compressed across FETCH boundaries)');
+      }
+    });
   });
 
   group('Bind parameters',

@@ -359,14 +359,48 @@ void main() {
               'filled — the transport must keep FETCHing');
     });
 
-    test('query batch boundary without an open cursor does not fetch', () {
+    // F1: a cached-cursor re-execute legitimately echoes cursorId == 0 while
+    // the original cursor stays open, so the batch-boundary signal must NOT
+    // be gated on the echoed id (node-oracledb clears moreRowsToFetch only on
+    // ORA-01403). The transport supplies the request's own cursor id.
+    test('query batch boundary with a zero cursor echo still signals more '
+        'rows', () {
       final payload = _buildPayload([
         _errorMessage(errorNum: 0, cursorId: 0),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
       final r = decodeExecuteResponse(payload, isQuery: true);
       expect(r.isSuccess, isTrue);
-      expect(r.moreRowsToFetch, isFalse);
+      expect(r.moreRowsToFetch, isTrue,
+          reason: 'only ORA-01403 ends the fetch — a zero cursor echo on a '
+              're-executed cached statement must not truncate the drain');
+    });
+
+    // The no-ERROR-message default branch: a successful query batch can end
+    // without ANY ERROR message (no end-of-fetch marker at all). The decoder
+    // must default to moreRowsToFetch == true — "fetch when unsure" costs one
+    // round trip answered by ORA-01403; "don't fetch" silently loses rows.
+    test('successful query payload with row data but NO error message '
+        'defaults moreRowsToFetch to true', () {
+      const cols = [
+        ColumnMetadata(name: 'C0', oracleType: oraTypeVarchar, maxLength: 100),
+      ];
+      final payload = _buildPayload([
+        _rowHeader(),
+        [ttcMsgTypeRowData, ..._bytesWithLength('hello'.codeUnits)],
+        // Terminal STATUS only — no ERROR message arrived.
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: cols,
+      );
+      expect(r.isSuccess, isTrue);
+      expect(r.rows.single, equals(['hello']));
+      expect(r.moreRowsToFetch, isTrue,
+          reason: 'a batch that ended without an end-of-fetch marker must '
+              'be reported as having more rows pending');
     });
 
     test('ORA-01403 with open cursor still ends the fetch', () {
@@ -1362,6 +1396,166 @@ void main() {
       expect(r.outBindValues[1], isNull);
     });
   });
+
+  // F2 / F3: duplicate-column bit-vector lifecycle. A bit vector describes
+  // exactly one row (node-oracledb withData.js:252 clears it after each
+  // processRowData); the duplicate source for the first row of a FETCH
+  // continuation is the last row of the previous round.
+  group('duplicate-column bit vector lifecycle (F2, F3)', () {
+    const cols = [
+      ColumnMetadata(name: 'C0', oracleType: oraTypeVarchar, maxLength: 100),
+      ColumnMetadata(name: 'C1', oracleType: oraTypeVarchar, maxLength: 100),
+    ];
+
+    test('stale bit vector: the row after a duplicate-marked row decodes all '
+        'columns from the wire', () {
+      // Row 1 ships both columns; a BIT_VECTOR marks column 0 of row 2 as a
+      // duplicate (row 2 ships only column 1); row 3 carries NO new vector
+      // and ships both columns. Pre-fix the stale vector made row 3 copy
+      // column 0 and mis-decode the remaining wire bytes (silent shear).
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength('aa'.codeUnits),
+          ..._bytesWithLength('b1'.codeUnits),
+        ],
+        // Bit 0 clear = column 0 duplicate; bit 1 set = column 1 on the wire.
+        _bitVector(2, [0x02]),
+        [ttcMsgTypeRowData, ..._bytesWithLength('b2'.codeUnits)],
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength('cc'.codeUnits),
+          ..._bytesWithLength('b3'.codeUnits),
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: cols,
+      );
+      expect(r.rows, hasLength(3));
+      expect(r.rows[0], equals(['aa', 'b1']));
+      expect(r.rows[1], equals(['aa', 'b2']),
+          reason: 'duplicate bit copies column 0 from the previous row');
+      expect(r.rows[2], equals(['cc', 'b3']),
+          reason: 'the vector must be cleared after row 2 — row 3 ships '
+              'both columns on the wire');
+    });
+
+    test('cross-round duplicate copies from previousRoundLastRow', () {
+      // First row of a FETCH continuation references the last row of the
+      // previous round (which lives in the transport accumulator, not in
+      // this response).
+      final payload = _buildPayload([
+        _rowHeader(),
+        _bitVector(2, [0x02]),
+        [ttcMsgTypeRowData, ..._bytesWithLength('x1'.codeUnits)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: cols,
+        previousRoundLastRow: const <Object?>['prev0', 'prev1'],
+      );
+      expect(r.rows.single, equals(['prev0', 'x1']),
+          reason: 'column 0 must be copied from the previous round\'s row');
+    });
+
+    test('cross-round duplicate with no prior row anywhere is a protocol '
+        'error', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        _bitVector(2, [0x02]),
+        [ttcMsgTypeRowData, ..._bytesWithLength('x1'.codeUnits)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: cols,
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+            .having((e) => e.message, 'message', contains('Duplicate'))),
+        reason: 'silently decoding a duplicate column from the wire would '
+            'shear every later column — must fail loud instead',
+      );
+    });
+
+    test('cross-round duplicate against a too-short previousRoundLastRow is '
+        'a protocol error (not a RangeError)', () {
+      // Column 1 is marked duplicate ([0x01]: bit 0 set = col 0 on the wire,
+      // bit 1 clear = col 1 duplicate), but the supplied prior row only has
+      // one column — priorRow[1] would throw a raw RangeError.
+      final payload = _buildPayload([
+        _rowHeader(),
+        _bitVector(2, [0x01]),
+        [ttcMsgTypeRowData, ..._bytesWithLength('x0'.codeUnits)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: cols,
+          previousRoundLastRow: const <Object?>['prev0'],
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+            .having((e) => e.message, 'message',
+                contains('prior-row length mismatch'))),
+        reason: 'a RangeError escaping the decoder would lose all protocol '
+            'context — fail loud with an OracleException instead',
+      );
+    });
+
+    test('completion probe stays byte-accurate past a first-row duplicate',
+        () {
+      // ttcStreamIsComplete never receives a previous-round row; it must
+      // skip the duplicate column WITHOUT consuming bytes and still locate
+      // the terminal STATUS.
+      final payload = _buildPayload([
+        _rowHeader(),
+        _bitVector(2, [0x02]),
+        [ttcMsgTypeRowData, ..._bytesWithLength('x1'.codeUnits)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(ttcStreamIsComplete(payload, expectedColumns: cols), isTrue);
+    });
+  });
+
+  // F14b: empty list inputs reuse canonical const empty lists (no per-DML
+  // allocations) while staying unmodifiable.
+  group('ExecuteResponse empty-list canonicalization (F14b)', () {
+    test('empty list fields are canonical const instances', () {
+      final a = ExecuteResponse(isSuccess: true);
+      final b = ExecuteResponse(isSuccess: true);
+      expect(identical(a.rows, b.rows), isTrue);
+      expect(identical(a.columnMetadata, b.columnMetadata), isTrue);
+      expect(identical(a.outBindValues, b.outBindValues), isTrue);
+      expect(identical(a.outBindIndices, b.outBindIndices), isTrue);
+    });
+
+    test('empty list fields remain unmodifiable', () {
+      final r = ExecuteResponse(isSuccess: true);
+      expect(() => r.rows.add(<Object?>[]), throwsUnsupportedError);
+      expect(
+          () => r.columnMetadata.add(const ColumnMetadata(
+              name: 'X', oracleType: oraTypeVarchar, maxLength: 1)),
+          throwsUnsupportedError);
+      expect(() => r.outBindValues.add(null), throwsUnsupportedError);
+      expect(() => r.outBindIndices.add(0), throwsUnsupportedError);
+    });
+  });
 }
 
 /// Builds a minimal TTC IO_VECTOR message carrying the supplied directions.
@@ -1394,6 +1588,14 @@ List<int> _ioVector(List<int> directions,
 /// Oracle base-100 encoding for the integer 5 (positive, 1 digit).
 /// Format: exponent byte = 0xC1, then digit + 1 = 6.
 List<int> _oracleNumberFiveBytes() => [0xC1, 6];
+
+/// Builds a TTC BIT_VECTOR message: UB2 column count, then the raw vector
+/// bytes (the decoder sizes the read from the known column count — bit SET
+/// means "column is on the wire", bit CLEAR means "duplicate of the previous
+/// row's column").
+List<int> _bitVector(int numColsSent, List<int> vectorBytes) {
+  return [ttcMsgTypeBitVector, ..._ub2(numColsSent), ...vectorBytes];
+}
 
 /// Builds a minimal TTC ROW_HEADER message with no bit-vector and no rowid.
 List<int> _rowHeader() {

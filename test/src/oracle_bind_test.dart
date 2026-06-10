@@ -320,6 +320,47 @@ void main() {
     });
   });
 
+  // F5a: OracleDbType.timestampTz — the documented TSTZ bind round-trip is
+  // now actually declarable.
+  group('OracleDbType.timestampTz (F5a)', () {
+    test('OUT bind constructs without maxSize (fixed wire size)', () {
+      final bind = OracleBind.out(type: OracleDbType.timestampTz);
+      expect(bind.type, equals(OracleDbType.timestampTz));
+      expect(bind.value, isNull);
+    });
+
+    test('IN OUT accepts an OracleTimestampTz value', () {
+      final value = OracleTimestampTz.fromHourMinute(
+          DateTime.utc(2024, 3, 15, 5, 0, 45), 5, 30);
+      expect(
+          () => OracleBind.inOut(value: value, type: OracleDbType.timestampTz),
+          returnsNormally);
+    });
+
+    test('IN OUT accepts a plain DateTime value', () {
+      expect(
+          () => OracleBind.inOut(
+              value: DateTime.utc(2024, 3, 15), type: OracleDbType.timestampTz),
+          returnsNormally);
+    });
+
+    test('IN OUT accepts null with the explicit type', () {
+      expect(
+          () => OracleBind.inOut(value: null, type: OracleDbType.timestampTz),
+          returnsNormally);
+    });
+
+    test('IN OUT rejects non-timestamp values', () {
+      expect(
+          () => OracleBind.inOut(value: 42, type: OracleDbType.timestampTz),
+          throwsArgumentError);
+      expect(
+          () =>
+              OracleBind.inOut(value: 'now', type: OracleDbType.timestampTz),
+          throwsArgumentError);
+    });
+  });
+
   group('Story 7.2 — OracleOutBinds lookup contract (AC7, AC8)', () {
     test('AC7 — unsupported key type throws ArgumentError', () {
       // The contract is "int (index) or String (name)" — any other key type

@@ -68,19 +68,16 @@ class BindVariable {
   bool get hasOutput => dir == BindDir.output || dir == BindDir.inputOutput;
 
   static int _inferType(Object? value) {
-    if (value == null) return oraTypeVarchar;
-    if (value is String) return oraTypeVarchar;
-    if (value is int) return oraTypeNumber;
-    if (value is double) return oraTypeNumber;
-    if (value is DateTime) return oraTypeDate;
-    if (value is OracleTimestampTz) return oraTypeTimestampTz;
-    if (value is Uint8List) return oraTypeRaw;
-    throw OracleException(
-      errorCode: oraBindTypeError,
-      message: 'Unsupported bind value type: ${value.runtimeType}. '
-          'Supported types: String, int, double, DateTime, '
-          'OracleTimestampTz, Uint8List, null',
-    );
+    final oraType = dt.inferOraTypeForValue(value);
+    if (oraType == null) {
+      throw OracleException(
+        errorCode: oraBindTypeError,
+        message: 'Unsupported bind value type: ${value.runtimeType}. '
+            'Supported types: String, int, double, DateTime, '
+            'OracleTimestampTz, Uint8List, null',
+      );
+    }
+    return oraType;
   }
 }
 
@@ -356,13 +353,18 @@ class ExecuteRequest extends Message {
         return;
       case oraTypeTimestampTz:
         // OracleTimestampTz binds carry their original offset on the wire
-        // (Story 7.9 AC13); a plain DateTime under an explicit TZ oraType
-        // falls back to the offset-less encoding.
+        // (Story 7.9 AC13). A plain DateTime under an explicit TZ oraType is
+        // encoded as its UTC instant wrapped at an explicit +00:00 offset
+        // (full 13-byte payload): empirically (P3, validated against 23ai
+        // and 21c) the server mishandles an 11-byte offset-less TSTZ bind —
+        // it echoes invalid all-zero zone bytes back, corrupting the value.
         if (value is OracleTimestampTz) {
           buffer.writeBytesWithLength(dt.encodeTimestampTz(value));
           return;
         }
-        buffer.writeBytesWithLength(dt.encodeTimestamp(value as DateTime));
+        buffer.writeBytesWithLength(dt.encodeTimestampTz(OracleTimestampTz(
+            (value as DateTime).toUtc(),
+            offsetMinutes: 0)));
         return;
       default:
         throw OracleException(
@@ -526,7 +528,11 @@ class BindMetadata {
 /// constructed response.
 class ExecuteResponse {
   /// Creates an execute response. List arguments are defensively copied into
-  /// unmodifiable views.
+  /// unmodifiable views; empty inputs reuse canonical const empty lists so
+  /// the common DML / COMMIT / fetch-round shapes allocate nothing per
+  /// response for the lists they leave empty. (PL/SQL responses with OUT
+  /// binds carry non-empty outBind lists by definition, so they always copy
+  /// those.)
   ExecuteResponse({
     required this.isSuccess,
     this.cursorId = 0,
@@ -539,10 +545,18 @@ class ExecuteResponse {
     this.errorCode,
     this.errorMessage,
     this.errorOffset,
-  })  : columnMetadata = List.unmodifiable(columnMetadata),
-        rows = List.unmodifiable(rows),
-        outBindValues = List.unmodifiable(outBindValues),
-        outBindIndices = List.unmodifiable(outBindIndices);
+  })  : columnMetadata = columnMetadata.isEmpty
+            ? const <ColumnMetadata>[]
+            : List<ColumnMetadata>.unmodifiable(columnMetadata),
+        rows = rows.isEmpty
+            ? const <List<Object?>>[]
+            : List<List<Object?>>.unmodifiable(rows),
+        outBindValues = outBindValues.isEmpty
+            ? const <Object?>[]
+            : List<Object?>.unmodifiable(outBindValues),
+        outBindIndices = outBindIndices.isEmpty
+            ? const <int>[]
+            : List<int>.unmodifiable(outBindIndices);
 
   /// Whether the call succeeded (no Oracle error).
   final bool isSuccess;
@@ -625,13 +639,22 @@ bool ttcStreamIsComplete(Uint8List data,
 /// Parses a complete TTC response payload (one or more TTC messages) into an
 /// [ExecuteResponse]. Handles SELECT (DESCRIBE_INFO + ROW_HEADER + ROW_DATA +
 /// ERROR-end-of-fetch) and DML (PARAMETER + ERROR) shapes plus piggybacks.
+///
+/// [previousRoundLastRow] is the last row accumulated by the transport from
+/// the *previous* EXECUTE/FETCH round, when this payload is a continuation
+/// FETCH. Oracle's duplicate-column optimization can mark a column of the
+/// first row in a new round as "same as the previous row" — which lives in
+/// the previous response. node-oracledb persists `statement.lastRowIndex`
+/// across rounds (withData.js:250); this decoder is stateless per response,
+/// so the transport threads the prior row in instead.
 ExecuteResponse decodeExecuteResponse(Uint8List data,
     {required bool isQuery,
     int ttcFieldVersion = 24,
     bool endOfRequestSupport = true,
     List<ColumnMetadata>? expectedColumns,
     List<BindMetadata>? bindMetadata,
-    bool preserveTimestampTimeZone = false}) {
+    bool preserveTimestampTimeZone = false,
+    List<Object?>? previousRoundLastRow}) {
   final buffer = ReadBuffer(data);
   final state = _DecodeState(
     isQuery: isQuery,
@@ -641,6 +664,7 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
     bindMetadata: bindMetadata ?? const [],
     endOfRequestSupport: endOfRequestSupport,
     preserveTimestampTimeZone: preserveTimestampTimeZone,
+    previousRoundLastRow: previousRoundLastRow,
   );
 
   try {
@@ -657,10 +681,15 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
   }
 
   final isSuccess = state.errorNum == 0 || state.errorNum == null;
-  // Cursor is still open when: query succeeded, no ORA-01403 end-of-fetch
-  // received, and the server assigned a non-zero cursor id. In that case the
-  // first batch may be incomplete — signal the transport to FETCH more rows.
-  if (isQuery && isSuccess && state.cursorId != 0 && state.errorNum == null) {
+  // No ERROR message arrived at all for a successful query: the batch ended
+  // without an end-of-fetch marker, so more rows are pending. Default to
+  // fetching regardless of the echoed cursor id — node-oracledb thin
+  // defaults moreRowsToFetch true and clears it ONLY on ORA-01403, and a
+  // cached-cursor re-execute legitimately echoes cursorId == 0 while the
+  // cursor stays open (the transport falls back to the request's own cursor
+  // id). "Fetch when unsure" costs one round trip answered by ORA-01403;
+  // "don't fetch when unsure" silently loses rows.
+  if (isQuery && isSuccess && state.errorNum == null) {
     state.moreRowsToFetch = true;
   }
   return ExecuteResponse(
@@ -686,7 +715,8 @@ class _DecodeState {
       this.ttcFieldVersion = 24,
       this.endOfRequestSupport = true,
       this.strictTypes = true,
-      this.preserveTimestampTimeZone = false});
+      this.preserveTimestampTimeZone = false,
+      this.previousRoundLastRow});
 
   final bool isQuery;
   final int ttcFieldVersion;
@@ -721,6 +751,11 @@ class _DecodeState {
   /// END_OF_REQUEST follows. node-oracledb encodes the same rule via
   /// `endOfResponse = !endOfRequestSupport` in `base.js processErrorInfo`.
   final bool endOfRequestSupport;
+
+  /// Last row accumulated by the transport from the previous FETCH round, if
+  /// any. Used as the duplicate-column source when a duplicate bit appears on
+  /// the first row of this response (see [decodeExecuteResponse]).
+  final List<Object?>? previousRoundLastRow;
   List<ColumnMetadata> columns;
   final List<List<Object?>> rows = [];
   int cursorId = 0;
@@ -919,8 +954,9 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
           continue;
         }
         final meta = s.bindMetadata[bindIdx];
-        final value =
-            _decodeValueByOraType(buf, meta.oraType, strict: s.strictTypes);
+        final value = _decodeValueByOraType(buf, meta.oraType,
+            strict: s.strictTypes,
+            preserveTimestampTimeZone: s.preserveTimestampTimeZone);
         // After the value bytes, an OUT bind carries an SB4 "actual num bytes"
         // trailer (matches node-oracledb processColumnData !inFetch path).
         buf.skipSB4();
@@ -934,8 +970,43 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
   final row = <Object?>[];
   for (var i = 0; i < s.columns.length; i++) {
     final col = s.columns[i];
-    if (_isDuplicate(s.bitVector, i) && s.rows.isNotEmpty) {
-      row.add(s.rows.last[i]);
+    if (_isDuplicate(s.bitVector, i)) {
+      // The duplicate source is the immediately preceding row: the last row
+      // of this response, or — for the first row of a continuation FETCH —
+      // the last row the transport accumulated in the previous round.
+      final priorRow =
+          s.rows.isNotEmpty ? s.rows.last : s.previousRoundLastRow;
+      if (priorRow != null && priorRow.length <= i) {
+        // The prior row is shorter than the duplicate column index. Reading
+        // priorRow[i] would throw a RangeError deep in the decoder; fail
+        // loud with a protocol error instead.
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message: 'Duplicate-column bit set for column $i but the prior row '
+              'only has ${priorRow.length} column(s) — duplicate-column '
+              'prior-row length mismatch (stream misaligned or wrong '
+              'previous-round row supplied)',
+        );
+      }
+      if (priorRow == null) {
+        // No prior row exists anywhere. A duplicate column ships no wire
+        // bytes, so decoding it from the buffer would misalign the stream.
+        // Real decode pass: fail loud instead of silently corrupting the
+        // row. Lenient completion probe (which never receives a
+        // previous-round row): skip the column without consuming bytes —
+        // that is byte-accurate, and value correctness is irrelevant there.
+        if (s.strictTypes) {
+          throw OracleException(
+            errorCode: oraProtocolError,
+            message: 'Duplicate-column bit set for column $i but no prior '
+                'row is available (first row of the result set) — stream '
+                'misaligned or previous-round row not supplied',
+          );
+        }
+        row.add(null);
+        continue;
+      }
+      row.add(priorRow[i]);
       continue;
     }
     row.add(_decodeColumnValue(buf, col,
@@ -943,9 +1014,12 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
         preserveTimestampTimeZone: s.preserveTimestampTimeZone));
   }
   s.rows.add(row);
-  // bitVector intentionally NOT cleared here — it persists for all ROW_DATA
-  // messages under the same ROW_HEADER. It is reset only when a new
-  // ROW_HEADER or BIT_VECTOR message arrives.
+  // A bit vector describes exactly ONE row: clear it after every decoded row
+  // so a following ROW_DATA without its own BIT_VECTOR message decodes all
+  // columns from the wire (node-oracledb withData.js:252 sets
+  // `this.bitVector = null` at the end of processRowData). A stale vector
+  // here would skip wire bytes and shear every later column in the batch.
+  s.bitVector = null;
 }
 
 /// Decodes one length-prefixed value from [buf] using the Oracle type indicator
@@ -996,9 +1070,7 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
       // The slice from readBytesWithLength already constrains the field, so we
-      // do not need to pass `length` to decodeNumber here — the equivalent
-      // column-decode path in data_types.dart `decodeValue` does pass length
-      // because it reads directly from the row buffer.
+      // do not need to pass `length` to decodeNumber here.
       // AC7: a declared fixed scale (> 0) forces double; scale null (bare
       // NUMBER) or 0 (e.g. NUMBER(10)) keeps the int heuristic.
       return dt.decodeNumber(ReadBuffer(bytes), forceDouble: (scale ?? 0) > 0);
@@ -1240,11 +1312,12 @@ void _processError(ReadBuffer buf, _DecodeState s) {
     // ERROR num=0 on a query is a batch boundary, not end of fetch: the
     // requested iteration count was delivered and the cursor remains open
     // (node-oracledb thin only clears moreRowsToFetch on ORA-01403 —
-    // statement.js defaults it true). Signal the transport to keep FETCHing
-    // unless the server reported no open cursor (Story 7.9 AC3 — the prior
-    // unconditional `false` here silently capped every SELECT at one
-    // prefetch window).
-    s.moreRowsToFetch = s.cursorId != 0;
+    // statement.js defaults it true). Set it unconditionally: a cached-cursor
+    // re-execute legitimately echoes cursorId == 0 while the original cursor
+    // stays open, so gating on the echoed id silently truncated re-executed
+    // multi-batch SELECTs to one prefetch window. The transport supplies the
+    // request's own cursor id when the echo is 0.
+    s.moreRowsToFetch = true;
   }
   if (!s.isQuery && num == 0) {
     s.rowsAffected = rowCount;

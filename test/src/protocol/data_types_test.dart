@@ -583,21 +583,75 @@ void main() {
       expect(viaWrapper.utc, equals(viaDefault));
     });
 
-    test('decodeTimestampTz treats a truncated 7-byte payload as +00:00', () {
+    // F10: TSTZ zone bytes encode +20/+60 and are never zero (even for
+    // +00:00 → bytes 20/60), so Oracle's trailing-zero truncation can never
+    // remove them. A 7/11-byte payload on this decoder means stream
+    // misalignment — fail loud instead of fabricating a +00:00 offset.
+    test('decodeTimestampTz rejects a short 7-byte payload', () {
       final wire = encodeDate(DateTime.utc(2024, 3, 15, 10, 30, 45));
       expect(wire.length, equals(7));
-      final decoded = decodeTimestampTz(ReadBuffer(wire));
-      expect(decoded.utc, equals(DateTime.utc(2024, 3, 15, 10, 30, 45)));
-      expect(decoded.tzHourOffset, equals(0));
-      expect(decoded.tzMinuteOffset, equals(0));
+      expect(
+        () => decodeTimestampTz(ReadBuffer(wire)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+      );
     });
 
-    test('decodeTimestampTz treats an 11-byte payload as +00:00', () {
+    test('decodeTimestampTz rejects a short 11-byte payload', () {
       final wire = encodeTimestamp(DateTime.utc(2024, 3, 15, 10, 30, 45, 123));
       expect(wire.length, equals(11));
+      expect(
+        () => decodeTimestampTz(ReadBuffer(wire)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+      );
+    });
+
+    // F6: malformed zone-byte combinations must surface as protocol errors —
+    // never as the OracleTimestampTz constructor's ArgumentError leaking out
+    // of a decode path.
+    test('decodeTimestampTz rejects bytes 34/90 (+14:30 — past the ceiling)',
+        () {
+      final wire = tzWire(DateTime.utc(2024, 3, 15, 10, 30, 45), 34, 90);
+      expect(
+        () => decodeTimestampTz(ReadBuffer(wire)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+      );
+    });
+
+    test('decodeTimestampTz rejects mixed-sign zone bytes 25/30 (+5:-30)', () {
+      final wire = tzWire(DateTime.utc(2024, 3, 15, 10, 30, 45), 25, 30);
+      expect(
+        () => decodeTimestampTz(ReadBuffer(wire)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+      );
+    });
+
+    test('decodeTimestamp rejects the same malformed zone bytes', () {
+      // The shared parser guards both decode paths identically.
+      for (final bytes in [
+        [34, 90], // +14:30
+        [25, 30], // +5:-30 mixed sign
+        [15, 90], // -5:+30 mixed sign
+      ]) {
+        final wire =
+            tzWire(DateTime.utc(2024, 3, 15, 10, 30, 45), bytes[0], bytes[1]);
+        expect(
+          () => decodeTimestamp(ReadBuffer(wire)),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+          reason: 'zone bytes $bytes must be a protocol error',
+        );
+      }
+    });
+
+    test('decodeTimestampTz accepts the +00:00 zone bytes 20/60', () {
+      final wire = tzWire(DateTime.utc(2024, 3, 15, 10, 30, 45), 20, 60);
       final decoded = decodeTimestampTz(ReadBuffer(wire));
-      expect(decoded.utc, equals(DateTime.utc(2024, 3, 15, 10, 30, 45, 123)));
-      expect(decoded.tzHourOffset, equals(0));
+      expect(decoded.utc, equals(DateTime.utc(2024, 3, 15, 10, 30, 45)));
+      expect(decoded.offsetMinutes, equals(0));
     });
 
     test('decodeTimestampTz rejects region-id zones like decodeTimestamp', () {
@@ -610,10 +664,10 @@ void main() {
     });
 
     test('encodeTimestampTz writes 13 bytes with the original offset', () {
-      final value = OracleTimestampTz(
+      final value = OracleTimestampTz.fromHourMinute(
         DateTime.utc(2024, 3, 15, 5, 0, 45, 123),
-        tzHourOffset: 5,
-        tzMinuteOffset: 30,
+        5,
+        30,
       );
       final wire = encodeTimestampTz(value);
       expect(wire.length, equals(13));
@@ -631,38 +685,42 @@ void main() {
     });
 
     test('encode → decode round-trips a negative offset value', () {
-      final value = OracleTimestampTz(
+      final value = OracleTimestampTz.fromHourMinute(
         DateTime.utc(2024, 6, 1, 18, 30, 0),
-        tzHourOffset: -8,
-        tzMinuteOffset: 0,
+        -8,
+        0,
       );
       final decoded = decodeTimestampTz(ReadBuffer(encodeTimestampTz(value)));
       expect(decoded, equals(value));
     });
 
-    test('encodeValue accepts OracleTimestampTz for the TZ oraType', () {
-      final value = OracleTimestampTz(
+    // Migrated from the deleted `encodeValue` dispatch (F12): the live bind
+    // path encodes through `encodeTimestampTz` directly.
+    test('encodeTimestampTz emits the +20/+60 zone bytes for +05:30', () {
+      final value = OracleTimestampTz.fromHourMinute(
         DateTime.utc(2024, 3, 15, 5, 0, 45),
-        tzHourOffset: 5,
-        tzMinuteOffset: 30,
+        5,
+        30,
       );
-      final wire = encodeValue(value, oraTypeTimestampTz);
+      final wire = encodeTimestampTz(value);
       expect(wire.length, equals(13));
       expect(wire[11], equals(25));
       expect(wire[12], equals(90));
     });
 
-    test('decodeValue returns the wrapper only when opted in', () {
+    // Migrated from the deleted `decodeValue` dispatch (F12): the live
+    // column path picks decodeTimestamp vs decodeTimestampTz by the
+    // connection's preserveTimestampTimeZone flag.
+    test('decodeTimestamp vs decodeTimestampTz: wrapper only when opted in',
+        () {
       final wire =
           tzWire(DateTime.utc(2024, 3, 15, 10, 30, 45), 20 + 5, 60 + 30);
-      final byDefault =
-          decodeValue(ReadBuffer(wire), oraTypeTimestampTz, wire.length);
+      final byDefault = decodeTimestamp(ReadBuffer(wire));
       expect(byDefault, isA<DateTime>(),
           reason: 'default decode contract (Story 7.1 AC1) is unchanged');
-      final optedIn = decodeValue(
-          ReadBuffer(wire), oraTypeTimestampTz, wire.length,
-          preserveTimestampTimeZone: true);
-      expect(optedIn, isA<OracleTimestampTz>());
+      final optedIn = decodeTimestampTz(ReadBuffer(wire));
+      expect(optedIn.utc, equals(byDefault));
+      expect(optedIn.offsetMinutes, equals(330));
     });
   });
 
@@ -795,86 +853,63 @@ void main() {
     });
   });
 
-  group('encodeValue', () {
-    test('encodes int as NUMBER', () {
-      final encoded = encodeValue(123, oraTypeNumber);
+  // Migrated from the deleted `encodeValue`/`decodeValue` test-only dispatch
+  // (F12): the same contracts pinned against the direct codec functions the
+  // live bind/column paths actually use.
+  group('direct codec round-trips (former encodeValue/decodeValue)', () {
+    test('encodes int as NUMBER and decodes it back', () {
+      final encoded = encodeNumber(123);
       expect(encoded.isNotEmpty, isTrue);
+      expect(decodeNumber(ReadBuffer(encoded)), equals(123));
     });
 
-    test('encodes String as VARCHAR', () {
-      final encoded = encodeValue('Hello', oraTypeVarchar);
+    test('encodes String as VARCHAR and decodes it back', () {
+      final encoded = encodeVarchar('Hello');
       expect(encoded.isNotEmpty, isTrue);
+      expect(decodeVarchar(ReadBuffer(encoded), encoded.length),
+          equals('Hello'));
     });
 
-    test('encodes DateTime as DATE', () {
-      final encoded = encodeValue(DateTime(2025, 12, 15), oraTypeDate);
-      expect(encoded.length, equals(7));
-    });
-
-    test('encodes null correctly', () {
-      final encoded = encodeValue(null, oraTypeVarchar);
-      expect(isNullValue(encoded), isTrue);
-    });
-
-    test('throws on unsupported type', () {
-      expect(
-        () => encodeValue(Object(), oraTypeVarchar),
-        throwsA(isA<OracleException>()),
-      );
-    });
-  });
-
-  group('decodeValue', () {
-    test('decodes NUMBER to int', () {
-      final encoded = encodeNumber(42);
-      final value =
-          decodeValue(ReadBuffer(encoded), oraTypeNumber, encoded.length);
-      expect(value, equals(42));
-    });
-
-    test('decodes VARCHAR to String', () {
-      final encoded = encodeVarchar('Test');
-      final value =
-          decodeValue(ReadBuffer(encoded), oraTypeVarchar, encoded.length);
-      expect(value, equals('Test'));
-    });
-
-    test('decodes DATE to DateTime', () {
+    test('encodes DateTime as 7-byte DATE and decodes it back', () {
       final dt = DateTime(2025, 12, 15, 10, 30, 0);
       final encoded = encodeDate(dt);
-      final value =
-          decodeValue(ReadBuffer(encoded), oraTypeDate, encoded.length);
-      expect(value, equals(dt));
+      expect(encoded.length, equals(7));
+      expect(decodeDate(ReadBuffer(encoded)), equals(dt));
     });
 
-    test('throws on unsupported type', () {
+    test('encodeNull emits the NULL marker', () {
+      expect(isNullValue(encodeNull()), isTrue);
+    });
+
+    test('decodes NUMBER to int via the bounded-length form', () {
       final encoded = encodeNumber(42);
-      expect(
-        () => decodeValue(ReadBuffer(encoded), 9999, encoded.length),
-        throwsA(isA<OracleException>()),
-      );
+      final value = decodeNumber(ReadBuffer(encoded), length: encoded.length);
+      expect(value, equals(42));
     });
   });
 
-  group('OracleException for data types', () {
-    test('includes error code for type mismatch', () {
-      try {
-        encodeValue(Object(), oraTypeVarchar);
-        fail('Should have thrown OracleException');
-      } on OracleException catch (e) {
-        expect(e.errorCode, equals(oraDataTypeNotSupported));
-        expect(e.message, contains('VARCHAR'));
-      }
+  group('inferOraTypeForValue (shared bind inference, F11)', () {
+    test('maps every supported Dart type to its wire type', () {
+      expect(inferOraTypeForValue(null), equals(oraTypeVarchar));
+      expect(inferOraTypeForValue('text'), equals(oraTypeVarchar));
+      expect(inferOraTypeForValue(42), equals(oraTypeNumber));
+      expect(inferOraTypeForValue(3.14), equals(oraTypeNumber));
+      expect(inferOraTypeForValue(DateTime(2024, 3, 15)), equals(oraTypeDate),
+          reason: 'DateTime deliberately maps to DATE, not TIMESTAMP — both '
+              'pre-existing tables agreed on this');
+      expect(
+          inferOraTypeForValue(OracleTimestampTz(DateTime.utc(2024),
+              offsetMinutes: 0)),
+          equals(oraTypeTimestampTz));
+      expect(inferOraTypeForValue(Uint8List.fromList([1, 2])),
+          equals(oraTypeRaw));
     });
 
-    test('includes error code for unsupported type', () {
-      try {
-        encodeValue('test', 9999);
-        fail('Should have thrown OracleException');
-      } on OracleException catch (e) {
-        expect(e.errorCode, equals(oraUnsupportedType));
-        expect(e.message, contains('9999'));
-      }
+    test('returns null for unsupported Dart types', () {
+      expect(inferOraTypeForValue(Object()), isNull);
+      expect(inferOraTypeForValue(const Duration(seconds: 1)), isNull);
+      expect(inferOraTypeForValue(<int>[1, 2, 3]), isNull);
+      expect(inferOraTypeForValue(true), isNull);
     });
   });
 

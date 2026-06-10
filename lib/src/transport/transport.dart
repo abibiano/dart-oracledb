@@ -368,7 +368,15 @@ class Transport {
   static const int _tnsDataFlagsEndOfRequest = 0x2000;
 
   // Safety cap: prevent infinite FETCH loops when moreRowsToFetch stays true.
-  static const int _maxFetchIterations = 1000;
+  static const int _defaultMaxFetchIterations = 1000;
+  int _maxFetchIterations = _defaultMaxFetchIterations;
+
+  /// Test-only seam to lower the fetch-drain iteration cap so the
+  /// incomplete-result path (`moreRowsToFetch == true` after hitting the cap)
+  /// can be exercised deterministically without draining 1,000 fetch rounds.
+  /// Not part of the public API.
+  @visibleForTesting
+  set debugMaxFetchIterations(int value) => _maxFetchIterations = value;
 
   /// Safety cap (AC10): the maximum number of TNS packets a single
   /// [_receiveAllTtcData] call will read while assembling one TTC response.
@@ -480,19 +488,26 @@ class Transport {
       preserveTimestampTimeZone: preserveTimestampTimeZone,
     );
 
-    // If this is a SELECT and the server kept the cursor open with more rows
-    // pending, drain them via FETCH calls until EOF. ExecuteResponse is
-    // immutable (Story 7.9 AC3), so rows accumulate in a local list and a
-    // single final response is built after the loop — on both the success
-    // and the fetch-failure paths.
-    if (isQuery && response.cursorId != 0 && response.isSuccess) {
+    // If this is a SELECT with more rows pending, drain them via FETCH calls
+    // until EOF. The server may echo cursorId == 0 on a cached-cursor
+    // re-execute while the original cursor stays open, so the drain falls
+    // back to the request's own cursor id. ExecuteResponse is immutable
+    // (Story 7.9 AC3), so rows accumulate in a local list and a single final
+    // response is built after the loop — on both the success and the
+    // fetch-failure paths.
+    final effectiveCursorId =
+        response.cursorId != 0 ? response.cursorId : cursorId;
+    if (isQuery &&
+        response.isSuccess &&
+        effectiveCursorId != 0 &&
+        response.moreRowsToFetch) {
       // Use column metadata from this response (populated from DESCRIBE or
       // expectedColumns) so fetch rounds can decode rows without DESCRIBE.
       final fetchColumns = response.columnMetadata.isNotEmpty
           ? response.columnMetadata
           : expectedColumns;
       final allRows = List<List<Object?>>.of(response.rows);
-      var moreRowsToFetch = response.moreRowsToFetch;
+      var moreRowsToFetch = true;
       var fetchCount = 0;
       while (moreRowsToFetch) {
         if (++fetchCount > _maxFetchIterations) {
@@ -505,15 +520,18 @@ class Transport {
           break;
         }
         final fetched = await _sendFetch(
-            response.cursorId, prefetchRows, timeout,
+            effectiveCursorId, prefetchRows, timeout,
             expectedColumns: fetchColumns,
-            preserveTimestampTimeZone: preserveTimestampTimeZone);
+            preserveTimestampTimeZone: preserveTimestampTimeZone,
+            // Duplicate-column dedup across FETCH rounds: the first row of
+            // the next round may reference the last row of this one.
+            previousRoundLastRow: allRows.isNotEmpty ? allRows.last : null);
         allRows.addAll(fetched.rows);
         moreRowsToFetch = fetched.moreRowsToFetch;
         if (!fetched.isSuccess) {
           return ExecuteResponse(
             isSuccess: false,
-            cursorId: response.cursorId,
+            cursorId: effectiveCursorId,
             columnMetadata: response.columnMetadata,
             rows: allRows,
             rowsAffected: fetched.rowsAffected,
@@ -524,18 +542,27 @@ class Transport {
           );
         }
       }
-      if (fetchCount > 0) {
-        return ExecuteResponse(
-          isSuccess: true,
-          cursorId: response.cursorId,
-          columnMetadata: response.columnMetadata,
-          rows: allRows,
-          outBindValues: response.outBindValues,
-          outBindIndices: response.outBindIndices,
-          rowsAffected: response.rowsAffected,
-          moreRowsToFetch: moreRowsToFetch,
-        );
-      }
+      return ExecuteResponse(
+        isSuccess: true,
+        cursorId: effectiveCursorId,
+        columnMetadata: response.columnMetadata,
+        rows: allRows,
+        outBindValues: response.outBindValues,
+        outBindIndices: response.outBindIndices,
+        rowsAffected: response.rowsAffected,
+        moreRowsToFetch: moreRowsToFetch,
+      );
+    }
+
+    if (isQuery &&
+        response.isSuccess &&
+        effectiveCursorId == 0 &&
+        response.moreRowsToFetch) {
+      // The server signalled more rows pending, but neither the response nor
+      // the request carries a usable cursor id, so the drain loop cannot run.
+      _log.warning('Server reports more rows pending but no usable cursor id '
+          'is available to continue fetching; result is reported incomplete '
+          '(moreRowsToFetch=true)');
     }
 
     return response;
@@ -621,7 +648,8 @@ class Transport {
   Future<ExecuteResponse> _sendFetch(
       int cursorId, int numRows, Duration? timeout,
       {List<ColumnMetadata>? expectedColumns,
-      bool preserveTimestampTimeZone = false}) async {
+      bool preserveTimestampTimeZone = false,
+      List<Object?>? previousRoundLastRow}) async {
     final fetch = FetchRequest(
       cursorId: cursorId,
       numRows: numRows,
@@ -638,6 +666,7 @@ class Transport {
       endOfRequestSupport: _supportsEndOfRequest,
       expectedColumns: expectedColumns,
       preserveTimestampTimeZone: preserveTimestampTimeZone,
+      previousRoundLastRow: previousRoundLastRow,
     );
   }
 

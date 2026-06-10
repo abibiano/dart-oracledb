@@ -20,6 +20,7 @@ library;
 import 'dart:typed_data';
 
 import 'errors.dart';
+import 'oracle_timestamp_tz.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/messages/execute_message.dart' show BindDir;
 
@@ -52,6 +53,18 @@ enum OracleDbType {
   /// Oracle TIMESTAMP (decoded as Dart `DateTime`).
   timestamp,
 
+  /// Oracle TIMESTAMP WITH TIME ZONE.
+  ///
+  /// Decoded as a UTC `DateTime` by default, or as `OracleTimestampTz`
+  /// (preserving the original offset) on a connection opened with
+  /// `preserveTimestampTimeZone: true` — consistent with column decoding.
+  /// IN OUT values may be supplied as `OracleTimestampTz` (the original
+  /// offset travels on the wire) or as a plain `DateTime`, which is encoded
+  /// as its UTC instant at an explicit `+00:00` offset. (The full 13-byte
+  /// payload is always sent: the server mishandles an offset-less 11-byte
+  /// TSTZ bind, echoing invalid zone bytes back.)
+  timestampTz,
+
   /// Oracle RAW (decoded as Dart `Uint8List`). Requires `maxSize`.
   raw,
 }
@@ -73,6 +86,11 @@ enum OracleDbType {
 /// For [OracleDbType.varchar] and [OracleDbType.raw], callers must supply
 /// [maxSize] so the server allocates a return buffer large enough for the
 /// returned value.
+///
+/// [OracleDbType.timestampTz] OUT / IN OUT values follow the connection's
+/// column-decode contract: a plain UTC [DateTime] by default, or an
+/// [OracleTimestampTz] carrying the server-sent offset on a connection
+/// opened with `preserveTimestampTimeZone: true`.
 class OracleBind {
   /// Declares an OUT-only bind for the given Oracle [type].
   ///
@@ -150,6 +168,14 @@ class OracleBind {
           throw ArgumentError.value(value, 'value',
               'OracleBind(type: timestamp) requires DateTime or null');
         }
+      case OracleDbType.timestampTz:
+        if (value is! OracleTimestampTz && value is! DateTime) {
+          throw ArgumentError.value(
+              value,
+              'value',
+              'OracleBind(type: timestampTz) requires OracleTimestampTz, '
+                  'DateTime, or null');
+        }
       case OracleDbType.raw:
         if (value is! Uint8List) {
           throw ArgumentError.value(value, 'value',
@@ -183,6 +209,8 @@ class OracleBind {
         return oc.oraTypeDate;
       case OracleDbType.timestamp:
         return oc.oraTypeTimestamp;
+      case OracleDbType.timestampTz:
+        return oc.oraTypeTimestampTz;
       case OracleDbType.raw:
         return oc.oraTypeRaw;
     }

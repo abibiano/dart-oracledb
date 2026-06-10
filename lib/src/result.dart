@@ -39,6 +39,7 @@ class OracleResult {
     required List<List<dynamic>> rowData,
     int? rowsAffected,
     OracleOutBinds? outBinds,
+    bool moreRowsAvailable = false,
   }) {
     final nameToIndex = _buildNameMap(columnMetadata);
     final rows = rowData
@@ -53,6 +54,7 @@ class OracleResult {
       rows: rows,
       rowsAffected: rowsAffected,
       outBinds: outBinds ?? const OracleOutBinds.empty(),
+      moreRowsAvailable: moreRowsAvailable,
     );
   }
 
@@ -61,6 +63,7 @@ class OracleResult {
     required this._rows,
     required this.outBinds,
     this.rowsAffected,
+    this.moreRowsAvailable = false,
   });
 
   final List<ColumnMetadata> _columnMetadata;
@@ -87,6 +90,23 @@ class OracleResult {
   /// result.outBinds[0];       // positional
   /// ```
   final OracleOutBinds outBinds;
+
+  /// Whether the driver stopped fetching while the server still had rows
+  /// pending.
+  ///
+  /// `true` when the driver could not fully drain the result set, for either
+  /// of two reasons:
+  ///
+  /// - the fetch-iteration safety cap (1,000 FETCH round trips per execute —
+  ///   see Known Limitations in the README) stopped the drain early, or
+  /// - the server reported more rows pending on a cursor the driver could not
+  ///   continue fetching (no usable cursor id was available for FETCH calls).
+  ///
+  /// In both cases [rows] is a truncated prefix of the full result set. Fully
+  /// drained result sets — including empty ones — always report `false`.
+  /// Callers reading very large result sets should check this flag and narrow
+  /// the query (or paginate) when it is set.
+  final bool moreRowsAvailable;
 
   /// The rows returned by a SELECT query.
   ///

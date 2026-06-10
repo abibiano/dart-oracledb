@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:oracledb/src/errors.dart';
+import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/messages/auth_message.dart';
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
@@ -359,6 +360,66 @@ void main() {
         // Cap exhaustion is a framing hazard: the transport must be poisoned.
         expect(transport.isCorrupted, isTrue);
         expect(transport.isConnected, isFalse);
+
+        await transport.disconnect();
+        await server.close();
+      });
+    });
+
+    // The fetch-drain iteration cap must surface an honestly incomplete
+    // result (moreRowsToFetch == true), never spin forever or silently
+    // truncate. A fake server answers every EXECUTE/FETCH with a bare STATUS
+    // success payload (no ERROR message), which for a query decodes to
+    // "success, more rows pending" — without the cap the drain loop would
+    // spin unbounded. Driven via the test-only debugMaxFetchIterations seam.
+    group('fetch-drain iteration cap (moreRowsToFetch backstop)', () {
+      test('hitting the lowered cap returns success with moreRowsToFetch true',
+          () async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        var requestsSeen = 0;
+        server.listen((s) {
+          s.listen((_) {
+            requestsSeen++;
+            // One DATA packet per request: data-flags 0x0000, then a bare
+            // terminal STATUS TTC message (type 9, UB4 0, UB2 0). For a query
+            // this is a success response with NO ERROR message, so the
+            // decoder defaults moreRowsToFetch to true (batch boundary).
+            const payload = <int>[0x00, 0x00, ttcMsgTypeStatus, 0x00, 0x00];
+            final packetLen = tnsHeaderSize + payload.length;
+            s.add(<int>[
+              (packetLen >> 8) & 0xFF, packetLen & 0xFF, // length (BE)
+              0x00, 0x00, // checksum
+              tnsPacketData, // type = 6
+              0x00, // marker
+              0x00, 0x00, // header checksum
+              ...payload,
+            ]);
+          });
+        });
+
+        final transport = Transport()..debugMaxFetchIterations = 3;
+        await transport.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+
+        // cursorId != 0 simulates a cached-cursor re-execute so the drain
+        // gate's effective-cursor-id fallback engages and the FETCH loop runs.
+        final response = await transport.sendExecute(
+          'SELECT x FROM t',
+          isQuery: true,
+          cursorId: 5,
+          timeout: const Duration(seconds: 5),
+        );
+
+        expect(response.isSuccess, isTrue);
+        expect(response.moreRowsToFetch, isTrue,
+            reason: 'hitting the fetch-iteration cap must report the result '
+                'as incomplete (moreRowsToFetch true → moreRowsAvailable at '
+                'the connection level), not as fully drained');
+        expect(response.cursorId, equals(5),
+            reason: 'the rebuilt response must carry the effective cursor id');
+        expect(requestsSeen, greaterThanOrEqualTo(2),
+            reason: 'the drain loop must have issued at least one FETCH '
+                'after the initial EXECUTE before tripping the cap');
 
         await transport.disconnect();
         await server.close();

@@ -151,51 +151,12 @@ jobs:
       - name: Install dependencies
         run: dart pub get
 
-      # Even though `services:` waits for the container healthcheck before
-      # starting steps, we add a bounded readiness probe so logs clearly show
-      # the failure mode (container vs. listener vs. PDB) if Oracle never
-      # becomes ready. The probe requires a real DB session on FREEPDB1 via
-      # in-container sqlplus (Story 7.9 AC4) — a TCP-up listener with a
-      # still-mounting PDB (ORA-12514) is not "ready". Total budget
-      # (60 × ~10s ≈ 10 min worst case) stays under timeout-minutes: 30 (AC5).
+      # Bounded readiness probe shared with the 21c job (F13 dedup) — see
+      # scripts/ci_wait_for_oracle.sh for the full rationale (Story 7.9
+      # AC4/AC5/AC7). Logs clearly show the failure mode (container vs.
+      # listener vs. PDB) if Oracle never becomes ready.
       - name: Wait for Oracle readiness on localhost:1521 (listener + FREEPDB1 session)
-        run: |
-          set -eu
-          # `services:` containers get auto-generated names — derive the id
-          # from the image (Story 7.9 AC7). Re-derive inside the loop: the
-          # container may not be listed when the step starts, and a one-shot
-          # empty id would make the [ -n "$cid" ] session probe never succeed,
-          # silently looping to the full timeout even on a healthy DB.
-          image="container-registry.oracle.com/database/free:latest"
-          attempts=60
-          for i in $(seq 1 $attempts); do
-            cid="$(docker ps --filter "ancestor=${image}" -q | head -n1)"
-            if bash -c "cat < /dev/tcp/localhost/1521" >/dev/null 2>&1; then
-              # Listener is up — now require an actual session on FREEPDB1.
-              # Credential is the ephemeral CI-only password (see test-run env).
-              if [ -n "$cid" ] && echo 'SELECT 1 FROM dual;' | docker exec -i "$cid" sqlplus -L -S system/testpassword@//localhost:1521/FREEPDB1 >/dev/null 2>&1; then
-                echo "Oracle ready: DB session on FREEPDB1 established (after ${i} attempts)"
-                exit 0
-              fi
-              if [ -z "$cid" ]; then
-                echo "Listener up but no container matched ancestor=${image} yet (attempt ${i}/${attempts})..."
-              else
-                echo "Listener up but FREEPDB1 not accepting sessions yet (attempt ${i}/${attempts})..."
-              fi
-            else
-              echo "Oracle not ready yet (attempt ${i}/${attempts})..."
-            fi
-            sleep 10
-          done
-          echo "::error::Oracle did not become ready within timeout"
-          # Surface service-container startup logs (Story 7.9 AC7).
-          if [ -n "$cid" ]; then
-            docker logs "$cid" 2>&1 | tail -n 200 || true
-          else
-            echo "::error::No container matched ancestor=${image}; cannot show logs. All containers:"
-            docker ps -a || true
-          fi
-          exit 1
+        run: scripts/ci_wait_for_oracle.sh "container-registry.oracle.com/database/free:latest" "FREEPDB1" "Oracle"
 
       - name: Run integration tests (Oracle-backed)
         env:
@@ -248,48 +209,12 @@ jobs:
       - name: Install dependencies
         run: dart pub get
 
-      # Bounded readiness probe requiring a real DB session on XEPDB1 via
-      # in-container sqlplus (Story 7.9 AC4) — a TCP-up listener with a
-      # still-mounting PDB (ORA-12514) is not "ready". Total budget
-      # (60 × ~10s ≈ 10 min worst case) stays under timeout-minutes: 20 (AC5).
+      # Bounded readiness probe shared with the 23ai job (F13 dedup) — see
+      # scripts/ci_wait_for_oracle.sh for the full rationale (Story 7.9
+      # AC4/AC5/AC7). Logs clearly show the failure mode (container vs.
+      # listener vs. PDB) if Oracle never becomes ready.
       - name: Wait for Oracle 21c readiness on localhost:1521 (listener + XEPDB1 session)
-        run: |
-          set -eu
-          # `services:` containers get auto-generated names — derive the id
-          # from the image (Story 7.9 AC7). Re-derive inside the loop: the
-          # container may not be listed when the step starts, and a one-shot
-          # empty id would make the [ -n "$cid" ] session probe never succeed,
-          # silently looping to the full timeout even on a healthy DB.
-          image="gvenzl/oracle-xe:21"
-          attempts=60
-          for i in $(seq 1 $attempts); do
-            cid="$(docker ps --filter "ancestor=${image}" -q | head -n1)"
-            if bash -c "cat < /dev/tcp/localhost/1521" >/dev/null 2>&1; then
-              # Listener is up — now require an actual session on XEPDB1.
-              # Credential is the ephemeral CI-only password (see test-run env).
-              if [ -n "$cid" ] && echo 'SELECT 1 FROM dual;' | docker exec -i "$cid" sqlplus -L -S system/testpassword@//localhost:1521/XEPDB1 >/dev/null 2>&1; then
-                echo "Oracle 21c ready: DB session on XEPDB1 established (after ${i} attempts)"
-                exit 0
-              fi
-              if [ -z "$cid" ]; then
-                echo "Listener up but no container matched ancestor=${image} yet (attempt ${i}/${attempts})..."
-              else
-                echo "Listener up but XEPDB1 not accepting sessions yet (attempt ${i}/${attempts})..."
-              fi
-            else
-              echo "Oracle 21c not ready yet (attempt ${i}/${attempts})..."
-            fi
-            sleep 10
-          done
-          echo "::error::Oracle 21c did not become ready within timeout"
-          # Surface service-container startup logs (Story 7.9 AC7).
-          if [ -n "$cid" ]; then
-            docker logs "$cid" 2>&1 | tail -n 200 || true
-          else
-            echo "::error::No container matched ancestor=${image}; cannot show logs. All containers:"
-            docker ps -a || true
-          fi
-          exit 1
+        run: scripts/ci_wait_for_oracle.sh "gvenzl/oracle-xe:21" "XEPDB1" "Oracle 21c"
 
       - name: Run integration tests (Oracle 21c)
         env:

@@ -47,7 +47,14 @@ const int oraConnectionNotAllowed =
 class OracleException implements Exception {
   /// Creates an Oracle exception with the given error code and message.
   ///
-  /// The [errorCode] should be a standard Oracle error code (e.g., 12170).
+  /// The [errorCode] should be a standard Oracle error code (e.g., 12170) —
+  /// valid Oracle codes are non-negative, and the driver only ever
+  /// constructs non-negative codes. A negative code (a caller bug) is
+  /// tolerated rather than rejected: [code] and [toString] render it as
+  /// `ORA-invalid(<code>)` instead of throwing, so error reporting never
+  /// fails mid-flight. There is deliberately no assert rejecting negative
+  /// codes: negative sentinel codes must remain constructible — tests and
+  /// the documented `ORA-invalid(<code>)` rendering rely on it.
   /// The [message] provides a human-readable description of the error.
   /// The optional [cause] preserves the original error for debugging.
   /// The optional [sql] and [offset] carry query-error context for
@@ -88,27 +95,24 @@ class OracleException implements Exception {
   /// Canonical Oracle error code formatted as `ORA-NNNNN` with five-digit
   /// zero padding (e.g., `ORA-00942`, `ORA-12170`).
   ///
-  /// Valid Oracle error codes are non-negative; this getter throws
-  /// [ArgumentError] for a negative [errorCode] rather than emitting a
-  /// malformed string such as `ORA-000-1`. Codes of 100000 or above (never
+  /// Total over all inputs: valid Oracle error codes are non-negative, so a
+  /// negative [errorCode] renders as the unambiguous sentinel
+  /// `ORA-invalid(<code>)` (e.g. `ORA-invalid(-1)`) instead of a malformed
+  /// string such as `ORA-000-1` — and never throws, so error-reporting paths
+  /// cannot fail while formatting an error. Codes of 100000 or above (never
   /// produced by Oracle servers, which use at most five digits) are emitted
   /// with their full digits (e.g., `ORA-100000`) — the five-digit padding is
   /// a floor, not a cap.
   String get code {
     if (errorCode < 0) {
-      throw ArgumentError.value(errorCode, 'errorCode',
-          'Oracle error codes are non-negative (0..99999)');
+      return 'ORA-invalid($errorCode)';
     }
     return 'ORA-${errorCode.toString().padLeft(5, '0')}';
   }
 
   @override
   String toString() {
-    // Negative (invalid) codes render raw instead of delegating to [code],
-    // which throws — toString must never throw.
-    final codeText =
-        errorCode < 0 ? 'ORA-invalid(errorCode: $errorCode)' : code;
-    final buffer = StringBuffer('OracleException: $codeText: $message');
+    final buffer = StringBuffer('OracleException: $code: $message');
     if (offset != null) {
       buffer.write(' [offset=$offset]');
     }

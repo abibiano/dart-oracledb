@@ -132,15 +132,25 @@ void main() {
       });
     });
 
-    // Story 7.9 AC1: code is range-safe — never emits malformed forms like
-    // ORA-000-1; negative codes are rejected, >=100000 keeps full digits.
-    group('range-safe ORA code formatting (Story 7.9 AC1)', () {
-      test('code throws ArgumentError for negative errorCode', () {
+    // Story 7.9 AC1 + F7: code is range-safe AND total — never emits
+    // malformed forms like ORA-000-1 and never throws; negative codes render
+    // as the ORA-invalid(<code>) sentinel, >=100000 keeps full digits.
+    group('range-safe ORA code formatting (Story 7.9 AC1, F7)', () {
+      test('code renders negative errorCode as ORA-invalid(...), no throw',
+          () {
         const exception = OracleException(
           errorCode: -1,
           message: 'bogus negative code',
         );
-        expect(() => exception.code, throwsArgumentError);
+        expect(exception.code, equals('ORA-invalid(-1)'));
+      });
+
+      test('code renders a large negative errorCode without throwing', () {
+        const exception = OracleException(
+          errorCode: -99999,
+          message: 'bogus negative code',
+        );
+        expect(exception.code, equals('ORA-invalid(-99999)'));
       });
 
       test('code formats 0 as ORA-00000', () {
@@ -168,13 +178,15 @@ void main() {
         expect(exception.code, equals('ORA-100000'));
       });
 
-      test('toString never throws for negative errorCode', () {
+      test('toString never throws for negative errorCode and delegates to '
+          'code', () {
         const exception = OracleException(
           errorCode: -1,
           message: 'bogus negative code',
         );
         final str = exception.toString();
-        expect(str, contains('-1'));
+        expect(str, contains('ORA-invalid(-1)'),
+            reason: 'toString delegates to the total code getter');
         expect(str, contains('bogus negative code'));
         expect(str, isNot(contains('ORA-000-1')));
       });

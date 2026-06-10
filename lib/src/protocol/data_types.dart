@@ -7,14 +7,10 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:logging/logging.dart';
-
 import '../errors.dart';
 import '../oracle_timestamp_tz.dart';
 import 'buffer.dart';
 import 'constants.dart';
-
-final _log = Logger('DataTypes');
 
 /// Special marker for NULL values in Oracle encoding.
 const int _nullMarker = 0xFF;
@@ -497,12 +493,14 @@ Uint8List encodeTimestampTz(OracleTimestampTz value) {
 /// Oracle TIMESTAMP wire format:
 /// - Bytes 0-6: DATE portion (always present)
 /// - Bytes 7-10: Nanoseconds (big-endian) — omitted by the server when zero
-/// - Bytes 11-12: Timezone offset (TZ variants only) — omitted when zero
+/// - Bytes 11-12: Timezone offset (TZ variants only)
 ///
-/// Oracle truncates trailing zero bytes in date/timestamp wire payloads, so a
-/// TIMESTAMP whose fractional-seconds (and TZ) are all zero arrives as 7 bytes.
-/// Fractional and TZ bytes are therefore treated as optional, defaulting to
-/// zero.
+/// Oracle truncates trailing **zero** bytes in date/timestamp wire payloads,
+/// so a plain TIMESTAMP whose fractional-seconds are zero arrives as 7 bytes.
+/// The TZ bytes of a `TIMESTAMP WITH TIME ZONE` value, however, encode the
+/// offset as `hour + 20` / `minute + 60` — never zero, even for `+00:00`
+/// (bytes 20/60) — so a TSTZ payload always carries all 13 bytes and the
+/// fractional bytes can only be "missing" on non-TZ payloads.
 ///
 /// **Time-zone handling (13-byte payload):** for `TIMESTAMP WITH TIME ZONE`
 /// the server sends the date/time fields **already normalized to UTC**; byte
@@ -559,16 +557,25 @@ DateTime decodeTimestamp(ReadBuffer buffer) {
 ///
 /// Wire shape and validation are identical to [decodeTimestamp] (same parser:
 /// BCE rejection, payload-length check, region-id rejection, offset-range
-/// check). The fields are the UTC instant; bytes 11-12 are the zone. A
-/// truncated 7/11-byte payload — Oracle drops trailing zero bytes — decodes
-/// as offset `+00:00`.
+/// check). The fields are the UTC instant; bytes 11-12 are the zone. The zone
+/// bytes encode `hour + 20` / `minute + 60` — never zero, even for `+00:00` —
+/// so Oracle's trailing-zero truncation cannot remove them: a 7/11-byte
+/// payload reaching this decoder means the stream is misaligned or the column
+/// is not actually `TIMESTAMP WITH TIME ZONE`, and an [OracleException]
+/// (`oraProtocolError`) is thrown rather than fabricating a `+00:00` offset.
 OracleTimestampTz decodeTimestampTz(ReadBuffer buffer) {
   final w = _readTimestampWire(buffer);
-  return OracleTimestampTz(
-    w.fieldsAsUtc,
-    tzHourOffset: w.tzHourOffset ?? 0,
-    tzMinuteOffset: w.tzMinuteOffset ?? 0,
-  );
+  final tzHour = w.tzHourOffset;
+  final tzMinute = w.tzMinuteOffset;
+  if (tzHour == null || tzMinute == null) {
+    throw const OracleException(
+      errorCode: oraProtocolError,
+      message: 'TIMESTAMP WITH TIME ZONE payload is missing its time-zone '
+          'bytes (got a 7/11-byte payload; TSTZ zone bytes are never '
+          'truncated because they encode +20/+60, never zero)',
+    );
+  }
+  return OracleTimestampTz.fromHourMinute(w.fieldsAsUtc, tzHour, tzMinute);
 }
 
 /// Parsed TIMESTAMP wire payload, shared by [decodeTimestamp] and
@@ -658,13 +665,19 @@ _TimestampWire _readTimestampWire(ReadBuffer buffer) {
     tzHourOffset = byte11 - 20;
     tzMinuteOffset = byte12 - 60;
     // Oracle's documented TZ offset range is [-12:59, +14:00]. A wire byte
-    // pair that decodes outside this band (e.g. byte11=0 → -20h) indicates
-    // either a corrupted payload or a server-protocol drift. Reject rather
-    // than silently constructing a wildly wrong instant via `subtract()`.
+    // pair that decodes outside this band (e.g. byte11=0 → -20h), past the
+    // +14:00 ceiling (e.g. +14:30), or with conflicting hour/minute signs
+    // (e.g. +5:-30) indicates either a corrupted payload or a
+    // server-protocol drift. All malformed shapes are rejected HERE as a
+    // protocol error so the OracleTimestampTz constructor's ArgumentError
+    // can never surface from a decode path.
     if (tzHourOffset < -12 ||
         tzHourOffset > 14 ||
         tzMinuteOffset < -59 ||
-        tzMinuteOffset > 59) {
+        tzMinuteOffset > 59 ||
+        (tzHourOffset == 14 && tzMinuteOffset != 0) ||
+        (tzHourOffset > 0 && tzMinuteOffset < 0) ||
+        (tzHourOffset < 0 && tzMinuteOffset > 0)) {
       throw OracleException(
         errorCode: oraProtocolError,
         message: 'TIMESTAMP TZ offset out of range: '
@@ -718,136 +731,26 @@ String decodeVarchar(ReadBuffer buffer, int length) {
 }
 
 // ============================================================================
-// Generic Value Encoding/Decoding
+// Bind type inference
 // ============================================================================
 
-/// Encodes a Dart value to Oracle wire format based on Oracle type.
+/// Infers the Oracle wire-protocol type indicator for a raw Dart bind value.
 ///
-/// Throws [OracleException] if the value type is not supported.
-Uint8List encodeValue(dynamic value, int oracleType) {
-  if (value == null) {
-    return encodeNull();
-  }
-
-  switch (oracleType) {
-    case oraTypeVarchar:
-    case oraTypeVarchar2:
-    case oraTypeString:
-      if (value is String) {
-        return encodeVarchar(value);
-      }
-      _log.warning(
-        'Type mismatch: expected String for VARCHAR, got ${value.runtimeType}',
-      );
-      throw OracleException(
-        errorCode: oraDataTypeNotSupported,
-        message: 'Data type error: expected String for VARCHAR type, '
-            'got ${value.runtimeType}',
-      );
-
-    case oraTypeNumber:
-    case oraTypeInteger:
-    case oraTypeFloat:
-    case oraTypeVarnum:
-      if (value is num) {
-        return encodeNumber(value);
-      }
-      _log.warning(
-        'Type mismatch: expected num for NUMBER, got ${value.runtimeType}',
-      );
-      throw OracleException(
-        errorCode: oraDataTypeNotSupported,
-        message: 'Data type error: expected num for NUMBER type, '
-            'got ${value.runtimeType}',
-      );
-
-    case oraTypeDate:
-      if (value is DateTime) {
-        return encodeDate(value);
-      }
-      _log.warning(
-        'Type mismatch: expected DateTime for DATE, got ${value.runtimeType}',
-      );
-      throw OracleException(
-        errorCode: oraDataTypeNotSupported,
-        message: 'Data type error: expected DateTime for DATE type, '
-            'got ${value.runtimeType}',
-      );
-
-    case oraTypeTimestamp:
-    case oraTypeTimestampTz:
-    case oraTypeTimestampLtz:
-      // An OracleTimestampTz bind keeps its original offset on the wire
-      // (Story 7.9 AC13); a plain DateTime keeps the offset-less encoding.
-      if (value is OracleTimestampTz) {
-        return encodeTimestampTz(value);
-      }
-      if (value is DateTime) {
-        return encodeTimestamp(value);
-      }
-      _log.warning(
-        'Type mismatch: expected DateTime for TIMESTAMP, got ${value.runtimeType}',
-      );
-      throw OracleException(
-        errorCode: oraDataTypeNotSupported,
-        message: 'Data type error: expected DateTime or OracleTimestampTz '
-            'for TIMESTAMP type, got ${value.runtimeType}',
-      );
-
-    default:
-      _log.warning('Unsupported Oracle type: $oracleType');
-      throw OracleException(
-        errorCode: oraUnsupportedType,
-        message: 'Unsupported Oracle type: $oracleType '
-            'for value type ${value.runtimeType}',
-      );
-  }
-}
-
-/// Decodes Oracle wire format to Dart value based on Oracle type.
+/// Single source of truth shared by `BindVariable` (encode side) and
+/// `OracleConnection` (decoder-side bind metadata), so the two tables can
+/// never drift. Returns `null` for unsupported Dart types — each caller
+/// applies its own policy (throw vs. fall back to VARCHAR).
 ///
-/// [scale] is the column's declared scale, when known. Mirrors the live
-/// column-decode path (`execute_message._decodeValueByOraType`): a declared
-/// scale > 0 forces NUMBER results to [double] (Story 7.8 AC7). Pass null
-/// for bare `NUMBER` or when no column metadata is available.
-///
-/// With [preserveTimestampTimeZone] set, `TIMESTAMP WITH TIME ZONE` values
-/// decode to [OracleTimestampTz] instead of a UTC [DateTime] (Story 7.9
-/// AC13); all other types are unaffected.
-///
-/// Throws [OracleException] if the type is not supported.
-dynamic decodeValue(ReadBuffer buffer, int oracleType, int length,
-    {int? scale, bool preserveTimestampTimeZone = false}) {
-  switch (oracleType) {
-    case oraTypeVarchar:
-    case oraTypeVarchar2:
-    case oraTypeString:
-      return decodeVarchar(buffer, length);
-
-    case oraTypeNumber:
-    case oraTypeInteger:
-    case oraTypeFloat:
-    case oraTypeVarnum:
-      return decodeNumber(buffer,
-          length: length, forceDouble: (scale ?? 0) > 0);
-
-    case oraTypeDate:
-      return decodeDate(buffer);
-
-    case oraTypeTimestampTz:
-      return preserveTimestampTimeZone
-          ? decodeTimestampTz(buffer)
-          : decodeTimestamp(buffer);
-
-    case oraTypeTimestamp:
-    case oraTypeTimestampLtz:
-      return decodeTimestamp(buffer);
-
-    default:
-      _log.warning('Unsupported Oracle type for decoding: $oracleType');
-      throw OracleException(
-        errorCode: oraUnsupportedType,
-        message: 'Unsupported Oracle type for decoding: $oracleType',
-      );
-  }
+/// Note `DateTime` deliberately maps to `DATE` (not TIMESTAMP): Oracle
+/// implicitly converts a DATE bind for TIMESTAMP columns, and DATE matches
+/// the second-precision wire form both existing call sites have always used.
+int? inferOraTypeForValue(Object? value) {
+  if (value == null) return oraTypeVarchar;
+  if (value is String) return oraTypeVarchar;
+  if (value is int) return oraTypeNumber;
+  if (value is double) return oraTypeNumber;
+  if (value is DateTime) return oraTypeDate;
+  if (value is OracleTimestampTz) return oraTypeTimestampTz;
+  if (value is Uint8List) return oraTypeRaw;
+  return null;
 }
