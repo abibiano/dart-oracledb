@@ -6,7 +6,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, and PL/SQL (stored procedures, functions, OUT/IN OUT binds) are implemented and validated against Oracle 23ai and 21c. LOBs (CLOB/BLOB/JSON) and connection pooling are not yet implemented. Depend on `oracledb: ^0.9.0`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once LOB support and connection pooling land.
+> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, and PL/SQL (stored procedures, functions, OUT/IN OUT binds) are implemented and validated against Oracle 23ai and 21c. LOBs (CLOB/BLOB/JSON) and connection pooling are not yet implemented. Depend on `oracledb: ^0.9.2`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once LOB support and connection pooling land.
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -15,7 +15,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 - **Pure Dart** — no FFI, no native code, no Oracle Instant Client required
 - **Thin protocol** — direct TNS/TTC wire protocol implementation
 - **Oracle 23ai + Oracle 21c** — tested against both; FAST_AUTH and classical auth paths both supported
-- **Desktop & server platforms** — macOS, Windows, Linux (mobile untested; web unsupported — requires `dart:io` TCP sockets)
+- **Native Dart platforms** — macOS, Windows, Linux, Android, and iOS (web unsupported — requires `dart:io` TCP sockets)
 - **TLS/SSL** — encrypted connections with certificate validation
 - **Full query support** — SELECT, INSERT, UPDATE, DELETE with positional and named bind parameters
 - **PL/SQL** — stored procedures and functions with OUT / IN OUT bind parameters
@@ -31,9 +31,11 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 | macOS    | ✅ |
 | Windows  | ✅ |
 | Linux    | ✅ |
-| iOS      | ⚠️ untested (not declared in `pubspec.yaml`) |
-| Android  | ⚠️ untested (not declared in `pubspec.yaml`) |
+| iOS      | ✅ declared native target |
+| Android  | ✅ declared native target |
 | Web      | ❌ (requires raw TCP sockets via `dart:io`) |
+
+Desktop/server targets are covered by CI. Android and iOS are declared in `pubspec.yaml` because the driver uses `dart:io` TCP sockets, which are available on native Dart targets; mobile-specific runtime validation is still expected before relying on them in production.
 
 ## Supported Oracle Versions
 
@@ -48,7 +50,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  oracledb: ^0.9.0
+  oracledb: ^0.9.2
 ```
 
 Then run:

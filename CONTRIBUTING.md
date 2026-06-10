@@ -148,8 +148,9 @@ When implementing new protocol features:
 1. Fork the repository and create a feature branch.
 2. Make your changes and ensure all tests pass on both Oracle versions.
 3. Run `dart analyze` — zero warnings required.
-4. Run `dart format .` — consistent formatting is required.
-5. Submit a pull request with a clear description of what changed and why.
+4. Run `scripts/sync_readme_version.sh --check` if you changed `pubspec.yaml` version metadata.
+5. Run `dart format .` — consistent formatting is required.
+6. Submit a pull request with a clear description of what changed and why.
 
 ## Reporting Issues
 

@@ -50,5 +50,8 @@ jobs:
           fi
           echo "Version check passed: $PUBSPEC_VERSION"
 
+      - name: Verify README version references
+        run: scripts/sync_readme_version.sh --check
+
       - name: Publish to pub.dev
         run: dart pub publish --force

@@ -16,6 +16,7 @@
 set -euo pipefail
 
 PUBSPEC="pubspec.yaml"
+README="README.md"
 DRY_RUN=false
 ACTION="alpha"
 
@@ -177,10 +178,13 @@ fi
 sed -i.bak "s/^version: .*/version: $NEW_VERSION/" "$PUBSPEC"
 rm -f "${PUBSPEC}.bak"
 
+# ── Keep release-facing documentation aligned ────────────────────────────────
+scripts/sync_readme_version.sh
+
 # ── Commit, tag, push ─────────────────────────────────────────────────────────
 TAG="v${NEW_VERSION}"
 
-git add "$PUBSPEC" "$CHANGELOG"
+git add "$PUBSPEC" "$CHANGELOG" "$README"
 git commit -m "chore: bump version to $NEW_VERSION"
 git tag "$TAG"
 git push origin HEAD

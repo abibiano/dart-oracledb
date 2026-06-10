@@ -34,6 +34,9 @@ jobs:
       - name: Verify formatting / analyzer (zero warnings)
         run: dart analyze --fatal-infos --fatal-warnings
 
+      - name: Verify README version references
+        run: scripts/sync_readme_version.sh --check
+
       # Verify that the platforms declared in pubspec.yaml (including android
       # and ios) match the package's actual API surface. pana is the same
       # static analyser pub.dev uses to score packages. --no-dartdoc skips

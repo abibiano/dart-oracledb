@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.2
+
+### Documentation
+- Update README platform support to reflect Android and iOS as declared native Dart targets while keeping web explicitly unsupported.
+- Keep README dependency examples aligned with the package version.
+
+### Tooling
+- Add a README version-sync helper and wire it into CI, publish, and release bumping so future releases fail before publishing if README dependency references drift from `pubspec.yaml`.
+
 ## 0.9.1
 
 ### Packaging
