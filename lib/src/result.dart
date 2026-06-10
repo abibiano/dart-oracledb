@@ -57,12 +57,11 @@ class OracleResult {
   }
 
   const OracleResult._({
-    required List<ColumnMetadata> columnMetadata,
-    required List<OracleRow> rows,
+    required this._columnMetadata,
+    required this._rows,
     required this.outBinds,
     this.rowsAffected,
-  })  : _columnMetadata = columnMetadata,
-        _rows = rows;
+  });
 
   final List<ColumnMetadata> _columnMetadata;
   final List<OracleRow> _rows;
@@ -131,12 +130,10 @@ class OracleResult {
 /// or the value is NULL in the database.
 class OracleRow {
   const OracleRow._({
-    required List<dynamic> data,
-    required List<ColumnMetadata> columnMetadata,
-    required Map<String, int> nameToIndex,
-  })  : _data = data,
-        _columnMetadata = columnMetadata,
-        _nameToIndex = nameToIndex;
+    required this._data,
+    required this._columnMetadata,
+    required this._nameToIndex,
+  });
 
   final List<dynamic> _data;
   final List<ColumnMetadata> _columnMetadata;

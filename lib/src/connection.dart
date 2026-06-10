@@ -40,14 +40,11 @@ final _log = Logger('OracleConnection');
 /// ```
 class OracleConnection {
   OracleConnection._({
-    required Transport transport,
-    required ConnectionInfo connectionInfo,
+    required this._transport,
+    required this._connectionInfo,
     required int statementCacheSize,
-    bool preserveTimestampTimeZone = false,
-  })  : _transport = transport,
-        _connectionInfo = connectionInfo,
-        _cache = StatementCache(statementCacheSize),
-        _preserveTimestampTimeZone = preserveTimestampTimeZone,
+    this._preserveTimestampTimeZone = false,
+  })  : _cache = StatementCache(statementCacheSize),
         _isClosed = false;
 
   /// Test-only constructor that injects a [Transport] directly, bypassing the
@@ -59,15 +56,13 @@ class OracleConnection {
   /// [connect] / [withConnection].
   @visibleForTesting
   OracleConnection.forTesting({
-    required Transport transport,
+    required this._transport,
     ConnectionInfo? connectionInfo,
     int statementCacheSize = 30,
-    bool preserveTimestampTimeZone = false,
-  })  : _transport = transport,
-        _connectionInfo = connectionInfo ??
+    this._preserveTimestampTimeZone = false,
+  })  : _connectionInfo = connectionInfo ??
             const ConnectionInfo(host: 'test', port: 0, serviceName: 'test'),
         _cache = StatementCache(statementCacheSize),
-        _preserveTimestampTimeZone = preserveTimestampTimeZone,
         _isClosed = false;
 
   final Transport _transport;
