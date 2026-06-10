@@ -9,6 +9,7 @@
 tags:
   unit: {}
   protocol: {}
+  platform: {}
   integration:
     timeout: 2x
   security:

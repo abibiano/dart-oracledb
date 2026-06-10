@@ -11,19 +11,17 @@ topics:
   - driver
   - sql
 
-# Native desktop/server platforms only. The driver opens raw TCP sockets via
-# `dart:io` (lib/src/transport/socket.dart, tls.dart and the auth/fast-auth
-# support files), which is unavailable on the web. UB8 reads in
-# lib/src/protocol/buffer.dart also rely on native 64-bit integers — dart2js
-# maps `int` to a double and silently loses precision past 2^53, which would
-# corrupt large Oracle NUMBER/rowid values. `web` is therefore deliberately
-# excluded rather than declared and left broken (Story 7.7 AC4). android/ios
-# are likewise omitted: they are untested and the transport layer has no mobile
-# integration coverage.
+# Supported native platforms. The driver uses dart:io TCP sockets
+# (lib/src/transport/socket.dart, tls.dart) — available on all native targets
+# including Android and iOS. `web` is deliberately excluded: dart:io is
+# unavailable in the browser, and dart2js maps `int` to a double and silently
+# loses precision past 2^53, which would corrupt Oracle NUMBER/rowid values.
 platforms:
   linux:
   macos:
   windows:
+  android:
+  ios:
 
 environment:
   sdk: ^3.12.0

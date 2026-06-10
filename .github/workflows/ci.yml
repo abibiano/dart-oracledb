@@ -34,6 +34,18 @@ jobs:
       - name: Verify formatting / analyzer (zero warnings)
         run: dart analyze --fatal-infos --fatal-warnings
 
+      # Verify that the platforms declared in pubspec.yaml (including android
+      # and ios) match the package's actual API surface. pana is the same
+      # static analyser pub.dev uses to score packages. --no-dartdoc skips
+      # documentation generation (slow, irrelevant here). No --exit-code-threshold
+      # flag: pana defaults to exit 0, making this step informational — the
+      # platform-support section is visible in the CI log without failing the
+      # job on unrelated score factors (e.g. pre-existing formatting deductions).
+      - name: pana platform-compatibility check
+        run: |
+          dart pub global activate pana --quiet
+          dart pub global run pana . --no-dartdoc
+
       - name: Run non-integration tests with coverage
         run: dart test --exclude-tags=integration --coverage-path=./coverage/lcov.info
 
