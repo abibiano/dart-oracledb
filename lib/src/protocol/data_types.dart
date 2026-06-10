@@ -143,6 +143,18 @@ Uint8List encodeNumber(num value) {
     }
   }
 
+  // Canonical mantissa (Story 7.8 AC9): strip trailing zero base-100 pairs so
+  // 10000 emits [0xC3, 0x02], not [0xC3, 0x02, 0x01, 0x01]. The exponent
+  // already encodes the magnitude, so decode is unchanged; this only matches
+  // the byte form node-oracledb produces (buffer.js writeOracleNumber strips
+  // trailing zeroes before pairing). Whole base-100 PAIRS only — the decimal
+  // digits inside a pair are untouched, so 100 can never collapse to 1
+  // (its pair is [1, 0] across two pairs '01','00' → digits [1, 0] → [1],
+  // and the exponent keeps the 100¹ magnitude).
+  while (digits.length > 1 && digits.last == 0) {
+    digits.removeLast();
+  }
+
   // Build encoded bytes
   final result = <int>[];
 
@@ -180,7 +192,17 @@ Uint8List encodeNumber(num value) {
 /// field. When [length] is null the decoder reads until the terminator or
 /// `hasRemaining` becomes false — appropriate when the buffer is already
 /// scoped to a single field (e.g. a slice).
-num decodeNumber(ReadBuffer buffer, [int? length]) {
+///
+/// [forceDouble] disables the int-vs-double heuristic so an integer-valued
+/// result is returned as [double] (Story 7.8 AC7). Column decode sets this
+/// for fixed-scale `NUMBER(p,s)` columns (declared scale > 0), matching
+/// node-oracledb's always-Number contract; bare `NUMBER` keeps the heuristic
+/// for backward compatibility.
+num decodeNumber(
+  ReadBuffer buffer, {
+  int? length,
+  bool forceDouble = false,
+}) {
   // An explicit zero-length wire field is not a valid NUMBER: the NULL case
   // is signaled by the column indicator before this function is called, so a
   // length=0 NUMBER reaching us means the stream is misaligned. Bail out
@@ -196,7 +218,7 @@ num decodeNumber(ReadBuffer buffer, [int? length]) {
 
   // Special case: zero
   if (firstByte == 0x80) {
-    return 0;
+    return forceDouble ? 0.0 : 0;
   }
 
   final isNegative = (firstByte & 0x80) == 0;
@@ -273,7 +295,9 @@ num decodeNumber(ReadBuffer buffer, [int? length]) {
   // Return int if no fractional part and within safe int range
   // Safe int range: JavaScript number limit (conservative)
   const maxSafeInt = 9007199254740992; // 2^53
-  if (result == result.truncateToDouble() && result.abs() <= maxSafeInt) {
+  if (!forceDouble &&
+      result == result.truncateToDouble() &&
+      result.abs() <= maxSafeInt) {
     return result.toInt();
   }
 
@@ -695,8 +719,14 @@ Uint8List encodeValue(dynamic value, int oracleType) {
 
 /// Decodes Oracle wire format to Dart value based on Oracle type.
 ///
+/// [scale] is the column's declared scale, when known. Mirrors the live
+/// column-decode path (`execute_message._decodeValueByOraType`): a declared
+/// scale > 0 forces NUMBER results to [double] (Story 7.8 AC7). Pass null
+/// for bare `NUMBER` or when no column metadata is available.
+///
 /// Throws [OracleException] if the type is not supported.
-dynamic decodeValue(ReadBuffer buffer, int oracleType, int length) {
+dynamic decodeValue(ReadBuffer buffer, int oracleType, int length,
+    {int? scale}) {
   switch (oracleType) {
     case oraTypeVarchar:
     case oraTypeVarchar2:
@@ -707,7 +737,8 @@ dynamic decodeValue(ReadBuffer buffer, int oracleType, int length) {
     case oraTypeInteger:
     case oraTypeFloat:
     case oraTypeVarnum:
-      return decodeNumber(buffer, length);
+      return decodeNumber(buffer,
+          length: length, forceDouble: (scale ?? 0) > 0);
 
     case oraTypeDate:
       return decodeDate(buffer);

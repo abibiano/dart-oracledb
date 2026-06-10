@@ -9,101 +9,83 @@
 @Tags(['integration'])
 library;
 
-import 'dart:io';
-
 import 'package:oracledb/oracledb.dart';
 import 'package:test/test.dart';
 
 import 'test_helper.dart';
 
 void main() {
-  if (Platform.environment['RUN_INTEGRATION_TESTS'] != 'true') {
+  if (!integrationEnabled) {
     test('skipped — set RUN_INTEGRATION_TESTS=true to run', () {}, skip: true);
     return;
   }
 
   group('PL/SQL execution — Story 3.1', () {
+    // AC3 (Story 7.8): nullable handle assigned only once connect()
+    // succeeds; tearDown cleans up null-safely. `conn` is the non-null
+    // alias used by test bodies.
+    OracleConnection? connHandle;
     late OracleConnection conn;
+    final s31Table = uniqueTableName('s31_vals');
 
     setUp(() async {
-      conn = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
+      connHandle = await connectForTest();
+      conn = connHandle!;
+
+      // Create story-scoped table and procedures; ignore only
+      // ORA-00955 ("name already used") so a previous failed run
+      // doesn't block setup. A setUp failure leaves the close to
+      // tearDown's cleanUpConnection (AC3/AC4).
+      await _ignoreOraCodes(
+        () => conn.execute(
+          'CREATE TABLE $s31Table (id NUMBER, name VARCHAR2(100))',
+        ),
+        const [955],
       );
 
-      try {
-        // Create story-scoped table and procedures; ignore only
-        // ORA-00955 ("name already used") so a previous failed run
-        // doesn't block setup.
-        await _ignoreOraCodes(
-          () => conn.execute(
-            'CREATE TABLE story31_values (id NUMBER, name VARCHAR2(100))',
-          ),
-          const [955],
-        );
-
-        await conn.execute('''
+      await conn.execute('''
           CREATE OR REPLACE PROCEDURE story31_proc_values(
             p_id   IN NUMBER,
             p_name IN VARCHAR2
           ) AS
           BEGIN
-            INSERT INTO story31_values (id, name) VALUES (p_id, p_name);
+            INSERT INTO $s31Table (id, name) VALUES (p_id, p_name);
           END;
         ''');
 
-        await conn.execute('''
+      await conn.execute('''
           CREATE OR REPLACE PROCEDURE story31_insert_default AS
           BEGIN
-            INSERT INTO story31_values (id, name) VALUES (99, 'default');
+            INSERT INTO $s31Table (id, name) VALUES (99, 'default');
           END;
         ''');
 
-        await conn.execute('''
+      await conn.execute('''
           CREATE OR REPLACE PROCEDURE story31_raise_error AS
           BEGIN
             RAISE_APPLICATION_ERROR(-20031, 'story31 expected failure');
           END;
         ''');
 
-        // Start each test with an empty table.
-        await conn.execute('TRUNCATE TABLE story31_values');
-      } catch (_) {
-        // Close the session before propagating to avoid leaks.
-        await conn.close();
-        rethrow;
-      }
+      // Start each test with an empty table.
+      await conn.execute('TRUNCATE TABLE $s31Table');
     });
 
     tearDown(() async {
-      // Roll back any in-flight transaction explicitly; the DROPs below
-      // perform an implicit COMMIT, which would otherwise persist
-      // partial state from a failed test. Best-effort — a dead session
-      // must not block the close() that follows.
-      try {
-        await conn.execute('ROLLBACK');
-      } catch (_) {
-        // ignore — close() below will surface any genuine session problem
-      }
-
-      await _ignoreOraCodes(
-        () => conn.execute('DROP PROCEDURE story31_proc_values'),
-        const <int>[4043],
+      final c = connHandle;
+      connHandle = null;
+      // rollbackFirst: the DROPs below perform an implicit COMMIT, which
+      // would otherwise persist partial state from a failed test.
+      await cleanUpConnection(
+        c,
+        rollbackFirst: true,
+        dropStatements: [
+          'DROP PROCEDURE story31_proc_values',
+          'DROP PROCEDURE story31_insert_default',
+          'DROP PROCEDURE story31_raise_error',
+          'DROP TABLE $s31Table PURGE',
+        ],
       );
-      await _ignoreOraCodes(
-        () => conn.execute('DROP PROCEDURE story31_insert_default'),
-        const <int>[4043],
-      );
-      await _ignoreOraCodes(
-        () => conn.execute('DROP PROCEDURE story31_raise_error'),
-        const <int>[4043],
-      );
-      await _ignoreOraCodes(
-        () => conn.execute('DROP TABLE story31_values PURGE'),
-        const <int>[942],
-      );
-      await conn.close();
     });
 
     // AC1 — positional IN binds
@@ -115,7 +97,7 @@ void main() {
       await conn.execute('COMMIT');
 
       final result = await conn.execute(
-        'SELECT id, name FROM story31_values WHERE id = :1',
+        'SELECT id, name FROM $s31Table WHERE id = :1',
         [42],
       );
       expect(result.rows, hasLength(1));
@@ -129,8 +111,8 @@ void main() {
       expect(result.rows, isEmpty);
       await conn.execute('COMMIT');
 
-      final check = await conn
-          .execute('SELECT COUNT(*) FROM story31_values WHERE id = 99');
+      final check =
+          await conn.execute('SELECT COUNT(*) FROM $s31Table WHERE id = 99');
       final count = check.rows.first[0];
       expect(count, equals(1));
     });
@@ -161,7 +143,7 @@ void main() {
       await conn.execute('COMMIT');
 
       final result = await conn.execute(
-        'SELECT id, name FROM story31_values WHERE id = :1',
+        'SELECT id, name FROM $s31Table WHERE id = :1',
         [7],
       );
       expect(result.rows, hasLength(1));
@@ -180,7 +162,7 @@ void main() {
       await conn.execute('COMMIT');
 
       final result = await conn.execute(
-        'SELECT id, name FROM story31_values WHERE id = :1',
+        'SELECT id, name FROM $s31Table WHERE id = :1',
         [13],
       );
       expect(result.rows.first[1], equals('Carol'));
@@ -208,11 +190,11 @@ void main() {
     test('AC5: DML rowsAffected is still populated after PL/SQL changes',
         () async {
       await conn.execute(
-        'INSERT INTO story31_values (id, name) VALUES (:1, :2)',
+        'INSERT INTO $s31Table (id, name) VALUES (:1, :2)',
         [100, 'DML'],
       );
       final result = await conn.execute(
-        'UPDATE story31_values SET name = :1 WHERE id = :2',
+        'UPDATE $s31Table SET name = :1 WHERE id = :2',
         ['DML-updated', 100],
       );
       expect(result.rowsAffected, equals(1));
@@ -230,8 +212,8 @@ void main() {
       );
       await conn.execute('COMMIT');
 
-      final check = await conn
-          .execute('SELECT COUNT(*) FROM story31_values WHERE id = 99');
+      final check =
+          await conn.execute('SELECT COUNT(*) FROM $s31Table WHERE id = 99');
       expect(check.rows.first[0], equals(1));
     });
 
@@ -245,26 +227,24 @@ void main() {
       }
       await conn.execute('COMMIT');
 
-      final result = await conn
-          .execute('SELECT COUNT(*) FROM story31_values WHERE id <= 5');
+      final result =
+          await conn.execute('SELECT COUNT(*) FROM $s31Table WHERE id <= 5');
       expect(result.rows.first[0], equals(5));
     });
   });
 
   group('PL/SQL function returns — Story 3.2', () {
+    OracleConnection? connHandle;
     late OracleConnection conn;
 
     setUp(() async {
-      conn = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      connHandle = await connectForTest();
+      conn = connHandle!;
 
-      try {
-        // Story-scoped functions. CREATE OR REPLACE is idempotent so we don't
-        // need to ignore ORA-00955 here.
-        await conn.execute('''
+      // Story-scoped functions. CREATE OR REPLACE is idempotent so we don't
+      // need to ignore ORA-00955 here. A setUp failure leaves the close to
+      // tearDown's cleanUpConnection (AC3/AC4).
+      await conn.execute('''
           CREATE OR REPLACE FUNCTION story32_add(
             p_a IN NUMBER,
             p_b IN NUMBER
@@ -274,7 +254,7 @@ void main() {
           END;
         ''');
 
-        await conn.execute('''
+      await conn.execute('''
           CREATE OR REPLACE FUNCTION story32_employee_count(
             p_dept_id IN NUMBER
           ) RETURN NUMBER AS
@@ -283,7 +263,7 @@ void main() {
           END;
         ''');
 
-        await conn.execute('''
+      await conn.execute('''
           CREATE OR REPLACE FUNCTION story32_greeting(
             p_name IN VARCHAR2
           ) RETURN VARCHAR2 AS
@@ -292,61 +272,54 @@ void main() {
           END;
         ''');
 
-        await conn.execute('''
+      await conn.execute('''
           CREATE OR REPLACE FUNCTION story32_null_text RETURN VARCHAR2 AS
           BEGIN
             RETURN NULL;
           END;
         ''');
 
-        await conn.execute('''
+      await conn.execute('''
           CREATE OR REPLACE FUNCTION story32_raise_error RETURN NUMBER AS
           BEGIN
             RAISE_APPLICATION_ERROR(-20032, 'story32 expected failure');
           END;
         ''');
 
-        await conn.execute('''
+      await conn.execute('''
           CREATE OR REPLACE FUNCTION story32_get_date RETURN DATE AS
           BEGIN
             RETURN DATE '2024-03-15';
           END;
         ''');
 
-        await conn.execute('''
+      await conn.execute('''
           CREATE OR REPLACE FUNCTION story32_get_timestamp RETURN TIMESTAMP AS
           BEGIN
             RETURN TIMESTAMP '2024-03-15 10:30:00';
           END;
         ''');
-      } catch (_) {
-        await conn.close();
-        rethrow;
-      }
     });
 
     tearDown(() async {
-      try {
-        await conn.execute('ROLLBACK');
-      } catch (_) {
-        // ignore — close() below will surface session problems
-      }
-
-      for (final name in const [
-        'story32_add',
-        'story32_employee_count',
-        'story32_greeting',
-        'story32_null_text',
-        'story32_raise_error',
-        'story32_get_date',
-        'story32_get_timestamp',
-      ]) {
-        await _ignoreOraCodes(
-          () => conn.execute('DROP FUNCTION $name'),
-          const <int>[4043],
-        );
-      }
-      await conn.close();
+      final c = connHandle;
+      connHandle = null;
+      await cleanUpConnection(
+        c,
+        rollbackFirst: true,
+        dropStatements: [
+          for (final name in const [
+            'story32_add',
+            'story32_employee_count',
+            'story32_greeting',
+            'story32_null_text',
+            'story32_raise_error',
+            'story32_get_date',
+            'story32_get_timestamp',
+          ])
+            'DROP FUNCTION $name',
+        ],
+      );
     });
 
     // AC1 — NUMBER return value with IN binds
@@ -494,17 +467,17 @@ void main() {
     // AC5 — DML rowsAffected is still populated after OUT bind plumbing
     test('AC5: DML rowsAffected is still populated after OUT bind changes',
         () async {
+      final dmlTable = uniqueTableName('s32_dml');
       await conn.execute(
-        'CREATE TABLE story32_dml_tmp (id NUMBER)',
+        'CREATE TABLE $dmlTable (id NUMBER)',
       );
       try {
-        await conn.execute('INSERT INTO story32_dml_tmp VALUES (1)');
-        final result =
-            await conn.execute('DELETE FROM story32_dml_tmp WHERE id = 1');
+        await conn.execute('INSERT INTO $dmlTable VALUES (1)');
+        final result = await conn.execute('DELETE FROM $dmlTable WHERE id = 1');
         expect(result.rowsAffected, equals(1));
       } finally {
         await _ignoreOraCodes(
-          () => conn.execute('DROP TABLE story32_dml_tmp'),
+          () => conn.execute('DROP TABLE $dmlTable'),
           const <int>[942],
         );
       }
@@ -512,18 +485,18 @@ void main() {
   });
 
   group('PL/SQL OUT and IN OUT parameters — Story 3.3', () {
+    OracleConnection? connHandle;
     late OracleConnection conn;
+    final s33DmlTable = uniqueTableName('s33_dml');
 
     setUp(() async {
-      conn = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      connHandle = await connectForTest();
+      conn = connHandle!;
 
-      try {
-        // Procedure with two scalar OUT parameters (NUMBER + VARCHAR2).
-        await conn.execute('''
+      // Procedure with two scalar OUT parameters (NUMBER + VARCHAR2).
+      // A setUp failure leaves the close to tearDown's cleanUpConnection
+      // (AC3/AC4).
+      await conn.execute('''
           CREATE OR REPLACE PROCEDURE story33_out_values(
             p_id   OUT NUMBER,
             p_name OUT VARCHAR2
@@ -534,8 +507,8 @@ void main() {
           END;
         ''');
 
-        // Procedure with one IN OUT NUMBER parameter (increment).
-        await conn.execute('''
+      // Procedure with one IN OUT NUMBER parameter (increment).
+      await conn.execute('''
           CREATE OR REPLACE PROCEDURE story33_inout_increment(
             p_value IN OUT NUMBER
           ) AS
@@ -544,9 +517,9 @@ void main() {
           END;
         ''');
 
-        // Procedure with IN OUT VARCHAR2 (append suffix — return value longer
-        // than input value, exercising the maxSize contract).
-        await conn.execute('''
+      // Procedure with IN OUT VARCHAR2 (append suffix — return value longer
+      // than input value, exercising the maxSize contract).
+      await conn.execute('''
           CREATE OR REPLACE PROCEDURE story33_inout_text(
             p_text IN OUT VARCHAR2
           ) AS
@@ -555,8 +528,8 @@ void main() {
           END;
         ''');
 
-        // Procedure mixing IN, OUT, and IN OUT (positional shape test).
-        await conn.execute('''
+      // Procedure mixing IN, OUT, and IN OUT (positional shape test).
+      await conn.execute('''
           CREATE OR REPLACE PROCEDURE story33_multi_out(
             p_in     IN     NUMBER,
             p_out    OUT    NUMBER,
@@ -568,8 +541,8 @@ void main() {
           END;
         ''');
 
-        // Procedure that explicitly returns NULL through an OUT parameter.
-        await conn.execute('''
+      // Procedure that explicitly returns NULL through an OUT parameter.
+      await conn.execute('''
           CREATE OR REPLACE PROCEDURE story33_null_out(
             p_value OUT VARCHAR2
           ) AS
@@ -577,38 +550,29 @@ void main() {
             p_value := NULL;
           END;
         ''');
-      } catch (_) {
-        await conn.close();
-        rethrow;
-      }
     });
 
     tearDown(() async {
-      try {
-        await conn.execute('ROLLBACK');
-      } catch (_) {
-        // ignore — close() below will surface session problems
-      }
-
-      for (final name in const [
-        'story33_out_values',
-        'story33_inout_increment',
-        'story33_inout_text',
-        'story33_multi_out',
-        'story33_null_out',
-      ]) {
-        await _ignoreOraCodes(
-          () => conn.execute('DROP PROCEDURE $name'),
-          const <int>[4043],
-        );
-      }
-      // AC7 DML regression test creates this table inline; guard here so a
-      // cancelled test cannot leak the table into subsequent setUp calls.
-      await _ignoreOraCodes(
-        () => conn.execute('DROP TABLE story33_dml_tmp PURGE'),
-        const <int>[942],
+      final c = connHandle;
+      connHandle = null;
+      await cleanUpConnection(
+        c,
+        rollbackFirst: true,
+        dropStatements: [
+          for (final name in const [
+            'story33_out_values',
+            'story33_inout_increment',
+            'story33_inout_text',
+            'story33_multi_out',
+            'story33_null_out',
+          ])
+            'DROP PROCEDURE $name',
+          // AC7 DML regression test creates this table inline; guard here so
+          // a cancelled test cannot leak the table into subsequent setUp
+          // calls.
+          'DROP TABLE $s33DmlTable PURGE',
+        ],
       );
-      await conn.close();
     });
 
     // AC1 — scalar OUT parameters expose their values via outBinds
@@ -795,15 +759,14 @@ void main() {
       expect(sel.rows.first[0], equals(7));
       expect(sel.outBinds.isEmpty, isTrue);
 
-      await conn.execute('CREATE TABLE story33_dml_tmp (id NUMBER)');
+      await conn.execute('CREATE TABLE $s33DmlTable (id NUMBER)');
       try {
-        await conn.execute('INSERT INTO story33_dml_tmp VALUES (1)');
-        final del =
-            await conn.execute('DELETE FROM story33_dml_tmp WHERE id = 1');
+        await conn.execute('INSERT INTO $s33DmlTable VALUES (1)');
+        final del = await conn.execute('DELETE FROM $s33DmlTable WHERE id = 1');
         expect(del.rowsAffected, equals(1));
       } finally {
         await _ignoreOraCodes(
-          () => conn.execute('DROP TABLE story33_dml_tmp PURGE'),
+          () => conn.execute('DROP TABLE $s33DmlTable PURGE'),
           const <int>[942],
         );
       }
@@ -898,19 +861,18 @@ void main() {
   // hook that can prove isCacheEligibleSql(sql) == false prevents
   // _cache.store(...) for PL/SQL".
   group('Story 7.3 AC4 — PL/SQL statement-cache exclusion', () {
+    OracleConnection? connHandle;
     late OracleConnection conn;
 
     setUp(() async {
-      conn = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-        statementCacheSize: 50,
-      );
+      connHandle = await connectForTest(statementCacheSize: 50);
+      conn = connHandle!;
     });
 
     tearDown(() async {
-      await conn.close();
+      final c = connHandle;
+      connHandle = null;
+      await cleanUpConnection(c);
     });
 
     test(
@@ -1023,22 +985,21 @@ void main() {
   });
 
   group('Story 7.2 — bind-name and bind-spec validation', () {
+    OracleConnection? connHandle;
     late OracleConnection conn;
 
     setUp(() async {
-      conn = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      connHandle = await connectForTest();
+      conn = connHandle!;
     });
 
     tearDown(() async {
-      await _ignoreOraCodes(
-        () => conn.execute('DROP PROCEDURE story72_ret'),
-        const <int>[4043],
+      final c = connHandle;
+      connHandle = null;
+      await cleanUpConnection(
+        c,
+        dropStatements: ['DROP PROCEDURE story72_ret'],
       );
-      await conn.close();
     });
 
     test(

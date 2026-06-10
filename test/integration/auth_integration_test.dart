@@ -12,9 +12,12 @@
 library;
 
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
+// Protocol/auth-flow test: needs Transport + AuthFlow + packet internals that
+// are not on the public surface (`lib/oracledb.dart` exports the connection
+// API only). No public test-only API exists; the `src/` imports are pinned
+// intentionally (Story 7.8 AC12).
 import 'package:oracledb/src/crypto/auth.dart';
 import 'package:oracledb/src/crypto/verifier.dart';
 import 'package:oracledb/src/errors.dart';
@@ -22,34 +25,25 @@ import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
 
-/// Check if integration tests should run.
-final _runIntegrationTests =
-    Platform.environment.containsKey('RUN_INTEGRATION_TESTS');
+import 'test_helper.dart';
 
 void main() {
-  group('Oracle 23ai authentication', skip: !_runIntegrationTests, () {
-    // Connection parameters from environment or defaults
-    final host = Platform.environment['ORACLE_HOST'] ?? 'localhost';
-    final port =
-        int.tryParse(Platform.environment['ORACLE_PORT'] ?? '') ?? 1521;
-    final serviceName = Platform.environment['ORACLE_SERVICE'] ?? 'FREEPDB1';
-    final username = Platform.environment['ORACLE_USER'] ?? 'system';
-    final password = Platform.environment['ORACLE_PASSWORD'] ?? 'testpassword';
-
+  group('Oracle 23ai authentication',
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     late Transport transport;
 
     /// Builds the TNS CONNECT packet body.
     Uint8List buildConnectData() {
       final tnsDescriptor = '(DESCRIPTION='
-          '(ADDRESS=(PROTOCOL=TCP)(HOST=$host)(PORT=$port))'
-          '(CONNECT_DATA=(SERVICE_NAME=$serviceName)))';
+          '(ADDRESS=(PROTOCOL=TCP)(HOST=$testHost)(PORT=$testPort))'
+          '(CONNECT_DATA=(SERVICE_NAME=$testService)))';
       final descriptorBytes = Uint8List.fromList(utf8.encode(tnsDescriptor));
       return buildConnectPacketBody(descriptorBytes);
     }
 
     setUp(() async {
       transport = Transport();
-      await transport.connect(host, port);
+      await transport.connect(testHost, testPort);
 
       // Perform TNS CONNECT/ACCEPT handshake (required before auth)
       final connectData = buildConnectData();
@@ -81,8 +75,8 @@ void main() {
       await expectLater(
         auth.authenticate(
           transport: transport,
-          username: username,
-          password: password,
+          username: testUser,
+          password: testPassword,
         ),
         completes,
       );
@@ -97,7 +91,7 @@ void main() {
       await expectLater(
         auth.authenticate(
           transport: transport,
-          username: username,
+          username: testUser,
           password: 'wrongpassword_12345',
         ),
         throwsA(isA<OracleException>()
@@ -114,7 +108,7 @@ void main() {
       try {
         await auth.authenticate(
           transport: transport,
-          username: username,
+          username: testUser,
           password: secretPassword,
         );
         fail('Expected OracleException');

@@ -16,49 +16,52 @@
 @Tags(['integration'])
 library;
 
-import 'dart:io';
-
 import 'package:oracledb/oracledb.dart';
 import 'package:test/test.dart';
 
 import 'test_helper.dart';
 
 void main() {
-  if (Platform.environment['RUN_INTEGRATION_TESTS'] != 'true') {
+  if (!integrationEnabled) {
     test('skipped — set RUN_INTEGRATION_TESTS=true to run', () {}, skip: true);
     return;
   }
 
   group('Statement-cache bind reuse — Story 7.7 AC9', () {
+    // AC3 (Story 7.8): nullable handle assigned only once connect()
+    // succeeds; tearDown cleans up null-safely. `conn` is the non-null
+    // alias used by test bodies.
+    OracleConnection? connHandle;
     late OracleConnection conn;
+    final testTable = uniqueTableName('s77_bind');
 
     setUp(() async {
-      conn = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      connHandle = await connectForTest();
+      conn = connHandle!;
       await _ignoreOraCodes(
         () => conn.execute(
-          'CREATE TABLE story77_bindcache (id NUMBER, v VARCHAR2(4000))',
+          'CREATE TABLE $testTable (id NUMBER, v VARCHAR2(4000))',
         ),
         const [955], // ORA-00955: name already used
       );
-      await conn.execute('TRUNCATE TABLE story77_bindcache');
+      await conn.execute('TRUNCATE TABLE $testTable');
     });
 
     tearDown(() async {
-      await _ignoreOraCodes(
-        () => conn.execute('DROP TABLE story77_bindcache PURGE'),
-        const [942], // ORA-00942: table does not exist
+      final c = connHandle;
+      connHandle = null;
+      // AC4 (Story 7.8): close() is guaranteed even if the DROP fails, and a
+      // close failure never masks the DROP error.
+      await cleanUpConnection(
+        c,
+        dropStatements: ['DROP TABLE $testTable PURGE'],
       );
-      await conn.close();
     });
 
     test(
         'a cursor first executed with a null VARCHAR bind is reused for a long '
         'string without truncation', () async {
-      const sql = 'INSERT INTO story77_bindcache (id, v) VALUES (:id, :v)';
+      final sql = 'INSERT INTO $testTable (id, v) VALUES (:id, :v)';
       final longValue = 'X' * 3000;
 
       // First execute: null VARCHAR bind. `_maxSizeFor` returns 1 here and the
@@ -78,7 +81,7 @@ void main() {
               'second execute of identical SQL must reuse the cached cursor');
 
       final result = await conn.execute(
-        'SELECT v FROM story77_bindcache WHERE id = 2',
+        'SELECT v FROM $testTable WHERE id = 2',
       );
       expect(result.rows.single['V'], equals(longValue),
           reason:
@@ -87,7 +90,7 @@ void main() {
 
       // The null row is still null (Oracle stores '' / null VARCHAR2 as NULL).
       final nullRow = await conn.execute(
-        'SELECT v FROM story77_bindcache WHERE id = 1',
+        'SELECT v FROM $testTable WHERE id = 1',
       );
       expect(nullRow.rows.single['V'], isNull);
     });

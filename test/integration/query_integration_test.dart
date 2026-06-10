@@ -1,30 +1,29 @@
 @Tags(['integration'])
 library;
 
-import 'dart:io';
-
 import 'package:test/test.dart';
 import 'package:oracledb/oracledb.dart';
 
 import 'test_helper.dart';
 
 void main() {
-  final hasOracle = Platform.environment.containsKey('RUN_INTEGRATION_TESTS');
-
   group('Query execution',
-      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    // AC3 (Story 7.8): nullable handle assigned only once connect()
+    // succeeds; tearDown cleans up null-safely. `connection` is the
+    // non-null alias used by test bodies.
+    OracleConnection? connectionHandle;
     late OracleConnection connection;
 
     setUp(() async {
-      connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      connectionHandle = await connectForTest();
+      connection = connectionHandle!;
     });
 
     tearDown(() async {
-      await connection.close();
+      final c = connectionHandle;
+      connectionHandle = null;
+      await cleanUpConnection(c);
     });
 
     test('SELECT FROM dual returns result', () async {
@@ -79,19 +78,19 @@ void main() {
   });
 
   group('Bind parameters',
-      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    OracleConnection? connectionHandle;
     late OracleConnection connection;
 
     setUp(() async {
-      connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      connectionHandle = await connectForTest();
+      connection = connectionHandle!;
     });
 
     tearDown(() async {
-      await connection.close();
+      final c = connectionHandle;
+      connectionHandle = null;
+      await cleanUpConnection(c);
     });
 
     // Story 2.3 - Bind Parameter Support
@@ -208,16 +207,14 @@ void main() {
 
   // Story 2.6 - Basic Data Type Mapping
   group('Data type mapping',
-      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    OracleConnection? connectionHandle;
     late OracleConnection connection;
-    const testTable = 'test_types_story26';
+    final testTable = uniqueTableName('types26');
 
     setUp(() async {
-      connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      connectionHandle = await connectForTest();
+      connection = connectionHandle!;
 
       try {
         await connection.execute('''
@@ -233,42 +230,29 @@ void main() {
           )
         ''');
       } on OracleException catch (e) {
-        if (e.errorCode == 955) {
-          // ORA-00955: table already exists — reuse it
-          try {
-            await connection.execute('TRUNCATE TABLE $testTable');
-          } catch (_) {
-            await connection.close();
-            rethrow;
-          }
-        } else {
-          // Close the connection before rethrowing so a setUp failure does
-          // not leak a session into the next test.
-          await connection.close();
-          rethrow;
-        }
+        // ORA-00955: leftover table from a previous run — reuse it. Any
+        // setUp failure leaves the close to tearDown's cleanUpConnection
+        // (AC3/AC4), so no session leaks into the next test.
+        if (e.errorCode != 955) rethrow;
+        await connection.execute('TRUNCATE TABLE $testTable');
       }
     });
 
     tearDown(() async {
-      try {
-        await connection.execute('DROP TABLE $testTable');
-      } on OracleException catch (e) {
-        // ORA-00942: table or view does not exist — acceptable in tearDown.
-        // Anything else (network, auth, protocol) should surface.
-        if (e.errorCode != 942) {
-          rethrow;
-        }
-      } finally {
-        await connection.close();
-      }
+      final c = connectionHandle;
+      connectionHandle = null;
+      await cleanUpConnection(
+        c,
+        dropStatements: ['DROP TABLE $testTable PURGE'],
+      );
     });
 
     test('SELECT character columns return String values', () async {
+      final id = nextTestId();
       await connection.execute(
         '''
         INSERT INTO $testTable (id, varchar2_col, varchar_col, char_col)
-        VALUES (1, 'Hello Oracle', 'VARCHAR value', 'ABCDE')
+        VALUES ($id, 'Hello Oracle', 'VARCHAR value', 'ABCDE')
         ''',
       );
 
@@ -276,7 +260,7 @@ void main() {
         '''
         SELECT varchar2_col, varchar_col, char_col
         FROM $testTable
-        WHERE id = 1
+        WHERE id = $id
         ''',
       );
       final row = result.rows.single;
@@ -290,12 +274,13 @@ void main() {
     });
 
     test('SELECT NUMBER(10) returns int', () async {
+      final id = nextTestId();
       await connection.execute(
-        'INSERT INTO $testTable (id, int_col) VALUES (2, 12345)',
+        'INSERT INTO $testTable (id, int_col) VALUES ($id, 12345)',
       );
 
       final result = await connection.execute(
-        'SELECT int_col FROM $testTable WHERE id = 2',
+        'SELECT int_col FROM $testTable WHERE id = $id',
       );
       final value = result.rows.single['INT_COL'];
 
@@ -304,12 +289,13 @@ void main() {
     });
 
     test('SELECT NUMBER(10,2) returns double', () async {
+      final id = nextTestId();
       await connection.execute(
-        'INSERT INTO $testTable (id, decimal_col) VALUES (3, 123.45)',
+        'INSERT INTO $testTable (id, decimal_col) VALUES ($id, 123.45)',
       );
 
       final result = await connection.execute(
-        'SELECT decimal_col FROM $testTable WHERE id = 3',
+        'SELECT decimal_col FROM $testTable WHERE id = $id',
       );
       final value = result.rows.single['DECIMAL_COL'];
 
@@ -318,15 +304,16 @@ void main() {
     });
 
     test('SELECT DATE returns DateTime without subsecond precision', () async {
+      final id = nextTestId();
       await connection.execute(
         '''
         INSERT INTO $testTable (id, date_col)
-        VALUES (4, TO_DATE('2025-12-16 14:30:45', 'YYYY-MM-DD HH24:MI:SS'))
+        VALUES ($id, TO_DATE('2025-12-16 14:30:45', 'YYYY-MM-DD HH24:MI:SS'))
         ''',
       );
 
       final result = await connection.execute(
-        'SELECT date_col FROM $testTable WHERE id = 4',
+        'SELECT date_col FROM $testTable WHERE id = $id',
       );
       final value = result.rows.single['DATE_COL'];
 
@@ -339,11 +326,12 @@ void main() {
 
     test('SELECT TIMESTAMP returns DateTime with subsecond precision',
         () async {
+      final id = nextTestId();
       await connection.execute(
         '''
         INSERT INTO $testTable (id, timestamp_col)
         VALUES (
-          5,
+          $id,
           TO_TIMESTAMP(
             '2025-12-16 14:30:45.123456',
             'YYYY-MM-DD HH24:MI:SS.FF6'
@@ -353,7 +341,7 @@ void main() {
       );
 
       final result = await connection.execute(
-        'SELECT timestamp_col FROM $testTable WHERE id = 5',
+        'SELECT timestamp_col FROM $testTable WHERE id = $id',
       );
       final value = result.rows.single['TIMESTAMP_COL'];
 
@@ -370,14 +358,15 @@ void main() {
     });
 
     test('SELECT NULL values return Dart null', () async {
-      await connection.execute('INSERT INTO $testTable (id) VALUES (6)');
+      final id = nextTestId();
+      await connection.execute('INSERT INTO $testTable (id) VALUES ($id)');
 
       final result = await connection.execute(
         '''
         SELECT varchar2_col, varchar_col, char_col,
                int_col, decimal_col, date_col, timestamp_col
         FROM $testTable
-        WHERE id = 6
+        WHERE id = $id
         ''',
       );
       final row = result.rows.single;
@@ -392,12 +381,13 @@ void main() {
     });
 
     test('SELECT negative NUMBER returns int', () async {
+      final id = nextTestId();
       await connection.execute(
-        'INSERT INTO $testTable (id, int_col) VALUES (8, -98765)',
+        'INSERT INTO $testTable (id, int_col) VALUES ($id, -98765)',
       );
 
       final result = await connection.execute(
-        'SELECT int_col FROM $testTable WHERE id = 8',
+        'SELECT int_col FROM $testTable WHERE id = $id',
       );
       final value = result.rows.single['INT_COL'];
 
@@ -406,12 +396,13 @@ void main() {
     });
 
     test('SELECT negative NUMBER(10,2) returns double', () async {
+      final id = nextTestId();
       await connection.execute(
-        'INSERT INTO $testTable (id, decimal_col) VALUES (9, -123.45)',
+        'INSERT INTO $testTable (id, decimal_col) VALUES ($id, -123.45)',
       );
 
       final result = await connection.execute(
-        'SELECT decimal_col FROM $testTable WHERE id = 9',
+        'SELECT decimal_col FROM $testTable WHERE id = $id',
       );
       final value = result.rows.single['DECIMAL_COL'];
 
@@ -420,24 +411,27 @@ void main() {
     });
 
     test('SELECT zero NUMBER returns int', () async {
+      final id = nextTestId();
       await connection.execute(
-        'INSERT INTO $testTable (id, int_col, decimal_col) VALUES (10, 0, 0)',
+        'INSERT INTO $testTable (id, int_col, decimal_col) '
+        'VALUES ($id, 0, 0)',
       );
 
       final result = await connection.execute(
-        'SELECT int_col, decimal_col FROM $testTable WHERE id = 10',
+        'SELECT int_col, decimal_col FROM $testTable WHERE id = $id',
       );
       final row = result.rows.single;
 
       expect(row['INT_COL'], isA<int>());
       expect(row['INT_COL'], equals(0));
-      // NUMBER(10,2) zero — scale > 0 column still decodes the special 0x80
-      // encoding; Dart-side may return int or double depending on the
-      // decoder's int-vs-double heuristic. Assert numeric value, not type.
+      // NUMBER(10,2) zero — declared fixed scale forces double since
+      // Story 7.8 AC7 (node-oracledb always-Number contract).
+      expect(row['DECIMAL_COL'], isA<double>());
       expect(row['DECIMAL_COL'], equals(0));
     });
 
     test('INSERT all mapped types and SELECT verifies Dart values', () async {
+      final id = nextTestId();
       await connection.execute(
         '''
         INSERT INTO $testTable (
@@ -450,7 +444,7 @@ void main() {
           date_col,
           timestamp_col
         ) VALUES (
-          7,
+          $id,
           'Round trip',
           'VARCHAR round',
           'ABCDE',
@@ -470,7 +464,7 @@ void main() {
         SELECT varchar2_col, varchar_col, char_col,
                int_col, decimal_col, date_col, timestamp_col
         FROM $testTable
-        WHERE id = 7
+        WHERE id = $id
         ''',
       );
       final row = result.rows.single;
@@ -494,16 +488,14 @@ void main() {
 
   // Story 2.4 - DML Operations (INSERT, UPDATE, DELETE)
   group('DML operations',
-      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    OracleConnection? connectionHandle;
     late OracleConnection connection;
-    const testTable = 'test_dml_story24';
+    final testTable = uniqueTableName('dml24');
 
     setUp(() async {
-      connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      connectionHandle = await connectForTest();
+      connection = connectionHandle!;
 
       // Create test table (handle "already exists" gracefully)
       try {
@@ -526,13 +518,12 @@ void main() {
     });
 
     tearDown(() async {
-      // Drop table to clean up
-      try {
-        await connection.execute('DROP TABLE $testTable');
-      } catch (_) {
-        // Ignore errors on cleanup
-      }
-      await connection.close();
+      final c = connectionHandle;
+      connectionHandle = null;
+      await cleanUpConnection(
+        c,
+        dropStatements: ['DROP TABLE $testTable PURGE'],
+      );
     });
 
     // Task 4: INSERT tests
@@ -820,33 +811,20 @@ void main() {
 
   // Story 2.5 - Transaction Management (commit, rollback, runTransaction)
   group('Transaction management',
-      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    // AC3 (Story 7.8): nullable handles assigned only once each connect()
+    // succeeds; tearDown cleans up null-safely.
+    OracleConnection? conn1Handle;
+    OracleConnection? conn2Handle;
     late OracleConnection conn1;
     late OracleConnection conn2;
-    const testTable = 'test_tx_story25';
+    final testTable = uniqueTableName('tx25');
 
     setUp(() async {
-      conn1 = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
-      addTearDown(() async {
-        try {
-          await conn1.close();
-        } catch (_) {}
-      });
-
-      conn2 = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
-      addTearDown(() async {
-        try {
-          await conn2.close();
-        } catch (_) {}
-      });
+      conn1Handle = await connectForTest();
+      conn1 = conn1Handle!;
+      conn2Handle = await connectForTest();
+      conn2 = conn2Handle!;
 
       try {
         await conn1.execute('''
@@ -866,15 +844,20 @@ void main() {
     });
 
     tearDown(() async {
+      final c1 = conn1Handle;
+      final c2 = conn2Handle;
+      conn1Handle = null;
+      conn2Handle = null;
       try {
-        await conn1.rollback();
-      } catch (_) {}
-      try {
-        await conn1.execute('DROP TABLE $testTable');
-      } catch (_) {}
-      // Individual connection closes are handled by the addTearDown hooks
-      // registered in setUp so that a close() failure on one does not
-      // prevent the other from closing.
+        await cleanUpConnection(
+          c1,
+          rollbackFirst: true,
+          dropStatements: ['DROP TABLE $testTable PURGE'],
+        );
+      } finally {
+        // conn2 closes even when conn1's cleanup throws.
+        await cleanUpConnection(c2);
+      }
     });
 
     // Task 3: commit() tests
@@ -928,11 +911,7 @@ void main() {
       // session. setUp's CREATE TABLE on conn1 is DDL — Oracle implicitly
       // commits, so calling commit() on conn1 would be testing
       // "commit-after-implicit-commit", not a truly empty transaction.
-      final fresh = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      final fresh = await connectForTest();
       addTearDown(() async {
         try {
           await fresh.close();
@@ -946,11 +925,7 @@ void main() {
     });
 
     test('commit on closed connection throws oraConnectionClosed', () async {
-      final closed = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      final closed = await connectForTest();
       addTearDown(() async {
         try {
           await closed.close();
@@ -1045,11 +1020,7 @@ void main() {
 
     test('rollback with no pending changes succeeds (fresh connection)',
         () async {
-      final fresh = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      final fresh = await connectForTest();
       addTearDown(() async {
         try {
           await fresh.close();
@@ -1062,11 +1033,7 @@ void main() {
     });
 
     test('rollback on closed connection throws oraConnectionClosed', () async {
-      final closed = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      final closed = await connectForTest();
       addTearDown(() async {
         try {
           await closed.close();
@@ -1155,11 +1122,7 @@ void main() {
 
     test('runTransaction on closed connection throws oraConnectionClosed',
         () async {
-      final closed = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      final closed = await connectForTest();
       addTearDown(() async {
         try {
           await closed.close();
@@ -1199,17 +1162,14 @@ void main() {
   });
 
   group('Statement caching',
-      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    OracleConnection? connHandle;
     late OracleConnection conn;
-    const testTable = 'test_stmt_cache_story27';
+    final testTable = uniqueTableName('stmt27');
 
     setUp(() async {
-      conn = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-        statementCacheSize: 50,
-      );
+      connHandle = await connectForTest(statementCacheSize: 50);
+      conn = connHandle!;
       try {
         await conn.execute('''
           CREATE TABLE $testTable (
@@ -1234,14 +1194,12 @@ void main() {
     });
 
     tearDown(() async {
-      try {
-        await conn.execute('DROP TABLE $testTable');
-      } on OracleException catch (e) {
-        // ORA-00942: table or view does not exist — acceptable in tearDown.
-        if (e.errorCode != 942) rethrow;
-      } finally {
-        await conn.close();
-      }
+      final c = connHandle;
+      connHandle = null;
+      await cleanUpConnection(
+        c,
+        dropStatements: ['DROP TABLE $testTable PURGE'],
+      );
     });
 
     test(
@@ -1289,11 +1247,14 @@ void main() {
       // Connect with no statementCacheSize argument and confirm the public
       // getter exposes the documented default of 30. Live-connection check
       // because the value cannot be observed without constructing an
-      // OracleConnection (private constructor).
+      // OracleConnection (private constructor). Deliberately NOT routed
+      // through connectForTest(), which passes statementCacheSize explicitly
+      // and would defeat the API-default assertion.
       final defaultConn = await OracleConnection.connect(
         testConnectString,
         user: testUser,
         password: testPassword,
+        timeout: const Duration(seconds: 5),
       );
       try {
         expect(defaultConn.statementCacheSize, equals(30));
@@ -1308,12 +1269,7 @@ void main() {
       // With cache size 1: execute SQL-A (stored), execute SQL-B (evicts A),
       // execute SQL-A again (re-parse required, evicts B). Oracle must not
       // return a cursor-already-closed or invalid cursor error.
-      final conn1 = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-        statementCacheSize: 1,
-      );
+      final conn1 = await connectForTest(statementCacheSize: 1);
       addTearDown(() async {
         try {
           await conn1.close();
@@ -1337,12 +1293,7 @@ void main() {
 
     test('statementCacheSize: 0 disables caching — queries still succeed',
         () async {
-      final noCache = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-        statementCacheSize: 0,
-      );
+      final noCache = await connectForTest(statementCacheSize: 0);
       addTearDown(() async {
         try {
           await noCache.close();
@@ -1363,14 +1314,9 @@ void main() {
   // depend on V$OPEN_CURSOR or any privileged view — it runs identically on
   // Oracle 23ai and 21c with the default test user.
   group('Story 7.6 — statement cache correctness',
-      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     Future<OracleConnection> openConn({int statementCacheSize = 50}) {
-      return OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-        statementCacheSize: statementCacheSize,
-      );
+      return connectForTest(statementCacheSize: statementCacheSize);
     }
 
     Future<void> dropQuietly(OracleConnection c, String table) async {
@@ -1452,7 +1398,7 @@ void main() {
         'DDL changing result shape forces fresh metadata, not stale decode '
         '(AC2)', () async {
       final c = await openConn();
-      const table = 'test_story76_ddl';
+      final table = uniqueTableName('s76_ddl');
       addTearDown(() async {
         try {
           await dropQuietly(c, table);
@@ -1487,7 +1433,7 @@ void main() {
     test('SELECT ... FOR UPDATE is not cached but still returns rows (AC6)',
         () async {
       final c = await openConn();
-      const table = 'test_story76_forupd';
+      final table = uniqueTableName('s76_upd');
       addTearDown(() async {
         try {
           try {
@@ -1540,17 +1486,14 @@ void main() {
   // tests in `test/src/sql_classifier_test.dart`. The integration suite
   // covers the supported Oracle shapes here.
   group('Story 7.3 — CTE/MERGE classification end-to-end',
-      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    OracleConnection? connectionHandle;
     late OracleConnection connection;
-    const testTable = 'test_story73_cte';
+    final testTable = uniqueTableName('cte73');
 
     setUp(() async {
-      connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-        statementCacheSize: 50,
-      );
+      connectionHandle = await connectForTest(statementCacheSize: 50);
+      connection = connectionHandle!;
       try {
         await connection.execute('''
           CREATE TABLE $testTable (
@@ -1559,28 +1502,21 @@ void main() {
           )
         ''');
       } on OracleException catch (e) {
-        if (e.errorCode == 955) {
-          try {
-            await connection.execute('TRUNCATE TABLE $testTable');
-          } catch (_) {
-            await connection.close();
-            rethrow;
-          }
-        } else {
-          await connection.close();
-          rethrow;
-        }
+        // ORA-00955: leftover table from a previous run — reuse it. Any
+        // setUp failure leaves the close to tearDown's cleanUpConnection
+        // (AC3/AC4).
+        if (e.errorCode != 955) rethrow;
+        await connection.execute('TRUNCATE TABLE $testTable');
       }
     });
 
     tearDown(() async {
-      try {
-        await connection.execute('DROP TABLE $testTable');
-      } on OracleException catch (e) {
-        if (e.errorCode != 942) rethrow;
-      } finally {
-        await connection.close();
-      }
+      final c = connectionHandle;
+      connectionHandle = null;
+      await cleanUpConnection(
+        c,
+        dropStatements: ['DROP TABLE $testTable PURGE'],
+      );
     });
 
     test(
@@ -1684,16 +1620,14 @@ void main() {
 
   // Story 2.8 - Query Error Handling
   group('Query error handling',
-      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    OracleConnection? connectionHandle;
     late OracleConnection connection;
-    const testTable = 'test_query_error_story28';
+    final testTable = uniqueTableName('qerr28');
 
     setUp(() async {
-      connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      connectionHandle = await connectForTest();
+      connection = connectionHandle!;
 
       try {
         await connection.execute('''
@@ -1703,29 +1637,21 @@ void main() {
           )
         ''');
       } on OracleException catch (e) {
-        if (e.errorCode == 955) {
-          try {
-            await connection.execute('TRUNCATE TABLE $testTable');
-          } catch (_) {
-            await connection.close();
-            rethrow;
-          }
-        } else {
-          await connection.close();
-          rethrow;
-        }
+        // ORA-00955: leftover table from a previous run — reuse it. Any
+        // setUp failure leaves the close to tearDown's cleanUpConnection
+        // (AC3/AC4).
+        if (e.errorCode != 955) rethrow;
+        await connection.execute('TRUNCATE TABLE $testTable');
       }
     });
 
     tearDown(() async {
-      try {
-        await connection.execute('DROP TABLE $testTable');
-      } on OracleException catch (e) {
-        // ORA-00942: table or view does not exist — acceptable in tearDown.
-        if (e.errorCode != 942) rethrow;
-      } finally {
-        await connection.close();
-      }
+      final c = connectionHandle;
+      connectionHandle = null;
+      await cleanUpConnection(
+        c,
+        dropStatements: ['DROP TABLE $testTable PURGE'],
+      );
     });
 
     test('AC1: syntax error surfaces ORA-009xx with failing SQL in message',

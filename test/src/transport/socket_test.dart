@@ -6,6 +6,8 @@ import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/transport/socket.dart';
 import 'package:test/test.dart';
 
+import '../../integration/test_helper.dart';
+
 void main() {
   group('OracleSocket', () {
     group('constructor', () {
@@ -156,21 +158,17 @@ void main() {
       });
     });
 
-    group('integration tests', () {
-      late bool shouldRun;
-
-      setUp(() {
-        shouldRun = Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
-      });
-
-      test('connects to Oracle 23ai on localhost', () async {
-        if (!shouldRun) {
-          markTestSkipped('Integration tests disabled');
-          return;
-        }
-
+    // AC13 (Story 7.8): tagged at group level — not file level — so the
+    // pure unit tests above stay in the `quality` CI job's
+    // `--exclude-tags=integration` run while these Oracle-backed tests are
+    // cleanly excluded. The group-level env skip replaces the previous
+    // per-test markTestSkipped pattern (AC2 single source of truth).
+    group('integration tests',
+        tags: 'integration',
+        skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+      test('connects to Oracle on the configured host/port', () async {
         final socket = OracleSocket();
-        await socket.connect('localhost', 1521,
+        await socket.connect(testHost, testPort,
             timeout: const Duration(seconds: 10));
         expect(socket.isConnected, isTrue);
         await socket.close();
@@ -178,11 +176,6 @@ void main() {
       });
 
       test('times out on non-responsive host', () async {
-        if (!shouldRun) {
-          markTestSkipped('Integration tests disabled');
-          return;
-        }
-
         final socket = OracleSocket();
         // Use a non-routable IP to test timeout
         expect(

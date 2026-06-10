@@ -11,7 +11,6 @@
 library;
 
 import 'dart:async';
-import 'dart:io';
 
 import 'package:logging/logging.dart';
 import 'package:oracledb/oracledb.dart';
@@ -20,10 +19,7 @@ import 'package:test/test.dart';
 import 'test_helper.dart';
 
 void main() {
-  final runIntegrationTests =
-      Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
-
-  if (!runIntegrationTests) {
+  if (!integrationEnabled) {
     test('Security tests require RUN_INTEGRATION_TESTS=true', () {
       Logger.root.info(
           'Skipping security integration tests - set RUN_INTEGRATION_TESTS=true');

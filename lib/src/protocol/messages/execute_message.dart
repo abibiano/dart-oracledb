@@ -767,8 +767,14 @@ void _processDescribeInfo(ReadBuffer buf, _DecodeState s) {
 ColumnMetadata _processColumnInfo(ReadBuffer buf, int ttcFieldVersion) {
   final dataType = buf.readUint8();
   buf.skipUB1(); // flags
-  final precision = buf.readUint8();
-  final scale = buf.readUint8();
+  // Precision and scale are SIGNED Int8 on the wire (node-oracledb base.js
+  // processColumnInfo uses readInt8): bare NUMBER and FLOAT report scale
+  // -127 (0x81) as the "no declared scale" sentinel, which an unsigned read
+  // would misparse as 129 (AC7).
+  final precisionRaw = buf.readUint8();
+  final scaleRaw = buf.readUint8();
+  final precision = precisionRaw > 127 ? precisionRaw - 256 : precisionRaw;
+  final scale = scaleRaw > 127 ? scaleRaw - 256 : scaleRaw;
   final maxSize = buf.readUB4();
   buf.skipUB4(); // max num array elements
   buf.skipUB8(); // cont flags
@@ -908,8 +914,14 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
 /// Decodes one length-prefixed value from [buf] using the Oracle type indicator
 /// [oraType]. Shared by the OUT bind decode path and the SELECT column decode
 /// path so both stay consistent under future type-handling changes.
+///
+/// [scale] is the column's declared scale when decoding a SELECT column
+/// (null for bare `NUMBER`). The OUT-bind path always passes null:
+/// `BindMetadata` carries no precision/scale, so OUT binds cannot honor the
+/// AC7 fixed-scale-forces-double contract — they keep the int-vs-double
+/// heuristic (documented limitation, Story 7.8 AC7).
 Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
-    {required bool strict}) {
+    {required bool strict, int? scale}) {
   switch (oraType) {
     case oraTypeLong:
     case oraTypeLongRaw:
@@ -950,7 +962,9 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       // do not need to pass `length` to decodeNumber here — the equivalent
       // column-decode path in data_types.dart `decodeValue` does pass length
       // because it reads directly from the row buffer.
-      return dt.decodeNumber(ReadBuffer(bytes));
+      // AC7: a declared fixed scale (> 0) forces double; scale null (bare
+      // NUMBER) or 0 (e.g. NUMBER(10)) keeps the int heuristic.
+      return dt.decodeNumber(ReadBuffer(bytes), forceDouble: (scale ?? 0) > 0);
     case oraTypeDate:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
@@ -977,7 +991,8 @@ bool _isDuplicate(Uint8List? bitVector, int colIndex) {
 
 Object? _decodeColumnValue(ReadBuffer buf, ColumnMetadata col,
         {required bool strict}) =>
-    _decodeValueByOraType(buf, col.oracleType, strict: strict);
+    _decodeValueByOraType(buf, col.oracleType,
+        strict: strict, scale: col.scale);
 
 void _processBitVector(ReadBuffer buf, _DecodeState s) {
   final numColsSent = buf.readUB2();

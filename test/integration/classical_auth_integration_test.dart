@@ -16,18 +16,17 @@
 library;
 
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:oracledb/oracledb.dart';
+// Auth-path probe: needs Transport.supportsFastAuth + the raw CONNECT packet
+// builder, neither of which is on the public surface. No public test-only
+// API exists; the `src/` imports are pinned intentionally (Story 7.8 AC12).
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
 
 import 'test_helper.dart';
-
-final _runIntegrationTests =
-    Platform.environment.containsKey('RUN_INTEGRATION_TESTS');
 
 Future<bool> _serverAdvertisesFastAuth() async {
   final transport = Transport();
@@ -49,7 +48,7 @@ void main() {
   bool fastAuthAdvertised = false;
 
   setUpAll(() async {
-    if (!_runIntegrationTests) return;
+    if (!integrationEnabled) return;
     try {
       fastAuthAdvertised = await _serverAdvertisesFastAuth();
     } catch (_) {
@@ -80,18 +79,14 @@ void main() {
         await probeTransport.disconnect();
       }
 
-      final connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      final connection = await connectForTest();
 
       try {
         expect(connection.isConnected, isTrue);
       } finally {
         await connection.close();
       }
-    }, skip: !_runIntegrationTests ? 'Integration tests disabled' : null);
+    }, skip: !integrationEnabled ? 'Integration tests disabled' : null);
 
     test('wrong password on pre-23 yields oraInvalidCredentials', () async {
       if (fastAuthAdvertised) {
@@ -114,6 +109,6 @@ void main() {
           ),
         ),
       );
-    }, skip: !_runIntegrationTests ? 'Integration tests disabled' : null);
+    }, skip: !integrationEnabled ? 'Integration tests disabled' : null);
   });
 }

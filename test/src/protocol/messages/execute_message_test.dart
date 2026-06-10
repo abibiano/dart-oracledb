@@ -324,6 +324,253 @@ void main() {
   // Story 7.7 AC1, AC2: column-metadata decode gates must mirror what each
   // negotiated TTC field version actually sends. A fixture built for version V
   // must decode without buffer misalignment when decoded at version V.
+  group('Story 7.8 — real UB8 test helper (AC5)', () {
+    test('_ub8 emits identical bytes to WriteBuffer.writeUB8 per size class',
+        () {
+      const values = [
+        0,
+        1,
+        0xff,
+        0x100,
+        0xffff,
+        0x10000,
+        0xffffffff,
+        0x100000000, // 2^32 — first value requiring the 8-byte form
+        9007199254740993, // 2^53 + 1
+        0x7fffffffffffffff,
+      ];
+      for (final v in values) {
+        final wb = WriteBuffer();
+        wb.writeUB8(v);
+        expect(_ub8(v), equals(wb.toBytes()),
+            reason: 'helper and production writer must agree for $v');
+      }
+    });
+
+    test('a >2^32 value round-trips through the helper and ReadBuffer.readUB8',
+        () {
+      const value = 0x1234567890; // > 0xFFFFFFFF
+      final bytes = _ub8(value);
+      expect(bytes.first, equals(8),
+          reason: 'values above 2^32 must use the 8-byte form');
+      expect(ReadBuffer(Uint8List.fromList(bytes)).readUB8(), equals(value));
+    });
+
+    test('a >2^32 extended row count decodes through the real ERROR path', () {
+      // Proves the fixture and decodeExecuteResponse agree on the UB8 wire
+      // shape end-to-end (the pre-fix _ub8 alias could not represent this).
+      const bigCount = 0x100000001; // 4294967297
+      final payload = _buildPayload([
+        _errorMessage(errorNum: 0, rowCount: bigCount),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.rowsAffected, equals(bigCount));
+    });
+  });
+
+  group('Story 7.8 — decodeExecuteResponse coverage (AC6)', () {
+    test('NUMBER column variants decode through ROW_DATA (a)', () {
+      // 42 → [0xC1, 43]; 123.45 → exp 1, digits [1,23,45] → [0xC2, 2, 24, 46];
+      // -5 → complement digit 101-5=96, exp ~0xC1=0x3E, 0x66 terminator;
+      // 0 → special single byte 0x80.
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength([0xC1, 43]),
+          ..._bytesWithLength([0xC2, 2, 24, 46]),
+          ..._bytesWithLength([0x3E, 96, 102]),
+          ..._bytesWithLength([0x80]),
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      const numberCol =
+          ColumnMetadata(name: 'N', oracleType: oraTypeNumber, maxLength: 0);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: const [numberCol, numberCol, numberCol, numberCol],
+      );
+      final row = r.rows.single;
+      expect(row[0], equals(42));
+      expect(row[0], isA<int>(),
+          reason: 'bare integer-valued NUMBER keeps the int heuristic');
+      expect(row[1], isA<double>());
+      expect(row[1] as double, closeTo(123.45, 1e-9));
+      expect(row[2], equals(-5));
+      expect(row[3], equals(0));
+    });
+
+    test('mixed-type OUT/IN/IN OUT binds decode into correct slots (b)', () {
+      // Directions [OUT DATE, IN NUMBER, IN OUT VARCHAR]: ROW_DATA carries
+      // values only for the OUT and IN OUT slots, in SQL order. Distinct
+      // types prove value↔slot pairing, not just index ordering.
+      // DATE 2024-03-15 00:00:00 → [century+100, year+100, m, d, h+1, m+1, s+1].
+      final payload = _buildPayload([
+        _ioVector([16, 32, 48]),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength([120, 124, 3, 15, 1, 1, 1]),
+          ..._ub4(0), // SB4 actualNumBytes trailer
+          ..._bytesWithLength('xyz'.codeUnits),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeDate, maxSize: 7, dir: BindDir.output),
+          BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
+          BindMetadata(
+              oraType: oraTypeVarchar, maxSize: 100, dir: BindDir.inputOutput),
+        ],
+      );
+      expect(r.outBindIndices, equals([0, 2]));
+      expect(r.outBindValues, hasLength(2));
+      expect(r.outBindValues[0], equals(DateTime(2024, 3, 15)));
+      expect(r.outBindValues[1], equals('xyz'));
+    });
+
+    test('multi-column DESCRIBE_INFO parses names, types, precision, scale (c)',
+        () {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'NAME', oraType: oraTypeVarchar, maxSize: 50),
+          _columnInfo(
+            name: 'PRICE',
+            oraType: oraTypeNumber,
+            maxSize: 0,
+            precisionByte: 10,
+            scaleByte: 2,
+          ),
+          _columnInfo(name: 'CREATED', oraType: oraTypeDate, maxSize: 0),
+        ]),
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.columnMetadata, hasLength(3));
+      expect(r.columnMetadata.map((c) => c.name),
+          equals(['NAME', 'PRICE', 'CREATED']));
+      expect(r.columnMetadata[0].oracleType, equals(oraTypeVarchar));
+      expect(r.columnMetadata[0].maxLength, equals(50));
+      expect(r.columnMetadata[1].oracleType, equals(oraTypeNumber));
+      expect(r.columnMetadata[1].precision, equals(10));
+      expect(r.columnMetadata[1].scale, equals(2));
+      expect(r.columnMetadata[2].oracleType, equals(oraTypeDate));
+      expect(r.columnMetadata[2].precision, isNull);
+      expect(r.columnMetadata[2].scale, isNull);
+    });
+
+    test('chunked (0xFE) VARCHAR payload reassembles across chunks (d)', () {
+      // 300 bytes split into 200 + 100 chunks via the long-length indicator;
+      // the chunk loop ends on a zero-length UB4.
+      final chunkA = List.filled(200, 0x41); // 'A'
+      final chunkB = List.filled(100, 0x42); // 'B'
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          0xFE, // TNS long-length indicator
+          ..._ub4(chunkA.length),
+          ...chunkA,
+          ..._ub4(chunkB.length),
+          ...chunkB,
+          ..._ub4(0), // end of chunks
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: const [
+          ColumnMetadata(
+              name: 'BIG', oracleType: oraTypeVarchar, maxLength: 4000),
+        ],
+      );
+      final value = r.rows.single.single;
+      expect(value, equals('A' * 200 + 'B' * 100));
+      expect((value as String).length, equals(300));
+    });
+
+    test('DML rowsAffected decodes single and large non-trivial counts (e)',
+        () {
+      for (final count in [1, 100000]) {
+        final payload = _buildPayload([
+          _errorMessage(errorNum: 0, rowCount: count),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        final r = decodeExecuteResponse(payload, isQuery: false);
+        expect(r.rowsAffected, equals(count), reason: 'count $count');
+      }
+    });
+  });
+
+  group('Story 7.8 — fixed-scale NUMBER decode (AC7)', () {
+    List<int> numberColumnPayload({required int scaleByte}) => _buildPayload([
+          _describeInfo([
+            _columnInfo(
+              name: 'N',
+              oraType: oraTypeNumber,
+              maxSize: 0,
+              precisionByte: 10,
+              scaleByte: scaleByte,
+            ),
+          ]),
+          _rowHeader(),
+          [
+            ttcMsgTypeRowData,
+            ..._bytesWithLength([0xC1, 43])
+          ], // 42
+          _errorMessage(errorNum: 1403),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+
+    test('declared scale > 0 forces double for an integer-valued NUMBER', () {
+      final r = decodeExecuteResponse(
+        Uint8List.fromList(numberColumnPayload(scaleByte: 2)),
+        isQuery: true,
+      );
+      expect(r.columnMetadata.single.scale, equals(2));
+      final value = r.rows.single.single;
+      expect(value, isA<double>(),
+          reason: 'NUMBER(10,2) must decode integer-valued 42 as 42.0 '
+              '(node-oracledb always-Number contract)');
+      expect(value, equals(42.0));
+    });
+
+    test('bare NUMBER (wire scale -127 sentinel) keeps the int heuristic', () {
+      // Oracle reports scale as a SIGNED Int8: bare NUMBER / FLOAT send -127
+      // (0x81) meaning "no declared scale" — node-oracledb base.js reads it
+      // with readInt8(). It must surface as scale == null, not 129.
+      final r = decodeExecuteResponse(
+        Uint8List.fromList(numberColumnPayload(scaleByte: 0x81)),
+        isQuery: true,
+      );
+      expect(r.columnMetadata.single.scale, isNull,
+          reason: '-127 is the no-scale sentinel, not a declared scale');
+      final value = r.rows.single.single;
+      expect(value, isA<int>(),
+          reason: 'bare NUMBER keeps the int-vs-double heuristic');
+      expect(value, equals(42));
+    });
+
+    test('NUMBER(10,0) (declared scale 0) keeps the int heuristic', () {
+      final r = decodeExecuteResponse(
+        Uint8List.fromList(numberColumnPayload(scaleByte: 0)),
+        isQuery: true,
+      );
+      expect(r.columnMetadata.single.scale, isNull);
+      expect(r.rows.single.single, isA<int>());
+    });
+  });
+
   group('Story 7.7 — column metadata version gating (AC1, AC2)', () {
     // Decodes a single-column DESCRIBE_INFO built for [version] and asserts the
     // column survived round-trip intact (a misaligned gate corrupts the name or
@@ -1110,13 +1357,15 @@ List<int> _columnInfo({
   required int oraType,
   required int maxSize,
   int ttcFieldVersion = 24,
+  int precisionByte = 0,
+  int scaleByte = 0,
 }) {
   final nameBytes = name.codeUnits;
   return [
     oraType, // dataType
     0, // flags
-    0, // precision
-    0, // scale
+    precisionByte, // precision (signed Int8 on the wire)
+    scaleByte, // scale (signed Int8 on the wire; 0x81 = -127 bare sentinel)
     ..._ub4(maxSize), // maxSize
     ..._ub4(0), // max num array elements
     ..._ub8(0), // cont flags (UB8)
@@ -1188,7 +1437,35 @@ List<int> _ub2(int v) {
   return [2, (v >> 8) & 0xff, v & 0xff];
 }
 
-List<int> _ub8(int v) => _ub4(v);
+/// Emits a real variable-length UB8 mirroring `WriteBuffer.writeUB8`:
+/// size byte 0/1/2/4/8 followed by that many big-endian payload bytes,
+/// including the 8-byte form for values above 2³² (Story 7.8 AC5).
+/// Deliberately decoupled from [_ub4], which caps at the 4-byte form.
+List<int> _ub8(int v) {
+  if (v == 0) return [0];
+  if (v <= 0xff) return [1, v];
+  if (v <= 0xffff) return [2, (v >> 8) & 0xff, v & 0xff];
+  if (v <= 0xffffffff) {
+    return [
+      4,
+      (v >> 24) & 0xff,
+      (v >> 16) & 0xff,
+      (v >> 8) & 0xff,
+      v & 0xff,
+    ];
+  }
+  return [
+    8,
+    (v >> 56) & 0xff,
+    (v >> 48) & 0xff,
+    (v >> 40) & 0xff,
+    (v >> 32) & 0xff,
+    (v >> 24) & 0xff,
+    (v >> 16) & 0xff,
+    (v >> 8) & 0xff,
+    v & 0xff,
+  ];
+}
 
 List<int> _bytesWithLength(List<int> data) {
   if (data.isEmpty) return [0];

@@ -24,9 +24,13 @@ void main() {
     // Task 7.1: Connection failure during auth
     // These tests make real network calls and are guarded by RUN_INTEGRATION_TESTS.
     // =========================================================================
+    // AC13 (Story 7.8): integration-gated tests under test/src/ carry the
+    // integration tag so `--exclude-tags=integration` (quality CI job)
+    // excludes them without relying on the env-var skip alone.
     final runNetworkTests =
         Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
     group('7.1 Connection failure during auth',
+        tags: 'integration',
         skip: runNetworkTests
             ? null
             : 'Network calls: set RUN_INTEGRATION_TESTS=true to run', () {

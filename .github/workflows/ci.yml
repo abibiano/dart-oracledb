@@ -59,6 +59,12 @@ jobs:
 
   # Cross-platform validation for analyzer + unit tests.
   # Oracle integration is intentionally Linux-only (separate job below).
+  #
+  # Linux is deliberately ABSENT from this matrix (Story 7.8 AC16): the
+  # `quality` job above already runs the identical analyzer + unit-test
+  # surface on ubuntu-latest (plus coverage), so adding Linux here would
+  # only duplicate that run. The matrix therefore covers exactly the
+  # platforms not exercised elsewhere: macOS and Windows.
   platform:
     name: Unit Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

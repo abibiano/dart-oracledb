@@ -66,9 +66,12 @@ void main() {
       }
       sw.stop();
 
-      // Generous bound to avoid CI flakiness while still catching a regression
-      // that turns the probe quadratically or pathologically slow.
-      expect(sw.elapsedMilliseconds, lessThan(3000),
+      // Story 7.8 AC15 (2026-06-10): measured locally at ~6-8ms for 200 full
+      // scans (Apple Silicon, JIT). 500ms keeps ~10x headroom over even a
+      // slow cold-JIT CI runner while still catching a ~10x algorithmic
+      // regression (the previous 3000ms ceiling was ~400x the baseline and
+      // could mask one).
+      expect(sw.elapsedMilliseconds, lessThan(500),
           reason: 'per-packet TTC completion probe must stay cheap; took '
               '${sw.elapsedMilliseconds}ms for $packets full scans');
     });
@@ -111,7 +114,10 @@ void main() {
           ttcStreamIsComplete(stream, endOfRequestSupport: true);
         }
         sw.stop();
-        expect(sw.elapsedMilliseconds, lessThan(3000),
+        // Story 7.8 AC15 (2026-06-10): same baseline as the STATUS-path bound
+        // above — measured ~6-8ms locally for 200 scans; 500ms documented
+        // there.
+        expect(sw.elapsedMilliseconds, lessThan(500),
             reason: '23ai error-probe re-walk must stay cheap; took '
                 '${sw.elapsedMilliseconds}ms for $packets full scans');
       });

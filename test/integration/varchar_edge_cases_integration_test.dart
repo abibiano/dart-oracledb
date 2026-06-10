@@ -6,29 +6,26 @@
 @Tags(['integration'])
 library;
 
-import 'dart:io';
-
 import 'package:oracledb/oracledb.dart';
 import 'package:test/test.dart';
 
 import 'test_helper.dart';
 
 void main() {
-  final hasOracle = Platform.environment.containsKey('RUN_INTEGRATION_TESTS');
-
   group(
     'VARCHAR2 / CHAR edge cases (Story 7.1 AC8, AC9)',
-    skip: !hasOracle ? 'Integration tests disabled' : null,
+    skip: !integrationEnabled ? 'Integration tests disabled' : null,
     () {
+      // AC3 (Story 7.8): nullable handle assigned only once connect()
+      // succeeds; tearDown cleans up null-safely. `connection` is the
+      // non-null alias used by test bodies.
+      OracleConnection? connectionHandle;
       late OracleConnection connection;
-      const testTable = 'test_varchar_edges_story71';
+      final testTable = uniqueTableName('vch_edge');
 
       setUp(() async {
-        connection = await OracleConnection.connect(
-          testConnectString,
-          user: testUser,
-          password: testPassword,
-        );
+        connectionHandle = await connectForTest();
+        connection = connectionHandle!;
         try {
           await connection.execute('''
             CREATE TABLE $testTable (
@@ -39,38 +36,32 @@ void main() {
             )
           ''');
         } on OracleException catch (e) {
-          if (e.errorCode == 955) {
-            try {
-              await connection.execute('TRUNCATE TABLE $testTable');
-            } catch (_) {
-              await connection.close();
-              rethrow;
-            }
-          } else {
-            await connection.close();
-            rethrow;
-          }
+          // ORA-00955: leftover table from a previous run — reuse it.
+          // Any setUp failure leaves the close to tearDown's
+          // cleanUpConnection (AC3/AC4).
+          if (e.errorCode != 955) rethrow;
+          await connection.execute('TRUNCATE TABLE $testTable');
         }
       });
 
       tearDown(() async {
-        try {
-          await connection.execute('DROP TABLE $testTable');
-        } on OracleException catch (e) {
-          if (e.errorCode != 942) rethrow;
-        } finally {
-          await connection.close();
-        }
+        final c = connectionHandle;
+        connectionHandle = null;
+        await cleanUpConnection(
+          c,
+          dropStatements: ['DROP TABLE $testTable PURGE'],
+        );
       });
 
       // AC8 — CHAR(N) padding contract
       test('CHAR(10) populated with "ab" returns server-side padding verbatim',
           () async {
+        final id = nextTestId();
         await connection.execute(
-          "INSERT INTO $testTable (id, char10) VALUES (1, 'ab')",
+          "INSERT INTO $testTable (id, char10) VALUES ($id, 'ab')",
         );
         final result = await connection.execute(
-          'SELECT char10 FROM $testTable WHERE id = 1',
+          'SELECT char10 FROM $testTable WHERE id = $id',
         );
         final value = result.rows.single['CHAR10'];
         expect(value, isA<String>());
@@ -82,31 +73,34 @@ void main() {
 
       // AC9.1 — multi-byte UTF-8 content (emoji, CJK, accented Latin)
       test('VARCHAR2 round-trips emoji', () async {
+        final id = nextTestId();
         await connection.execute(
-          "INSERT INTO $testTable (id, v_unicode) VALUES (2, '🔥💯')",
+          "INSERT INTO $testTable (id, v_unicode) VALUES ($id, '🔥💯')",
         );
         final result = await connection.execute(
-          'SELECT v_unicode FROM $testTable WHERE id = 2',
+          'SELECT v_unicode FROM $testTable WHERE id = $id',
         );
         expect(result.rows.single['V_UNICODE'], equals('🔥💯'));
       });
 
       test('VARCHAR2 round-trips CJK characters', () async {
+        final id = nextTestId();
         await connection.execute(
-          "INSERT INTO $testTable (id, v_unicode) VALUES (3, 'こんにちは世界')",
+          "INSERT INTO $testTable (id, v_unicode) VALUES ($id, 'こんにちは世界')",
         );
         final result = await connection.execute(
-          'SELECT v_unicode FROM $testTable WHERE id = 3',
+          'SELECT v_unicode FROM $testTable WHERE id = $id',
         );
         expect(result.rows.single['V_UNICODE'], equals('こんにちは世界'));
       });
 
       test('VARCHAR2 round-trips accented Latin', () async {
+        final id = nextTestId();
         await connection.execute(
-          "INSERT INTO $testTable (id, v_unicode) VALUES (4, 'café résumé')",
+          "INSERT INTO $testTable (id, v_unicode) VALUES ($id, 'café résumé')",
         );
         final result = await connection.execute(
-          'SELECT v_unicode FROM $testTable WHERE id = 4',
+          'SELECT v_unicode FROM $testTable WHERE id = $id',
         );
         expect(result.rows.single['V_UNICODE'], equals('café résumé'));
       });
@@ -115,12 +109,13 @@ void main() {
       test('VARCHAR2(100) populated with exactly 100 ASCII bytes succeeds',
           () async {
         final s = 'A' * 100; // 100 ASCII bytes
+        final id = nextTestId();
         await connection.execute(
-          'INSERT INTO $testTable (id, v100) VALUES (5, :1)',
+          'INSERT INTO $testTable (id, v100) VALUES ($id, :1)',
           [s],
         );
         final result = await connection.execute(
-          'SELECT v100 FROM $testTable WHERE id = 5',
+          'SELECT v100 FROM $testTable WHERE id = $id',
         );
         expect(result.rows.single['V100'], equals(s));
       });
@@ -128,9 +123,10 @@ void main() {
       // AC9.3 — over-length raises ORA-12899
       test('VARCHAR2(100) populated with 101 bytes raises ORA-12899', () async {
         final s = 'A' * 101;
+        final id = nextTestId();
         await expectLater(
           connection.execute(
-            'INSERT INTO $testTable (id, v100) VALUES (6, :1)',
+            'INSERT INTO $testTable (id, v100) VALUES ($id, :1)',
             [s],
           ),
           throwsA(isA<OracleException>()
@@ -141,11 +137,12 @@ void main() {
       // AC9.4 — '' vs NULL semantics (SQL literal path)
       test("VARCHAR2 empty string '' is stored as NULL (Oracle convention)",
           () async {
+        final id = nextTestId();
         await connection.execute(
-          "INSERT INTO $testTable (id, v100) VALUES (7, '')",
+          "INSERT INTO $testTable (id, v100) VALUES ($id, '')",
         );
         final result = await connection.execute(
-          'SELECT v100 FROM $testTable WHERE id = 7',
+          'SELECT v100 FROM $testTable WHERE id = $id',
         );
         // Oracle treats '' as NULL on insert; the round-tripped value is null.
         expect(result.rows.single['V100'], isNull);
@@ -157,12 +154,13 @@ void main() {
       // also surfaces ''-as-NULL semantics end-to-end.
       test("VARCHAR2 empty string '' bound via parameter is stored as NULL",
           () async {
+        final id = nextTestId();
         await connection.execute(
-          'INSERT INTO $testTable (id, v100) VALUES (8, :1)',
+          'INSERT INTO $testTable (id, v100) VALUES ($id, :1)',
           [''],
         );
         final result = await connection.execute(
-          'SELECT v100 FROM $testTable WHERE id = 8',
+          'SELECT v100 FROM $testTable WHERE id = $id',
         );
         expect(result.rows.single['V100'], isNull);
       });

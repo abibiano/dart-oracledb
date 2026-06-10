@@ -1,24 +1,16 @@
 @Tags(['integration'])
 library;
 
-import 'dart:io';
-
 import 'package:oracledb/oracledb.dart';
 import 'package:test/test.dart';
 
 import 'test_helper.dart';
 
 void main() {
-  final hasOracle = Platform.environment.containsKey('RUN_INTEGRATION_TESTS');
-
   group('Oracle 23ai connection',
-      skip: !hasOracle ? 'Integration tests disabled' : null, () {
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     test('connects with valid credentials', () async {
-      final connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      final connection = await connectForTest();
 
       expect(connection.isConnected, isTrue);
       expect(connection.serviceName, equals(testService));
@@ -30,11 +22,7 @@ void main() {
     });
 
     test('close() is idempotent', () async {
-      final connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      final connection = await connectForTest();
 
       expect(connection.isConnected, isTrue);
 
@@ -109,11 +97,7 @@ void main() {
     // Story 1.7: Connection Lifecycle Management Tests
 
     test('ping returns true for active connection', () async {
-      final connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      final connection = await connectForTest();
 
       try {
         expect(connection.isHealthy, isTrue);
@@ -124,11 +108,7 @@ void main() {
     });
 
     test('ping returns false after close', () async {
-      final connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      final connection = await connectForTest();
 
       await connection.close();
 
@@ -179,11 +159,7 @@ void main() {
     });
 
     test('ping respects custom timeout', () async {
-      final connection = await OracleConnection.connect(
-        testConnectString,
-        user: testUser,
-        password: testPassword,
-      );
+      final connection = await connectForTest();
 
       try {
         // Ping with explicit timeout

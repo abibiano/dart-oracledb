@@ -6,6 +6,9 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
+// Protocol/auth-flow test: needs Transport + AuthFlow + packet internals that
+// are not on the public surface. No public test-only API exists; the `src/`
+// imports are pinned intentionally (Story 7.8 AC12).
 import 'package:oracledb/src/crypto/auth.dart';
 import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/transport/packet.dart';
@@ -20,7 +23,9 @@ void main() {
     print('${record.level.name}: ${record.loggerName}: ${record.message}');
   });
 
-  test('auth with WRONG password', () async {
+  test('auth with WRONG password',
+      skip: !integrationEnabled ? 'Integration tests disabled' : null,
+      () async {
     final transport = Transport();
     const password = 'WRONG_PASSWORD_123'; // Intentionally wrong
 

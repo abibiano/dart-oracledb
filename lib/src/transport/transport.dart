@@ -691,7 +691,8 @@ class Transport {
           _poison();
           throw OracleException(
             errorCode: oraProtocolError,
-            message: 'Protocol receive-loop exhaustion: read $_maxReceivePackets '
+            message:
+                'Protocol receive-loop exhaustion: read $_maxReceivePackets '
                 'TNS packets without a complete TTC response; the server stream '
                 'is not terminating. Transport poisoned — close this connection '
                 'and open a new one.',

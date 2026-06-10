@@ -231,7 +231,7 @@ void main() {
         0xDE, 0xAD, 0xBE, 0xEF, 0x01, // trailing field bytes
       ]);
       final buf = ReadBuffer(wire);
-      final value = decodeNumber(buf, fieldLen);
+      final value = decodeNumber(buf, length: fieldLen);
       expect(value, equals(-100));
       // Exactly the encoded bytes were consumed; the trailing bytes are
       // available for the next field's decoder.
@@ -255,9 +255,108 @@ void main() {
       // Append unrelated bytes after.
       final wire = Uint8List.fromList([...trimmed, 0x42, 0x42]);
       final buf = ReadBuffer(wire);
-      final value = decodeNumber(buf, trimmed.length);
+      final value = decodeNumber(buf, length: trimmed.length);
       expect(value, equals(-1));
       expect(buf.remaining, equals(2));
+    });
+  });
+
+  group('Story 7.8 — NUMBER codec (AC7, AC8, AC9, AC10)', () {
+    // AC7 — forceDouble for declared fixed-scale columns.
+    test('forceDouble returns double for integer-valued NUMBERs', () {
+      // 42 → [0xC1, 43]; 0 → [0x80]; -5 → [0x3E, 96, 102].
+      final fortyTwo = decodeNumber(
+        ReadBuffer(Uint8List.fromList([0xC1, 43])),
+        forceDouble: true,
+      );
+      expect(fortyTwo, isA<double>());
+      expect(fortyTwo, equals(42.0));
+
+      final zero = decodeNumber(
+        ReadBuffer(Uint8List.fromList([0x80])),
+        forceDouble: true,
+      );
+      expect(zero, isA<double>(),
+          reason: 'the special 0x80 zero must also honor forceDouble');
+      expect(zero, equals(0));
+
+      final negFive = decodeNumber(
+        ReadBuffer(Uint8List.fromList([0x3E, 96, 102])),
+        forceDouble: true,
+      );
+      expect(negFive, isA<double>());
+      expect(negFive, equals(-5));
+    });
+
+    test('default (no forceDouble) keeps the int heuristic — backward compat',
+        () {
+      final v = decodeNumber(ReadBuffer(Uint8List.fromList([0xC1, 43])));
+      expect(v, isA<int>());
+      expect(v, equals(42));
+    });
+
+    test('forceDouble does not alter fractional decode', () {
+      // 123.45 → [0xC2, 2, 24, 46] — double either way.
+      final v = decodeNumber(
+        ReadBuffer(Uint8List.fromList([0xC2, 2, 24, 46])),
+        forceDouble: true,
+      );
+      expect(v, isA<double>());
+      expect(v as double, closeTo(123.45, 1e-9));
+    });
+
+    // AC8 — exact boundaries of the magnitude guard (the far-out-of-range
+    // cases double.minPositive / 1e200 are pinned in the encode group above).
+    test('encodeNumber accepts 1e-130 and rejects 1e126 at the boundary', () {
+      expect(() => encodeNumber(1e-130), returnsNormally);
+      expect(
+        () => encodeNumber(1e126),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraDataTypeNotSupported)),
+      );
+    });
+
+    // AC9 — canonical mantissa: trailing zero base-100 pairs are stripped,
+    // matching reference/node-oracledb/lib/impl/datahandlers/buffer.js
+    // writeOracleNumber ("strip any trailing zeroes", exponent adjusted).
+    test('encodeNumber emits the canonical short form for 10000', () {
+      // 10000 = 1 × 100² → exponent byte 0xC3, single digit 1 → byte 0x02.
+      expect(encodeNumber(10000), equals([0xC3, 0x02]));
+    });
+
+    test('encodeNumber canonical form covers more trailing-zero shapes', () {
+      // 100 = 1 × 100¹; 1000000 = 1 × 100³; 120000 = 12 × 100²
+      expect(encodeNumber(100), equals([0xC2, 0x02]));
+      expect(encodeNumber(1000000), equals([0xC4, 0x02]));
+      expect(encodeNumber(120000), equals([0xC3, 0x0D]));
+    });
+
+    test('encodeNumber canonical form for negatives keeps the terminator', () {
+      // -10000: exponent ~(192+3) = 0x3C, digit 101-1 = 100 = 0x64, 0x66.
+      expect(encodeNumber(-10000), equals([0x3C, 0x64, 0x66]));
+    });
+
+    test('canonicalized values still round-trip exactly', () {
+      for (final v in <num>[100, 10000, -10000, 1000000, 120000, 100.5]) {
+        final decoded = decodeNumber(ReadBuffer(encodeNumber(v)));
+        expect(decoded, equals(v), reason: 'round-trip failed for $v');
+      }
+      // Story 7.1 guard: integer-part zeros must never collapse 100 → 1.
+      expect(decodeNumber(ReadBuffer(encodeNumber(100))), isNot(equals(1)));
+    });
+
+    // AC10 — >2^53 precision-loss contract pinned at the wire level.
+    test('decodeNumber pins the 2^53+1 precision-loss contract', () {
+      // 9007199254740993 (2^53 + 1) on the wire: exponent 8 → 0xC8, base-100
+      // pairs [90,07,19,92,54,74,09,93] each +1.
+      final bytes = Uint8List.fromList([0xC8, 91, 8, 20, 93, 55, 75, 10, 94]);
+      final v = decodeNumber(ReadBuffer(bytes));
+      // The true value is exactly halfway between the two nearest doubles
+      // (2^53 and 2^53+2); IEEE-754 ties-to-even rounds DOWN to 2^53, which
+      // the int-vs-double heuristic then returns as an int. The loss is
+      // bounded (±1) and predictable — this pin locks the contract.
+      expect(v, isA<int>());
+      expect(v, equals(9007199254740992));
     });
   });
 
@@ -691,7 +790,7 @@ void main() {
       // byte we have no right to.
       final buffer = ReadBuffer(Uint8List.fromList([0xC1, 6]));
       expect(
-        () => decodeNumber(buffer, 0),
+        () => decodeNumber(buffer, length: 0),
         throwsA(isA<OracleException>()
             .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
       );

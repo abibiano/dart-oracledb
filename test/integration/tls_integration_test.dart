@@ -9,7 +9,7 @@ import 'package:test/test.dart';
 import 'test_helper.dart';
 
 void main() {
-  final hasOracle = Platform.environment.containsKey('RUN_INTEGRATION_TESTS');
+  final hasOracle = integrationEnabled;
   final hasTlsOracle = Platform.environment.containsKey('ORACLE_TLS_PORT');
   final tlsPort =
       int.tryParse(Platform.environment['ORACLE_TLS_PORT'] ?? '') ?? 2484;
