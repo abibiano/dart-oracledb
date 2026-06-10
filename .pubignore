@@ -12,3 +12,6 @@ scripts/
 docker-compose.yml
 docker-compose.override.yml
 coverage/
+
+# TLS test certificates (gitignored *.pem)
+docker/tls/
