@@ -327,6 +327,12 @@ void main() {
       test('non-terminating DATA stream trips the cap and poisons', () async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         server.listen((s) {
+          // The client poisons and disconnects mid-flood once the cap trips;
+          // the remaining writes then hit an aborted socket. Swallow that
+          // post-disconnect write error so it does not surface as an async
+          // failure after the test completes (Windows aborts hard: errno
+          // 10053).
+          unawaited(s.done.catchError((_) {}));
           s.listen((_) {
             // Flood the client with non-terminal DATA packets: each carries the
             // 2-byte data-flags (0x0000) and NO TTC payload, so the completion
@@ -343,7 +349,7 @@ void main() {
                 0x00, 0x00, // data flags = 0x0000 (non-terminal)
               ]);
             }
-          });
+          }, onError: (_) {});
         });
 
         final transport = Transport()..debugMaxReceivePackets = 5;
@@ -378,6 +384,10 @@ void main() {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         var requestsSeen = 0;
         server.listen((s) {
+          // The drain loop disconnects when the cap trips; a reply may still be
+          // in flight, so swallow the post-disconnect write error (Windows:
+          // errno 10053) rather than let it fail the test after completion.
+          unawaited(s.done.catchError((_) {}));
           s.listen((_) {
             requestsSeen++;
             // One DATA packet per request: data-flags 0x0000, then a bare
@@ -394,7 +404,7 @@ void main() {
               0x00, 0x00, // header checksum
               ...payload,
             ]);
-          });
+          }, onError: (_) {});
         });
 
         final transport = Transport()..debugMaxFetchIterations = 3;

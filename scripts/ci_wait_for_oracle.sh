@@ -35,9 +35,13 @@ attempts=60
 cid=""
 for i in $(seq 1 $attempts); do
   cid="$(docker ps --filter "ancestor=${image}" -q | head -n1)"
-  # `timeout 5` bounds the probe: a listener that accepts but then hangs
-  # must not block an iteration for minutes.
-  if timeout 5 bash -c "cat < /dev/tcp/localhost/${port}" >/dev/null 2>&1; then
+  # Connect-only probe: opening /dev/tcp performs the TCP connect, and `:`
+  # returns immediately on success WITHOUT reading. A `cat`-style read would
+  # block forever here — Oracle's TNS listener sends nothing until it receives
+  # a connect packet — making a `timeout`-wrapped read report "not ready" on
+  # every iteration even against a healthy listener. `timeout 5` still bounds a
+  # connect that hangs (accepts but never completes the handshake).
+  if timeout 5 bash -c ": < /dev/tcp/localhost/${port}" >/dev/null 2>&1; then
     # Listener is up — now require an actual session on the PDB.
     # Credential is the ephemeral CI-only password (see test-run env).
     if [ -n "$cid" ] && echo 'SELECT 1 FROM dual;' | docker exec -i "$cid" sqlplus -L -S "system/testpassword@//localhost:${port}/${service}" >/dev/null 2>&1; then
