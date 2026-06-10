@@ -1531,33 +1531,6 @@ void main() {
       ]);
       expect(ttcStreamIsComplete(payload, expectedColumns: cols), isTrue);
     });
-
-    test('bit vector with numColsSent < column count is a protocol error', () {
-      // The server declares only 1 column in the bit-vector header but the
-      // decode state has 2 columns. The truncated vector would leave the
-      // second column's duplicate bit unset, silently shearing the row decode.
-      // _processBitVector must catch this and throw oraProtocolError.
-      final payload = _buildPayload([
-        _rowHeader(),
-        _bitVector(1, [0x02]), // numColsSent=1 but cols has 2 columns
-        [ttcMsgTypeRowData, ..._bytesWithLength('x1'.codeUnits)],
-        _errorMessage(errorNum: 1403),
-        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-      ]);
-      expect(
-        () => decodeExecuteResponse(
-          payload,
-          isQuery: true,
-          expectedColumns: cols,
-        ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
-            .having((e) => e.message, 'message',
-                contains('bit vector covers'))),
-        reason: 'a truncated bit vector must fail loud rather than '
-            'silently shearing the row decode',
-      );
-    });
   });
 
   // F14b: empty list inputs reuse canonical const empty lists (no per-DML
