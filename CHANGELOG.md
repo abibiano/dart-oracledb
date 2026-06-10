@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.1
+
+### Packaging
+- Android and iOS added to the supported platforms list. The transport layer uses only `dart:io` TCP sockets (`Socket`, `SecureSocket`) which are available on both mobile platforms — no code changes were required.
+
 ## 0.9.0
 
 First stable-leaning release. The core driver — connections, authentication, queries, DML, transactions, statement caching, and PL/SQL — is validated against Oracle 23ai and Oracle 21c. 1.0.0 will follow once LOB support and connection pooling land.
