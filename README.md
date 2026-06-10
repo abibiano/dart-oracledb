@@ -3,12 +3,10 @@
 A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire protocol. No Oracle Client libraries required.
 
 [![Pub Version](https://img.shields.io/pub/v/oracledb)](https://pub.dev/packages/oracledb)
-[![pub pre-release](https://img.shields.io/pub/v/oracledb?label=pre-release&include_prereleases)](https://pub.dev/packages/oracledb)
-[![CI](https://img.shields.io/github/actions/workflow/status/abibiano/dart-oracledb/ci.yml?branch=main&label=CI)](https://github.com/abibiano/dart-oracledb/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.3.0-blue)](https://dart.dev)
+[![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **Alpha — public API may change between releases.** Epics 1 & 2 (connection, auth, queries, DML, transactions) are stable. PL/SQL, LOBs, and connection pooling are not yet implemented. Pin to an exact version (`oracledb: 0.1.0-alpha.1`) until 1.0.
+> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, and PL/SQL (stored procedures, functions, OUT/IN OUT binds) are implemented and validated against Oracle 23ai and 21c. LOBs (CLOB/BLOB/JSON) and connection pooling are not yet implemented. Depend on `oracledb: ^0.9.0`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once LOB support and connection pooling land.
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -17,10 +15,12 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 - **Pure Dart** — no FFI, no native code, no Oracle Instant Client required
 - **Thin protocol** — direct TNS/TTC wire protocol implementation
 - **Oracle 23ai + Oracle 21c** — tested against both; FAST_AUTH and classical auth paths both supported
-- **All Dart platforms** — macOS, Windows, Linux, iOS, Android (not web — requires TCP sockets)
+- **Desktop & server platforms** — macOS, Windows, Linux (mobile untested; web unsupported — requires `dart:io` TCP sockets)
 - **TLS/SSL** — encrypted connections with certificate validation
 - **Full query support** — SELECT, INSERT, UPDATE, DELETE with positional and named bind parameters
+- **PL/SQL** — stored procedures and functions with OUT / IN OUT bind parameters
 - **Transactions** — commit, rollback, and transaction helper
+- **TIMESTAMP WITH TIME ZONE** — decoded as UTC `DateTime`, or as `OracleTimestampTz` preserving the original offset (opt-in)
 - **Statement caching** — transparent prepared-statement cache
 - **Async/await** — modern Dart async API throughout
 
@@ -31,8 +31,8 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 | macOS    | ✅ |
 | Windows  | ✅ |
 | Linux    | ✅ |
-| iOS      | ✅ |
-| Android  | ✅ |
+| iOS      | ⚠️ untested (not declared in `pubspec.yaml`) |
+| Android  | ⚠️ untested (not declared in `pubspec.yaml`) |
 | Web      | ❌ (requires raw TCP sockets via `dart:io`) |
 
 ## Supported Oracle Versions
@@ -48,7 +48,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  oracledb: ^0.1.0
+  oracledb: ^0.9.0
 ```
 
 Then run:
@@ -176,6 +176,35 @@ try {
 }
 ```
 
+### PL/SQL — Stored Procedures & Functions
+
+```dart
+// Call a stored procedure
+await connection.execute(
+  'BEGIN raise_salary(:dept, :pct); END;',
+  {'dept': 10, 'pct': 5},
+);
+
+// Function return value via an OUT bind
+final result = await connection.execute(
+  'BEGIN :ret := get_employee_name(:id); END;',
+  {
+    'ret': OracleBind.out(type: OracleDbType.varchar, maxSize: 100),
+    'id': 100,
+  },
+);
+print(result.outBinds['ret']);
+
+// IN OUT parameter
+final r = await connection.execute(
+  'BEGIN increment(:value); END;',
+  {'value': OracleBind.inOut(value: 41, type: OracleDbType.number)},
+);
+print(r.outBinds['value']); // 42
+```
+
+`maxSize` is required for `varchar` and `raw` OUT binds — size it for the largest value the procedure may return.
+
 ### TLS/SSL Connections
 
 ```dart
@@ -212,7 +241,10 @@ final isAlive = await connection.ping();
 |--------|-------------|
 | `OracleConnection.connect(...)` | Open a connection |
 | `OracleConnection.withConnection(...)` | Open, use, and auto-close a connection |
-| `connection.execute(sql, [bindValues])` | Run a query or DML statement |
+| `connection.execute(sql, [bindValues])` | Run a query, DML statement, or PL/SQL block |
+| `OracleBind.out(type: ..., maxSize: ...)` | Declare a PL/SQL OUT bind parameter |
+| `OracleBind.inOut(value: ..., type: ...)` | Declare a PL/SQL IN OUT bind parameter |
+| `result.outBinds` | OUT / IN OUT values, by name or position |
 | `connection.ping()` | Send a ping to verify the connection is alive |
 | `connection.commit()` | Commit the current transaction |
 | `connection.rollback()` | Roll back the current transaction |
@@ -230,6 +262,7 @@ final isAlive = await connection.ping();
 | NUMBER | `num` / `int` / `double` |
 | DATE | `DateTime` |
 | TIMESTAMP | `DateTime` |
+| TIMESTAMP WITH TIME ZONE | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` |
 | RAW | `Uint8List` |
 | NULL | `null` |
 
@@ -241,15 +274,15 @@ This package implements a subset of the full Oracle driver feature set. Below is
 |------|--------|
 | Core connection & authentication | ✅ Done |
 | Query execution & transactions | ✅ Done |
-| PL/SQL execution (stored procedures, functions) | 🔄 In progress |
-| Advanced data types (CLOB, BLOB, RAW, JSON) | 📋 Planned |
+| PL/SQL execution (stored procedures, functions) | ✅ Done |
+| Advanced data types (CLOB, BLOB, JSON) | 📋 Planned |
 | Connection pooling | 📋 Planned |
 
 ## Tests
 
 The project has an extensive test suite:
 
-- **~490 unit tests** — covering protocol, crypto, transport, and connection layers
+- **~818 unit tests** — covering protocol, crypto, transport, and connection layers
 - **Integration tests** — run against real Oracle instances via Docker
 
 ```bash
@@ -268,6 +301,16 @@ docker compose --profile oracle21c up -d oracle21c
 RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test/integration/
 ```
 
+## Known Limitations
+
+- **Character sets** — the driver assumes the database character set is UTF-8 (`AL32UTF8`, the Oracle default since 12c). Data stored in non-UTF-8 character sets may decode incorrectly.
+- **Statement cache and external DDL** — top-level DDL executed on the same connection clears the statement cache, but DDL issued from another session (or inside a PL/SQL block) can leave stale cached SELECT metadata. This matches node-oracledb thin-mode behavior.
+- **NUMBER beyond 2⁵³** — integer-valued NUMBERs larger than 2⁵³ decode to `double` and lose precision (Dart `double` limit; matches node-oracledb).
+- **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use separate connections for concurrent work until connection pooling lands (see roadmap).
+- **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
+- **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) are rejected on decode; offset-based zones (e.g. `+02:00`) are supported.
+- **Very large result sets** — a single `execute()` is bounded by a safety cap of 1,000 fetch round-trips (about 50,000 rows at the default fetch size); if the cap is hit, a warning is logged and the rows fetched so far are returned.
+
 ## Thin Mode Limitations
 
 This driver implements Oracle's thin-mode protocol. The following features require Oracle Client (thick mode) and are **not supported**:
@@ -281,7 +324,7 @@ This driver implements Oracle's thin-mode protocol. The following features requi
 
 ## Requirements
 
-- Dart SDK >= 3.3.0
+- Dart SDK >= 3.12.0
 - Oracle Database 21c or later (older versions may work but are untested)
 
 ## Contributing
