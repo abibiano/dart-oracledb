@@ -371,6 +371,15 @@ const int ttcMaxLongLength = 0x7fffffff;
 /// 32K runtime capability this driver always requests).
 const int ttcMaxVarcharBindBytes = 32767;
 
+/// Maximum byte size of a short (non-long) RAW bind. PL/SQL byte binds
+/// beyond this limit are converted to temporary BLOBs (node-oracledb retypes
+/// PL/SQL RAW binds with maxSize > 32767 to DB_TYPE_BLOB the same way).
+/// Currently equal to [ttcMaxVarcharBindBytes], but kept as a separate
+/// constant so either limit can be retuned without silently dragging the
+/// other along. (The SQL long-bind classification in execute_message.dart
+/// deliberately keeps the shared VARCHAR threshold — node-oracledb parity.)
+const int ttcMaxRawBindBytes = 32767;
+
 /// CCAP field version index in compile capabilities array.
 const int ttcCcapFieldVersionIndex = 7;
 

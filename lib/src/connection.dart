@@ -115,6 +115,24 @@ class OracleConnection {
   @visibleForTesting
   int get debugReuseExecutes => _transport.debugReuseExecutes;
 
+  /// Number of TTC LOB READ operations sent on this connection.
+  ///
+  /// Instrumentation for the CLOB/BLOB drain integration tests: proves how
+  /// many READ round trips materialized locator values without privileged
+  /// Oracle views. Not part of the public API.
+  @visibleForTesting
+  int get debugLobReadOps => _transport.debugLobReadOps;
+
+  /// Number of temporary-LOB locators queued for the free-temp piggyback on
+  /// the next execute.
+  ///
+  /// Instrumentation for the temp-LOB lifecycle integration tests (Story
+  /// 4.1): proves the queue drains to zero after the execute that follows a
+  /// temp-LOB bind — including after a failed execute. Not part of the
+  /// public API.
+  @visibleForTesting
+  int get debugPendingTempLobCount => _transport.debugPendingTempLobCount;
+
   /// Current TTC sequence-counter value on the underlying transport.
   ///
   /// Exists for the sequence-wrap integration smoke test, which samples the

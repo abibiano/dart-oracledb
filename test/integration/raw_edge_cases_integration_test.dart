@@ -165,6 +165,23 @@ void main() {
         );
       });
 
+      // The same over-length contract at the RAW(2000) standard-size ceiling:
+      // 2001 bytes is one past the declared column width and must surface the
+      // server's ORA-12899, never a silent truncation to 2000 bytes.
+      test('RAW(2000) over-length payload (2001 bytes) raises ORA-12899',
+          () async {
+        final id = nextTestId();
+        final tooBig = patternBytes(2001, seed: 47);
+        await expectLater(
+          connection.execute(
+            'INSERT INTO $testTable (id, r2000) VALUES ($id, :1)',
+            [tooBig],
+          ),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', 12899)),
+        );
+      });
+
       // A full-width RAW(2000) payload is the standard-size ceiling
       // (MAX_STRING_SIZE=STANDARD); both test databases support it without
       // EXTENDED string sizes.
@@ -224,8 +241,9 @@ void main() {
         final reuseBefore = connection.debugReuseExecutes;
         final second = await connection.execute(query, [id]);
         expect(second.rows.single['R2000'], equals(bytes));
-        expect(connection.debugReuseExecutes, greaterThan(reuseBefore),
-            reason: 'RAW cursors must take the normal cursor-reuse path');
+        expect(connection.debugReuseExecutes, equals(reuseBefore + 1),
+            reason: 'RAW cursors must take the normal cursor-reuse path — '
+                'exactly one reuse EXECUTE for the repeated SELECT');
         expect(connection.debugFullParseExecutes, equals(parseBefore),
             reason: 'RAW must not inherit the CLOB/BLOB re-parse safeguard');
       });

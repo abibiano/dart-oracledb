@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/messages/auth_message.dart';
+import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
@@ -685,6 +686,91 @@ void main() {
 
         await transport.disconnect();
         await server.close();
+      });
+    });
+
+    group('resolveOutBindMaxSize (LOB OUT-bind guard)', () {
+      const metadata = [
+        BindMetadata(oraType: oraTypeVarchar, dir: BindDir.input),
+        BindMetadata(oraType: oraTypeClob, dir: BindDir.output, maxSize: 4000),
+      ];
+
+      test('aligned indices resolve the declared maxSize', () {
+        expect(
+          Transport.resolveOutBindMaxSize(
+            valueIndex: 0,
+            outBindIndices: const [1],
+            bindMetadata: metadata,
+          ),
+          equals(4000),
+        );
+      });
+
+      test('null bind metadata resolves to null (no guard possible)', () {
+        expect(
+          Transport.resolveOutBindMaxSize(
+            valueIndex: 0,
+            outBindIndices: const [1],
+            bindMetadata: null,
+          ),
+          isNull,
+        );
+      });
+
+      test('indices array shorter than the OUT values throws oraProtocolError',
+          () {
+        expect(
+          () => Transport.resolveOutBindMaxSize(
+            valueIndex: 1,
+            outBindIndices: const [1],
+            bindMetadata: metadata,
+          ),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('misalignment'))),
+        );
+      });
+
+      test('bind index beyond the declared metadata throws oraProtocolError',
+          () {
+        expect(
+          () => Transport.resolveOutBindMaxSize(
+            valueIndex: 0,
+            outBindIndices: const [2],
+            bindMetadata: metadata,
+          ),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('misalignment'))),
+        );
+      });
+    });
+
+    group('verifyBlobReadLength (single-round-trip BLOB read guard)', () {
+      test('exact length passes silently', () {
+        Transport.verifyBlobReadLength(100, 100);
+      });
+
+      test('short read names the single round-trip limit, not corruption',
+          () {
+        expect(
+          () => Transport.verifyBlobReadLength(80, 100),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message',
+                  contains('single round-trip read limit'))),
+        );
+      });
+
+      test('overrun reports a plain mismatch without the size-limit hint',
+          () {
+        expect(
+          () => Transport.verifyBlobReadLength(120, 100),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message',
+                  isNot(contains('single round-trip read limit')))),
+        );
       });
     });
   });

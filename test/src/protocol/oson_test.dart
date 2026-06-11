@@ -234,6 +234,72 @@ void main() {
       final doc = <String, Object?>{'k' * 255: 'edge'};
       expect(roundTrip(doc), equals(doc));
     });
+
+    test('field-names segment beyond 65535 bytes round-trips '
+        '(uint32 segment size and offsets)', () {
+      // 300 unique 250-byte names → a ~75,300-byte field-names segment,
+      // past the uint16 boundary: the encoder must set FNAMES_SEG_UINT32
+      // and write uint32 name offsets, and the decoder must honor both.
+      final doc = <String, Object?>{
+        for (var i = 0; i < 300; i++)
+          '${'f' * 246}${i.toString().padLeft(4, '0')}': i,
+      };
+      final namesSegBytes =
+          doc.keys.fold<int>(0, (sum, k) => sum + 1 + k.length);
+      expect(namesSegBytes, greaterThan(65535),
+          reason: 'fixture must cross the uint16 segment-size boundary');
+      final decoded = roundTrip(doc)! as Map<String, Object?>;
+      expect(decoded, equals(doc));
+      expect(decoded.keys.toList(), equals(doc.keys.toList()));
+    });
+  });
+
+  group('OSON decode — hand-crafted fixtures', () {
+    test('zero-length integer node (0x40 / 0x50) decodes to 0', () {
+      // Scalar document: magic, version 1, flags INLINE_LEAF|IS_SCALAR,
+      // uint16 tree segment size, then the bare node byte. The length
+      // nibble is 0, so no NUMBER bytes follow (reference oson.js parity).
+      expect(decodeOson(_hex('ff4a5a010012000140')), equals(0));
+      expect(decodeOson(_hex('ff4a5a010012000150')), equals(0));
+    });
+
+    test('zero-length number node with explicit uint8 length decodes to 0',
+        () {
+      // Same parity rule for the 0x34 node, whose length travels in a
+      // separate uint8 byte instead of the type nibble.
+      expect(decodeOson(_hex('ff4a5a01001200023400')), equals(0));
+    });
+
+    test('version 3 document with a >255-byte (long) field name decodes', () {
+      // The encoder only emits version 1, so this v3 fixture is hand-built
+      // along the decoder's own field walk: primary header with zero short
+      // field names, a secondary (v3) header declaring one long field name,
+      // a long-names segment with uint16 hash ids, uint32 name offsets and
+      // 2-byte name length prefixes, then a one-field object tree.
+      final longName = 'a' * 260;
+      final fixture = _hex([
+        'ff4a5a', // magic
+        '03', // version 3 (max field name 65535 bytes)
+        '0002', // primary flags: INLINE_LEAF
+        '00', // number of short field names (uint8)
+        '0000', // short field-names segment size (uint16)
+        '0000', // secondary flags (v3 only)
+        '00000001', // number of long field names (uint32)
+        '00000106', // long field-names segment size: 2 + 260 (uint32)
+        '0008', // tree segment size (uint16)
+        '0000', // tiny nodes statistic
+        '0000', // long-name hash id array (1 × uint16, skipped)
+        '00000000', // long-name offset array (1 × uint32)
+        '0104', // long name length prefix (uint16): 260
+        '61' * 260, // the 260-byte field name ('a' × 260)
+        '84', // object node, uint8 child count, uint16 offsets
+        '01', // one child
+        '01', // field id 1 → the long field name
+        '0005', // child offset within the tree segment
+        '330176', // string node, length 1, 'v'
+      ].join());
+      expect(decodeOson(fixture), equals(<String, Object?>{longName: 'v'}));
+    });
   });
 
   group('OSON decode — error handling', () {

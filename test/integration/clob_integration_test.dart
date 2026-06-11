@@ -134,20 +134,31 @@ void main() {
       test('>64 KiB CLOB drains over multiple LOB read chunks', () async {
         final id = nextTestId();
         // 70,000 chars > 64 KiB and far beyond the ~8060-char server chunk
-        // size, so the read loop must issue several LOB READ round trips;
-        // exact equality proves no chunk was lost, duplicated or reordered.
+        // size, so the server streams the value back in several LOB_DATA
+        // chunks; exact equality proves no chunk was lost, duplicated or
+        // reordered.
         final text = List.generate(7000, (i) => 'chunk${i.toString().padLeft(5, '0')}').join();
         expect(text.length, equals(70000));
         await connection.execute(
           'INSERT INTO $testTable (id, doc) VALUES ($id, :doc)',
           {'doc': text},
         );
+        final readOpsBefore = connection.debugLobReadOps;
         final result = await connection
             .execute('SELECT doc FROM $testTable WHERE id = $id');
         final value = result.rows.single['DOC'] as String?;
         expect(value, isNotNull);
         expect(value!.length, equals(70000));
         expect(value, equals(text));
+        // The value must be materialized through the TTC LOB READ path —
+        // never through some inline shortcut that would bypass the locator.
+        // The driver issues ONE full-length READ per locator (node-oracledb
+        // `getData` parity) and the server streams the 70,000 chars back as
+        // multiple LOB_DATA chunks inside that single response, so the
+        // expected delta is exactly one READ operation.
+        expect(connection.debugLobReadOps - readOpsBefore, equals(1),
+            reason: 'the >64 KiB CLOB must be drained via exactly one '
+                'full-length LOB READ');
       });
 
       test('large multibyte CLOB survives chunk boundaries', () async {
@@ -391,6 +402,73 @@ void main() {
           ),
           throwsA(isA<OracleException>().having(
               (e) => e.message, 'message', contains('maxSize'))),
+        );
+      });
+
+      test('multibyte 40k-char temp-CLOB IN OUT round-trips exactly',
+          () async {
+        // Non-ASCII including supplementary-plane emoji, sized so the IN
+        // side travels through an internal temporary CLOB and exercises the
+        // UTF-8-vs-UTF-16BE charset selection for temp locators with
+        // content that a charset mix-up cannot leave intact. The chunk is
+        // exactly 10 UTF-16 code units (the emoji is a surrogate pair), so
+        // 4,000 repeats give a 40,000-unit value.
+        const chunk = 'aé日本語😀ñüz';
+        final text = chunk * 4000;
+        expect(text.length, equals(40000));
+        final result = await connection.execute(
+          'BEGIN $appendProc(:p); END;',
+          {
+            'p': OracleBind.inOut(
+                value: text, type: OracleDbType.clob, maxSize: 50000),
+          },
+        );
+        expect(result.outBinds['p'], equals('$text world'));
+      });
+
+      test('failed large-IN/tiny-OUT execute leaves the connection usable '
+          'and the temp-LOB queue drains to 0', () async {
+        // The IN value exceeds the 32,767-byte VARCHAR bind limit, so it is
+        // converted to a temporary CLOB before the execute; the OUT bind's
+        // tiny maxSize then fails the same execute client-side. The temp
+        // locator must stay queued for the free-temp piggyback...
+        final text = 'F' * 40000;
+        await expectLater(
+          connection.execute(
+            'BEGIN $copyProc(:src, :ret); END;',
+            {
+              'src': text,
+              'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 10),
+            },
+          ),
+          throwsA(isA<OracleException>().having(
+              (e) => e.message, 'message', contains('maxSize'))),
+        );
+        expect(connection.debugPendingTempLobCount, greaterThan(0),
+            reason: 'the failed execute\'s temp CLOB must stay queued for '
+                'the next free-temp piggyback');
+        // ...and the connection must remain fully usable: the next execute
+        // succeeds and its piggyback frees the queued temp LOB.
+        final id = nextTestId();
+        await connection.execute(
+          'INSERT INTO $testTable (id, doc) VALUES ($id, :doc)',
+          {'doc': 'recovered after failed execute'},
+        );
+        expect(connection.debugPendingTempLobCount, equals(0),
+            reason: 'the next execute must drain the temp-LOB free queue');
+        final result = await connection
+            .execute('SELECT doc FROM $testTable WHERE id = $id');
+        expect(result.rows.single['DOC'],
+            equals('recovered after failed execute'));
+      });
+
+      test('CLOB SELECT on a closed connection fails fast', () async {
+        final closed = await connectForTest();
+        await closed.close();
+        await expectLater(
+          closed.execute('SELECT doc FROM $testTable WHERE id = 1'),
+          throwsA(isA<OracleException>().having(
+              (e) => e.errorCode, 'errorCode', 3113)), // connection closed
         );
       });
 

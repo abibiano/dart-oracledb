@@ -327,6 +327,11 @@ needed (or exposed):
   truncating. The empty string binds as SQL NULL, consistent with Oracle's
   `'' IS NULL` semantics.
 
+Statement-cache note: result cursors for queries that select CLOB (or BLOB)
+columns are always re-parsed, never blind-reused from the statement cache —
+fresh defines keep the LOB-prefetch row shape intact — while RAW queries keep
+normal cursor reuse.
+
 ### BLOB support
 
 BLOB values round-trip as Dart `Uint8List`s — no LOB handle or streaming API
@@ -452,6 +457,7 @@ RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test
 
 - **Character sets** — the driver assumes the database character set is UTF-8 (`AL32UTF8`, the Oracle default since 12c). Data stored in non-UTF-8 character sets may decode incorrectly.
 - **Statement cache and external DDL** — top-level DDL executed on the same connection clears the statement cache, but DDL issued from another session (or inside a PL/SQL block) can leave stale cached SELECT metadata. This matches node-oracledb thin-mode behavior.
+- **CLOB/BLOB cursor re-parse** — result cursors for queries selecting CLOB or BLOB columns are always re-parsed, never blind-reused from the statement cache (fresh defines are required to keep the LOB-prefetch metadata); RAW queries keep normal cursor reuse.
 - **NUMBER beyond 2⁵³** — integer-valued NUMBERs larger than 2⁵³ decode to `double` and lose precision (Dart `double` limit; matches node-oracledb).
 - **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use separate connections for concurrent work until connection pooling lands (see roadmap).
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).

@@ -677,7 +677,10 @@ class _OsonDecoder {
       case _nodeStringLenUint32:
         return utf8.decode(_buf.readBytes(_buf.readUint32BE()));
       case _nodeNumberLenUint8:
-        return _decodeNumber(_buf.readUint8());
+        // Zero-length numbers decode to 0 — the same parity rule as the
+        // packed 0x40/0x50 nodes, with the length in a separate uint8.
+        final numberLength = _buf.readUint8();
+        return numberLength == 0 ? 0 : _decodeNumber(numberLength);
       // Oracle-specific scalar kinds are out of the Story 4.4 standard-JSON
       // scope: fail loud (AC5) rather than decode silently to null. Each
       // case is named so the error message tells callers what the document
@@ -712,9 +715,13 @@ class _OsonDecoder {
     if (typeBits == 0x20 || typeBits == 0x60) {
       return _decodeNumber((nodeType & 0x0f) + 1);
     }
-    // Integer with the length packed into the node type itself.
+    // Integer with the length packed into the node type itself. A
+    // zero-length integer node decodes to 0 (reference oson.js parity:
+    // parseOracleNumber over zero bytes yields "0" rather than throwing).
     if (typeBits == 0x40 || typeBits == 0x50) {
-      return _decodeNumber(nodeType & 0x0f);
+      final length = nodeType & 0x0f;
+      if (length == 0) return 0;
+      return _decodeNumber(length);
     }
     // String with the length packed into the node type itself.
     if ((nodeType & 0xe0) == 0) {

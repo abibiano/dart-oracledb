@@ -55,6 +55,14 @@ void main() {
               .execute('CREATE TABLE $probeTable (doc JSON) TABLESPACE USERS');
           await probe.execute('DROP TABLE $probeTable PURGE');
         } on OracleException catch (e) {
+          // Skip only for the errors that mean "this server cannot create
+          // native JSON columns": ORA-00902 (invalid datatype, pre-21c
+          // parser), ORA-00406 (COMPATIBLE below 20) and ORA-43853 (JSON
+          // rejects the tablespace's segment management). Anything else —
+          // privileges, quota, connectivity — is a real failure and must
+          // fail the suite loudly, not silently skip 20 tests.
+          const jsonUnavailableCodes = {902, 406, 43853};
+          if (!jsonUnavailableCodes.contains(e.errorCode)) rethrow;
           nativeJsonUnavailable = 'ORA-${e.errorCode}: ${e.message}';
         } finally {
           await probe.close();

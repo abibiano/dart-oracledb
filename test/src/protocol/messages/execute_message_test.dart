@@ -2485,6 +2485,24 @@ void main() {
       ];
       expect(_indexOfSub(bytes, rawDefine), greaterThanOrEqualTo(0),
           reason: 'RAW define block not found in encoded request');
+      // Negative assertion: a locator-style define for this column — same
+      // metadata prefix but the 112-byte LOB locator allocation as the
+      // buffer size — must be absent anywhere in the request.
+      final locatorStyleDefine = [
+        oraTypeRaw, ttcBindUseIndicators, 0, 0,
+        1, 112, // UB4 buffer size = LOB locator allocation
+      ];
+      expect(_indexOfSub(bytes, locatorStyleDefine), equals(-1),
+          reason: 'RAW define must never use the 112-byte LOB locator '
+              'buffer size');
+      // A regression could also retype the column to BLOB outright, so the
+      // BLOB-typed locator define must be absent too.
+      final blobLocatorDefine = [
+        oraTypeBlob, ttcBindUseIndicators, 0, 0,
+        1, 112, // UB4 buffer size = LOB locator allocation
+      ];
+      expect(_indexOfSub(bytes, blobLocatorDefine), equals(-1),
+          reason: 'RAW column must never be defined as a BLOB locator');
     });
 
     test('RAW OUT bind decodes through outBindValues as Uint8List', () {

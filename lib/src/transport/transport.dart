@@ -446,9 +446,21 @@ class Transport {
   int _tempLobsTotalSize = 0;
 
   /// Number of temp-LOB locators queued for the free piggyback. Exposed for
-  /// integration tests (Story 4.1 — temp-LOB lifecycle); not a public API.
-  @visibleForTesting
+  /// integration tests (Story 4.1 — temp-LOB lifecycle) via
+  /// `OracleConnection.debugPendingTempLobCount`; not a public API.
   int get debugPendingTempLobCount => _tempLobsToClose.length;
+
+  /// Count of TTC LOB READ operations sent (one per [sendLobOp] call with
+  /// `tnsLobOpRead`). See [debugLobReadOps].
+  int _lobReadOps = 0;
+
+  /// Number of LOB READ operations sent on this transport.
+  ///
+  /// Instrumentation for the CLOB/BLOB drain integration tests: proves how
+  /// many READ round trips materialized a locator value without privileged
+  /// Oracle views. Surfaced to tests via `OracleConnection.debugLobReadOps`;
+  /// not a public API.
+  int get debugLobReadOps => _lobReadOps;
 
   Future<ExecuteResponse> sendExecute(
     String sql, {
@@ -755,6 +767,9 @@ class Transport {
       sequence: nextSequence(),
     );
     await sendData(request.toBytes());
+    if (operation == tnsLobOpRead) {
+      _lobReadOps++;
+    }
     final sourceLocatorLength = sourceLocator?.length ?? 0;
     final payload = await _receiveDataWithTimeout(
       timeout,
@@ -861,7 +876,7 @@ class Transport {
                       raw.value is Uint8List
                   ? raw.value as Uint8List
                   : null);
-          if (bytes != null && bytes.length > ttcMaxVarcharBindBytes) {
+          if (bytes != null && bytes.length > ttcMaxRawBindBytes) {
             replacement = BindVariable(
               value: await _createTempBlob(bytes, timeout),
               oraType: oraTypeBlob,
@@ -997,6 +1012,62 @@ class Transport {
     );
   }
 
+  /// Resolves the declared `maxSize` for the LOB OUT-bind value at
+  /// [valueIndex] from the decoder-side bind metadata.
+  ///
+  /// [outBindIndices] maps each OUT value position to its original bind
+  /// slot, so the value's metadata lives at
+  /// `bindMetadata[outBindIndices[valueIndex]]`. A misalignment between the
+  /// two — an indices list shorter than the OUT values, or an index outside
+  /// the declared metadata — means the decoded response no longer matches
+  /// what was sent: fail loud rather than silently skipping the maxSize
+  /// guard. Returns null only when no bind metadata was supplied at all
+  /// (no guard is possible) or when the resolved bind declares no maxSize.
+  @visibleForTesting
+  static int? resolveOutBindMaxSize({
+    required int valueIndex,
+    required List<int> outBindIndices,
+    required List<BindMetadata>? bindMetadata,
+  }) {
+    if (bindMetadata == null) return null;
+    if (valueIndex >= outBindIndices.length) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'OUT bind index misalignment: OUT value $valueIndex has no '
+            'entry in outBindIndices (${outBindIndices.length} entries) — '
+            'cannot apply the OUT-bind maxSize guard',
+      );
+    }
+    final bindIdx = outBindIndices[valueIndex];
+    if (bindIdx < 0 || bindIdx >= bindMetadata.length) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'OUT bind index misalignment: outBindIndices[$valueIndex] '
+            'is $bindIdx but only ${bindMetadata.length} bind metadata '
+            'entries were declared — cannot apply the OUT-bind maxSize guard',
+      );
+    }
+    return bindMetadata[bindIdx].maxSize;
+  }
+
+  /// Fail-loud guard for single-round-trip BLOB reads: the locator's
+  /// prefetch metadata reports the exact byte length, so a mismatch means
+  /// the value cannot be returned whole — never truncate or pad. A short
+  /// read most likely means the value exceeds what one READ round trip can
+  /// deliver (multi-round-trip streaming is a post-1.0 roadmap item), not
+  /// that the wire stream is corrupt.
+  @visibleForTesting
+  static void verifyBlobReadLength(int received, int locatorLength) {
+    if (received == locatorLength) return;
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message: 'BLOB read returned $received bytes but the locator reports '
+          '$locatorLength${received < locatorLength ? ' — the value may '
+              'exceed the single round-trip read limit; values this large '
+              'are not yet supported' : ''}',
+    );
+  }
+
   /// Replaces every [LobLocator] in a successful response's rows and OUT
   /// binds with its materialized value — `String` for CLOB, `Uint8List` for
   /// BLOB (Stories 4.1/4.2).
@@ -1052,14 +1123,11 @@ class Transport {
         // raises ERR_INSUFFICIENT_BUFFER_FOR_BINDS from its outConverter
         // the same way). Units follow the LOB type: characters for CLOB,
         // bytes for BLOB.
-        final bindIdx = i < response.outBindIndices.length
-            ? response.outBindIndices[i]
-            : -1;
-        final maxSize = (bindMetadata != null &&
-                bindIdx >= 0 &&
-                bindIdx < bindMetadata.length)
-            ? bindMetadata[bindIdx].maxSize
-            : null;
+        final maxSize = resolveOutBindMaxSize(
+          valueIndex: i,
+          outBindIndices: response.outBindIndices,
+          bindMetadata: bindMetadata,
+        );
         if (maxSize != null && value.length > maxSize) {
           final isBlob = value.oracleType == oraTypeBlob;
           throw OracleException(
@@ -1185,16 +1253,7 @@ class Transport {
             '(expected ${locator.length} bytes)',
       );
     }
-    // Truncation/overrun guard: the locator's prefetch metadata reports the
-    // exact byte length, so any mismatch is wire corruption — fail loud
-    // rather than truncate or pad.
-    if (bytes.length != locator.length) {
-      throw OracleException(
-        errorCode: oraProtocolError,
-        message: 'BLOB read length mismatch: locator reports '
-            '${locator.length} bytes but ${bytes.length} were received',
-      );
-    }
+    verifyBlobReadLength(bytes.length, locator.length);
     return bytes;
   }
 

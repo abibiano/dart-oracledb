@@ -257,6 +257,72 @@ void main() {
         expect(ReadBuffer(Uint8List.fromList([0])).readUB8(), equals(0));
       });
     });
+
+    // readSB8 is the widest signed reader (GET_LENGTH amounts in LOB
+    // operation responses). Wire format: size-prefix byte (0x80 high bit =
+    // negative), then `size & 0x7F` big-endian magnitude bytes.
+    group('readSB8 signed variable integers', () {
+      test('decodes positive values at every width 1-8 bytes', () {
+        for (var width = 1; width <= 8; width++) {
+          // Magnitude 0x0102...0w — distinct byte per position so a
+          // byte-order or off-by-one slip changes the value.
+          final magnitude = List<int>.generate(width, (i) => i + 1);
+          var expected = 0;
+          for (final b in magnitude) {
+            expected = (expected << 8) | b;
+          }
+          expect(
+              ReadBuffer(Uint8List.fromList([width, ...magnitude])).readSB8(),
+              equals(expected),
+              reason: 'width $width');
+        }
+      });
+
+      test('decodes negative values (sign bit 0x80 set) at every width 1-8',
+          () {
+        for (var width = 1; width <= 8; width++) {
+          final magnitude = List<int>.generate(width, (i) => i + 1);
+          var expected = 0;
+          for (final b in magnitude) {
+            expected = (expected << 8) | b;
+          }
+          expect(
+              ReadBuffer(Uint8List.fromList([0x80 | width, ...magnitude]))
+                  .readSB8(),
+              equals(-expected),
+              reason: 'width $width');
+        }
+      });
+
+      test('decodes the 0x80 negative-zero sentinel as 0', () {
+        expect(ReadBuffer(Uint8List.fromList([0x80])).readSB8(), equals(0));
+      });
+
+      test('decodes a zero-length size byte as 0', () {
+        expect(ReadBuffer(Uint8List.fromList([0])).readSB8(), equals(0));
+      });
+
+      test('decodes magnitudes beyond 4 bytes exactly (native 64-bit ints)',
+          () {
+        // 0x0123456789ABCDEF exceeds 2^53; exact only on a 64-bit native int.
+        final magnitude = [0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF];
+        expect(ReadBuffer(Uint8List.fromList([8, ...magnitude])).readSB8(),
+            equals(0x0123456789ABCDEF));
+        expect(
+            ReadBuffer(Uint8List.fromList([0x88, ...magnitude])).readSB8(),
+            equals(-0x0123456789ABCDEF));
+      });
+
+      test('rejects a size beyond 8 bytes with BufferException', () {
+        final data = Uint8List.fromList([9, ...List<int>.filled(9, 0x01)]);
+        expect(() => ReadBuffer(data).readSB8(),
+            throwsA(isA<BufferException>()));
+        final negative =
+            Uint8List.fromList([0x80 | 9, ...List<int>.filled(9, 0x01)]);
+        expect(() => ReadBuffer(negative).readSB8(),
+            throwsA(isA<BufferException>()));
+      });
+    });
   });
 
   group('WriteBuffer', () {

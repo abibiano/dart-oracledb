@@ -181,6 +181,26 @@ void main() {
       expect(String.fromCharCodes(r.data!), equals('first second'));
     });
 
+    test('GET_LENGTH response decodes a multi-byte SB8 amount', () {
+      // 70,000 (0x011170) needs three magnitude bytes, so this fixture fails
+      // if the SB8 amount were read with a narrower or unsigned reader.
+      const lobLength = 70000;
+      final locatorEcho = List.filled(40, 0x24);
+      final payload = Uint8List.fromList([
+        ttcMsgTypeParameter,
+        ...locatorEcho,
+        ..._sb8(lobLength),
+        ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0),
+      ]);
+      final r = decodeLobOpResponse(payload,
+          operation: tnsLobOpGetLength,
+          sourceLocatorLength: 40,
+          sendAmount: true);
+      expect(r.isSuccess, isTrue);
+      expect(r.updatedLocator, equals(locatorEcho));
+      expect(r.amount, equals(lobLength));
+    });
+
     test('CREATE_TEMP response: locator echo + charset UB2 + flags UB1', () {
       final newLocator = List.generate(40, (i) => i);
       final payload = Uint8List.fromList([
@@ -349,8 +369,19 @@ List<int> _ub2(int v) {
   return [2, (v >> 8) & 0xff, v & 0xff];
 }
 
-/// Variable-length signed integer (positive values only) matching readSB8.
-List<int> _sb8(int v) => _ub4(v);
+/// Variable-length signed integer matching readSB8's wire format: size-prefix
+/// byte (high bit 0x80 = negative), then big-endian magnitude bytes.
+List<int> _sb8(int v) {
+  if (v == 0) return [0];
+  final isNegative = v < 0;
+  var magnitude = isNegative ? -v : v;
+  final bytes = <int>[];
+  while (magnitude > 0) {
+    bytes.insert(0, magnitude & 0xff);
+    magnitude >>= 8;
+  }
+  return [(isNegative ? 0x80 : 0) | bytes.length, ...bytes];
+}
 
 /// Minimal TTC ERROR (type 4) message body — same layout the EXECUTE decoder
 /// fixtures use (see execute_message_test.dart `_errorMessage`).
