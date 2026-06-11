@@ -1,12 +1,12 @@
-/// Internal LOB locator value produced while decoding CLOB column or OUT-bind
-/// data (Story 4.1).
+/// Internal LOB locator value produced while decoding CLOB / BLOB column or
+/// OUT-bind data (Stories 4.1 and 4.2).
 ///
 /// A locator is a reference to LOB data stored on the server, shipped with
 /// LOB-prefetch metadata (length and chunk size) because the driver
 /// negotiates `TNS_CCAP_LOB_PREFETCH` in its compile capabilities. Instances
 /// never escape the transport layer: `Transport.sendExecute` materializes
-/// every locator into a Dart `String` (via TTC LOB READ operations) before
-/// the response reaches `OracleConnection`.
+/// every locator into a Dart `String` (CLOB) or `Uint8List` (BLOB) via TTC
+/// LOB READ operations before the response reaches `OracleConnection`.
 library;
 
 import 'dart:typed_data';
@@ -18,7 +18,8 @@ class LobLocator {
   /// Creates a locator value.
   LobLocator({
     required this.locator,
-    required this.lengthInChars,
+    required this.oracleType,
+    required this.length,
     required this.chunkSize,
   });
 
@@ -27,14 +28,21 @@ class LobLocator {
   /// operation response.
   final Uint8List locator;
 
-  /// LOB length in UCS-2 code units — Oracle's CLOB character counting,
-  /// which matches Dart's `String.length` (UTF-16 code units) exactly.
-  final int lengthInChars;
+  /// The Oracle LOB type this locator references: [oraTypeClob] or
+  /// [oraTypeBlob]. Determines the units of [length] / [chunkSize] and how
+  /// LOB READ payloads are interpreted (character data vs raw bytes).
+  final int oracleType;
 
-  /// Server-side chunk size in characters from the LOB-prefetch metadata.
-  /// `0` when unknown (e.g. internally created temporary LOBs). Retained as
-  /// diagnostic metadata; the value is read in a single full-length LOB READ
-  /// (node-oracledb `getData` parity), so this no longer sizes reads.
+  /// LOB length in the type's native units: UCS-2 code units for CLOB —
+  /// Oracle's CLOB character counting, which matches Dart's `String.length`
+  /// (UTF-16 code units) exactly — and **bytes** for BLOB.
+  final int length;
+
+  /// Server-side chunk size from the LOB-prefetch metadata, in the same
+  /// units as [length]. `0` when unknown (e.g. internally created temporary
+  /// LOBs). Retained as diagnostic metadata; the value is read in a single
+  /// full-length LOB READ (node-oracledb `getData` parity), so this no
+  /// longer sizes reads.
   final int chunkSize;
 
   /// Whether the locator flags report a variable-length character set.
@@ -49,7 +57,8 @@ class LobLocator {
       (locator[tnsLobLocOffsetFlag3] & tnsLobLocFlagsVarLengthCharset) != 0;
 
   @override
-  String toString() => 'LobLocator(length: $lengthInChars chars, '
+  String toString() => 'LobLocator(type: $oracleType, length: $length '
+      '${oracleType == oraTypeBlob ? 'bytes' : 'chars'}, '
       'chunkSize: $chunkSize, locator: ${locator.length} bytes)';
 }
 

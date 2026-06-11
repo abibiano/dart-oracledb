@@ -458,18 +458,18 @@ class OracleConnection {
     if (eligible) {
       cacheEntry = _cache.acquire(cacheKey);
       if (cacheEntry != null) {
-        // Story 4.1: a cursor whose result shape contains a CLOB column is
-        // never blind-re-executed. Without fresh defines the server stops
-        // sending the LOB-prefetch metadata (length + chunk size) on
-        // re-execute and the row stream misaligns. node-oracledb solves this
-        // by abandoning the plain re-execute path for LOB queries too (it
-        // sends an extra DEFINE message and disables row prefetch); this
-        // driver's equivalent safeguard is to close the old cursor (via the
-        // close-cursor piggyback on this same execute) and re-parse, which
-        // re-establishes the prefetch shape.
-        final hasClobColumn = cacheEntry.columnMetadata
-            .any((c) => c.oracleType == oc.oraTypeClob);
-        if (hasClobColumn && cacheEntry.cursorId != 0) {
+        // Stories 4.1/4.2: a cursor whose result shape contains a locator
+        // LOB column (CLOB or BLOB) is never blind-re-executed. Without
+        // fresh defines the server stops sending the LOB-prefetch metadata
+        // (length + chunk size) on re-execute and the row stream misaligns.
+        // node-oracledb solves this by abandoning the plain re-execute path
+        // for LOB queries too (it sends an extra DEFINE message and
+        // disables row prefetch); this driver's equivalent safeguard is to
+        // close the old cursor (via the close-cursor piggyback on this same
+        // execute) and re-parse, which re-establishes the prefetch shape.
+        final hasLobColumn = cacheEntry.columnMetadata.any((c) =>
+            c.oracleType == oc.oraTypeClob || c.oracleType == oc.oraTypeBlob);
+        if (hasLobColumn && cacheEntry.cursorId != 0) {
           _cache.requeueCursorsToClose([cacheEntry.cursorId]);
           cacheEntry.cursorId = 0;
         }

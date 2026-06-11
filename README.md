@@ -6,7 +6,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), and CLOB-as-String are implemented and validated against Oracle 23ai and 21c. BLOB/JSON and connection pooling are not yet implemented. Depend on `oracledb: ^0.9.2`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once LOB support and connection pooling land.
+> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, and BLOB-as-Uint8List are implemented and validated against Oracle 23ai and 21c. JSON and connection pooling are not yet implemented. Depend on `oracledb: ^0.9.2`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once LOB support and connection pooling land.
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -272,6 +272,7 @@ final isAlive = await connection.ping();
 | TIMESTAMP WITH TIME ZONE  | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` |
 | RAW                       | `Uint8List`                                                                      |
 | CLOB                      | `String` (see [CLOB support](#clob-support))                                     |
+| BLOB                      | `Uint8List` (see [BLOB support](#blob-support))                                  |
 | NULL                      | `null`                                                                           |
 
 ### CLOB support
@@ -295,9 +296,35 @@ needed (or exposed):
   truncating. The empty string binds as SQL NULL, consistent with Oracle's
   `'' IS NULL` semantics.
 
+### BLOB support
+
+BLOB values round-trip as Dart `Uint8List`s — no LOB handle or streaming API
+is needed (or exposed):
+
+- **Queries** — selecting a `BLOB` column returns a `Uint8List` (`null` for
+  SQL NULL, an empty `Uint8List` for `EMPTY_BLOB()`). The driver reads LOB
+  locators transparently and byte-for-byte — no character set conversion
+  ever touches the bytes; values above 64 KiB are covered by tests.
+- **DML** — bind an ordinary `Uint8List` into a `BLOB` column with named or
+  positional binds. Values above the 32,767-byte scalar bind limit are
+  handled automatically (Oracle's long-data path for SQL, an internal
+  temporary BLOB for PL/SQL). An **empty** `Uint8List` bound as a plain value
+  in SQL DML stores SQL NULL (it travels as a zero-length RAW, and Oracle maps
+  that to NULL — matching node-oracledb). To store an empty-but-not-NULL BLOB,
+  bind through `OracleBind(value: Uint8List(0), type: OracleDbType.blob)`,
+  which routes the value through a temporary BLOB (see PL/SQL note below).
+- **PL/SQL OUT / IN OUT** — declare
+  `OracleBind.out(type: OracleDbType.blob, maxSize: ...)` or
+  `OracleBind.inOut(value: ..., type: OracleDbType.blob, maxSize: ...)`;
+  values decode through `result.outBinds` as `Uint8List?`. `maxSize` counts
+  **bytes** and bounds the value the driver will materialize — a longer
+  value fails loudly instead of truncating. An empty `Uint8List` binds as an
+  empty BLOB value (length 0), which Oracle treats as distinct from SQL
+  NULL — unlike CLOB's empty string.
+
 Unbounded/multi-gigabyte LOBs are not claimed: values are materialized in
-memory as a single `String`. BLOB, NCLOB, BFILE, and JSON columns are not yet
-supported and fail with a clear `OracleException` (see roadmap).
+memory as a single `String` / `Uint8List`. NCLOB, BFILE, and JSON columns
+are not yet supported and fail with a clear `OracleException` (see roadmap).
 
 ## Project Status
 
@@ -308,7 +335,7 @@ This package implements a subset of the full Oracle driver feature set. Below is
 | Core connection & authentication                | ✅ Done        |
 | Query execution & transactions                  | ✅ Done        |
 | PL/SQL execution (stored procedures, functions) | ✅ Done        |
-| Advanced data types (CLOB ✅, BLOB, JSON)       | 🚧 In progress |
+| Advanced data types (CLOB ✅, BLOB ✅, JSON)    | 🚧 In progress |
 | Connection pooling                              | 📋 Planned     |
 
 ### Planned After 1.0

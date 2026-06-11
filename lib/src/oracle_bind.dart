@@ -80,6 +80,18 @@ enum OracleDbType {
   /// (Story 4.1). The empty string binds as SQL NULL, consistent with
   /// Oracle's `'' IS NULL` semantics.
   clob,
+
+  /// Oracle BLOB (decoded as Dart `Uint8List`). Requires `maxSize`.
+  ///
+  /// `maxSize` is expressed in **bytes** (Oracle's BLOB length semantics)
+  /// and bounds the value the driver will materialize for an OUT / IN OUT
+  /// bind. A returned BLOB longer than `maxSize` bytes fails loud with
+  /// [OracleException] instead of being truncated. On the wire the bind is
+  /// always a LOB locator: IN / IN OUT `Uint8List` values travel through an
+  /// internal temporary BLOB, and returned locators are read back into
+  /// `Uint8List` (Story 4.2). An empty `Uint8List` binds as an empty BLOB
+  /// value (length 0), which is distinct from SQL NULL.
+  blob,
 }
 
 /// Specification for an OUT or IN OUT bind variable.
@@ -141,7 +153,8 @@ class OracleBind {
     }
     if ((type == OracleDbType.varchar ||
             type == OracleDbType.raw ||
-            type == OracleDbType.clob) &&
+            type == OracleDbType.clob ||
+            type == OracleDbType.blob) &&
         maxSize == null) {
       throw OracleException(
         errorCode: oraBindTypeError,
@@ -201,6 +214,11 @@ class OracleBind {
           throw ArgumentError.value(value, 'value',
               'OracleBind(type: clob) requires String or null');
         }
+      case OracleDbType.blob:
+        if (value is! Uint8List) {
+          throw ArgumentError.value(value, 'value',
+              'OracleBind(type: blob) requires Uint8List or null');
+        }
     }
   }
 
@@ -210,7 +228,12 @@ class OracleBind {
   /// The Oracle type expected on the wire.
   final OracleDbType type;
 
-  /// Maximum buffer size in bytes (required for varchar/raw).
+  /// Maximum returned-value bound (required for varchar/raw/clob/blob).
+  ///
+  /// Units depend on the bind type: **bytes** for [OracleDbType.varchar],
+  /// [OracleDbType.raw], and [OracleDbType.blob]; **characters** (UTF-16
+  /// code units, the same counting as Dart's `String.length`) for
+  /// [OracleDbType.clob].
   final int? maxSize;
 
   /// Direction on the wire. Only [BindDir.output] and [BindDir.inputOutput]
@@ -235,6 +258,8 @@ class OracleBind {
         return oc.oraTypeRaw;
       case OracleDbType.clob:
         return oc.oraTypeClob;
+      case OracleDbType.blob:
+        return oc.oraTypeBlob;
     }
   }
 }

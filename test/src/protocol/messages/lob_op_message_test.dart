@@ -293,11 +293,18 @@ void main() {
       nclobLocator[tnsLobLocOffsetFlag3] = tnsLobLocFlagsVarLengthCharset;
       expect(
           LobLocator(
-                  locator: nclobLocator, lengthInChars: 1, chunkSize: 0)
+                  locator: nclobLocator,
+                  oracleType: oraTypeClob,
+                  length: 1,
+                  chunkSize: 0)
               .usesVarLengthCharset,
           isTrue);
       expect(
-          LobLocator(locator: Uint8List(40), lengthInChars: 1, chunkSize: 0)
+          LobLocator(
+                  locator: Uint8List(40),
+                  oracleType: oraTypeClob,
+                  length: 1,
+                  chunkSize: 0)
               .usesVarLengthCharset,
           isFalse);
     });

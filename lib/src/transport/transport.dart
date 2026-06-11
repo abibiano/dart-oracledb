@@ -476,13 +476,28 @@ class Transport {
     _tempLobsToClose.clear();
     _tempLobsTotalSize = 0;
 
-    // Story 4.1: CLOB-typed String binds (and PL/SQL strings beyond the
-    // 32767-byte VARCHAR limit) travel as temporary-CLOB locators, created
-    // here via LOB operations on this same connection before the execute.
-    final effectiveBinds = bindValues == null
-        ? null
-        : await _prepareClobBinds(bindValues, isPlSql: isPlSql,
+    // Stories 4.1/4.2: CLOB-typed String binds, BLOB-typed Uint8List binds
+    // (and PL/SQL strings beyond the 32767-byte VARCHAR limit) travel as
+    // temporary-LOB locators, created here via LOB operations on this same
+    // connection before the execute.
+    final List<Object?>? effectiveBinds;
+    if (bindValues == null) {
+      effectiveBinds = null;
+    } else {
+      try {
+        effectiveBinds = await _prepareLobBinds(bindValues, isPlSql: isPlSql,
             timeout: timeout);
+      } catch (_) {
+        // Bind preparation failed after we drained the previous call's
+        // temp-LOB free list (above). Without this restore, those server-side
+        // temp LOBs would be orphaned: this execute never sends its
+        // free-temp piggyback, and the next one drains an empty list. Put the
+        // drained locators back so the next execute frees them.
+        _tempLobsToClose.insertAll(0, lobsToFree);
+        _tempLobsTotalSize += lobsToFreeSize;
+        rethrow;
+      }
+    }
 
     final request = ExecuteRequest(
       sql: sql,
@@ -550,17 +565,18 @@ class Transport {
           : expectedColumns;
       var allRows = List<List<Object?>>.of(response.rows);
       var moreRowsToFetch = true;
-      // Story 4.1: for CLOB queries the server defers row delivery — the
-      // first execute returns DESCRIBE only (zero rows). A DEFINE call
-      // (defines carrying the LOB-prefetch cont-flag) re-executes the
-      // cursor and returns the first row batch in the prefetch shape;
-      // subsequent FETCH rounds keep that shape. Without it, FETCH rounds
-      // ship bare locators (no length/chunk prefix) that cannot be decoded.
-      // Mirrors node-oracledb `_handleDefines`, whose define response is
-      // processed as ordinary row data.
+      // Stories 4.1/4.2: for locator-LOB (CLOB/BLOB) queries the server
+      // defers row delivery — the first execute returns DESCRIBE only (zero
+      // rows). A DEFINE call (defines carrying the LOB-prefetch cont-flag)
+      // re-executes the cursor and returns the first row batch in the
+      // prefetch shape; subsequent FETCH rounds keep that shape. Without
+      // it, FETCH rounds ship bare locators (no length/chunk prefix) that
+      // cannot be decoded. Mirrors node-oracledb `_handleDefines`, whose
+      // define response is processed as ordinary row data.
       if (fetchColumns != null &&
           response.rows.isEmpty &&
-          fetchColumns.any((c) => c.oracleType == oraTypeClob)) {
+          fetchColumns.any((c) =>
+              c.oracleType == oraTypeClob || c.oracleType == oraTypeBlob)) {
         final defineResponse = await _sendLobDefines(
             sql, effectiveCursorId, fetchColumns, prefetchRows, timeout);
         allRows = List<List<Object?>>.of(defineResponse.rows);
@@ -600,7 +616,7 @@ class Transport {
           );
         }
       }
-      return _materializeClobValues(
+      return _materializeLobValues(
         ExecuteResponse(
           isSuccess: true,
           cursorId: effectiveCursorId,
@@ -627,7 +643,7 @@ class Transport {
           '(moreRowsToFetch=true)');
     }
 
-    return _materializeClobValues(response,
+    return _materializeLobValues(response,
         bindMetadata: bindMetadata, timeout: timeout);
   }
 
@@ -759,19 +775,23 @@ class Transport {
     return response;
   }
 
-  /// Converts CLOB-destined String bind values into temporary-CLOB locators
-  /// before the execute is encoded (Story 4.1).
+  /// Converts LOB-destined bind values into temporary-LOB locators before
+  /// the execute is encoded (Stories 4.1/4.2).
   ///
-  /// Two conversions, both node-oracledb parity (connection.js `_bind`):
+  /// Three conversions, all node-oracledb parity (connection.js `_bind`):
   /// * any CLOB-typed [BindVariable] holding a `String` — the declared
   ///   `OracleDbType.clob` path; the empty string binds as SQL NULL,
   ///   consistent with Oracle's `'' IS NULL` semantics;
+  /// * any BLOB-typed [BindVariable] holding a `Uint8List` — the declared
+  ///   `OracleDbType.blob` path; the empty byte list travels through an
+  ///   internal empty temporary BLOB (no WRITE), preserving the BLOB
+  ///   empty-vs-NULL distinction;
   /// * plain PL/SQL IN strings whose UTF-8 size exceeds the 32767-byte
   ///   VARCHAR bind limit. (SQL DML keeps oversized strings VARCHAR-typed
   ///   and relies on the deferred long-data write ordering instead.)
   ///
   /// Returns the original list unchanged when no bind needs conversion.
-  Future<List<Object?>> _prepareClobBinds(
+  Future<List<Object?>> _prepareLobBinds(
     List<Object?> binds, {
     required bool isPlSql,
     Duration? timeout,
@@ -790,6 +810,15 @@ class Transport {
           maxSize: raw.maxSize,
           dir: raw.dir,
         );
+      } else if (raw is BindVariable &&
+          raw.oraType == oraTypeBlob &&
+          raw.value is Uint8List) {
+        replacement = BindVariable(
+          value: await _createTempBlob(raw.value as Uint8List, timeout),
+          oraType: oraTypeBlob,
+          maxSize: raw.maxSize,
+          dir: raw.dir,
+        );
       } else if (isPlSql) {
         final String? value = raw is String
             ? raw
@@ -805,6 +834,28 @@ class Transport {
             oraType: oraTypeClob,
             dir: BindDir.input,
           );
+        } else {
+          // Plain PL/SQL IN byte values beyond the 32767-byte RAW bind
+          // limit travel as temporary BLOBs — node-oracledb retypes PL/SQL
+          // RAW binds with maxSize > 32767 to DB_TYPE_BLOB the same way
+          // (connection.js `_bind`). SQL DML keeps oversized Uint8List
+          // values RAW-typed and relies on the deferred long-data write
+          // ordering instead.
+          final Uint8List? bytes = raw is Uint8List
+              ? raw
+              : (raw is BindVariable &&
+                      raw.dir == BindDir.input &&
+                      raw.oraType == oraTypeRaw &&
+                      raw.value is Uint8List
+                  ? raw.value as Uint8List
+                  : null);
+          if (bytes != null && bytes.length > ttcMaxVarcharBindBytes) {
+            replacement = BindVariable(
+              value: await _createTempBlob(bytes, timeout),
+              oraType: oraTypeBlob,
+              dir: BindDir.input,
+            );
+          }
         }
       }
       if (replacement != null) {
@@ -843,8 +894,11 @@ class Transport {
       // The created locator's charset flag dictates the write encoding:
       // variable-length-charset locators take UTF-16BE data, others UTF-8
       // (node-oracledb lobOp.js encode checks getCsfrm() the same way).
-      final probe =
-          LobLocator(locator: locator, lengthInChars: 0, chunkSize: 0);
+      final probe = LobLocator(
+          locator: locator,
+          oracleType: oraTypeClob,
+          length: 0,
+          chunkSize: 0);
       final data = probe.usesVarLengthCharset
           ? encodeUtf16Be(value)
           : Uint8List.fromList(utf8.encode(value));
@@ -868,19 +922,78 @@ class Transport {
     }
     return LobLocator(
       locator: locator,
-      lengthInChars: value.length,
+      oracleType: oraTypeClob,
+      length: value.length,
+      chunkSize: 0,
+    );
+  }
+
+  /// Creates a temporary BLOB on the server and writes [value] into it
+  /// (Story 4.2).
+  ///
+  /// Mirrors node-oracledb `lob.js create()` + `write()` for
+  /// `DB_TYPE_BLOB`: CREATE_TEMP carries the charset form (0 for BLOB — no
+  /// character set) in the source offset, the Oracle type in the dest
+  /// offset, and the session duration in the dest length; the WRITE then
+  /// ships the raw bytes unchanged at 1-based offset 1 (lobOp.js passes
+  /// BLOB data through with no transcoding). An empty [value] skips the
+  /// WRITE entirely, leaving an empty temporary BLOB — node-oracledb binds
+  /// empty buffers as NULL, but this driver preserves the BLOB
+  /// empty-vs-NULL distinction (validated by integration tests on 23ai and
+  /// 21c). The locator is queued for the free-temp piggyback on the NEXT
+  /// execute even if the write fails, so a failed bind cannot leak the
+  /// server-side temp LOB past the next RPC.
+  Future<LobLocator> _createTempBlob(Uint8List value, Duration? timeout) async {
+    final created = await sendLobOp(
+      operation: tnsLobOpCreateTemp,
+      sourceLocator: Uint8List(tnsLobLocatorBufferSize),
+      sourceOffset: 0, // BLOB has no charset form (node-oracledb dbType._csfrm)
+      destOffset: oraTypeBlob,
+      destLength: tnsDurationSession,
+      timeout: timeout,
+    );
+    final locator = created.updatedLocator;
+    if (locator == null) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message: 'Temporary BLOB creation returned no locator',
+      );
+    }
+    try {
+      if (value.isNotEmpty) {
+        final written = await sendLobOp(
+          operation: tnsLobOpWrite,
+          sourceLocator: locator,
+          sourceOffset: 1, // LOB offsets are 1-based (bytes for BLOB)
+          data: value,
+          timeout: timeout,
+        );
+        final updated = written.updatedLocator;
+        if (updated != null && updated.length == locator.length) {
+          locator.setRange(0, locator.length, updated);
+        }
+      }
+    } finally {
+      _tempLobsToClose.add(locator);
+      _tempLobsTotalSize += locator.length;
+    }
+    return LobLocator(
+      locator: locator,
+      oracleType: oraTypeBlob,
+      length: value.length,
       chunkSize: 0,
     );
   }
 
   /// Replaces every [LobLocator] in a successful response's rows and OUT
-  /// binds with its materialized `String` value (Story 4.1, AC1/AC3/AC4).
+  /// binds with its materialized value — `String` for CLOB, `Uint8List` for
+  /// BLOB (Stories 4.1/4.2).
   ///
   /// Runs inside [sendExecute] — and therefore inside the connection's
   /// single-execute guard — after the fetch drain, so all LOB reads complete
   /// before the response escapes the transport (AC6). A failed LOB read
   /// fails the whole execute rather than returning a half-populated result.
-  Future<ExecuteResponse> _materializeClobValues(
+  Future<ExecuteResponse> _materializeLobValues(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
     Duration? timeout,
@@ -893,9 +1006,11 @@ class Transport {
 
     // Oracle's duplicate-column optimization can alias one LobLocator
     // instance into several rows; read each distinct locator once.
-    final materialized = <LobLocator, String>{};
-    Future<String> readLocator(LobLocator locator) async =>
-        materialized[locator] ??= await _readClobAsString(locator, timeout);
+    final materialized = <LobLocator, Object>{};
+    Future<Object> readLocator(LobLocator locator) async =>
+        materialized[locator] ??= locator.oracleType == oraTypeBlob
+            ? await _readBlobAsBytes(locator, timeout)
+            : await _readClobAsString(locator, timeout);
 
     var rows = response.rows;
     if (hasRowLob) {
@@ -919,11 +1034,12 @@ class Transport {
       for (var i = 0; i < newOut.length; i++) {
         final value = newOut[i];
         if (value is! LobLocator) continue;
-        // OracleBind(type: clob) requires maxSize; enforce it client-side
-        // before reading — the wire bind is locator-sized, so the server
-        // cannot apply the usual OUT-buffer bound (node-oracledb raises
-        // ERR_INSUFFICIENT_BUFFER_FOR_BINDS from its outConverter the same
-        // way).
+        // OracleBind(type: clob/blob) requires maxSize; enforce it
+        // client-side before reading — the wire bind is locator-sized, so
+        // the server cannot apply the usual OUT-buffer bound (node-oracledb
+        // raises ERR_INSUFFICIENT_BUFFER_FOR_BINDS from its outConverter
+        // the same way). Units follow the LOB type: characters for CLOB,
+        // bytes for BLOB.
         final bindIdx = i < response.outBindIndices.length
             ? response.outBindIndices[i]
             : -1;
@@ -932,12 +1048,14 @@ class Transport {
                 bindIdx < bindMetadata.length)
             ? bindMetadata[bindIdx].maxSize
             : null;
-        if (maxSize != null && value.lengthInChars > maxSize) {
+        if (maxSize != null && value.length > maxSize) {
+          final isBlob = value.oracleType == oraTypeBlob;
           throw OracleException(
             errorCode: oraBindTypeError,
-            message: 'CLOB OUT bind returned ${value.lengthInChars} '
-                'characters but OracleBind maxSize is $maxSize — increase '
-                'maxSize to at least the largest value the block can return',
+            message: '${isBlob ? 'BLOB' : 'CLOB'} OUT bind returned '
+                '${value.length} ${isBlob ? 'bytes' : 'characters'} but '
+                'OracleBind maxSize is $maxSize — increase maxSize to at '
+                'least the largest value the block can return',
           );
         }
         newOut[i] = await readLocator(value);
@@ -975,7 +1093,7 @@ class Transport {
   /// counts UTF-16 code units and desynced from Oracle's character offsets on
   /// astral text.
   Future<String> _readClobAsString(LobLocator locator, Duration? timeout) async {
-    if (locator.lengthInChars == 0) return ''; // EMPTY_CLOB()
+    if (locator.length == 0) return ''; // EMPTY_CLOB()
     // PL/SQL-created and temporary CLOB locators carry the variable-length
     // charset flag: their data travels as UTF-16BE instead of the negotiated
     // UTF-8 (node-oracledb lob.js getCsfrm / lobOp.js swap16 handling).
@@ -985,7 +1103,7 @@ class Transport {
       sourceLocator: locator.locator,
       sourceOffset: 1, // 1-based: read from the start of the LOB
       sendAmount: true,
-      amount: locator.lengthInChars, // entire LOB length in one round trip
+      amount: locator.length, // entire LOB length in one round trip
       timeout: timeout,
     );
     final bytes = response.data;
@@ -993,7 +1111,7 @@ class Transport {
       throw OracleException(
         errorCode: oraProtocolError,
         message: 'CLOB read returned no data '
-            '(expected ${locator.lengthInChars} chars)',
+            '(expected ${locator.length} chars)',
       );
     }
     final String text;
@@ -1014,14 +1132,58 @@ class Transport {
     // units (CLOBs are stored AL16UTF16), which equals Dart's UTF-16
     // `String.length` — so a short read is a real truncation, not a
     // code-point-vs-code-unit mismatch.
-    if (text.length != locator.lengthInChars) {
+    if (text.length != locator.length) {
       throw OracleException(
         errorCode: oraProtocolError,
         message: 'CLOB read length mismatch: locator reports '
-            '${locator.lengthInChars} chars but ${text.length} were received',
+            '${locator.length} chars but ${text.length} were received',
       );
     }
     return text;
+  }
+
+  /// Reads a BLOB locator's full value as a Dart `Uint8List` via a single
+  /// TTC LOB READ operation (Story 4.2, AC1/AC4).
+  ///
+  /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`:
+  /// one READ requesting the entire LOB byte length at 1-based offset 1. The
+  /// server streams the content back as one or more `LOB_DATA` messages
+  /// inside the single response, which [decodeLobOpResponse] concatenates
+  /// into one byte buffer. BLOB `LOB_DATA` bytes pass through unchanged — no
+  /// character set conversion of any kind (node-oracledb lobOp.js
+  /// processMessage keeps BLOB data as a raw Buffer).
+  Future<Uint8List> _readBlobAsBytes(
+      LobLocator locator, Duration? timeout) async {
+    if (locator.length == 0) {
+      return Uint8List(0); // EMPTY_BLOB() — no LOB_DATA round trip needed
+    }
+    final response = await sendLobOp(
+      operation: tnsLobOpRead,
+      sourceLocator: locator.locator,
+      sourceOffset: 1, // 1-based: read from the start of the LOB (bytes)
+      sendAmount: true,
+      amount: locator.length, // entire LOB byte length in one round trip
+      timeout: timeout,
+    );
+    final bytes = response.data;
+    if (bytes == null || bytes.isEmpty) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'BLOB read returned no data '
+            '(expected ${locator.length} bytes)',
+      );
+    }
+    // Truncation/overrun guard: the locator's prefetch metadata reports the
+    // exact byte length, so any mismatch is wire corruption — fail loud
+    // rather than truncate or pad.
+    if (bytes.length != locator.length) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'BLOB read length mismatch: locator reports '
+            '${locator.length} bytes but ${bytes.length} were received',
+      );
+    }
+    return bytes;
   }
 
   /// Sends a TTC COMMIT message and waits for the server's acknowledgement.

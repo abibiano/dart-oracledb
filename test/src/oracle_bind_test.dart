@@ -165,6 +165,63 @@ void main() {
     });
   });
 
+  group('Story 4.2 — OracleDbType.blob validation', () {
+    test('BLOB OUT bind requires maxSize', () {
+      expect(
+        () => OracleBind.out(type: OracleDbType.blob),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(6502))
+            .having((e) => e.message, 'message', contains('maxSize'))),
+      );
+    });
+
+    test('BLOB IN OUT bind requires maxSize', () {
+      expect(
+        () => OracleBind.inOut(
+            value: Uint8List.fromList([1, 2]), type: OracleDbType.blob),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(6502))),
+      );
+    });
+
+    test('BLOB OUT bind constructs with maxSize and reports type code 113', () {
+      final b = OracleBind.out(type: OracleDbType.blob, maxSize: 100000);
+      expect(b.type, equals(OracleDbType.blob));
+      expect(b.maxSize, equals(100000));
+      expect(b.value, isNull);
+      expect(b.oracleTypeCode, equals(113) /* oraTypeBlob */);
+    });
+
+    test('BLOB IN OUT accepts Uint8List and null values only', () {
+      final bytes = Uint8List.fromList([0, 1, 254, 255]);
+      final u = OracleBind.inOut(
+          value: bytes, type: OracleDbType.blob, maxSize: 4000);
+      expect(u.value, same(bytes));
+      final n = OracleBind.inOut(
+          value: null, type: OracleDbType.blob, maxSize: 4000);
+      expect(n.value, isNull);
+      // String and plain List<int> are binary-looking but not Uint8List —
+      // reject at construction so the failure surfaces at the call site.
+      expect(
+        () => OracleBind.inOut(
+            value: 'bytes', type: OracleDbType.blob, maxSize: 4000),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(
+        () => OracleBind.inOut(
+            value: <int>[1, 2, 3], type: OracleDbType.blob, maxSize: 4000),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('BLOB bind rejects non-positive maxSize', () {
+      expect(
+        () => OracleBind.out(type: OracleDbType.blob, maxSize: 0),
+        throwsA(isA<OracleException>()),
+      );
+    });
+  });
+
   group('OracleOutBinds', () {
     test('empty container reports isEmpty and returns null for any key', () {
       const out = OracleOutBinds.empty();

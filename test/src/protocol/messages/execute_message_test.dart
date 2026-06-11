@@ -1589,7 +1589,8 @@ void main() {
       final value = r.rows.single.single;
       expect(value, isA<LobLocator>());
       final loc = value! as LobLocator;
-      expect(loc.lengthInChars, equals(11));
+      expect(loc.length, equals(11));
+      expect(loc.oracleType, equals(oraTypeClob));
       expect(loc.chunkSize, equals(8060));
       expect(loc.locator, equals(locatorBytes));
       // AC: ColumnMetadata survives decode for CLOB columns.
@@ -1629,7 +1630,7 @@ void main() {
       ]);
       final r = decodeExecuteResponse(payload, isQuery: true);
       final loc = r.rows.single.single! as LobLocator;
-      expect(loc.lengthInChars, equals(0));
+      expect(loc.length, equals(0));
     });
 
     test('CLOB OUT bind decodes through the locator shape', () {
@@ -1652,17 +1653,70 @@ void main() {
       );
       expect(r.outBindIndices, equals([0]));
       final loc = r.outBindValues.single! as LobLocator;
-      expect(loc.lengthInChars, equals(5));
+      expect(loc.length, equals(5));
       expect(loc.chunkSize, equals(4000));
     });
 
-    test('BLOB column fails loud with ORA-03115 in the strict pass', () {
+    test('BLOB column decodes to a byte-typed LobLocator (Story 4.2)', () {
       final payload = _buildPayload([
         _describeInfo([
           _columnInfo(name: 'B', oraType: oraTypeBlob, maxSize: 4000),
         ]),
         _rowHeader(),
-        [ttcMsgTypeRowData, ...clobValue()],
+        [ttcMsgTypeRowData, ...clobValue(length: 17, chunkSize: 8132)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.isSuccess, isTrue);
+      final loc = r.rows.single.single! as LobLocator;
+      expect(loc.oracleType, equals(oraTypeBlob));
+      expect(loc.length, equals(17)); // bytes, not characters
+      expect(loc.chunkSize, equals(8132));
+      expect(loc.locator, equals(locatorBytes));
+      // The lenient completion probe consumes the identical locator bytes
+      // and still finds the terminal STATUS message.
+      expect(ttcStreamIsComplete(payload), isTrue);
+    });
+
+    test('BLOB OUT bind decodes through the locator shape (Story 4.2)', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          ...clobValue(length: 9, chunkSize: 8132),
+          ..._ub4(0), // SB4 actualNumBytes trailer (non-fetch path)
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(
+              oraType: oraTypeBlob, maxSize: 100, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindIndices, equals([0]));
+      final loc = r.outBindValues.single! as LobLocator;
+      expect(loc.oracleType, equals(oraTypeBlob));
+      expect(loc.length, equals(9));
+    });
+
+    test('BFILE column still fails loud in the strict pass (Story 4.2)', () {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'F', oraType: oraTypeBfile, maxSize: 4000),
+        ]),
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          // BFILE prefetch shape: locator length + locator only (no UB8
+          // length / UB4 chunk size).
+          ..._ub4(40),
+          ..._bytesWithLength(locatorBytes),
+        ],
         _errorMessage(errorNum: 1403),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
@@ -1670,10 +1724,10 @@ void main() {
         () => decodeExecuteResponse(payload, isQuery: true),
         throwsA(isA<OracleException>()
             .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-            .having((e) => e.message, 'message', contains('BLOB'))),
+            .having((e) => e.message, 'message', contains('BFILE'))),
       );
-      // The lenient completion probe consumes the identical locator bytes
-      // and still finds the terminal STATUS message.
+      // The lenient completion probe consumes the identical BFILE bytes and
+      // still finds the terminal STATUS message.
       expect(ttcStreamIsComplete(payload), isTrue);
     });
 
@@ -1764,7 +1818,10 @@ void main() {
         bindValues: [
           BindVariable(
             value: LobLocator(
-                locator: locator, lengthInChars: 3, chunkSize: 0),
+                locator: locator,
+                oracleType: oraTypeClob,
+                length: 3,
+                chunkSize: 0),
             oraType: oraTypeClob,
             dir: BindDir.input,
           ),
@@ -1835,6 +1892,123 @@ void main() {
       expect(
           bytes.sublist(bytes.length - 4), equals([3, 0x61, 0x62, 0x63]),
           reason: 'PL/SQL writes values in bind order — abc is last');
+    });
+  });
+
+  // Story 4.2 — BLOB bind encode: locator-sized metadata with the LOB
+  // prefetch cont-flag, no character set form, and locator value writes.
+  group('Story 4.2 — BLOB bind encode', () {
+    test('BLOB bind metadata: type 113, prefetch flag, locator buffer size',
+        () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+              value: null,
+              oraType: oraTypeBlob,
+              maxSize: 100000,
+              dir: BindDir.output),
+        ],
+      );
+      final bytes = req.toBytes();
+      // Expected metadata block: oraType(113), flags(1), precision(0),
+      // scale(0), UB4 maxSize=112 (locator buffer, NOT the user's 100000),
+      // UB4 maxNumElements=0, UB4 contFlag=0x2000000, UB4 OID=0,
+      // UB2 version=0, UB2 charset=0 (BLOB has no charset), csfrm=0,
+      // UB4 lobPrefetch=0, UB4 oaccolid=0.
+      final expectedMetadata = [
+        oraTypeBlob, ttcBindUseIndicators, 0, 0,
+        1, 112, // UB4 maxSize = 112
+        0, // UB4 max num elements
+        4, 0x02, 0x00, 0x00, 0x00, // UB4 contFlag = TNS_LOB_PREFETCH_FLAG
+        0, // UB4 OID
+        0, // UB2 version
+        0, // UB2 charset = 0 (binary)
+        0, // csfrm = 0 (no character set form)
+        0, // UB4 lob prefetch length
+        0, // UB4 oaccolid
+      ];
+      expect(_indexOfSub(bytes, expectedMetadata), greaterThanOrEqualTo(0),
+          reason: 'BLOB bind metadata block not found in encoded request');
+    });
+
+    test('BLOB bind value writes UB4 locator length + locator bytes', () {
+      final locator = Uint8List.fromList(List.filled(40, 0xB7));
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: LobLocator(
+                locator: locator,
+                oracleType: oraTypeBlob,
+                length: 5,
+                chunkSize: 0),
+            oraType: oraTypeBlob,
+            dir: BindDir.input,
+          ),
+        ],
+      );
+      final bytes = req.toBytes();
+      final expectedValue = [
+        1, 40, // UB4 locator length
+        40, ...locator, // bytes-with-length locator
+      ];
+      expect(_indexOfSub(bytes, expectedValue), greaterThanOrEqualTo(0),
+          reason: 'locator bind value bytes not found in encoded request');
+    });
+
+    test('raw Uint8List reaching the BLOB encoder is an internal error', () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+              value: Uint8List.fromList([1, 2, 3]),
+              oraType: oraTypeBlob,
+              dir: BindDir.input),
+        ],
+      );
+      expect(
+        req.toBytes,
+        throwsA(isA<OracleException>().having(
+            (e) => e.message, 'message', contains('LOB locator'))),
+      );
+    });
+
+    test('BLOB define block carries the prefetch flag and locator size', () {
+      const blobCol = ColumnMetadata(
+          name: 'B', oracleType: oraTypeBlob, maxLength: 4000);
+      const numberCol = ColumnMetadata(
+          name: 'ID', oracleType: oraTypeNumber, maxLength: 0);
+      final req = ExecuteRequest(
+        sql: 'SELECT id, b FROM t',
+        isQuery: true,
+        cursorId: 9,
+        defineColumns: [numberCol, blobCol],
+      );
+      final bytes = req.toBytes();
+      // BLOB define: type 113, locator buffer size 112 (not
+      // ColumnMetadata.maxLength), LOB prefetch cont-flag, charset 0,
+      // csfrm 0.
+      final blobDefine = [
+        oraTypeBlob, ttcBindUseIndicators, 0, 0,
+        1, 112, // UB4 buffer size (locator allocation)
+        0, // max num elements
+        4, 0x02, 0x00, 0x00, 0x00, // UB4 contFlag = TNS_LOB_PREFETCH_FLAG
+        0, // OID
+        0, // version
+        0, // UB2 charset = 0
+        0, // csfrm = 0
+        0, // prefetch length
+        0, // oaccolid
+      ];
+      expect(_indexOfSub(bytes, blobDefine), greaterThanOrEqualTo(0),
+          reason: 'BLOB define block not found in encoded request');
     });
   });
 

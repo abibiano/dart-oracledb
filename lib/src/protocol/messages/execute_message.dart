@@ -366,7 +366,9 @@ class ExecuteRequest extends Message {
       // LOB binds request prefetch metadata (length + chunk size inline with
       // the returned locator) — node-oracledb writeColumnMetadata sets
       // TNS_LOB_PREFETCH_FLAG for every LOB-typed bind.
-      buffer.writeUB4(oraType == oraTypeClob ? tnsLobPrefetchFlag : 0);
+      buffer.writeUB4(oraType == oraTypeClob || oraType == oraTypeBlob
+          ? tnsLobPrefetchFlag
+          : 0);
       buffer.writeUB4(0); // OID
       buffer.writeUB2(0); // version
       buffer.writeUB2(csfrm != 0 ? ttcCharsetUtf8 : 0);
@@ -380,8 +382,8 @@ class ExecuteRequest extends Message {
 
   /// Writes one define block per query column — the same field layout as
   /// bind metadata (node-oracledb shares `writeColumnMetadata` between the
-  /// two). CLOB defines carry the LOB prefetch cont-flag so the server keeps
-  /// sending length + chunk size with every locator on FETCH rounds.
+  /// two). CLOB/BLOB defines carry the LOB prefetch cont-flag so the server
+  /// keeps sending length + chunk size with every locator on FETCH rounds.
   void _writeDefineMetadata(WriteBuffer buffer, List<ColumnMetadata> columns) {
     for (final col in columns) {
       final oraType =
@@ -394,7 +396,9 @@ class ExecuteRequest extends Message {
       buffer.writeUint8(0);
       buffer.writeUB4(_defineBufferSize(col));
       buffer.writeUB4(0); // max num elements (not array)
-      buffer.writeUB4(oraType == oraTypeClob ? tnsLobPrefetchFlag : 0);
+      buffer.writeUB4(oraType == oraTypeClob || oraType == oraTypeBlob
+          ? tnsLobPrefetchFlag
+          : 0);
       buffer.writeUB4(0); // OID
       buffer.writeUB2(0); // version
       buffer.writeUB2(col.csfrm != 0 ? ttcCharsetUtf8 : 0);
@@ -408,11 +412,12 @@ class ExecuteRequest extends Message {
 
   /// Define buffer size per column type: byte-sized types use the described
   /// column width; fixed-width types use their wire size (node-oracledb
-  /// DbType bufferSizeFactor values); CLOB uses the locator allocation.
+  /// DbType bufferSizeFactor values); CLOB/BLOB use the locator allocation.
   static int _defineBufferSize(ColumnMetadata col) {
     switch (col.oracleType) {
       case oraTypeClob:
-        return _clobLocatorBindBufferSize;
+      case oraTypeBlob:
+        return _lobLocatorBindBufferSize;
       case oraTypeNumber:
       case oraTypeInteger:
       case oraTypeFloat:
@@ -472,10 +477,12 @@ class ExecuteRequest extends Message {
             offsetMinutes: 0)));
         return;
       case oraTypeClob:
-        // CLOB binds put a locator on the wire, never the value bytes
+      case oraTypeBlob:
+        // CLOB/BLOB binds put a locator on the wire, never the value bytes
         // (node-oracledb writeBindParamsColumn). The transport converts
-        // String values into temporary-CLOB locators before encoding, so a
-        // raw String reaching this point is an internal sequencing bug.
+        // String/Uint8List values into temporary-LOB locators before
+        // encoding, so a raw value reaching this point is an internal
+        // sequencing bug.
         if (value is LobLocator) {
           buffer.writeUB4(value.locator.length);
           buffer.writeBytesWithLength(value.locator);
@@ -483,8 +490,9 @@ class ExecuteRequest extends Message {
         }
         throw OracleException(
           errorCode: oraBindTypeError,
-          message: 'Internal: CLOB bind value must be converted to a LOB '
-              'locator before encoding (got ${value.runtimeType})',
+          message: 'Internal: ${oraType == oraTypeBlob ? 'BLOB' : 'CLOB'} '
+              'bind value must be converted to a LOB locator before '
+              'encoding (got ${value.runtimeType})',
         );
       default:
         throw OracleException(
@@ -501,14 +509,17 @@ class ExecuteRequest extends Message {
     return bind.oraType;
   }
 
-  /// Wire buffer size for a CLOB bind: the locator allocation, matching
-  /// node-oracledb's `DB_TYPE_CLOB` bufferSizeFactor. The user-declared
-  /// `maxSize` of a CLOB [OracleBind] guards the materialized value length
-  /// client-side and never reaches the wire.
-  static const int _clobLocatorBindBufferSize = 112;
+  /// Wire buffer size for a CLOB/BLOB bind: the locator allocation, matching
+  /// node-oracledb's `DB_TYPE_CLOB`/`DB_TYPE_BLOB` bufferSizeFactor. The
+  /// user-declared `maxSize` of a CLOB/BLOB [OracleBind] guards the
+  /// materialized value length client-side and never reaches the wire.
+  static const int _lobLocatorBindBufferSize = 112;
 
   int _maxSizeFor(BindVariable bind) {
-    if (_wireTypeFor(bind) == oraTypeClob) return _clobLocatorBindBufferSize;
+    final wireType = _wireTypeFor(bind);
+    if (wireType == oraTypeClob || wireType == oraTypeBlob) {
+      return _lobLocatorBindBufferSize;
+    }
     if (bind.maxSize != null) return bind.maxSize!;
     final v = bind.value;
     switch (_wireTypeFor(bind)) {
@@ -1233,34 +1244,32 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       // LOB wire shape with the negotiated LOB-prefetch capability
       // (node-oracledb withData.js processColumnData): UB4 locator length
       // (0 ⇒ SQL NULL and nothing follows), then — except for BFILE — a UB8
-      // LOB length (characters for CLOB) and UB4 chunk size, then the
-      // locator as length-prefixed bytes. Story 4.1 supports CLOB only;
-      // BLOB/BFILE/NCLOB fail loud rather than decode silently (AC5). The
-      // lenient completion probe consumes the identical bytes so the
-      // terminal message stays locatable.
-      if (strict && oraType != oraTypeClob) {
-        final typeName = oraType == oraTypeBlob ? 'BLOB' : 'BFILE';
+      // LOB length (characters for CLOB, bytes for BLOB) and UB4 chunk
+      // size, then the locator as length-prefixed bytes. Stories 4.1/4.2
+      // support CLOB and BLOB; BFILE/NCLOB fail loud rather than decode
+      // silently (AC5). The lenient completion probe consumes the identical
+      // bytes so the terminal message stays locatable.
+      if (strict && oraType == oraTypeBfile) {
         throw OracleException(
           errorCode: oraUnsupportedType,
-          message: '$typeName columns are not supported yet (Oracle type '
-              '$oraType). Story 4.1 implements CLOB only; BLOB support is '
-              'planned for a later Epic 4 story.',
+          message: 'BFILE columns are not supported yet (Oracle type '
+              '$oraType). Stories 4.1/4.2 implement CLOB and BLOB only.',
         );
       }
       if (strict && csfrm == ttcCsfrmNChar) {
         throw OracleException(
           errorCode: oraUnsupportedType,
           message: 'NCLOB columns are not supported yet (Oracle type '
-              '$oraType, NCHAR charset form). Story 4.1 implements CLOB '
-              'only.',
+              '$oraType, NCHAR charset form). Stories 4.1/4.2 implement '
+              'CLOB and BLOB only.',
         );
       }
       final locatorLen = buf.readUB4();
       if (locatorLen == 0) return null; // SQL NULL — no further bytes
-      var lengthInChars = 0;
+      var lobLength = 0;
       var chunkSize = 0;
       if (oraType != oraTypeBfile) {
-        lengthInChars = buf.readUB8();
+        lobLength = buf.readUB8();
         chunkSize = buf.readUB4();
       }
       final locator = buf.readBytesWithLength();
@@ -1269,7 +1278,8 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       // the server on subsequent LOB READ operations.
       return LobLocator(
         locator: Uint8List.fromList(locator),
-        lengthInChars: lengthInChars,
+        oracleType: oraType,
+        length: lobLength,
         chunkSize: chunkSize,
       );
     case oraTypeJson:

@@ -1,11 +1,12 @@
 /// TTC LOB operation message (RPC function 96, `TNS_FUNC_LOB_OP`).
 ///
 /// Implements the subset of node-oracledb's thin `LobOpMessage` needed for
-/// Story 4.1 CLOB support: READ, WRITE, and CREATE_TEMP (FREE_TEMP travels as
-/// a piggyback built by the transport, mirroring node-oracledb
-/// `writeCloseTempLobsPiggyback`). The wire format follows
+/// Stories 4.1/4.2 CLOB and BLOB support: READ, WRITE, and CREATE_TEMP
+/// (FREE_TEMP travels as a piggyback built by the transport, mirroring
+/// node-oracledb `writeCloseTempLobsPiggyback`). The wire format follows
 /// `reference/node-oracledb/lib/thin/protocol/messages/lobOp.js` byte for
-/// byte.
+/// byte. Offsets and amounts are characters for CLOB and bytes for BLOB;
+/// BLOB data payloads pass through unchanged (no charset conversion).
 library;
 
 import 'dart:typed_data';
@@ -22,12 +23,12 @@ class LobOpRequest extends Message {
   /// Creates a LOB operation request.
   ///
   /// [operation] is one of the `tnsLobOp*` constants. For READ pass
-  /// [sourceLocator], a 1-based [sourceOffset] (characters for CLOB),
-  /// `sendAmount: true` and the requested [amount]. For WRITE pass
-  /// [sourceLocator], [sourceOffset] and [data]. For CREATE_TEMP pass a
-  /// zeroed [sourceLocator] buffer, the charset form in [sourceOffset], the
-  /// Oracle type in [destOffset] and [tnsDurationSession] in [destLength]
-  /// (node-oracledb `lob.js create()`).
+  /// [sourceLocator], a 1-based [sourceOffset] (characters for CLOB, bytes
+  /// for BLOB), `sendAmount: true` and the requested [amount]. For WRITE
+  /// pass [sourceLocator], [sourceOffset] and [data]. For CREATE_TEMP pass
+  /// a zeroed [sourceLocator] buffer, the charset form in [sourceOffset]
+  /// (0 for BLOB), the Oracle type in [destOffset] and [tnsDurationSession]
+  /// in [destLength] (node-oracledb `lob.js create()`).
   LobOpRequest({
     required this.operation,
     this.sourceLocator,
@@ -47,8 +48,9 @@ class LobOpRequest extends Message {
   /// Source LOB locator bytes, when the operation targets an existing LOB.
   final Uint8List? sourceLocator;
 
-  /// Source offset (UB8 on the wire). 1-based character offset for CLOB
-  /// read/write; carries the charset form for CREATE_TEMP.
+  /// Source offset (UB8 on the wire). 1-based offset for read/write
+  /// (characters for CLOB, bytes for BLOB); carries the charset form for
+  /// CREATE_TEMP.
   final int sourceOffset;
 
   /// Destination offset (UB8 on the wire). Carries the Oracle type indicator
@@ -64,10 +66,11 @@ class LobOpRequest extends Message {
   final bool sendAmount;
 
   /// Amount value written when [sendAmount] is true (characters to read for
-  /// CLOB READ).
+  /// CLOB READ, bytes for BLOB READ).
   final int amount;
 
-  /// Data payload for WRITE operations (UTF-8 bytes for CLOB).
+  /// Data payload for WRITE operations (UTF-8/UTF-16BE bytes for CLOB, raw
+  /// bytes for BLOB).
   final Uint8List? data;
 
   /// Negotiated TTC field version.
@@ -112,7 +115,9 @@ class LobOpRequest extends Message {
       buffer.writeBytes(locator);
     }
     if (operation == tnsLobOpCreateTemp) {
-      // Implicit (database) charset only — NCLOB is out of Story 4.1 scope.
+      // Implicit (database) charset only — node-oracledb writes UTF8 here
+      // for every non-NCHAR temp LOB, including BLOB; NCLOB is out of
+      // Stories 4.1/4.2 scope.
       buffer.writeUB4(ttcCharsetUtf8);
     }
     final writeData = data;
