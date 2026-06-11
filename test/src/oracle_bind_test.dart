@@ -112,6 +112,59 @@ void main() {
     });
   });
 
+  group('Story 4.1 — OracleDbType.clob validation', () {
+    test('CLOB OUT bind requires maxSize', () {
+      expect(
+        () => OracleBind.out(type: OracleDbType.clob),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(6502))
+            .having((e) => e.message, 'message', contains('maxSize'))),
+      );
+    });
+
+    test('CLOB IN OUT bind requires maxSize', () {
+      expect(
+        () => OracleBind.inOut(value: 'text', type: OracleDbType.clob),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(6502))),
+      );
+    });
+
+    test('CLOB OUT bind constructs with maxSize', () {
+      final b = OracleBind.out(type: OracleDbType.clob, maxSize: 100000);
+      expect(b.type, equals(OracleDbType.clob));
+      expect(b.maxSize, equals(100000));
+      expect(b.value, isNull);
+      expect(b.oracleTypeCode, equals(112) /* oraTypeClob */);
+    });
+
+    test('CLOB IN OUT accepts String and null values only', () {
+      final s = OracleBind.inOut(
+          value: 'hello', type: OracleDbType.clob, maxSize: 4000);
+      expect(s.value, equals('hello'));
+      final n = OracleBind.inOut(
+          value: null, type: OracleDbType.clob, maxSize: 4000);
+      expect(n.value, isNull);
+      expect(
+        () => OracleBind.inOut(
+            value: 42, type: OracleDbType.clob, maxSize: 4000),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(
+        () => OracleBind.inOut(
+            value: Uint8List(3), type: OracleDbType.clob, maxSize: 4000),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('CLOB bind rejects non-positive maxSize', () {
+      expect(
+        () => OracleBind.out(type: OracleDbType.clob, maxSize: 0),
+        throwsA(isA<OracleException>()),
+      );
+    });
+  });
+
   group('OracleOutBinds', () {
     test('empty container reports isEmpty and returns null for any key', () {
       const out = OracleOutBinds.empty();

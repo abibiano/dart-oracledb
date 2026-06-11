@@ -185,6 +185,9 @@ class ReadBuffer {
   /// Reads an Oracle SB4 (variable-length signed, up to 4 bytes).
   int readSB4() => _readInteger(4, signed: true);
 
+  /// Reads an Oracle SB8 (variable-length signed, up to 8 bytes).
+  int readSB8() => _readInteger(8, signed: true);
+
   /// Skips an Oracle UB1 (1 byte).
   void skipUB1() => skip(1);
 

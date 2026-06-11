@@ -14,6 +14,7 @@ import 'package:test/test.dart';
 import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
+import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 
 void main() {
@@ -1556,6 +1557,438 @@ void main() {
       expect(() => r.outBindIndices.add(0), throwsUnsupportedError);
     });
   });
+
+  // Story 4.1 — CLOB locator decode (AC4/AC5). The LOB-prefetch wire shape
+  // is UB4 locator length (0 ⇒ SQL NULL), UB8 LOB length, UB4 chunk size,
+  // then the locator as length-prefixed bytes.
+  group('Story 4.1 — CLOB locator decode', () {
+    final clobColumn = [
+      _columnInfo(
+          name: 'DOC', oraType: oraTypeClob, maxSize: 4000, csfrm: 1),
+    ];
+    final locatorBytes = List<int>.generate(40, (i) => 0xA0 + (i % 16));
+
+    List<int> clobValue({int length = 11, int chunkSize = 8060}) => [
+          ..._ub4(40), // locator length (> 0 ⇒ non-null)
+          ..._ub8(length), // LOB length in chars
+          ..._ub4(chunkSize), // chunk size
+          ..._bytesWithLength(locatorBytes),
+        ];
+
+    test('CLOB column decodes to a LobLocator, not null and not a String',
+        () {
+      final payload = _buildPayload([
+        _describeInfo(clobColumn),
+        _rowHeader(),
+        [ttcMsgTypeRowData, ...clobValue()],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.isSuccess, isTrue);
+      final value = r.rows.single.single;
+      expect(value, isA<LobLocator>());
+      final loc = value! as LobLocator;
+      expect(loc.lengthInChars, equals(11));
+      expect(loc.chunkSize, equals(8060));
+      expect(loc.locator, equals(locatorBytes));
+      // AC: ColumnMetadata survives decode for CLOB columns.
+      expect(r.columnMetadata.single.oracleType, equals(oraTypeClob));
+      expect(r.columnMetadata.single.csfrm, equals(1));
+      expect(r.columnMetadata.single.name, equals('DOC'));
+    });
+
+    test('NULL CLOB (locator length 0) decodes to null, byte-accurately', () {
+      // A trailing VARCHAR column proves no stray locator bytes were read.
+      final payload = _buildPayload([
+        _describeInfo([
+          ...clobColumn,
+          _columnInfo(name: 'TAG', oraType: oraTypeVarchar, maxSize: 10),
+        ]),
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._ub4(0), // NULL CLOB — nothing follows for this column
+          ..._bytesWithLength('ok'.codeUnits),
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.rows.single[0], isNull);
+      expect(r.rows.single[1], equals('ok'));
+    });
+
+    test('EMPTY_CLOB() decodes to a locator with zero length', () {
+      final payload = _buildPayload([
+        _describeInfo(clobColumn),
+        _rowHeader(),
+        [ttcMsgTypeRowData, ...clobValue(length: 0)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      final loc = r.rows.single.single! as LobLocator;
+      expect(loc.lengthInChars, equals(0));
+    });
+
+    test('CLOB OUT bind decodes through the locator shape', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          ...clobValue(length: 5, chunkSize: 4000),
+          ..._ub4(0), // SB4 actualNumBytes trailer (non-fetch path)
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeClob, maxSize: 100, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindIndices, equals([0]));
+      final loc = r.outBindValues.single! as LobLocator;
+      expect(loc.lengthInChars, equals(5));
+      expect(loc.chunkSize, equals(4000));
+    });
+
+    test('BLOB column fails loud with ORA-03115 in the strict pass', () {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'B', oraType: oraTypeBlob, maxSize: 4000),
+        ]),
+        _rowHeader(),
+        [ttcMsgTypeRowData, ...clobValue()],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(payload, isQuery: true),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+            .having((e) => e.message, 'message', contains('BLOB'))),
+      );
+      // The lenient completion probe consumes the identical locator bytes
+      // and still finds the terminal STATUS message.
+      expect(ttcStreamIsComplete(payload), isTrue);
+    });
+
+    test('NCLOB column (csfrm NCHAR) fails loud in the strict pass', () {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(
+              name: 'N', oraType: oraTypeClob, maxSize: 4000, csfrm: 2),
+        ]),
+        _rowHeader(),
+        [ttcMsgTypeRowData, ...clobValue()],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(payload, isQuery: true),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+            .having((e) => e.message, 'message', contains('NCLOB'))),
+      );
+      expect(ttcStreamIsComplete(payload), isTrue);
+    });
+
+    test('JSON column fails loud in the strict pass', () {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'J', oraType: oraTypeJson, maxSize: 4000),
+        ]),
+        _rowHeader(),
+        [ttcMsgTypeRowData, ..._bytesWithLength([1, 2, 3])],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(payload, isQuery: true),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+            .having((e) => e.message, 'message', contains('JSON'))),
+      );
+    });
+  });
+
+  // Story 4.1 — CLOB bind encode: locator-sized metadata with the LOB
+  // prefetch cont-flag, locator value writes, and SQL long-data ordering.
+  group('Story 4.1 — CLOB bind encode', () {
+    test('CLOB bind metadata: type 112, prefetch flag, locator buffer size',
+        () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+              value: null,
+              oraType: oraTypeClob,
+              maxSize: 100000,
+              dir: BindDir.output),
+        ],
+      );
+      final bytes = req.toBytes();
+      // Expected metadata block: oraType(112), flags(1), precision(0),
+      // scale(0), UB4 maxSize=112 (locator buffer, NOT the user's 100000),
+      // UB4 maxNumElements=0, UB4 contFlag=0x2000000, UB4 OID=0,
+      // UB2 version=0, UB2 charset=873, csfrm=1, UB4 lobPrefetch=0,
+      // UB4 oaccolid=0.
+      final expectedMetadata = [
+        oraTypeClob, ttcBindUseIndicators, 0, 0,
+        1, 112, // UB4 maxSize = 112
+        0, // UB4 max num elements
+        4, 0x02, 0x00, 0x00, 0x00, // UB4 contFlag = TNS_LOB_PREFETCH_FLAG
+        0, // UB4 OID
+        0, // UB2 version
+        2, 0x03, 0x69, // UB2 charset = 873
+        1, // csfrm implicit
+        0, // UB4 lob prefetch length
+        0, // UB4 oaccolid
+      ];
+      expect(_indexOfSub(bytes, expectedMetadata), greaterThanOrEqualTo(0),
+          reason: 'CLOB bind metadata block not found in encoded request');
+    });
+
+    test('CLOB bind value writes UB4 locator length + locator bytes', () {
+      final locator = Uint8List.fromList(List.filled(40, 0xCD));
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: LobLocator(
+                locator: locator, lengthInChars: 3, chunkSize: 0),
+            oraType: oraTypeClob,
+            dir: BindDir.input,
+          ),
+        ],
+      );
+      final bytes = req.toBytes();
+      final expectedValue = [
+        1, 40, // UB4 locator length
+        40, ...locator, // bytes-with-length locator
+      ];
+      expect(_indexOfSub(bytes, expectedValue), greaterThanOrEqualTo(0),
+          reason: 'locator bind value bytes not found in encoded request');
+    });
+
+    test('a raw String under a CLOB bind type fails loud (internal guard)',
+        () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+              value: 'not converted',
+              oraType: oraTypeClob,
+              dir: BindDir.input),
+        ],
+      );
+      expect(
+        req.toBytes,
+        throwsA(isA<OracleException>().having(
+            (e) => e.message, 'message', contains('LOB locator'))),
+      );
+    });
+
+    test('SQL DML writes >32767-byte string values after all other binds',
+        () {
+      final long = 'X' * 40000;
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t VALUES (:1, :2)',
+        isQuery: false,
+        bindValues: [long, 'abc'],
+      );
+      final bytes = req.toBytes();
+      // Deferred ordering: even though the long string is bind :1, its bytes
+      // are written last — the message ends with the chunked-encoding
+      // terminator (UB4 0) right after the 'X' run, not with 'abc'.
+      expect(bytes.last, equals(0),
+          reason: 'message must end with the long chunk terminator');
+      expect(bytes[bytes.length - 2], equals(0x58),
+          reason: 'the long X-run must be the final value written');
+      final shortIdx = _indexOfSub(bytes, [3, 0x61, 0x62, 0x63]);
+      final chunkIdx = _indexOfSub(bytes, [0xFE, 2, 0x9C, 0x40]);
+      expect(shortIdx, greaterThanOrEqualTo(0));
+      expect(chunkIdx, greaterThan(shortIdx),
+          reason: 'long value must be written after the short value');
+    });
+
+    test('PL/SQL keeps bind-order value writes (no long-data deferral)', () {
+      final long = 'X' * 40000;
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1, :2); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [long, 'abc'],
+      );
+      final bytes = req.toBytes();
+      // In-place ordering: the message ends with the 'abc' value bytes.
+      expect(
+          bytes.sublist(bytes.length - 4), equals([3, 0x61, 0x62, 0x63]),
+          reason: 'PL/SQL writes values in bind order — abc is last');
+    });
+  });
+
+  // Story 4.1 — define-mode ExecuteRequest (the DEFINE call sent for open
+  // CLOB query cursors, mirroring node-oracledb `_handleDefines`).
+  group('Story 4.1 — define-mode ExecuteRequest', () {
+    const clobCol = ColumnMetadata(
+        name: 'DOC', oracleType: oraTypeClob, maxLength: 4000, csfrm: 1);
+    const numberCol = ColumnMetadata(
+        name: 'ID', oracleType: oraTypeNumber, maxLength: 0);
+
+    test('sets DEFINE and clears EXECUTE/FETCH/PARSE', () {
+      final req = ExecuteRequest(
+        sql: 'SELECT id, doc FROM t',
+        isQuery: true,
+        cursorId: 9,
+        defineColumns: [numberCol, clobCol],
+      );
+      final options = _readOptionsFromHeader(req.toBytes());
+      expect(options & ttcExecOptionDefine, isNonZero);
+      expect(options & ttcExecOptionExecute, equals(0),
+          reason: 'DEFINE replaces EXECUTE');
+      expect(options & ttcExecOptionFetch, equals(0),
+          reason: 'rows come from later FETCH RPCs');
+      expect(options & ttcExecOptionParse, equals(0),
+          reason: 'the cursor is already open');
+      expect(options & ttcExecOptionNotPlSql, isNonZero);
+    });
+
+    test('writes one define block per column with the CLOB prefetch flag',
+        () {
+      final req = ExecuteRequest(
+        sql: 'SELECT id, doc FROM t',
+        isQuery: true,
+        cursorId: 9,
+        defineColumns: [numberCol, clobCol],
+      );
+      final bytes = req.toBytes();
+      // NUMBER define: type 2, flags 1, prec/scale 0, UB4 size=22, UB4 0,
+      // UB4 contFlag=0, OID 0, version 0, charset 0, csfrm 0, prefetch 0,
+      // oaccolid 0.
+      final numberDefine = [
+        oraTypeNumber, ttcBindUseIndicators, 0, 0, 1, 22, 0, 0, 0, 0, 0, 0,
+        0, 0,
+      ];
+      // CLOB define: type 112, locator buffer size 112, LOB prefetch
+      // cont-flag, charset 873, csfrm 1.
+      final clobDefine = [
+        oraTypeClob, ttcBindUseIndicators, 0, 0,
+        1, 112, // UB4 buffer size (locator allocation)
+        0, // max num elements
+        4, 0x02, 0x00, 0x00, 0x00, // UB4 contFlag = TNS_LOB_PREFETCH_FLAG
+        0, // OID
+        0, // version
+        2, 0x03, 0x69, // UB2 charset = 873
+        1, // csfrm implicit
+        0, // prefetch length
+        0, // oaccolid
+      ];
+      final numberIdx = _indexOfSub(bytes, numberDefine);
+      final clobIdx = _indexOfSub(bytes, clobDefine);
+      expect(numberIdx, greaterThanOrEqualTo(0));
+      expect(clobIdx, greaterThan(numberIdx),
+          reason: 'defines are written in column order');
+    });
+  });
+
+  // Story 4.1 — RETURN_PARAMETER body variants. Wire captures against
+  // Oracle 21c show the key/value and registration sections present on some
+  // responses (DDL — both empty) and absent on others (PL/SQL with a CLOB
+  // OUT bind, where the terminal ERROR message follows directly).
+  group('Story 4.1 — RETURN_PARAMETER section heuristic', () {
+    List<int> parameterBody({required bool withSections}) => [
+          ttcMsgTypeParameter,
+          ..._ub2(2), // numParams
+          ..._ub4(0x123456), // param 1
+          ..._ub4(0), // param 2
+          ..._ub2(0), // transaction length
+          if (withSections) ...[
+            ..._ub2(0), // numKv = 0
+            ..._ub2(0), // registration length = 0
+          ],
+        ];
+
+    test('PARAMETER without kv/registration sections (21c PL/SQL shape)', () {
+      final payload = _buildPayload([
+        parameterBody(withSections: false),
+        _errorMessage(errorNum: 0, rowCount: 1),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.isSuccess, isTrue);
+      expect(r.rowsAffected, equals(1));
+    });
+
+    test('PARAMETER with empty kv/registration sections (DDL shape)', () {
+      final payload = _buildPayload([
+        parameterBody(withSections: true),
+        _errorMessage(errorNum: 0, rowCount: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.isSuccess, isTrue);
+    });
+
+    test('completion probe consumes CLOB OUT binds byte-accurately', () {
+      // The pre-23.4 completion probe walks OUT binds with bindMetadata
+      // (Story 4.1): a CLOB OUT bind ships the locator shape, which the
+      // metadata-less fallback (bytes-with-length) would misparse.
+      final locator = List<int>.filled(40, 0x55);
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          ..._ub4(40), // locator length
+          ..._ub8(11), // LOB length in chars
+          ..._ub4(8132), // chunk size
+          ..._bytesWithLength(locator),
+          ..._ub4(0), // SB4 trailer
+        ],
+        parameterBody(withSections: false),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        ttcStreamIsComplete(payload, bindMetadata: const [
+          BindMetadata(oraType: oraTypeClob, maxSize: 100, dir: BindDir.output),
+        ]),
+        isTrue,
+      );
+      // Truncated stream: probe reports incomplete instead of throwing.
+      expect(
+        ttcStreamIsComplete(
+            Uint8List.sublistView(payload, 0, payload.length ~/ 2),
+            bindMetadata: const [
+              BindMetadata(
+                  oraType: oraTypeClob, maxSize: 100, dir: BindDir.output),
+            ]),
+        isFalse,
+      );
+    });
+  });
+}
+
+/// Returns the first index of [needle] within [haystack], or -1.
+int _indexOfSub(List<int> haystack, List<int> needle) {
+  outer:
+  for (var i = 0; i + needle.length <= haystack.length; i++) {
+    for (var j = 0; j < needle.length; j++) {
+      if (haystack[i + j] != needle[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
 }
 
 /// Builds a minimal TTC IO_VECTOR message carrying the supplied directions.
@@ -1646,6 +2079,7 @@ List<int> _columnInfo({
   int ttcFieldVersion = 24,
   int precisionByte = 0,
   int scaleByte = 0,
+  int csfrm = 0,
 }) {
   final nameBytes = name.codeUnits;
   return [
@@ -1659,7 +2093,7 @@ List<int> _columnInfo({
     ..._ub4(0), // oidLen = 0
     ..._ub2(0), // version
     ..._ub2(0), // charset id
-    0, // csfrm
+    csfrm, // csfrm
     ..._ub4(maxSize), // size
     if (ttcFieldVersion >= ttcCcapFieldVersion12_2) ..._ub4(0), // oaccolid
     0, // nullable

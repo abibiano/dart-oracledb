@@ -5,7 +5,7 @@ Thank you for your interest in contributing! This document explains how to set u
 ## Development Setup
 
 **Requirements:**
-- Dart SDK >= 3.3.0
+- Dart SDK >= 3.12.0
 - Docker (for integration tests)
 - Git
 

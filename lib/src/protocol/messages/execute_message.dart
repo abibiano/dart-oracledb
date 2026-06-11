@@ -14,6 +14,7 @@ import '../../oracle_timestamp_tz.dart';
 import '../buffer.dart';
 import '../constants.dart';
 import '../data_types.dart' as dt;
+import '../lob_locator.dart';
 import 'base.dart';
 
 /// Direction of a [BindVariable] on the wire.
@@ -98,9 +99,14 @@ class ExecuteRequest extends Message {
     this.isPlSql = false,
     this.numIters = 50,
     this.ttcFieldVersion = 24,
+    this.defineColumns,
     super.sequence = 1,
   })  : assert(!(isQuery && isPlSql),
             'a statement cannot be both query and PL/SQL'),
+        assert(
+            defineColumns == null ||
+                (isQuery && cursorId != 0 && bindValues == null),
+            'define mode requires an open query cursor and carries no binds'),
         super(messageType: ttcMsgTypeFunction) {
     // OUT and IN OUT binds are only meaningful in PL/SQL. Refuse mid-build
     // rather than emit malformed bytes that would surface as a confusing
@@ -141,6 +147,16 @@ class ExecuteRequest extends Message {
   /// Negotiated TTC field version from protocol negotiation.
   final int ttcFieldVersion;
 
+  /// When non-null, this message is a DEFINE call for an already-open query
+  /// cursor (Story 4.1): it establishes column defines — with the LOB
+  /// prefetch cont-flag on CLOB columns — instead of executing. Mirrors
+  /// node-oracledb's `requiresDefine` execute variant (`_handleDefines`):
+  /// options carry DEFINE without EXECUTE/FETCH/PARSE, no binds travel, and
+  /// the define metadata replaces the bind metadata block. Required because
+  /// the server stops sending the LOB-prefetch shape (length + chunk size)
+  /// on FETCH continuation rounds until defines are established.
+  final List<ColumnMetadata>? defineColumns;
+
   /// Number of execute iterations for DML (always 1 here; bulk DML deferred).
   int get _numExecs => 1;
 
@@ -170,21 +186,30 @@ class ExecuteRequest extends Message {
     // Execute options + DML options
     var options = 0;
     var dmlOptions = 0;
-    options |= ttcExecOptionExecute;
-    if (cursorId == 0) {
-      options |= ttcExecOptionParse;
+    final defines = defineColumns;
+    if (defines != null) {
+      // Define mode (node-oracledb execute.js `requiresDefine`): DEFINE
+      // replaces EXECUTE, no FETCH (rows come from later FETCH RPCs), no
+      // PARSE (the cursor is open), and the implicit-resultset DML option
+      // stays clear.
+      options |= ttcExecOptionDefine | ttcExecOptionNotPlSql;
+    } else {
+      options |= ttcExecOptionExecute;
+      if (cursorId == 0) {
+        options |= ttcExecOptionParse;
+      }
+      if (isQuery) {
+        options |= ttcExecOptionFetch;
+      } else if (!isPlSql) {
+        options |= ttcExecOptionNotPlSql;
+      } else if (numParams > 0) {
+        options |= ttcExecOptionPlSqlBind;
+      }
+      if (numParams > 0) {
+        options |= ttcExecOptionBind;
+      }
+      dmlOptions |= ttcExecOptionImplicitResultset;
     }
-    if (isQuery) {
-      options |= ttcExecOptionFetch;
-    } else if (!isPlSql) {
-      options |= ttcExecOptionNotPlSql;
-    } else if (numParams > 0) {
-      options |= ttcExecOptionPlSqlBind;
-    }
-    if (numParams > 0) {
-      options |= ttcExecOptionBind;
-    }
-    dmlOptions |= ttcExecOptionImplicitResultset;
 
     buffer.writeUB4(options);
     buffer.writeUB4(cursorId);
@@ -221,9 +246,15 @@ class ExecuteRequest extends Message {
     buffer.writeUint8(0); // al8kv
     buffer.writeUint8(0); // al8kvl
 
-    // no defines (we let server describe)
-    buffer.writeUint8(0);
-    buffer.writeUB4(0);
+    // defines: normally absent (the server describes); the Story 4.1 define
+    // call announces one define per query column here (al8doac pointer).
+    if (defines != null) {
+      buffer.writeUint8(1);
+      buffer.writeUB4(defines.length);
+    } else {
+      buffer.writeUint8(0);
+      buffer.writeUB4(0);
+    }
 
     buffer.writeUB4(0); // registration id
 
@@ -281,12 +312,31 @@ class ExecuteRequest extends Message {
     buffer.writeUB4(0); // al8i4[11]
     buffer.writeUB4(0); // al8i4[12]
 
-    // Bind metadata + values
+    // Define metadata (define mode) OR bind metadata + values — never both
+    // (node-oracledb execute.js writes one or the other).
+    if (defines != null) {
+      _writeDefineMetadata(buffer, defines);
+      return;
+    }
     if (numParams > 0) {
       _writeBindMetadata(buffer, binds);
       // Single ROW_DATA message containing all bind values for one iteration.
       buffer.writeUint8(ttcMsgTypeRowData);
+      // SQL (non-PL/SQL) statements must write values whose declared size
+      // exceeds the 32767-byte string bind limit AFTER all other binds —
+      // Oracle's long-data ordering, mirrored from node-oracledb
+      // writeBindParamsRow (`foundLong`). PL/SQL never reaches this path:
+      // oversized PL/SQL strings are converted to temporary CLOBs before
+      // encoding (Story 4.1).
+      final deferredLongBinds = <BindVariable>[];
       for (final bind in binds) {
+        if (!isPlSql && _maxSizeFor(bind) > ttcMaxVarcharBindBytes) {
+          deferredLongBinds.add(bind);
+          continue;
+        }
+        _writeBindValue(buffer, bind);
+      }
+      for (final bind in deferredLongBinds) {
         _writeBindValue(buffer, bind);
       }
     }
@@ -313,7 +363,10 @@ class ExecuteRequest extends Message {
       buffer.writeUint8(0); // scale
       buffer.writeUB4(maxSize);
       buffer.writeUB4(0); // max num elements (not array)
-      buffer.writeUB4(0); // cont flag
+      // LOB binds request prefetch metadata (length + chunk size inline with
+      // the returned locator) — node-oracledb writeColumnMetadata sets
+      // TNS_LOB_PREFETCH_FLAG for every LOB-typed bind.
+      buffer.writeUB4(oraType == oraTypeClob ? tnsLobPrefetchFlag : 0);
       buffer.writeUB4(0); // OID
       buffer.writeUB2(0); // version
       buffer.writeUB2(csfrm != 0 ? ttcCharsetUtf8 : 0);
@@ -322,6 +375,58 @@ class ExecuteRequest extends Message {
       if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
         buffer.writeUB4(0); // oaccolid
       }
+    }
+  }
+
+  /// Writes one define block per query column — the same field layout as
+  /// bind metadata (node-oracledb shares `writeColumnMetadata` between the
+  /// two). CLOB defines carry the LOB prefetch cont-flag so the server keeps
+  /// sending length + chunk size with every locator on FETCH rounds.
+  void _writeDefineMetadata(WriteBuffer buffer, List<ColumnMetadata> columns) {
+    for (final col in columns) {
+      final oraType =
+          col.oracleType == oraTypeVarchar2 ? oraTypeVarchar : col.oracleType;
+      buffer.writeUint8(oraType);
+      buffer.writeUint8(ttcBindUseIndicators);
+      // Precision and scale are always written as zero — the server
+      // complains about any other value (node-oracledb writeColumnMetadata).
+      buffer.writeUint8(0);
+      buffer.writeUint8(0);
+      buffer.writeUB4(_defineBufferSize(col));
+      buffer.writeUB4(0); // max num elements (not array)
+      buffer.writeUB4(oraType == oraTypeClob ? tnsLobPrefetchFlag : 0);
+      buffer.writeUB4(0); // OID
+      buffer.writeUB2(0); // version
+      buffer.writeUB2(col.csfrm != 0 ? ttcCharsetUtf8 : 0);
+      buffer.writeUint8(col.csfrm);
+      buffer.writeUB4(0); // max chars (LOB prefetch length)
+      if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
+        buffer.writeUB4(0); // oaccolid
+      }
+    }
+  }
+
+  /// Define buffer size per column type: byte-sized types use the described
+  /// column width; fixed-width types use their wire size (node-oracledb
+  /// DbType bufferSizeFactor values); CLOB uses the locator allocation.
+  static int _defineBufferSize(ColumnMetadata col) {
+    switch (col.oracleType) {
+      case oraTypeClob:
+        return _clobLocatorBindBufferSize;
+      case oraTypeNumber:
+      case oraTypeInteger:
+      case oraTypeFloat:
+      case oraTypeVarnum:
+        return 22;
+      case oraTypeDate:
+        return 7;
+      case oraTypeTimestamp:
+      case oraTypeTimestampLtz:
+        return 11;
+      case oraTypeTimestampTz:
+        return 13;
+      default:
+        return col.maxLength > 0 ? col.maxLength : 1;
     }
   }
 
@@ -366,6 +471,21 @@ class ExecuteRequest extends Message {
             (value as DateTime).toUtc(),
             offsetMinutes: 0)));
         return;
+      case oraTypeClob:
+        // CLOB binds put a locator on the wire, never the value bytes
+        // (node-oracledb writeBindParamsColumn). The transport converts
+        // String values into temporary-CLOB locators before encoding, so a
+        // raw String reaching this point is an internal sequencing bug.
+        if (value is LobLocator) {
+          buffer.writeUB4(value.locator.length);
+          buffer.writeBytesWithLength(value.locator);
+          return;
+        }
+        throw OracleException(
+          errorCode: oraBindTypeError,
+          message: 'Internal: CLOB bind value must be converted to a LOB '
+              'locator before encoding (got ${value.runtimeType})',
+        );
       default:
         throw OracleException(
           errorCode: oraBindTypeError,
@@ -381,7 +501,14 @@ class ExecuteRequest extends Message {
     return bind.oraType;
   }
 
+  /// Wire buffer size for a CLOB bind: the locator allocation, matching
+  /// node-oracledb's `DB_TYPE_CLOB` bufferSizeFactor. The user-declared
+  /// `maxSize` of a CLOB [OracleBind] guards the materialized value length
+  /// client-side and never reaches the wire.
+  static const int _clobLocatorBindBufferSize = 112;
+
   int _maxSizeFor(BindVariable bind) {
+    if (_wireTypeFor(bind) == oraTypeClob) return _clobLocatorBindBufferSize;
     if (bind.maxSize != null) return bind.maxSize!;
     final v = bind.value;
     switch (_wireTypeFor(bind)) {
@@ -414,6 +541,7 @@ class ExecuteRequest extends Message {
     switch (oraType) {
       case oraTypeVarchar:
       case oraTypeString:
+      case oraTypeClob:
         return ttcCsfrmImplicit;
       default:
         return 0;
@@ -789,7 +917,7 @@ void _dispatch(int msgType, ReadBuffer buf, _DecodeState s) {
       _processError(buf, s);
       return;
     case ttcMsgTypeWarning:
-      _processWarning(buf);
+      skipTtcWarningBody(buf);
       return;
     case ttcMsgTypeStatus:
       _processStatus(buf, s);
@@ -798,7 +926,7 @@ void _dispatch(int msgType, ReadBuffer buf, _DecodeState s) {
       _processReturnParameter(buf);
       return;
     case ttcMsgTypeServerSidePiggyback:
-      _processServerSidePiggyback(buf);
+      processServerSidePiggybackBody(buf);
       return;
     case ttcMsgTypeEndOfRequest:
       s.endOfResponse = true;
@@ -1031,8 +1159,16 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
 /// `BindMetadata` carries no precision/scale, so OUT binds cannot honor the
 /// AC7 fixed-scale-forces-double contract — they keep the int-vs-double
 /// heuristic (documented limitation, Story 7.8 AC7).
+///
+/// [csfrm] is the character set form when decoding a SELECT column (used to
+/// reject NCLOB, which shares the CLOB type indicator). The OUT-bind path
+/// passes 0: the public bind API cannot declare NCHAR types, and the
+/// locator-level variable-length-charset flag is re-checked at read time.
 Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
-    {required bool strict, int? scale, bool preserveTimestampTimeZone = false}) {
+    {required bool strict,
+    int? scale,
+    bool preserveTimestampTimeZone = false,
+    int csfrm = 0}) {
   switch (oraType) {
     case oraTypeLong:
     case oraTypeLongRaw:
@@ -1091,6 +1227,64 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
       return dt.decodeTimestamp(ReadBuffer(bytes));
+    case oraTypeClob:
+    case oraTypeBlob:
+    case oraTypeBfile:
+      // LOB wire shape with the negotiated LOB-prefetch capability
+      // (node-oracledb withData.js processColumnData): UB4 locator length
+      // (0 ⇒ SQL NULL and nothing follows), then — except for BFILE — a UB8
+      // LOB length (characters for CLOB) and UB4 chunk size, then the
+      // locator as length-prefixed bytes. Story 4.1 supports CLOB only;
+      // BLOB/BFILE/NCLOB fail loud rather than decode silently (AC5). The
+      // lenient completion probe consumes the identical bytes so the
+      // terminal message stays locatable.
+      if (strict && oraType != oraTypeClob) {
+        final typeName = oraType == oraTypeBlob ? 'BLOB' : 'BFILE';
+        throw OracleException(
+          errorCode: oraUnsupportedType,
+          message: '$typeName columns are not supported yet (Oracle type '
+              '$oraType). Story 4.1 implements CLOB only; BLOB support is '
+              'planned for a later Epic 4 story.',
+        );
+      }
+      if (strict && csfrm == ttcCsfrmNChar) {
+        throw OracleException(
+          errorCode: oraUnsupportedType,
+          message: 'NCLOB columns are not supported yet (Oracle type '
+              '$oraType, NCHAR charset form). Story 4.1 implements CLOB '
+              'only.',
+        );
+      }
+      final locatorLen = buf.readUB4();
+      if (locatorLen == 0) return null; // SQL NULL — no further bytes
+      var lengthInChars = 0;
+      var chunkSize = 0;
+      if (oraType != oraTypeBfile) {
+        lengthInChars = buf.readUB8();
+        chunkSize = buf.readUB4();
+      }
+      final locator = buf.readBytesWithLength();
+      if (!strict) return null; // probe pass: bytes consumed, value unused
+      // Copy out of the response buffer view: the locator is sent back to
+      // the server on subsequent LOB READ operations.
+      return LobLocator(
+        locator: Uint8List.fromList(locator),
+        lengthInChars: lengthInChars,
+        chunkSize: chunkSize,
+      );
+    case oraTypeJson:
+      // JSON (OSON) has its own wire format this driver cannot consume yet.
+      // Fail loud in the real decode pass (AC5); the lenient probe keeps the
+      // historical best-effort consumption.
+      if (strict) {
+        throw OracleException(
+          errorCode: oraUnsupportedType,
+          message: 'JSON columns are not supported yet (Oracle type '
+              '$oraType). Support is planned for a later Epic 4 story.',
+        );
+      }
+      buf.readBytesWithLength();
+      return null;
     default:
       buf.readBytesWithLength();
       return null;
@@ -1110,7 +1304,8 @@ Object? _decodeColumnValue(ReadBuffer buf, ColumnMetadata col,
     _decodeValueByOraType(buf, col.oracleType,
         strict: strict,
         scale: col.scale,
-        preserveTimestampTimeZone: preserveTimestampTimeZone);
+        preserveTimestampTimeZone: preserveTimestampTimeZone,
+        csfrm: col.csfrm);
 
 void _processBitVector(ReadBuffer buf, _DecodeState s) {
   final numColsSent = buf.readUB2();
@@ -1222,20 +1417,54 @@ void _processIoVector(ReadBuffer buf, _DecodeState s) {
   }
 }
 
-void _processError(ReadBuffer buf, _DecodeState s) {
+/// Decoded fields of a TTC ERROR message body.
+///
+/// Produced by [decodeTtcErrorBody], which is shared between the EXECUTE
+/// response decoder and the LOB operation decoder
+/// (`lob_op_message.dart`) so the two cannot drift on the ERROR wire walk.
+class TtcErrorInfo {
+  /// Creates an error info record.
+  const TtcErrorInfo({
+    required this.num,
+    this.message,
+    this.offset,
+    required this.cursorId,
+    this.rowCount,
+  });
+
+  /// Oracle error number (0 = success / informational end-of-call).
+  final int num;
+
+  /// Server error message text (only present when [num] != 0).
+  final String? message;
+
+  /// Character offset into the SQL text, when the server provided one.
+  final int? offset;
+
+  /// Cursor id echoed by the server.
+  final int cursorId;
+
+  /// Row count from the extended error block (12.2+ servers only).
+  final int? rowCount;
+}
+
+/// Walks the body of a TTC ERROR message (everything after the message-type
+/// byte) and returns the decoded fields. Pure byte walk — response-level
+/// semantics (ORA-01403 end-of-fetch, rowsAffected, terminal-on-pre-23.4)
+/// stay with the callers.
+TtcErrorInfo decodeTtcErrorBody(ReadBuffer buf,
+    {required int ttcFieldVersion}) {
   buf.readUB4(); // end of call status
   buf.skipUB2(); // end-to-end seq num
   buf.skipUB4(); // current row number
   buf.skipUB2(); // error number (short)
   buf.skipUB2(); // array elem error
   buf.skipUB2(); // array elem error
-  s.cursorId = buf.readUB4(); // cursor id (node-oracledb uses readUB4)
+  final cursorId = buf.readUB4(); // cursor id (node-oracledb uses readUB4)
   // Error position (SB4): character offset into the SQL text where Oracle
   // reports the parse/exec error. node-oracledb only surfaces it when >= 0
-  // (negative is the "unknown" sentinel). Always assign (including null) so
-  // a second _processError call on the same state doesn't carry a stale value.
+  // (negative is the "unknown" sentinel).
   final errorPos = buf.readSB4();
-  s.errorOffset = errorPos >= 0 ? errorPos : null;
   buf.skipUB1(); // sql type
   buf.skipUB1(); // fatal?
   buf.skipUB1(); // flags
@@ -1292,16 +1521,37 @@ void _processError(ReadBuffer buf, _DecodeState s) {
   // 0 rows" and "the server reported nothing" are distinct, and the public
   // `OracleResult.rowsAffected` contract surfaces the absence as null.
   int? rowCount;
-  if (s.ttcFieldVersion >= ttcCcapFieldVersion12_2) {
+  if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
     rowCount = buf.readUB8();
-    if (s.ttcFieldVersion >= ttcCcapFieldVersion20_1) {
+    if (ttcFieldVersion >= ttcCcapFieldVersion20_1) {
       buf.skipUB4(); // sql type
       buf.skipUB4(); // server checksum
     }
   }
+  String? message;
   if (num != 0) {
     final bytes = buf.readBytesWithLength();
-    s.errorMessage = utf8.decode(bytes, allowMalformed: true).trim();
+    message = utf8.decode(bytes, allowMalformed: true).trim();
+  }
+  return TtcErrorInfo(
+    num: num,
+    message: message,
+    offset: errorPos >= 0 ? errorPos : null,
+    cursorId: cursorId,
+    rowCount: rowCount,
+  );
+}
+
+void _processError(ReadBuffer buf, _DecodeState s) {
+  final err = decodeTtcErrorBody(buf, ttcFieldVersion: s.ttcFieldVersion);
+  final num = err.num;
+  final rowCount = err.rowCount;
+  s.cursorId = err.cursorId;
+  // Always assign (including null) so a second _processError call on the
+  // same state doesn't carry a stale offset value.
+  s.errorOffset = err.offset;
+  if (num != 0) {
+    s.errorMessage = err.message;
   }
   s.errorNum = num;
   if (s.isQuery && num == 1403) {
@@ -1330,7 +1580,9 @@ void _processError(ReadBuffer buf, _DecodeState s) {
   }
 }
 
-void _processWarning(ReadBuffer buf) {
+/// Skips the body of a TTC WARNING message. Shared with the LOB operation
+/// decoder (`lob_op_message.dart`).
+void skipTtcWarningBody(ReadBuffer buf) {
   buf.skipUB2(); // warning number (short)
   final numBytes = buf.readUB2();
   buf.skipUB2(); // flags
@@ -1351,6 +1603,18 @@ void _processReturnParameter(ReadBuffer buf) {
   }
   final txLen = buf.readUB2();
   if (txLen > 0) buf.skip(txLen);
+  // Key/value pairs and the registration blob are present in some responses
+  // and absent in others — wire captures (Story 4.1, Oracle 21c) show a DDL
+  // response carrying both sections (as empty: 0x00 0x00) while a PL/SQL
+  // response with a CLOB OUT bind ends the body right after the transaction
+  // field, with the terminal ERROR message following directly. The two
+  // cases are disambiguated by peeking the next byte: a section start is a
+  // UB2 size byte (0, 1, or 2), while every TTC message type that can
+  // follow PARAMETER (ERROR=4, ROW_DATA=7, STATUS=9, END_OF_REQUEST=29,
+  // ...) is > 2. An empty buffer here means a partial stream — fall through
+  // to the UB2 read so the resulting BufferException keeps its existing
+  // "need more packets" semantics in the completion probe.
+  if (buf.hasRemaining && buf.peekUint8() > 2) return;
   final numKv = buf.readUB2();
   for (var i = 0; i < numKv; i++) {
     final keyLen = buf.readUB2();
@@ -1363,7 +1627,9 @@ void _processReturnParameter(ReadBuffer buf) {
   if (regLen > 0) buf.skip(regLen);
 }
 
-void _processServerSidePiggyback(ReadBuffer buf) {
+/// Consumes the body of a server-side piggyback message. Shared with the
+/// LOB operation decoder (`lob_op_message.dart`).
+void processServerSidePiggybackBody(ReadBuffer buf) {
   final opcode = buf.readUint8();
   // Best-effort scan: try to consume well-known opcodes; unknowns terminate.
   switch (opcode) {

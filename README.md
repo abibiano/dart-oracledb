@@ -6,7 +6,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, and PL/SQL (stored procedures, functions, OUT/IN OUT binds) are implemented and validated against Oracle 23ai and 21c. LOBs (CLOB/BLOB/JSON) and connection pooling are not yet implemented. Depend on `oracledb: ^0.9.2`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once LOB support and connection pooling land.
+> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), and CLOB-as-String are implemented and validated against Oracle 23ai and 21c. BLOB/JSON and connection pooling are not yet implemented. Depend on `oracledb: ^0.9.2`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once LOB support and connection pooling land.
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -26,16 +26,19 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 
 ## Platform Support
 
-| Platform | Supported |
-|----------|-----------|
-| macOS    | ✅ |
-| Windows  | ✅ |
-| Linux    | ✅ |
-| iOS      | ✅ declared native target |
-| Android  | ✅ declared native target |
+| Platform | Supported                                   |
+| -------- | ------------------------------------------- |
+| macOS    | ✅                                          |
+| Windows  | ✅                                          |
+| Linux    | ✅                                          |
+| iOS      | ✅                                          |
+| Android  | ✅                                          |
 | Web      | ❌ (requires raw TCP sockets via `dart:io`) |
 
-Desktop/server targets are covered by CI. Android and iOS are declared in `pubspec.yaml` because the driver uses `dart:io` TCP sockets, which are available on native Dart targets; mobile-specific runtime validation is still expected before relying on them in production.
+All supported native platforms are declared in `pubspec.yaml`. Desktop/server
+targets are covered by CI. Android and iOS use the same `dart:io` TCP socket
+transport, which is available on native Dart targets; mobile-specific runtime
+validation is still expected before relying on them in production.
 
 ## Supported Oracle Versions
 
@@ -241,52 +244,93 @@ final isAlive = await connection.ping();
 
 ## API Reference
 
-| Method | Description |
-|--------|-------------|
-| `OracleConnection.connect(...)` | Open a connection |
-| `OracleConnection.withConnection(...)` | Open, use, and auto-close a connection |
-| `connection.execute(sql, [bindValues])` | Run a query, DML statement, or PL/SQL block |
-| `OracleBind.out(type: ..., maxSize: ...)` | Declare a PL/SQL OUT bind parameter |
-| `OracleBind.inOut(value: ..., type: ...)` | Declare a PL/SQL IN OUT bind parameter |
-| `result.outBinds` | OUT / IN OUT values, by name or position |
-| `connection.ping()` | Send a ping to verify the connection is alive |
-| `connection.commit()` | Commit the current transaction |
-| `connection.rollback()` | Roll back the current transaction |
-| `connection.runTransaction(callback)` | Run a callback inside a managed transaction |
-| `connection.close()` | Close the connection |
-| `connection.isConnected` | Whether the connection is open |
-| `connection.isHealthy` | Synchronous connection state check (no network I/O) |
-| `connection.statementCacheSize` | Configured statement cache size |
+| Method                                    | Description                                         |
+| ----------------------------------------- | --------------------------------------------------- |
+| `OracleConnection.connect(...)`           | Open a connection                                   |
+| `OracleConnection.withConnection(...)`    | Open, use, and auto-close a connection              |
+| `connection.execute(sql, [bindValues])`   | Run a query, DML statement, or PL/SQL block         |
+| `OracleBind.out(type: ..., maxSize: ...)` | Declare a PL/SQL OUT bind parameter                 |
+| `OracleBind.inOut(value: ..., type: ...)` | Declare a PL/SQL IN OUT bind parameter              |
+| `result.outBinds`                         | OUT / IN OUT values, by name or position            |
+| `connection.ping()`                       | Send a ping to verify the connection is alive       |
+| `connection.commit()`                     | Commit the current transaction                      |
+| `connection.rollback()`                   | Roll back the current transaction                   |
+| `connection.runTransaction(callback)`     | Run a callback inside a managed transaction         |
+| `connection.close()`                      | Close the connection                                |
+| `connection.isConnected`                  | Whether the connection is open                      |
+| `connection.isHealthy`                    | Synchronous connection state check (no network I/O) |
+| `connection.statementCacheSize`           | Configured statement cache size                     |
 
 ## Supported Data Types
 
-| Oracle Type | Dart Type |
-|-------------|-----------|
-| VARCHAR2, CHAR, NVARCHAR2 | `String` |
-| NUMBER | `num` / `int` / `double` |
-| DATE | `DateTime` |
-| TIMESTAMP | `DateTime` |
-| TIMESTAMP WITH TIME ZONE | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` |
-| RAW | `Uint8List` |
-| NULL | `null` |
+| Oracle Type               | Dart Type                                                                        |
+| ------------------------- | -------------------------------------------------------------------------------- |
+| VARCHAR2, CHAR, NVARCHAR2 | `String`                                                                         |
+| NUMBER                    | `num` / `int` / `double`                                                         |
+| DATE                      | `DateTime`                                                                       |
+| TIMESTAMP                 | `DateTime`                                                                       |
+| TIMESTAMP WITH TIME ZONE  | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` |
+| RAW                       | `Uint8List`                                                                      |
+| CLOB                      | `String` (see [CLOB support](#clob-support))                                     |
+| NULL                      | `null`                                                                           |
+
+### CLOB support
+
+CLOB values round-trip as Dart `String`s — no LOB handle or streaming API is
+needed (or exposed):
+
+- **Queries** — selecting a `CLOB` column returns a `String` (`null` for SQL
+  NULL, `''` for `EMPTY_CLOB()`). The driver reads LOB locators transparently
+  in server-chunk-sized pieces; values above 64 KiB are covered by tests.
+- **DML** — bind an ordinary `String` into a `CLOB` column with named or
+  positional binds. Strings above the 32,767-byte VARCHAR bind limit are
+  handled automatically (Oracle's long-data path for SQL, an internal
+  temporary CLOB for PL/SQL).
+- **PL/SQL OUT / IN OUT** — declare
+  `OracleBind.out(type: OracleDbType.clob, maxSize: ...)` or
+  `OracleBind.inOut(value: ..., type: OracleDbType.clob, maxSize: ...)`;
+  values decode through `result.outBinds` as `String?`. `maxSize` counts
+  characters (UTF-16 code units, the same as `String.length`) and bounds the
+  value the driver will materialize — a longer value fails loudly instead of
+  truncating. The empty string binds as SQL NULL, consistent with Oracle's
+  `'' IS NULL` semantics.
+
+Unbounded/multi-gigabyte LOBs are not claimed: values are materialized in
+memory as a single `String`. BLOB, NCLOB, BFILE, and JSON columns are not yet
+supported and fail with a clear `OracleException` (see roadmap).
 
 ## Project Status
 
 This package implements a subset of the full Oracle driver feature set. Below is the current roadmap:
 
-| Epic | Status |
-|------|--------|
-| Core connection & authentication | ✅ Done |
-| Query execution & transactions | ✅ Done |
-| PL/SQL execution (stored procedures, functions) | ✅ Done |
-| Advanced data types (CLOB, BLOB, JSON) | 📋 Planned |
-| Connection pooling | 📋 Planned |
+| Epic                                            | Status         |
+| ----------------------------------------------- | -------------- |
+| Core connection & authentication                | ✅ Done        |
+| Query execution & transactions                  | ✅ Done        |
+| PL/SQL execution (stored procedures, functions) | ✅ Done        |
+| Advanced data types (CLOB ✅, BLOB, JSON)       | 🚧 In progress |
+| Connection pooling                              | 📋 Planned     |
+
+### Planned After 1.0
+
+After the 1.0 release, the project roadmap includes larger API and compatibility work. These items are planned candidates and may change as the APIs are designed and validated:
+
+| Priority | Planned enhancement                                                                       |
+| -------- | ----------------------------------------------------------------------------------------- |
+| 1        | Streaming and `ResultSet` API for incremental result consumption                          |
+| 2        | REF CURSOR and implicit results, built on `ResultSet`                                     |
+| 3        | Non-`AL32UTF8` database character set compatibility                                       |
+| 4        | Bulk DML / `executeMany()`                                                                |
+| 5        | Public LOB streaming and temporary LOBs                                                   |
+| 6        | JSON / OSON parity                                                                        |
+| 7        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
+| 8        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
 
 ## Tests
 
 The project has an extensive test suite:
 
-- **~818 unit tests** — covering protocol, crypto, transport, and connection layers
+- **Unit tests** — covering protocol, crypto, transport, and connection layers
 - **Integration tests** — run against real Oracle instances via Docker
 
 ```bash
@@ -312,7 +356,7 @@ RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test
 - **NUMBER beyond 2⁵³** — integer-valued NUMBERs larger than 2⁵³ decode to `double` and lose precision (Dart `double` limit; matches node-oracledb).
 - **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use separate connections for concurrent work until connection pooling lands (see roadmap).
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
-- **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) are rejected on decode; offset-based zones (e.g. `+02:00`) are supported.
+- **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) are rejected on decode; offset-based zones (e.g. `+02:00`) are supported. Region-name compatibility is planned as a post-1.0 temporal enhancement.
 - **Very large result sets** — a single `execute()` is bounded by a safety cap of 1,000 fetch round-trips (about 50,000 rows at the default fetch size); if the cap is hit, a warning is logged, the rows fetched so far are returned, and `result.moreRowsAvailable` is `true` so the truncation is detectable. The same flag is also set (with a logged warning) in the rarer case where the server reports more rows pending but the driver has no usable cursor id to continue fetching — in either case `true` means the rows are an incomplete prefix of the full result set.
 
 ## Thin Mode Limitations

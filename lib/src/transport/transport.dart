@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
@@ -7,9 +8,11 @@ import 'package:meta/meta.dart';
 import '../errors.dart';
 import '../protocol/buffer.dart';
 import '../protocol/constants.dart';
+import '../protocol/lob_locator.dart';
 import '../protocol/messages/auth_message.dart';
 import '../protocol/messages/execute_message.dart';
 import '../protocol/messages/fast_auth_message.dart';
+import '../protocol/messages/lob_op_message.dart';
 import '../protocol/messages/ping_message.dart';
 import '../protocol/messages/protocol_message.dart';
 import 'packet.dart';
@@ -423,6 +426,22 @@ class Transport {
   /// Number of cursor-reuse EXECUTEs sent (cursorId != 0, parse skipped).
   int get debugReuseExecutes => _reuseExecutes;
 
+  /// Temporary LOB locators awaiting a free-temp piggyback (Story 4.1).
+  ///
+  /// Internal temporary CLOBs created for bind values are not freed with a
+  /// standalone RPC — node-oracledb frees them via a `TNS_FUNC_LOB_OP`
+  /// piggyback (`FREE_TEMP | ARRAY`) prepended to the next message
+  /// (base.js `writeCloseTempLobsPiggyback`). Locators queue here after the
+  /// execute that bound them and ride the next [sendExecute]; any remainder
+  /// at session end is reaped by the server at teardown, like cached cursors.
+  final List<Uint8List> _tempLobsToClose = [];
+  int _tempLobsTotalSize = 0;
+
+  /// Number of temp-LOB locators queued for the free piggyback. Exposed for
+  /// integration tests (Story 4.1 — temp-LOB lifecycle); not a public API.
+  @visibleForTesting
+  int get debugPendingTempLobCount => _tempLobsToClose.length;
+
   Future<ExecuteResponse> sendExecute(
     String sql, {
     required bool isQuery,
@@ -449,9 +468,25 @@ class Transport {
       _reuseExecutes++;
     }
 
+    // Story 4.1: drain the temp-LOB free list BEFORE creating this call's
+    // temp LOBs, so a locator bound by this execute can never be freed by
+    // its own piggyback.
+    final lobsToFree = List<Uint8List>.of(_tempLobsToClose);
+    final lobsToFreeSize = _tempLobsTotalSize;
+    _tempLobsToClose.clear();
+    _tempLobsTotalSize = 0;
+
+    // Story 4.1: CLOB-typed String binds (and PL/SQL strings beyond the
+    // 32767-byte VARCHAR limit) travel as temporary-CLOB locators, created
+    // here via LOB operations on this same connection before the execute.
+    final effectiveBinds = bindValues == null
+        ? null
+        : await _prepareClobBinds(bindValues, isPlSql: isPlSql,
+            timeout: timeout);
+
     final request = ExecuteRequest(
       sql: sql,
-      bindValues: bindValues,
+      bindValues: effectiveBinds,
       bindNames: bindNames,
       isQuery: isQuery,
       isPlSql: isPlSql,
@@ -461,22 +496,29 @@ class Transport {
       cursorId: cursorId,
     );
 
-    // Prepend close-cursor piggyback when LRU evictions produced pending IDs.
+    // Prepend piggybacks: close-cursor (LRU evictions) and free-temp-LOBs
+    // (temp CLOBs bound by a previous execute).
     final executeData = request.toBytes();
+    final piggybacks = <Uint8List>[
+      if (lobsToFree.isNotEmpty)
+        _buildFreeTempLobsPiggyback(lobsToFree, lobsToFreeSize),
+      if (cursorsToClose.isNotEmpty) _buildCloseCursorPiggyback(cursorsToClose),
+    ];
     final Uint8List requestData;
-    if (cursorsToClose.isNotEmpty) {
-      final closeData = _buildCloseCursorPiggyback(cursorsToClose);
-      requestData = Uint8List(closeData.length + executeData.length)
-        ..setRange(0, closeData.length, closeData)
-        ..setRange(closeData.length, closeData.length + executeData.length,
-            executeData);
-    } else {
+    if (piggybacks.isEmpty) {
       requestData = executeData;
+    } else {
+      final builder = BytesBuilder(copy: false);
+      for (final p in piggybacks) {
+        builder.add(p);
+      }
+      builder.add(executeData);
+      requestData = builder.toBytes();
     }
 
     await sendData(requestData);
     final payload = await _receiveDataWithTimeout(timeout,
-        expectedColumns: expectedColumns);
+        expectedColumns: expectedColumns, bindMetadata: bindMetadata);
 
     final response = decodeExecuteResponse(
       payload,
@@ -506,8 +548,24 @@ class Transport {
       final fetchColumns = response.columnMetadata.isNotEmpty
           ? response.columnMetadata
           : expectedColumns;
-      final allRows = List<List<Object?>>.of(response.rows);
+      var allRows = List<List<Object?>>.of(response.rows);
       var moreRowsToFetch = true;
+      // Story 4.1: for CLOB queries the server defers row delivery — the
+      // first execute returns DESCRIBE only (zero rows). A DEFINE call
+      // (defines carrying the LOB-prefetch cont-flag) re-executes the
+      // cursor and returns the first row batch in the prefetch shape;
+      // subsequent FETCH rounds keep that shape. Without it, FETCH rounds
+      // ship bare locators (no length/chunk prefix) that cannot be decoded.
+      // Mirrors node-oracledb `_handleDefines`, whose define response is
+      // processed as ordinary row data.
+      if (fetchColumns != null &&
+          response.rows.isEmpty &&
+          fetchColumns.any((c) => c.oracleType == oraTypeClob)) {
+        final defineResponse = await _sendLobDefines(
+            sql, effectiveCursorId, fetchColumns, prefetchRows, timeout);
+        allRows = List<List<Object?>>.of(defineResponse.rows);
+        moreRowsToFetch = defineResponse.moreRowsToFetch;
+      }
       var fetchCount = 0;
       while (moreRowsToFetch) {
         if (++fetchCount > _maxFetchIterations) {
@@ -542,15 +600,19 @@ class Transport {
           );
         }
       }
-      return ExecuteResponse(
-        isSuccess: true,
-        cursorId: effectiveCursorId,
-        columnMetadata: response.columnMetadata,
-        rows: allRows,
-        outBindValues: response.outBindValues,
-        outBindIndices: response.outBindIndices,
-        rowsAffected: response.rowsAffected,
-        moreRowsToFetch: moreRowsToFetch,
+      return _materializeClobValues(
+        ExecuteResponse(
+          isSuccess: true,
+          cursorId: effectiveCursorId,
+          columnMetadata: response.columnMetadata,
+          rows: allRows,
+          outBindValues: response.outBindValues,
+          outBindIndices: response.outBindIndices,
+          rowsAffected: response.rowsAffected,
+          moreRowsToFetch: moreRowsToFetch,
+        ),
+        bindMetadata: bindMetadata,
+        timeout: timeout,
       );
     }
 
@@ -565,7 +627,8 @@ class Transport {
           '(moreRowsToFetch=true)');
     }
 
-    return response;
+    return _materializeClobValues(response,
+        bindMetadata: bindMetadata, timeout: timeout);
   }
 
   /// Builds a close-cursor piggyback TTC message (prepended to another message).
@@ -588,6 +651,377 @@ class Transport {
       buf.writeUB4(id);
     }
     return buf.toBytes();
+  }
+
+  /// Builds a free-temporary-LOBs piggyback (Story 4.1), byte-for-byte after
+  /// node-oracledb `writeCloseTempLobsPiggyback` (base.js): a piggybacked
+  /// `TNS_FUNC_LOB_OP` with operation `FREE_TEMP | ARRAY` followed by the raw
+  /// locator bytes. Like close-cursor, it only ever rides another message —
+  /// there is no standalone free-temp round trip.
+  Uint8List _buildFreeTempLobsPiggyback(
+      List<Uint8List> locators, int totalSize) {
+    final buf = WriteBuffer();
+    buf.writeUint8(ttcMsgTypePiggyback);
+    buf.writeUint8(ttcLobOp);
+    buf.writeUint8(nextSequence() & 0xFF);
+    if (_ttcFieldVersion >= ttcCcapFieldVersion23_1Ext1) {
+      buf.writeUB8(0); // token number
+    }
+    buf.writeUint8(1); // pointer
+    buf.writeUB4(totalSize); // combined byte size of all locators
+    buf.writeUint8(0); // dest LOB locator
+    buf.writeUB4(0);
+    buf.writeUB4(0); // source LOB locator
+    buf.writeUB4(0);
+    buf.writeUint8(0); // source LOB offset
+    buf.writeUint8(0); // dest LOB offset
+    buf.writeUint8(0); // charset
+    buf.writeUB4(tnsLobOpFreeTemp | tnsLobOpArray);
+    buf.writeUint8(0); // SCN
+    buf.writeUB4(0); // LOB scn
+    buf.writeUB8(0); // LOB scnl
+    buf.writeUB8(0);
+    buf.writeUint8(0);
+    // array LOB fields
+    buf.writeUint8(0);
+    buf.writeUB4(0);
+    buf.writeUint8(0);
+    buf.writeUB4(0);
+    buf.writeUint8(0);
+    buf.writeUB4(0);
+    for (final locator in locators) {
+      buf.writeBytes(locator);
+    }
+    return buf.toBytes();
+  }
+
+  /// Sends one TTC LOB operation and decodes its response (Story 4.1).
+  ///
+  /// Used internally by [sendExecute] for temp-CLOB creation/writes and for
+  /// materializing CLOB locators into Strings. Callers above the transport
+  /// never issue LOB operations directly, so every LOB round trip stays
+  /// inside the connection's single-execute concurrency guard.
+  ///
+  /// Throws [OracleException] when the server reports an error.
+  Future<LobOpResponse> sendLobOp({
+    required int operation,
+    Uint8List? sourceLocator,
+    int sourceOffset = 0,
+    int destOffset = 0,
+    int destLength = 0,
+    bool sendAmount = false,
+    int amount = 0,
+    Uint8List? data,
+    Duration? timeout = const Duration(minutes: 2),
+  }) async {
+    final request = LobOpRequest(
+      operation: operation,
+      sourceLocator: sourceLocator,
+      sourceOffset: sourceOffset,
+      destOffset: destOffset,
+      destLength: destLength,
+      sendAmount: sendAmount,
+      amount: amount,
+      data: data,
+      ttcFieldVersion: _ttcFieldVersion,
+      sequence: nextSequence(),
+    );
+    await sendData(request.toBytes());
+    final sourceLocatorLength = sourceLocator?.length ?? 0;
+    final payload = await _receiveDataWithTimeout(
+      timeout,
+      operation: 'LOB operation',
+      // LOB responses carry LOB_DATA / RETURN_PARAMETER shapes the EXECUTE
+      // completion probe cannot walk — substitute the LOB-aware probe.
+      completionProbe: (accumulated) => lobOpStreamIsComplete(
+        accumulated,
+        operation: operation,
+        sourceLocatorLength: sourceLocatorLength,
+        sendAmount: sendAmount,
+        ttcFieldVersion: _ttcFieldVersion,
+        endOfRequestSupport: _supportsEndOfRequest,
+      ),
+    );
+    final response = decodeLobOpResponse(
+      payload,
+      operation: operation,
+      sourceLocatorLength: sourceLocatorLength,
+      sendAmount: sendAmount,
+      ttcFieldVersion: _ttcFieldVersion,
+      endOfRequestSupport: _supportsEndOfRequest,
+    );
+    if (!response.isSuccess) {
+      throw OracleException(
+        errorCode: response.errorCode ?? oraProtocolError,
+        message: response.errorMessage ?? 'LOB operation failed',
+      );
+    }
+    return response;
+  }
+
+  /// Converts CLOB-destined String bind values into temporary-CLOB locators
+  /// before the execute is encoded (Story 4.1).
+  ///
+  /// Two conversions, both node-oracledb parity (connection.js `_bind`):
+  /// * any CLOB-typed [BindVariable] holding a `String` — the declared
+  ///   `OracleDbType.clob` path; the empty string binds as SQL NULL,
+  ///   consistent with Oracle's `'' IS NULL` semantics;
+  /// * plain PL/SQL IN strings whose UTF-8 size exceeds the 32767-byte
+  ///   VARCHAR bind limit. (SQL DML keeps oversized strings VARCHAR-typed
+  ///   and relies on the deferred long-data write ordering instead.)
+  ///
+  /// Returns the original list unchanged when no bind needs conversion.
+  Future<List<Object?>> _prepareClobBinds(
+    List<Object?> binds, {
+    required bool isPlSql,
+    Duration? timeout,
+  }) async {
+    List<Object?>? converted;
+    for (var i = 0; i < binds.length; i++) {
+      final raw = binds[i];
+      BindVariable? replacement;
+      if (raw is BindVariable &&
+          raw.oraType == oraTypeClob &&
+          raw.value is String) {
+        final value = raw.value as String;
+        replacement = BindVariable(
+          value: value.isEmpty ? null : await _createTempClob(value, timeout),
+          oraType: oraTypeClob,
+          maxSize: raw.maxSize,
+          dir: raw.dir,
+        );
+      } else if (isPlSql) {
+        final String? value = raw is String
+            ? raw
+            : (raw is BindVariable &&
+                    raw.dir == BindDir.input &&
+                    raw.oraType == oraTypeVarchar &&
+                    raw.value is String
+                ? raw.value as String
+                : null);
+        if (value != null && utf8.encode(value).length > ttcMaxVarcharBindBytes) {
+          replacement = BindVariable(
+            value: await _createTempClob(value, timeout),
+            oraType: oraTypeClob,
+            dir: BindDir.input,
+          );
+        }
+      }
+      if (replacement != null) {
+        converted ??= List<Object?>.of(binds);
+        converted[i] = replacement;
+      }
+    }
+    return converted ?? binds;
+  }
+
+  /// Creates a temporary CLOB on the server and writes [value] into it.
+  ///
+  /// Mirrors node-oracledb `lob.js create()` + `write()`: CREATE_TEMP carries
+  /// the charset form in the source offset, the Oracle type in the dest
+  /// offset, and the session duration in the dest length; the WRITE then
+  /// ships the UTF-8 bytes at 1-based offset 1. The locator is queued for the
+  /// free-temp piggyback on the NEXT execute even if the write fails, so a
+  /// failed bind cannot leak the server-side temp LOB past the next RPC.
+  Future<LobLocator> _createTempClob(String value, Duration? timeout) async {
+    final created = await sendLobOp(
+      operation: tnsLobOpCreateTemp,
+      sourceLocator: Uint8List(tnsLobLocatorBufferSize),
+      sourceOffset: ttcCsfrmImplicit,
+      destOffset: oraTypeClob,
+      destLength: tnsDurationSession,
+      timeout: timeout,
+    );
+    final locator = created.updatedLocator;
+    if (locator == null) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message: 'Temporary CLOB creation returned no locator',
+      );
+    }
+    try {
+      // The created locator's charset flag dictates the write encoding:
+      // variable-length-charset locators take UTF-16BE data, others UTF-8
+      // (node-oracledb lobOp.js encode checks getCsfrm() the same way).
+      final probe =
+          LobLocator(locator: locator, lengthInChars: 0, chunkSize: 0);
+      final data = probe.usesVarLengthCharset
+          ? encodeUtf16Be(value)
+          : Uint8List.fromList(utf8.encode(value));
+      final written = await sendLobOp(
+        operation: tnsLobOpWrite,
+        sourceLocator: locator,
+        sourceOffset: 1, // LOB offsets are 1-based
+        data: data,
+        timeout: timeout,
+      );
+      // The server may update the locator state on write; keep a single
+      // buffer whose contents track the latest server echo (node-oracledb
+      // copies the returned bytes into the same `_locator` buffer).
+      final updated = written.updatedLocator;
+      if (updated != null && updated.length == locator.length) {
+        locator.setRange(0, locator.length, updated);
+      }
+    } finally {
+      _tempLobsToClose.add(locator);
+      _tempLobsTotalSize += locator.length;
+    }
+    return LobLocator(
+      locator: locator,
+      lengthInChars: value.length,
+      chunkSize: 0,
+    );
+  }
+
+  /// Replaces every [LobLocator] in a successful response's rows and OUT
+  /// binds with its materialized `String` value (Story 4.1, AC1/AC3/AC4).
+  ///
+  /// Runs inside [sendExecute] — and therefore inside the connection's
+  /// single-execute guard — after the fetch drain, so all LOB reads complete
+  /// before the response escapes the transport (AC6). A failed LOB read
+  /// fails the whole execute rather than returning a half-populated result.
+  Future<ExecuteResponse> _materializeClobValues(
+    ExecuteResponse response, {
+    List<BindMetadata>? bindMetadata,
+    Duration? timeout,
+  }) async {
+    if (!response.isSuccess) return response;
+    final hasRowLob =
+        response.rows.any((row) => row.any((v) => v is LobLocator));
+    final hasOutLob = response.outBindValues.any((v) => v is LobLocator);
+    if (!hasRowLob && !hasOutLob) return response;
+
+    // Oracle's duplicate-column optimization can alias one LobLocator
+    // instance into several rows; read each distinct locator once.
+    final materialized = <LobLocator, String>{};
+    Future<String> readLocator(LobLocator locator) async =>
+        materialized[locator] ??= await _readClobAsString(locator, timeout);
+
+    var rows = response.rows;
+    if (hasRowLob) {
+      final newRows = <List<Object?>>[];
+      for (final row in response.rows) {
+        final newRow = List<Object?>.of(row);
+        for (var i = 0; i < newRow.length; i++) {
+          final value = newRow[i];
+          if (value is LobLocator) {
+            newRow[i] = await readLocator(value);
+          }
+        }
+        newRows.add(newRow);
+      }
+      rows = newRows;
+    }
+
+    var outBindValues = response.outBindValues;
+    if (hasOutLob) {
+      final newOut = List<Object?>.of(outBindValues);
+      for (var i = 0; i < newOut.length; i++) {
+        final value = newOut[i];
+        if (value is! LobLocator) continue;
+        // OracleBind(type: clob) requires maxSize; enforce it client-side
+        // before reading — the wire bind is locator-sized, so the server
+        // cannot apply the usual OUT-buffer bound (node-oracledb raises
+        // ERR_INSUFFICIENT_BUFFER_FOR_BINDS from its outConverter the same
+        // way).
+        final bindIdx = i < response.outBindIndices.length
+            ? response.outBindIndices[i]
+            : -1;
+        final maxSize = (bindMetadata != null &&
+                bindIdx >= 0 &&
+                bindIdx < bindMetadata.length)
+            ? bindMetadata[bindIdx].maxSize
+            : null;
+        if (maxSize != null && value.lengthInChars > maxSize) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message: 'CLOB OUT bind returned ${value.lengthInChars} '
+                'characters but OracleBind maxSize is $maxSize — increase '
+                'maxSize to at least the largest value the block can return',
+          );
+        }
+        newOut[i] = await readLocator(value);
+      }
+      outBindValues = newOut;
+    }
+
+    return ExecuteResponse(
+      isSuccess: true,
+      cursorId: response.cursorId,
+      columnMetadata: response.columnMetadata,
+      rows: rows,
+      outBindValues: outBindValues,
+      outBindIndices: response.outBindIndices,
+      rowsAffected: response.rowsAffected,
+      moreRowsToFetch: response.moreRowsToFetch,
+    );
+  }
+
+  /// Reads a CLOB locator's full value as a Dart String via a single TTC LOB
+  /// READ operation (AC4).
+  ///
+  /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`: one
+  /// READ requesting the entire LOB length at 1-based offset 1. The server
+  /// streams the content back as one or more `LOB_DATA` messages inside the
+  /// single response, which [decodeLobOpResponse] concatenates into one byte
+  /// buffer.
+  ///
+  /// Reading the whole length at once — rather than looping with a per-chunk
+  /// character offset — keeps multibyte and supplementary-plane (surrogate
+  /// pair) text correct: a chunk boundary can split a UTF-8 sequence or a
+  /// surrogate pair, which a per-piece decode cannot reassemble but a single
+  /// decode over the fully assembled bytes always can. It also avoids
+  /// reconstructing a character offset from a decoded String's length, which
+  /// counts UTF-16 code units and desynced from Oracle's character offsets on
+  /// astral text.
+  Future<String> _readClobAsString(LobLocator locator, Duration? timeout) async {
+    if (locator.lengthInChars == 0) return ''; // EMPTY_CLOB()
+    // PL/SQL-created and temporary CLOB locators carry the variable-length
+    // charset flag: their data travels as UTF-16BE instead of the negotiated
+    // UTF-8 (node-oracledb lob.js getCsfrm / lobOp.js swap16 handling).
+    final isUtf16 = locator.usesVarLengthCharset;
+    final response = await sendLobOp(
+      operation: tnsLobOpRead,
+      sourceLocator: locator.locator,
+      sourceOffset: 1, // 1-based: read from the start of the LOB
+      sendAmount: true,
+      amount: locator.lengthInChars, // entire LOB length in one round trip
+      timeout: timeout,
+    );
+    final bytes = response.data;
+    if (bytes == null || bytes.isEmpty) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'CLOB read returned no data '
+            '(expected ${locator.lengthInChars} chars)',
+      );
+    }
+    final String text;
+    try {
+      // Strict decode over the fully assembled buffer: malformed bytes mean
+      // stream corruption — fail loud instead of substituting replacement
+      // characters.
+      text = isUtf16 ? decodeUtf16Be(bytes) : utf8.decode(bytes);
+    } on FormatException catch (e) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'CLOB read returned malformed '
+            '${isUtf16 ? 'UTF-16' : 'UTF-8'} data',
+        cause: e,
+      );
+    }
+    // Story 7.9 truncation guard. Oracle reports CLOB length in UCS-2 code
+    // units (CLOBs are stored AL16UTF16), which equals Dart's UTF-16
+    // `String.length` — so a short read is a real truncation, not a
+    // code-point-vs-code-unit mismatch.
+    if (text.length != locator.lengthInChars) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'CLOB read length mismatch: locator reports '
+            '${locator.lengthInChars} chars but ${text.length} were received',
+      );
+    }
+    return text;
   }
 
   /// Sends a TTC COMMIT message and waits for the server's acknowledgement.
@@ -645,6 +1079,44 @@ class Transport {
     }
   }
 
+  /// Sends a DEFINE call for an open query cursor whose result shape
+  /// contains a CLOB column (Story 4.1) and returns its decoded response.
+  ///
+  /// The call establishes column defines with the LOB prefetch cont-flag
+  /// AND re-executes the cursor: its response carries the first row batch
+  /// (up to [prefetchRows] rows) in the prefetch shape, so the caller must
+  /// treat it as the authoritative first batch. Mirrors node-oracledb
+  /// `connection._handleDefines`.
+  Future<ExecuteResponse> _sendLobDefines(String sql, int cursorId,
+      List<ColumnMetadata> columns, int prefetchRows, Duration? timeout) async {
+    final request = ExecuteRequest(
+      sql: sql,
+      isQuery: true,
+      cursorId: cursorId,
+      numIters: prefetchRows,
+      defineColumns: columns,
+      ttcFieldVersion: _ttcFieldVersion,
+      sequence: nextSequence(),
+    );
+    await sendData(request.toBytes());
+    final payload = await _receiveDataWithTimeout(timeout,
+        operation: 'Define', expectedColumns: columns);
+    final response = decodeExecuteResponse(
+      payload,
+      isQuery: true,
+      ttcFieldVersion: _ttcFieldVersion,
+      endOfRequestSupport: _supportsEndOfRequest,
+      expectedColumns: columns,
+    );
+    if (!response.isSuccess) {
+      throw OracleException(
+        errorCode: response.errorCode ?? oraProtocolError,
+        message: response.errorMessage ?? 'LOB define call failed',
+      );
+    }
+    return response;
+  }
+
   Future<ExecuteResponse> _sendFetch(
       int cursorId, int numRows, Duration? timeout,
       {List<ColumnMetadata>? expectedColumns,
@@ -672,9 +1144,14 @@ class Transport {
 
   Future<Uint8List> _receiveDataWithTimeout(Duration? timeout,
       {String operation = 'Query',
-      List<ColumnMetadata>? expectedColumns}) async {
+      List<ColumnMetadata>? expectedColumns,
+      List<BindMetadata>? bindMetadata,
+      bool Function(Uint8List accumulated)? completionProbe}) async {
     _ensureUsable();
-    final future = _receiveAllTtcData(expectedColumns: expectedColumns);
+    final future = _receiveAllTtcData(
+        expectedColumns: expectedColumns,
+        bindMetadata: bindMetadata,
+        completionProbe: completionProbe);
     if (timeout == null) return future;
     return future.timeout(
       timeout,
@@ -712,7 +1189,25 @@ class Transport {
   ///     matches node-oracledb thin (`packet.js waitForPackets`), which only
   ///     batches packets for `endOfRequestSupport == true`.
   Future<Uint8List> _receiveAllTtcData(
-      {List<ColumnMetadata>? expectedColumns}) async {
+      {List<ColumnMetadata>? expectedColumns,
+      List<BindMetadata>? bindMetadata,
+      bool Function(Uint8List accumulated)? completionProbe}) async {
+    // The completion probe decides whether the accumulated TTC bytes form a
+    // complete response. EXECUTE-shaped responses (the default) use
+    // [ttcStreamIsComplete]; LOB operations substitute [lobOpStreamIsComplete]
+    // because their LOB_DATA / RETURN_PARAMETER shapes are not walkable by
+    // the EXECUTE decoder. The probe needs [bindMetadata] for byte-accurate
+    // OUT-bind consumption (Story 4.1): a CLOB OUT bind ships a locator
+    // shape, not a generic length-prefixed value, so the metadata-less
+    // fallback would misalign the stream on pre-23.4 servers (where this
+    // probe — not TNS data flags — detects end-of-response).
+    bool isComplete(Uint8List accumulated) => completionProbe != null
+        ? completionProbe(accumulated)
+        : ttcStreamIsComplete(accumulated,
+            ttcFieldVersion: _ttcFieldVersion,
+            endOfRequestSupport: _supportsEndOfRequest,
+            expectedColumns: expectedColumns,
+            bindMetadata: bindMetadata);
     final chunks = <Uint8List>[];
     var packetsRead = 0;
     while (true) {
@@ -807,10 +1302,7 @@ class Transport {
         // (a stateful/lazy parser) is the shared follow-up tracked below.
         if (ttcData.isNotEmpty &&
             ttcData.last == ttcMsgTypeEndOfRequest &&
-            ttcStreamIsComplete(_concatChunks(chunks),
-                ttcFieldVersion: _ttcFieldVersion,
-                endOfRequestSupport: _supportsEndOfRequest,
-                expectedColumns: expectedColumns)) {
+            isComplete(_concatChunks(chunks))) {
           break;
         }
       } else {
@@ -829,10 +1321,7 @@ class Transport {
         // stateful-parser refactor (node-oracledb `waitForPackets` style) is the
         // long-term fix and is tracked as a follow-up; it is intentionally NOT
         // done here to avoid destabilising the working decode path.
-        if (ttcStreamIsComplete(_concatChunks(chunks),
-            ttcFieldVersion: _ttcFieldVersion,
-            endOfRequestSupport: _supportsEndOfRequest,
-            expectedColumns: expectedColumns)) {
+        if (isComplete(_concatChunks(chunks))) {
           break;
         }
       }
@@ -1880,14 +2369,30 @@ class Transport {
   Future<void> sendData(Uint8List ttcData, {int? dataFlags}) async {
     dataFlags ??= _serverMajorVersion >= 23 ? _tnsDataFlagsEndOfRpc : 0x0000;
 
-    // Build payload with 2-byte data flags prefix
-    final payload = Uint8List(2 + ttcData.length);
-    payload[0] = (dataFlags >> 8) & 0xFF; // Data flags high byte (BE)
-    payload[1] = dataFlags & 0xFF; // Data flags low byte (BE)
-    payload.setRange(2, payload.length, ttcData);
-
-    final packet = TnsPacket(type: tnsPacketData, payload: payload);
-    await send(packet);
+    // The negotiated SDU bounds the whole TNS packet: 8-byte header + 2-byte
+    // data flags + payload. A TTC message larger than one packet's capacity
+    // (e.g. a >32K CLOB-bound execute, Story 4.1) is fragmented across
+    // multiple DATA packets — node-oracledb's WritePacket sends a packet per
+    // SDU with data flags 0x0000 and puts the request flags (END_OF_RPC on
+    // 23ai) only on the final packet (packet.js `_sendPacket`).
+    final capacity = _sdu - 10;
+    var offset = 0;
+    while (true) {
+      final remaining = ttcData.length - offset;
+      final chunkLen = remaining > capacity ? capacity : remaining;
+      final isLast = offset + chunkLen >= ttcData.length;
+      final flags = isLast ? dataFlags : 0x0000;
+      final payload = Uint8List(2 + chunkLen);
+      payload[0] = (flags >> 8) & 0xFF; // Data flags high byte (BE)
+      payload[1] = flags & 0xFF; // Data flags low byte (BE)
+      if (chunkLen > 0) {
+        payload.setRange(
+            2, payload.length, ttcData, offset);
+      }
+      await send(TnsPacket(type: tnsPacketData, payload: payload));
+      offset += chunkLen;
+      if (isLast) break;
+    }
   }
 
   /// Sends a TNS MARKER packet with RESET data (NIQRMARK=2).

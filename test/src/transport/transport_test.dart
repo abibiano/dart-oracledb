@@ -588,6 +588,58 @@ void main() {
       });
     });
 
+    group('sendData SDU fragmentation (Story 4.1)', () {
+      test('a TTC message larger than the SDU spans multiple DATA packets',
+          () async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        final received = BytesBuilder(copy: true);
+        final done = Completer<void>();
+        // 3 packets expected: capacity = SDU(50) - 8 header - 2 flags = 40;
+        // 100 payload bytes → 40 + 40 + 20, each packet 10 bytes of framing.
+        const expectedTotal = 100 + 3 * 10;
+        server.listen((s) {
+          s.listen((data) {
+            received.add(data);
+            if (received.length >= expectedTotal && !done.isCompleted) {
+              done.complete();
+            }
+          });
+        });
+        final transport = Transport();
+        await transport.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+        transport.debugSdu = 50;
+        final message =
+            Uint8List.fromList(List.generate(100, (i) => i & 0xFF));
+        await transport.sendData(message);
+        await done.future.timeout(const Duration(seconds: 2));
+        await transport.disconnect();
+        await server.close();
+
+        final bytes = received.toBytes();
+        final reassembled = BytesBuilder(copy: true);
+        final packetFlags = <int>[];
+        var pos = 0;
+        while (pos < bytes.length) {
+          final len = (bytes[pos] << 8) | bytes[pos + 1];
+          expect(len, lessThanOrEqualTo(50),
+              reason: 'no packet may exceed the negotiated SDU');
+          expect(bytes[pos + 4], equals(tnsPacketData));
+          packetFlags.add((bytes[pos + 8] << 8) | bytes[pos + 9]);
+          reassembled.add(bytes.sublist(pos + 10, pos + len));
+          pos += len;
+        }
+        expect(packetFlags.length, equals(3));
+        // Intermediate packets carry flags 0x0000; only the final packet
+        // carries the request flags (END_OF_RPC for the default 23ai).
+        expect(packetFlags[0], equals(0x0000));
+        expect(packetFlags[1], equals(0x0000));
+        expect(packetFlags[2], equals(0x0800));
+        expect(reassembled.toBytes(), equals(message),
+            reason: 'fragments must reassemble to the original TTC message');
+      });
+    });
+
     group('mid-query REFUSE handling (Story 7.4 AC7)', () {
       test('surfaces the real refuse reason, not invalid-credentials',
           () async {

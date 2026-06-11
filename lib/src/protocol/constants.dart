@@ -64,6 +64,50 @@ const int ttcPing = 0x93; // 147
 const int ttcLobOp = 0x60; // 96
 
 // ============================================================================
+// LOB Operation Codes (TNS_LOB_OP_* in node-oracledb constants.js)
+// ============================================================================
+
+/// LOB operation: get LOB length.
+const int tnsLobOpGetLength = 0x0001;
+
+/// LOB operation: read data from a LOB.
+const int tnsLobOpRead = 0x0002;
+
+/// LOB operation: write data to a LOB.
+const int tnsLobOpWrite = 0x0040;
+
+/// LOB operation: get the server-side chunk size.
+const int tnsLobOpGetChunkSize = 0x4000;
+
+/// LOB operation: create a temporary LOB.
+const int tnsLobOpCreateTemp = 0x0110;
+
+/// LOB operation: free a temporary LOB.
+const int tnsLobOpFreeTemp = 0x0111;
+
+/// LOB operation modifier: the operation applies to an array of locators
+/// (used with [tnsLobOpFreeTemp] in the free-temp-LOBs piggyback).
+const int tnsLobOpArray = 0x80000;
+
+/// Session duration indicator for temporary LOB creation
+/// (TNS_DURATION_SESSION).
+const int tnsDurationSession = 10;
+
+/// Bind/define metadata cont-flag requesting LOB prefetch metadata
+/// (length + chunk size sent inline with the locator).
+const int tnsLobPrefetchFlag = 0x2000000;
+
+/// Locator byte offset of flag byte 3 (TNS_LOB_LOC_OFFSET_FLAG_3).
+const int tnsLobLocOffsetFlag3 = 6;
+
+/// Flag-3 bit: the locator uses a variable-length (NCHAR) character set
+/// (TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET).
+const int tnsLobLocFlagsVarLengthCharset = 0x80;
+
+/// Size in bytes of a fresh (all-zero) temporary LOB locator buffer.
+const int tnsLobLocatorBufferSize = 40;
+
+// ============================================================================
 // Oracle Data Type Indicators
 // ============================================================================
 
@@ -114,6 +158,9 @@ const int oraTypeClob = 112;
 
 /// BLOB data type.
 const int oraTypeBlob = 113;
+
+/// BFILE data type.
+const int oraTypeBfile = 114;
 
 /// JSON data type (Oracle 21c+).
 const int oraTypeJson = 119;
@@ -199,6 +246,10 @@ const int ttcMsgTypeIoVector = 11;
 
 /// Piggyback message type (client → server side metadata).
 const int ttcMsgTypePiggyback = 17;
+
+/// LOB data message type (payload of a LOB read; also written before LOB
+/// data in a LOB write request).
+const int ttcMsgTypeLobData = 14;
 
 /// Bit vector message type (sparse row selection).
 const int ttcMsgTypeBitVector = 21;
@@ -292,6 +343,12 @@ const int ttcNullLengthIndicator = 0xFF;
 
 /// Maximum LONG / LONG RAW length.
 const int ttcMaxLongLength = 0x7fffffff;
+
+/// Maximum byte size of a short (non-long) string/RAW bind. Values declared
+/// beyond this use Oracle's long-data ordering for SQL, and are converted to
+/// temporary CLOBs for PL/SQL (node-oracledb `caps.maxStringSize` with the
+/// 32K runtime capability this driver always requests).
+const int ttcMaxVarcharBindBytes = 32767;
 
 /// CCAP field version index in compile capabilities array.
 const int ttcCcapFieldVersionIndex = 7;

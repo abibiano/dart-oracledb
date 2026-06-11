@@ -67,6 +67,19 @@ enum OracleDbType {
 
   /// Oracle RAW (decoded as Dart `Uint8List`). Requires `maxSize`.
   raw,
+
+  /// Oracle CLOB (decoded as Dart `String`). Requires `maxSize`.
+  ///
+  /// `maxSize` is expressed in characters (UTF-16 code units — the same
+  /// counting as Dart's `String.length` and Oracle's CLOB length semantics)
+  /// and bounds the value the driver will materialize for an OUT / IN OUT
+  /// bind. A returned CLOB longer than `maxSize` fails loud with
+  /// [OracleException] instead of being truncated. On the wire the bind is
+  /// always a LOB locator: IN OUT `String` values travel through an internal
+  /// temporary CLOB, and returned locators are read back into `String`
+  /// (Story 4.1). The empty string binds as SQL NULL, consistent with
+  /// Oracle's `'' IS NULL` semantics.
+  clob,
 }
 
 /// Specification for an OUT or IN OUT bind variable.
@@ -126,7 +139,9 @@ class OracleBind {
         message: 'OracleBind maxSize must be > 0 (got $maxSize)',
       );
     }
-    if ((type == OracleDbType.varchar || type == OracleDbType.raw) &&
+    if ((type == OracleDbType.varchar ||
+            type == OracleDbType.raw ||
+            type == OracleDbType.clob) &&
         maxSize == null) {
       throw OracleException(
         errorCode: oraBindTypeError,
@@ -181,6 +196,11 @@ class OracleBind {
           throw ArgumentError.value(value, 'value',
               'OracleBind(type: raw) requires Uint8List or null');
         }
+      case OracleDbType.clob:
+        if (value is! String) {
+          throw ArgumentError.value(value, 'value',
+              'OracleBind(type: clob) requires String or null');
+        }
     }
   }
 
@@ -213,6 +233,8 @@ class OracleBind {
         return oc.oraTypeTimestampTz;
       case OracleDbType.raw:
         return oc.oraTypeRaw;
+      case OracleDbType.clob:
+        return oc.oraTypeClob;
     }
   }
 }
