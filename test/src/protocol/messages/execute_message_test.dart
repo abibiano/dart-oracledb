@@ -2012,6 +2012,181 @@ void main() {
     });
   });
 
+  // Story 4.3 — RAW stays a length-prefixed scalar (type 23): no LOB
+  // locator, no prefetch cont-flag, no temporary-LOB conversion. These
+  // tests pin the wire shape so future LOB work cannot silently route RAW
+  // through the Story 4.1/4.2 locator path.
+  group('Story 4.3 — RAW scalar encode/decode', () {
+    test('plain Uint8List bind infers oraTypeRaw, not BLOB', () {
+      final bind = BindVariable(value: Uint8List.fromList([1, 2, 3]));
+      expect(bind.oraType, equals(oraTypeRaw));
+    });
+
+    test('RAW column decode returns Uint8List preserving 0x00 and 0xFF', () {
+      final bytes = [0x00, 0xDE, 0xAD, 0xFF, 0x00];
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(bytes),
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: const [
+          ColumnMetadata(name: 'R', oracleType: oraTypeRaw, maxLength: 16),
+        ],
+      );
+      final value = r.rows.single.single;
+      expect(value, isA<Uint8List>());
+      expect(value, equals(Uint8List.fromList(bytes)));
+    });
+
+    test('zero-length RAW field decodes as null (Oracle NULL convention)', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          0, // zero-length indicator = SQL NULL
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: const [
+          ColumnMetadata(name: 'R', oracleType: oraTypeRaw, maxLength: 16),
+        ],
+      );
+      expect(r.rows.single.single, isNull);
+    });
+
+    test('RAW bind metadata: type 23, no LOB prefetch cont-flag', () {
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t (r) VALUES (:1)',
+        isQuery: false,
+        bindValues: [
+          BindVariable(
+              value: Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]),
+              oraType: oraTypeRaw,
+              dir: BindDir.input),
+        ],
+      );
+      final bytes = req.toBytes();
+      // Expected metadata block: oraType(23), flags(1), precision(0),
+      // scale(0), UB4 maxSize=4 (value length), UB4 maxNumElements=0,
+      // UB4 contFlag=0 (NOT TNS_LOB_PREFETCH_FLAG — that is CLOB/BLOB
+      // only), UB4 OID=0, UB2 version=0, UB2 charset=0 (binary), csfrm=0,
+      // UB4 lobPrefetchLen=0, UB4 oaccolid=0.
+      final expectedMetadata = [
+        oraTypeRaw, ttcBindUseIndicators, 0, 0,
+        1, 4, // UB4 maxSize = 4 (value byte length)
+        0, // UB4 max num elements
+        0, // UB4 contFlag = 0 — no LOB prefetch flag for RAW
+        0, // UB4 OID
+        0, // UB2 version
+        0, // UB2 charset = 0 (binary, no character set)
+        0, // csfrm = 0
+        0, // UB4 lob prefetch length
+        0, // UB4 oaccolid
+      ];
+      expect(_indexOfSub(bytes, expectedMetadata), greaterThanOrEqualTo(0),
+          reason: 'RAW bind metadata block not found in encoded request');
+    });
+
+    test('RAW bind value encodes as length-prefixed bytes (no locator)', () {
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t (r) VALUES (:1)',
+        isQuery: false,
+        bindValues: [
+          BindVariable(
+              value: Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]),
+              oraType: oraTypeRaw,
+              dir: BindDir.input),
+        ],
+      );
+      final bytes = req.toBytes();
+      final expectedValue = [4, 0xDE, 0xAD, 0xBE, 0xEF];
+      expect(_indexOfSub(bytes, expectedValue), greaterThanOrEqualTo(0),
+          reason: 'length-prefixed RAW value bytes not found in request');
+    });
+
+    test('RAW define block uses column maxLength, no LOB locator size', () {
+      const rawCol = ColumnMetadata(
+          name: 'R', oracleType: oraTypeRaw, maxLength: 16);
+      final req = ExecuteRequest(
+        sql: 'SELECT r FROM t',
+        isQuery: true,
+        cursorId: 9,
+        defineColumns: const [rawCol],
+      );
+      final bytes = req.toBytes();
+      // RAW define: type 23, buffer size = declared byte width 16 (NOT the
+      // 112-byte locator allocation), contFlag 0 (no LOB prefetch).
+      final rawDefine = [
+        oraTypeRaw, ttcBindUseIndicators, 0, 0,
+        1, 16, // UB4 buffer size = ColumnMetadata.maxLength
+        0, // max num elements
+        0, // UB4 contFlag = 0 — BLOB locator metadata not applied to RAW
+        0, // OID
+        0, // version
+        0, // UB2 charset = 0
+        0, // csfrm = 0
+        0, // prefetch length
+        0, // oaccolid
+      ];
+      expect(_indexOfSub(bytes, rawDefine), greaterThanOrEqualTo(0),
+          reason: 'RAW define block not found in encoded request');
+    });
+
+    test('RAW OUT bind decodes through outBindValues as Uint8List', () {
+      final raw = [0xCA, 0xFE, 0x00, 0xBA, 0xBE];
+      final payload = _buildPayload([
+        _ioVector([16]), // single OUT bind
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(raw),
+          ..._ub4(0), // SB4 actualNumBytes trailer
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeRaw, maxSize: 16, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindValues.single, isA<Uint8List>());
+      expect(r.outBindValues.single, equals(Uint8List.fromList(raw)));
+    });
+
+    test('RAW DESCRIBE_INFO maxLength comes from the wire maxSize field', () {
+      // RAW is the one type whose declared width arrives in the maxSize
+      // field rather than the size field (node-oracledb processColumnInfo).
+      // Send different values in the two fields to prove the RAW branch
+      // reads maxSize.
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(
+              name: 'R', oraType: oraTypeRaw, maxSize: 16, sizeField: 99),
+        ]),
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      final col = r.columnMetadata.single;
+      expect(col.oracleType, equals(oraTypeRaw));
+      expect(col.maxLength, equals(16),
+          reason: 'RAW maxLength must come from maxSize, not size');
+    });
+  });
+
   // Story 4.1 — define-mode ExecuteRequest (the DEFINE call sent for open
   // CLOB query cursors, mirroring node-oracledb `_handleDefines`).
   group('Story 4.1 — define-mode ExecuteRequest', () {
@@ -2254,6 +2429,7 @@ List<int> _columnInfo({
   int precisionByte = 0,
   int scaleByte = 0,
   int csfrm = 0,
+  int? sizeField,
 }) {
   final nameBytes = name.codeUnits;
   return [
@@ -2268,7 +2444,10 @@ List<int> _columnInfo({
     ..._ub2(0), // version
     ..._ub2(0), // charset id
     csfrm, // csfrm
-    ..._ub4(maxSize), // size
+    // The separate `size` field — defaults to maxSize; override via
+    // [sizeField] to prove a decoder branch reads one field and not the
+    // other (RAW reads maxSize, every other byte-sized type reads size).
+    ..._ub4(sizeField ?? maxSize), // size
     if (ttcFieldVersion >= ttcCcapFieldVersion12_2) ..._ub4(0), // oaccolid
     0, // nullable
     0, // v7 name length

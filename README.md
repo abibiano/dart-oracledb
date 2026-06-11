@@ -6,7 +6,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, and BLOB-as-Uint8List are implemented and validated against Oracle 23ai and 21c. JSON and connection pooling are not yet implemented. Depend on `oracledb: ^0.9.2`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once LOB support and connection pooling land.
+> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, and RAW-as-Uint8List are implemented and validated against Oracle 23ai and 21c. JSON and connection pooling are not yet implemented. Depend on `oracledb: ^0.9.2`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once JSON support and connection pooling land.
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -270,10 +270,40 @@ final isAlive = await connection.ping();
 | DATE                      | `DateTime`                                                                       |
 | TIMESTAMP                 | `DateTime`                                                                       |
 | TIMESTAMP WITH TIME ZONE  | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` |
-| RAW                       | `Uint8List`                                                                      |
+| RAW                       | `Uint8List` (see [RAW support](#raw-support))                                    |
 | CLOB                      | `String` (see [CLOB support](#clob-support))                                     |
 | BLOB                      | `Uint8List` (see [BLOB support](#blob-support))                                  |
 | NULL                      | `null`                                                                           |
+
+### RAW support
+
+RAW values round-trip as Dart `Uint8List`s. RAW is a **scalar** binary type —
+not a LOB and not a BLOB alias: values travel inline on the wire
+(length-prefixed bytes, never a LOB locator), bytes are preserved exactly with
+no character-set conversion, and RAW queries keep normal statement-cache
+cursor reuse:
+
+- **Queries** — selecting a `RAW` column returns a `Uint8List` (`null` for
+  SQL NULL). Oracle stores a zero-length RAW as SQL NULL — there is no
+  empty-but-not-NULL RAW value, so an inserted `Uint8List(0)` reads back as
+  `null`.
+- **DML** — bind an ordinary `Uint8List` into a `RAW` column with named or
+  positional binds. A value longer than the column's declared byte size fails
+  loudly with the Oracle error (ORA-12899) — never truncated or coerced. An
+  **empty** `Uint8List` stores SQL NULL (Oracle's zero-length RAW
+  convention); this differs from `OracleBind(type: OracleDbType.blob)`,
+  which can preserve an empty-but-not-NULL BLOB through a temporary LOB.
+- **PL/SQL OUT / IN OUT** — declare
+  `OracleBind.out(type: OracleDbType.raw, maxSize: ...)` or
+  `OracleBind.inOut(value: ..., type: OracleDbType.raw, maxSize: ...)`;
+  values decode through `result.outBinds` as `Uint8List?`. `maxSize` counts
+  **bytes** and must hold the largest value the procedure may return — an
+  undersized buffer fails loudly with the server's ORA-06502 instead of
+  truncating.
+
+RAW columns hold up to 2000 bytes with `MAX_STRING_SIZE=STANDARD` (32,767
+with `EXTENDED`); use BLOB for anything larger. `LONG RAW` is not supported
+and fails with a clear `OracleException`.
 
 ### CLOB support
 
@@ -335,7 +365,7 @@ This package implements a subset of the full Oracle driver feature set. Below is
 | Core connection & authentication                | ✅ Done        |
 | Query execution & transactions                  | ✅ Done        |
 | PL/SQL execution (stored procedures, functions) | ✅ Done        |
-| Advanced data types (CLOB ✅, BLOB ✅, JSON)    | 🚧 In progress |
+| Advanced data types (CLOB ✅, BLOB ✅, RAW ✅, JSON) | 🚧 In progress |
 | Connection pooling                              | 📋 Planned     |
 
 ### Planned After 1.0

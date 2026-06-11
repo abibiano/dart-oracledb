@@ -374,6 +374,36 @@ void main() {
           type: OracleDbType.raw,
           maxSize: 10);
       expect(spec.value, isA<Uint8List>());
+      expect(spec.oracleTypeCode, equals(23) /* oraTypeRaw */);
+    });
+
+    test('raw type accepts a null IN OUT value with maxSize', () {
+      final spec = OracleBind.inOut(
+          value: null, type: OracleDbType.raw, maxSize: 16);
+      expect(spec.value, isNull);
+      expect(spec.type, equals(OracleDbType.raw));
+    });
+
+    test('raw type rejects a plain List<int> value', () {
+      // List<int> is binary-looking but not Uint8List — reject at
+      // construction so the failure surfaces at the call site, not during
+      // wire encoding.
+      expect(
+        () => OracleBind.inOut(
+            value: <int>[1, 2, 3], type: OracleDbType.raw, maxSize: 10),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('raw bind rejects non-positive maxSize', () {
+      expect(
+        () => OracleBind.out(type: OracleDbType.raw, maxSize: 0),
+        throwsA(isA<OracleException>()),
+      );
+      expect(
+        () => OracleBind.out(type: OracleDbType.raw, maxSize: -1),
+        throwsA(isA<OracleException>()),
+      );
     });
 
     test('null IN OUT values bypass the mismatch check', () {
