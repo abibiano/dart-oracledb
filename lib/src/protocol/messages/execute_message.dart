@@ -1698,18 +1698,13 @@ void _processReturnParameter(ReadBuffer buf) {
   }
   final txLen = buf.readUB2();
   if (txLen > 0) buf.skip(txLen);
-  // Key/value pairs and the registration blob are present in some responses
-  // and absent in others — wire captures (Story 4.1, Oracle 21c) show a DDL
-  // response carrying both sections (as empty: 0x00 0x00) while a PL/SQL
-  // response with a CLOB OUT bind ends the body right after the transaction
-  // field, with the terminal ERROR message following directly. The two
-  // cases are disambiguated by peeking the next byte: a section start is a
-  // UB2 size byte (0, 1, or 2), while every TTC message type that can
-  // follow PARAMETER (ERROR=4, ROW_DATA=7, STATUS=9, END_OF_REQUEST=29,
-  // ...) is > 2. An empty buffer here means a partial stream — fall through
-  // to the UB2 read so the resulting BufferException keeps its existing
-  // "need more packets" semantics in the completion probe.
-  if (buf.hasRemaining && buf.peekUint8() > 2) return;
+  // The key/value-pairs and registration sections are always on the wire
+  // (zero-length encoded as single 0x00 UB2 size bytes) — verified by live
+  // capture on 23ai and 21c across DDL/DML/PL-SQL-CLOB-OUT shapes
+  // (2026-06-11), matching node-oracledb `processReturnParameter`
+  // (withData.js), which reads them unconditionally. An underflow here
+  // surfaces BufferException, so the completion probe keeps its "need more
+  // packets" semantics.
   final numKv = buf.readUB2();
   for (var i = 0; i < numKv; i++) {
     final keyLen = buf.readUB2();

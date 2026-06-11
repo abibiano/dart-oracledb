@@ -2613,42 +2613,82 @@ void main() {
     });
   });
 
-  // Story 4.1 — RETURN_PARAMETER body variants. Wire captures against
-  // Oracle 21c show the key/value and registration sections present on some
-  // responses (DDL — both empty) and absent on others (PL/SQL with a CLOB
-  // OUT bind, where the terminal ERROR message follows directly).
-  group('Story 4.1 — RETURN_PARAMETER section heuristic', () {
-    List<int> parameterBody({required bool withSections}) => [
+  // RETURN_PARAMETER body parsing. Live wire captures (2026-06-11) against
+  // both Oracle 23ai and 21c — DDL, DML, and PL/SQL with a CLOB OUT bind —
+  // show the key/value-pairs and registration sections are ALWAYS on the
+  // wire (zero-length encoded as single 0x00 UB2 size bytes), so the decoder
+  // reads both unconditionally (node-oracledb processReturnParameter parity).
+  group('RETURN_PARAMETER section parsing', () {
+    // PARAMETER body with empty kv/registration sections — the exact shape
+    // every live capture showed on both servers.
+    List<int> parameterBody() => [
           ttcMsgTypeParameter,
           ..._ub2(2), // numParams
           ..._ub4(0x123456), // param 1
           ..._ub4(0), // param 2
           ..._ub2(0), // transaction length
-          if (withSections) ...[
-            ..._ub2(0), // numKv = 0
-            ..._ub2(0), // registration length = 0
-          ],
+          ..._ub2(0), // numKv = 0
+          ..._ub2(0), // registration length = 0
         ];
 
-    test('PARAMETER without kv/registration sections (21c PL/SQL shape)', () {
+    test('PARAMETER with empty sections directly followed by ERROR '
+        '(shape shared by DDL and 21c PL/SQL CLOB OUT responses)', () {
       final payload = _buildPayload([
-        parameterBody(withSections: false),
+        parameterBody(),
         _errorMessage(errorNum: 0, rowCount: 1),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
       final r = decodeExecuteResponse(payload, isQuery: false);
       expect(r.isSuccess, isTrue);
-      expect(r.rowsAffected, equals(1));
+      expect(r.rowsAffected, equals(1),
+          reason: 'decode must consume both empty sections and reach the '
+              'terminal ERROR/STATUS messages');
     });
 
-    test('PARAMETER with empty kv/registration sections (DDL shape)', () {
+    test('PARAMETER with kv pairs and a registration blob drains correctly',
+        () {
+      final key = 'SESSION_SCHEMA'.codeUnits;
+      final value = 'APP_USER'.codeUnits;
+      final registration = List<int>.filled(5, 0xAB);
+      final paramMsg = <int>[
+        ttcMsgTypeParameter,
+        ..._ub2(2), // numParams
+        ..._ub4(0x123456), // param 1
+        ..._ub4(0), // param 2
+        ..._ub2(0), // transaction length
+        ..._ub2(2), // numKv = 2
+        // kv pair 1: key + value + keyword num
+        ..._ub2(key.length),
+        ..._bytesWithLength(key),
+        ..._ub2(value.length),
+        ..._bytesWithLength(value),
+        ..._ub2(168), // keyword num (skipped, not consumed semantically)
+        // kv pair 2: zero-length key and value (no payload bytes follow)
+        ..._ub2(0), // key length = 0
+        ..._ub2(0), // value length = 0
+        ..._ub2(0), // keyword num
+        ..._ub2(registration.length), // registration length
+        ...registration,
+      ];
       final payload = _buildPayload([
-        parameterBody(withSections: true),
-        _errorMessage(errorNum: 0, rowCount: 0),
+        paramMsg,
+        _errorMessage(errorNum: 0, rowCount: 4),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
       final r = decodeExecuteResponse(payload, isQuery: false);
       expect(r.isSuccess, isTrue);
+      expect(r.rowsAffected, equals(4),
+          reason: 'decode must drain the kv triples and registration blob '
+              'and reach the terminal ERROR/STATUS messages');
+      // Exhaustive truncation sweep: every cut inside the PARAMETER body
+      // (mid-key, mid-value, mid-keyword, mid-registration) must make the
+      // probe report incomplete ("need more packets") instead of throwing,
+      // now that the kv/registration reads are unconditional.
+      for (var cut = 1; cut <= paramMsg.length; cut++) {
+        expect(ttcStreamIsComplete(Uint8List.sublistView(payload, 0, cut)),
+            isFalse,
+            reason: 'probe must report incomplete at cut=$cut');
+      }
     });
 
     test('completion probe consumes CLOB OUT binds byte-accurately', () {
@@ -2656,34 +2696,40 @@ void main() {
       // (Story 4.1): a CLOB OUT bind ships the locator shape, which the
       // metadata-less fallback (bytes-with-length) would misparse.
       final locator = List<int>.filled(40, 0x55);
+      final prefix = <int>[
+        ..._ioVector([16]),
+        ttcMsgTypeRowData,
+        ..._ub4(40), // locator length
+        ..._ub8(11), // LOB length in chars
+        ..._ub4(8132), // chunk size
+        ..._bytesWithLength(locator),
+        ..._ub4(0), // SB4 trailer
+      ];
       final payload = _buildPayload([
-        _ioVector([16]),
-        [
-          ttcMsgTypeRowData,
-          ..._ub4(40), // locator length
-          ..._ub8(11), // LOB length in chars
-          ..._ub4(8132), // chunk size
-          ..._bytesWithLength(locator),
-          ..._ub4(0), // SB4 trailer
-        ],
-        parameterBody(withSections: false),
+        prefix,
+        parameterBody(),
         _errorMessage(errorNum: 0),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
+      const bindMetadata = [
+        BindMetadata(oraType: oraTypeClob, maxSize: 100, dir: BindDir.output),
+      ];
+      expect(ttcStreamIsComplete(payload, bindMetadata: bindMetadata), isTrue);
+      // Truncate INSIDE the PARAMETER body, in the section area: drop its
+      // final byte (the 0x00 UB2 size of the registration section). The
+      // resulting BufferException must make the probe report incomplete
+      // ("need more packets") instead of throwing.
+      final cutAt = prefix.length + parameterBody().length - 1;
+      // Pin the cut location so the test fails loudly if a helper encoding
+      // ever changes width: the dropped byte is the registration UB2 size
+      // (0x00) and the byte after it starts the terminal ERROR message.
+      expect(payload[cutAt], equals(0),
+          reason: 'cut must drop the registration-section UB2 size byte');
+      expect(payload[cutAt + 1], equals(ttcMsgTypeError),
+          reason: 'the byte after the cut must start the ERROR message');
       expect(
-        ttcStreamIsComplete(payload, bindMetadata: const [
-          BindMetadata(oraType: oraTypeClob, maxSize: 100, dir: BindDir.output),
-        ]),
-        isTrue,
-      );
-      // Truncated stream: probe reports incomplete instead of throwing.
-      expect(
-        ttcStreamIsComplete(
-            Uint8List.sublistView(payload, 0, payload.length ~/ 2),
-            bindMetadata: const [
-              BindMetadata(
-                  oraType: oraTypeClob, maxSize: 100, dir: BindDir.output),
-            ]),
+        ttcStreamIsComplete(Uint8List.sublistView(payload, 0, cutAt),
+            bindMetadata: bindMetadata),
         isFalse,
       );
     });
