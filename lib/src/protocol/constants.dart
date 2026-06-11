@@ -107,6 +107,27 @@ const int tnsLobLocFlagsVarLengthCharset = 0x80;
 /// Size in bytes of a fresh (all-zero) temporary LOB locator buffer.
 const int tnsLobLocatorBufferSize = 40;
 
+/// Maximum native JSON (OSON) payload size declared in bind metadata
+/// (TNS_JSON_MAX_LENGTH — 32 MB).
+const int tnsJsonMaxLength = 32 * 1024 * 1024;
+
+/// QLocator version written in value-based abstract LOB locators
+/// (TNS_LOB_QLOCATOR_VERSION).
+const int tnsLobQLocatorVersion = 4;
+
+/// Locator flag byte 1: BLOB storage (TNS_LOB_LOC_FLAGS_BLOB).
+const int tnsLobLocFlagsBlob = 0x01;
+
+/// Locator flag byte 1: value-based locator (TNS_LOB_LOC_FLAGS_VALUE_BASED).
+const int tnsLobLocFlagsValueBased = 0x20;
+
+/// Locator flag byte 1: abstract LOB (TNS_LOB_LOC_FLAGS_ABSTRACT) — used for
+/// JSON/VECTOR payloads that travel inline rather than via LOB operations.
+const int tnsLobLocFlagsAbstract = 0x40;
+
+/// Locator flag byte 2: initialized (TNS_LOB_LOC_FLAGS_INIT).
+const int tnsLobLocFlagsInit = 0x08;
+
 // ============================================================================
 // Oracle Data Type Indicators
 // ============================================================================

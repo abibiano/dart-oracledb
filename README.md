@@ -6,7 +6,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, and RAW-as-Uint8List are implemented and validated against Oracle 23ai and 21c. JSON and connection pooling are not yet implemented. Depend on `oracledb: ^0.9.2`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once JSON support and connection pooling land.
+> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is not yet implemented. Depend on `oracledb: ^0.9.2`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once connection pooling lands.
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -273,6 +273,7 @@ final isAlive = await connection.ping();
 | RAW                       | `Uint8List` (see [RAW support](#raw-support))                                    |
 | CLOB                      | `String` (see [CLOB support](#clob-support))                                     |
 | BLOB                      | `Uint8List` (see [BLOB support](#blob-support))                                  |
+| JSON (21c+)               | `Map<String, Object?>` / `List<Object?>` (see [JSON support](#json-support))     |
 | NULL                      | `null`                                                                           |
 
 ### RAW support
@@ -353,8 +354,49 @@ is needed (or exposed):
   NULL — unlike CLOB's empty string.
 
 Unbounded/multi-gigabyte LOBs are not claimed: values are materialized in
-memory as a single `String` / `Uint8List`. NCLOB, BFILE, and JSON columns
-are not yet supported and fail with a clear `OracleException` (see roadmap).
+memory as a single `String` / `Uint8List`. NCLOB and BFILE columns are not
+yet supported and fail with a clear `OracleException` (see roadmap).
+
+### JSON support
+
+Oracle's **native `JSON` data type** (introduced in Oracle Database 21c;
+requires database `compatible >= 20`) round-trips as ordinary Dart values —
+`Map<String, Object?>` for objects, `List<Object?>` for arrays, with members
+decoding as `null` / `bool` / `num` / `String` and nested maps/lists. On the
+wire, values travel in Oracle's binary JSON format (OSON) under the native
+type — no `jsonEncode()`/`jsonDecode()` round-trip through text, no Oracle
+Client, no LOB read round trips:
+
+- **Queries** — selecting a `JSON` column returns a `Map`/`List` (`null` for
+  SQL NULL). Document shape and member order are preserved; statement-cache
+  cursor reuse and multi-batch fetches work normally.
+- **DML** — bind an ordinary `Map<String, Object?>` or `List<Object?>` into a
+  `JSON` column with named or positional binds; the driver encodes it as
+  OSON. Members may be `null`, `bool`, finite `num`, `String`, and nested
+  maps/lists; anything else (e.g. `DateTime`, `Uint8List`, `Set`, NaN)
+  fails loudly at the call site. Field names are limited to 255 UTF-8 bytes
+  (the limit shared by all supported server versions). Numeric members
+  follow the same NUMBER contract as scalar columns: integers beyond 2⁵³
+  decode to `double` and lose precision (see
+  [Known limitations](#known-limitations)).
+- **PL/SQL OUT / IN OUT** — declare
+  `OracleBind.out(type: OracleDbType.json, maxSize: ...)` or
+  `OracleBind.inOut(value: ..., type: OracleDbType.json, maxSize: ...)`;
+  values decode through `result.outBinds`. `maxSize` counts **OSON bytes**
+  (the binary wire encoding) and bounds the returned document — a larger
+  return fails loudly instead of truncating.
+
+**Native vs. textual JSON.** This support covers the dedicated `JSON` column
+type (OSON-backed, 21c+). JSON *text* stored in `VARCHAR2`/`CLOB`/`BLOB`
+columns — the pre-21c pattern with `IS JSON` constraints — keeps its ordinary
+`String`/`Uint8List` behavior; parse it with `dart:convert` or query it
+through SQL/JSON functions. JSON text inserted *into* a native `JSON` column
+is parsed by the server and reads back as `Map`/`List`.
+
+Not in scope: SODA, JSON-relational duality views, `JsonId`, VECTOR, and
+Oracle-specific JSON scalar types (dates/timestamps/intervals/binary inside
+JSON documents). Documents containing such scalars fail loudly with
+`OracleException` rather than decoding silently.
 
 ## Project Status
 
@@ -365,7 +407,7 @@ This package implements a subset of the full Oracle driver feature set. Below is
 | Core connection & authentication                | ✅ Done        |
 | Query execution & transactions                  | ✅ Done        |
 | PL/SQL execution (stored procedures, functions) | ✅ Done        |
-| Advanced data types (CLOB ✅, BLOB ✅, RAW ✅, JSON) | 🚧 In progress |
+| Advanced data types (CLOB, BLOB, RAW, JSON)     | ✅ Done        |
 | Connection pooling                              | 📋 Planned     |
 
 ### Planned After 1.0
@@ -379,7 +421,7 @@ After the 1.0 release, the project roadmap includes larger API and compatibility
 | 3        | Non-`AL32UTF8` database character set compatibility                                       |
 | 4        | Bulk DML / `executeMany()`                                                                |
 | 5        | Public LOB streaming and temporary LOBs                                                   |
-| 6        | JSON / OSON parity                                                                        |
+| 6        | Extended JSON / OSON parity (Oracle-specific JSON scalars, OSON-in-BLOB helpers)          |
 | 7        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
 | 8        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
 

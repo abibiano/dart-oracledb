@@ -300,7 +300,9 @@ void main() {
       expect(
         () => connection.execute(
           'SELECT :1 FROM dual',
-          [<String, dynamic>{}], // Map as bind value is invalid
+          // Duration has no Oracle mapping. (Map/List became valid native
+          // JSON binds in Story 4.4, so they no longer serve as invalid.)
+          [const Duration(seconds: 1)],
         ),
         throwsA(isA<OracleException>()
             .having((e) => e.errorCode, 'errorCode', oraBindTypeError)),

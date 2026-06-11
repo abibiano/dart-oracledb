@@ -23,6 +23,7 @@ import 'errors.dart';
 import 'oracle_timestamp_tz.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/messages/execute_message.dart' show BindDir;
+import 'protocol/oson.dart' show assertValidJsonBindValue;
 
 // AC5: Direction enum boundary.
 //
@@ -92,6 +93,19 @@ enum OracleDbType {
   /// `Uint8List` (Story 4.2). An empty `Uint8List` binds as an empty BLOB
   /// value (length 0), which is distinct from SQL NULL.
   blob,
+
+  /// Oracle native `JSON` (Oracle 21c+; decoded as Dart `Map<String, Object?>`
+  /// or `List<Object?>`). Requires `maxSize`.
+  ///
+  /// `maxSize` is expressed in **OSON bytes** (the size of the binary JSON
+  /// payload on the wire) and bounds the value the driver will accept for an
+  /// OUT / IN OUT bind. A returned document whose OSON encoding exceeds
+  /// `maxSize` bytes fails loud with [OracleException] instead of being
+  /// truncated. IN OUT values must be `Map<String, Object?>`,
+  /// `List<Object?>`, or `null`; members may be `null`, `bool`, finite `num`,
+  /// `String`, and nested maps/lists. Values travel as OSON (Oracle's binary
+  /// JSON) under wire type 119 (Story 4.4).
+  json,
 }
 
 /// Specification for an OUT or IN OUT bind variable.
@@ -154,7 +168,8 @@ class OracleBind {
     if ((type == OracleDbType.varchar ||
             type == OracleDbType.raw ||
             type == OracleDbType.clob ||
-            type == OracleDbType.blob) &&
+            type == OracleDbType.blob ||
+            type == OracleDbType.json) &&
         maxSize == null) {
       throw OracleException(
         errorCode: oraBindTypeError,
@@ -219,6 +234,11 @@ class OracleBind {
           throw ArgumentError.value(value, 'value',
               'OracleBind(type: blob) requires Uint8List or null');
         }
+      case OracleDbType.json:
+        // Recursive structure check: rejects non-Map/List top-level values
+        // and invalid nested members (DateTime, Uint8List, Set, non-finite
+        // doubles, non-String keys, arbitrary objects) at the call site.
+        assertValidJsonBindValue(value, 'value');
     }
   }
 
@@ -228,12 +248,13 @@ class OracleBind {
   /// The Oracle type expected on the wire.
   final OracleDbType type;
 
-  /// Maximum returned-value bound (required for varchar/raw/clob/blob).
+  /// Maximum returned-value bound (required for varchar/raw/clob/blob/json).
   ///
   /// Units depend on the bind type: **bytes** for [OracleDbType.varchar],
   /// [OracleDbType.raw], and [OracleDbType.blob]; **characters** (UTF-16
   /// code units, the same counting as Dart's `String.length`) for
-  /// [OracleDbType.clob].
+  /// [OracleDbType.clob]; **OSON bytes** (the binary JSON wire encoding) for
+  /// [OracleDbType.json].
   final int? maxSize;
 
   /// Direction on the wire. Only [BindDir.output] and [BindDir.inputOutput]
@@ -260,6 +281,8 @@ class OracleBind {
         return oc.oraTypeClob;
       case OracleDbType.blob:
         return oc.oraTypeBlob;
+      case OracleDbType.json:
+        return oc.oraTypeJson;
     }
   }
 }

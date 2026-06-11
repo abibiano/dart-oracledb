@@ -744,6 +744,10 @@ String decodeVarchar(ReadBuffer buffer, int length) {
 /// Note `DateTime` deliberately maps to `DATE` (not TIMESTAMP): Oracle
 /// implicitly converts a DATE bind for TIMESTAMP columns, and DATE matches
 /// the second-precision wire form both existing call sites have always used.
+///
+/// `Map` and `List` map to native JSON (OSON, type 119 — Story 4.4). The
+/// `Uint8List` check must stay ahead of the `List` check: plain bytes are
+/// RAW, never JSON.
 int? inferOraTypeForValue(Object? value) {
   if (value == null) return oraTypeVarchar;
   if (value is String) return oraTypeVarchar;
@@ -752,5 +756,7 @@ int? inferOraTypeForValue(Object? value) {
   if (value is DateTime) return oraTypeDate;
   if (value is OracleTimestampTz) return oraTypeTimestampTz;
   if (value is Uint8List) return oraTypeRaw;
+  if (value is Map) return oraTypeJson;
+  if (value is List) return oraTypeJson;
   return null;
 }

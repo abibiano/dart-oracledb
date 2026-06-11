@@ -908,8 +908,17 @@ void main() {
     test('returns null for unsupported Dart types', () {
       expect(inferOraTypeForValue(Object()), isNull);
       expect(inferOraTypeForValue(const Duration(seconds: 1)), isNull);
-      expect(inferOraTypeForValue(<int>[1, 2, 3]), isNull);
+      // Top-level bool binds stay unsupported: Oracle has no SQL BOOLEAN
+      // bind in this driver's scope (bools are valid JSON *members* only).
       expect(inferOraTypeForValue(true), isNull);
+    });
+
+    test('Map and List bind values infer native JSON (Story 4.4)', () {
+      expect(inferOraTypeForValue(<String, Object?>{'a': 1}),
+          equals(oraTypeJson));
+      expect(inferOraTypeForValue(<Object?>[1, 2, 3]), equals(oraTypeJson));
+      // Regression trap: Uint8List is a List<int> but must stay RAW.
+      expect(inferOraTypeForValue(Uint8List(3)), equals(oraTypeRaw));
     });
   });
 

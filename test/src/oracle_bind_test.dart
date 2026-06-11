@@ -222,6 +222,106 @@ void main() {
     });
   });
 
+  group('Story 4.4 — OracleDbType.json validation', () {
+    test('JSON OUT bind requires maxSize', () {
+      expect(
+        () => OracleBind.out(type: OracleDbType.json),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(6502))
+            .having((e) => e.message, 'message', contains('maxSize'))),
+      );
+    });
+
+    test('JSON IN OUT bind requires maxSize', () {
+      expect(
+        () => OracleBind.inOut(
+            value: <String, Object?>{'a': 1}, type: OracleDbType.json),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', equals(6502))),
+      );
+    });
+
+    test('JSON OUT bind constructs with maxSize and reports type code 119',
+        () {
+      final b = OracleBind.out(type: OracleDbType.json, maxSize: 100000);
+      expect(b.type, equals(OracleDbType.json));
+      expect(b.maxSize, equals(100000));
+      expect(b.value, isNull);
+      expect(b.oracleTypeCode, equals(119) /* oraTypeJson */);
+    });
+
+    test('JSON bind rejects non-positive maxSize', () {
+      expect(
+        () => OracleBind.out(type: OracleDbType.json, maxSize: 0),
+        throwsA(isA<OracleException>()),
+      );
+      expect(
+        () => OracleBind.out(type: OracleDbType.json, maxSize: -5),
+        throwsA(isA<OracleException>()),
+      );
+    });
+
+    test('JSON IN OUT accepts Map, List, and null values', () {
+      final m = OracleBind.inOut(
+          value: <String, Object?>{
+            'name': 'x',
+            'n': 1,
+            'd': 1.5,
+            'b': true,
+            'nul': null,
+            'nested': <String, Object?>{'list': <Object?>[1, 'two', false]},
+          },
+          type: OracleDbType.json,
+          maxSize: 4000);
+      expect(m.value, isA<Map<String, Object?>>());
+      final l = OracleBind.inOut(
+          value: <Object?>[1, 'a', null, <String, Object?>{}],
+          type: OracleDbType.json,
+          maxSize: 4000);
+      expect(l.value, isA<List<Object?>>());
+      final n = OracleBind.inOut(
+          value: null, type: OracleDbType.json, maxSize: 4000);
+      expect(n.value, isNull);
+    });
+
+    test('JSON IN OUT rejects top-level scalars and non-JSON Dart types', () {
+      for (final bad in <Object>[
+        'a string', // top-level scalars are out of scope: Map/List/null only
+        42,
+        true,
+        DateTime.utc(2026),
+        Uint8List.fromList([1, 2]),
+        <int>{1, 2}, // Set
+        Duration.zero, // arbitrary object
+      ]) {
+        expect(
+          () => OracleBind.inOut(
+              value: bad, type: OracleDbType.json, maxSize: 4000),
+          throwsA(isA<ArgumentError>()),
+          reason: 'expected rejection for ${bad.runtimeType}',
+        );
+      }
+    });
+
+    test('JSON IN OUT rejects invalid nested values at construction', () {
+      for (final bad in <Object?>[
+        <String, Object?>{'when': DateTime.utc(2026)},
+        <String, Object?>{'bytes': Uint8List(2)},
+        <Object?>[double.nan],
+        <Object?>[double.infinity],
+        <String, Object?>{'deep': <Object?>[<String, Object?>{'s': <int>{1}}]},
+        <Object, Object?>{1: 'non-string key'},
+      ]) {
+        expect(
+          () => OracleBind.inOut(
+              value: bad, type: OracleDbType.json, maxSize: 4000),
+          throwsA(isA<ArgumentError>()),
+          reason: 'expected rejection for $bad',
+        );
+      }
+    });
+  });
+
   group('OracleOutBinds', () {
     test('empty container reports isEmpty and returns null for any key', () {
       const out = OracleOutBinds.empty();

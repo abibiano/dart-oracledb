@@ -565,18 +565,22 @@ class Transport {
           : expectedColumns;
       var allRows = List<List<Object?>>.of(response.rows);
       var moreRowsToFetch = true;
-      // Stories 4.1/4.2: for locator-LOB (CLOB/BLOB) queries the server
-      // defers row delivery — the first execute returns DESCRIBE only (zero
-      // rows). A DEFINE call (defines carrying the LOB-prefetch cont-flag)
-      // re-executes the cursor and returns the first row batch in the
-      // prefetch shape; subsequent FETCH rounds keep that shape. Without
-      // it, FETCH rounds ship bare locators (no length/chunk prefix) that
-      // cannot be decoded. Mirrors node-oracledb `_handleDefines`, whose
-      // define response is processed as ordinary row data.
+      // Stories 4.1/4.2/4.4: for locator-LOB (CLOB/BLOB) and native JSON
+      // queries the server defers row delivery — the first execute returns
+      // DESCRIBE only (zero rows). A DEFINE call (defines carrying the
+      // LOB-prefetch cont-flag) re-executes the cursor and returns the first
+      // row batch in the prefetch shape; subsequent FETCH rounds keep that
+      // shape. Without it, FETCH rounds ship bare locators / bare JSON
+      // values (no length/chunk prefix) that cannot be decoded — validated
+      // live on 23ai (Story 4.4): a JSON FETCH round without defines
+      // misaligns the stream. Mirrors node-oracledb `_handleDefines` and its
+      // `requiresDefine = true` for CLOB/BLOB/JSON query columns.
       if (fetchColumns != null &&
           response.rows.isEmpty &&
           fetchColumns.any((c) =>
-              c.oracleType == oraTypeClob || c.oracleType == oraTypeBlob)) {
+              c.oracleType == oraTypeClob ||
+              c.oracleType == oraTypeBlob ||
+              c.oracleType == oraTypeJson)) {
         final defineResponse = await _sendLobDefines(
             sql, effectiveCursorId, fetchColumns, prefetchRows, timeout);
         allRows = List<List<Object?>>.of(defineResponse.rows);

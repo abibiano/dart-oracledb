@@ -16,6 +16,7 @@ import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
+import 'package:oracledb/src/protocol/oson.dart' show encodeOson;
 
 void main() {
   group('ExecuteRequest encoding', () {
@@ -1751,13 +1752,110 @@ void main() {
       expect(ttcStreamIsComplete(payload), isTrue);
     });
 
-    test('JSON column fails loud in the strict pass', () {
+  });
+
+  // Story 4.4 — JSON (type 119) decode: the wire shape is the LOB-prefetch
+  // form with the OSON document inline (node-oracledb packet.js readOson):
+  // UB4 locator-ish length (0 ⇒ SQL NULL, nothing follows), UB8 size and
+  // UB4 chunk size (both unused), length-prefixed OSON data, length-prefixed
+  // locator (unused). No LOB READ round trips and no LobLocator.
+  group('Story 4.4 — JSON column decode (type 119)', () {
+    List<int> jsonValue(Object? doc) {
+      final oson = encodeOson(doc);
+      return [
+        ..._ub4(40), // non-null marker
+        ..._ub8(oson.length), // size (unused)
+        ..._ub4(8132), // chunk size (unused)
+        ..._bytesWithLength(oson),
+        ..._bytesWithLength(List.filled(40, 0xAB)), // locator (skipped)
+      ];
+    }
+
+    test('JSON object column decodes to Map<String, Object?>', () {
+      final doc = <String, Object?>{
+        'name': 'rocket',
+        'count': 3,
+        'ratio': 2.5,
+        'ok': true,
+        'missing': null,
+        'tags': <Object?>['a', 'b'],
+        'nested': <String, Object?>{'deep': <Object?>[1, null]},
+      };
       final payload = _buildPayload([
         _describeInfo([
-          _columnInfo(name: 'J', oraType: oraTypeJson, maxSize: 4000),
+          _columnInfo(name: 'DOC', oraType: oraTypeJson, maxSize: 0),
         ]),
         _rowHeader(),
-        [ttcMsgTypeRowData, ..._bytesWithLength([1, 2, 3])],
+        [ttcMsgTypeRowData, ...jsonValue(doc)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.isSuccess, isTrue);
+      final value = r.rows.single.single;
+      expect(value, isA<Map<String, Object?>>());
+      expect(value, equals(doc));
+      // The lenient completion probe consumes the identical JSON bytes and
+      // still finds the terminal STATUS message.
+      expect(ttcStreamIsComplete(payload), isTrue);
+    });
+
+    test('JSON array column decodes to List<Object?>', () {
+      final doc = <Object?>[1, 'two', null, false];
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'DOC', oraType: oraTypeJson, maxSize: 0),
+        ]),
+        _rowHeader(),
+        [ttcMsgTypeRowData, ...jsonValue(doc)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      final value = r.rows.single.single;
+      expect(value, isA<List<Object?>>());
+      expect(value, equals(doc));
+    });
+
+    test('SQL NULL JSON column decodes to null (zero locator length)', () {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'DOC', oraType: oraTypeJson, maxSize: 0),
+        ]),
+        _rowHeader(),
+        // A NULL JSON value is exactly one UB4 zero — nothing follows.
+        [ttcMsgTypeRowData, ..._ub4(0)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.rows.single.single, isNull);
+      expect(ttcStreamIsComplete(payload), isTrue);
+    });
+
+    test('unsupported OSON scalar node still fails loud in the strict pass',
+        () {
+      // Scalar OSON document whose node is BINARY_DOUBLE (0x36) — outside
+      // the supported standard-JSON scope (AC5).
+      final badOson = [
+        0xff, 0x4a, 0x5a, 0x01, // magic + version
+        0x00, 0x12, // flags: INLINE_LEAF | IS_SCALAR
+        0x00, 0x09, // tree segment size
+        0x36, 1, 2, 3, 4, 5, 6, 7, 8, // BINARY_DOUBLE node
+      ];
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'DOC', oraType: oraTypeJson, maxSize: 0),
+        ]),
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._ub4(40),
+          ..._ub8(badOson.length),
+          ..._ub4(8132),
+          ..._bytesWithLength(badOson),
+          ..._bytesWithLength(List.filled(40, 0xAB)),
+        ],
         _errorMessage(errorNum: 1403),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
@@ -1765,8 +1863,254 @@ void main() {
         () => decodeExecuteResponse(payload, isQuery: true),
         throwsA(isA<OracleException>()
             .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-            .having((e) => e.message, 'message', contains('JSON'))),
+            .having((e) => e.message, 'message', contains('BINARY_DOUBLE'))),
       );
+      // The lenient probe consumes the bytes without decoding the document.
+      expect(ttcStreamIsComplete(payload), isTrue);
+    });
+
+    test('JSON OUT bind decodes through outBinds', () {
+      final doc = <String, Object?>{'result': <Object?>[1, 2, 3]};
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          ...jsonValue(doc),
+          ..._ub4(0), // SB4 actualNumBytes trailer (non-fetch path)
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(
+              oraType: oraTypeJson, maxSize: 4000, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindIndices, equals([0]));
+      expect(r.outBindValues.single, equals(doc));
+    });
+
+    test('JSON OUT bind SQL NULL decodes to null', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [ttcMsgTypeRowData, ..._ub4(0), ..._ub4(0)],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(
+              oraType: oraTypeJson, maxSize: 4000, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindValues.single, isNull);
+    });
+
+    test('JSON OUT bind enforces maxSize against returned OSON byte length',
+        () {
+      final doc = <String, Object?>{'big': 'x' * 100};
+      final osonLength = encodeOson(doc).length;
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [ttcMsgTypeRowData, ...jsonValue(doc), ..._ub4(0)],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: [
+            BindMetadata(
+                oraType: oraTypeJson,
+                maxSize: osonLength - 1, // one byte too small — fail loud
+                dir: BindDir.output),
+          ],
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('maxSize'))),
+      );
+    });
+  });
+
+  group('Story 4.4 — JSON bind encode', () {
+    test('JSON bind metadata: type 119, prefetch flag, 32MB sizes, csfrm 0',
+        () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+              value: null,
+              oraType: oraTypeJson,
+              maxSize: 4000,
+              dir: BindDir.output),
+        ],
+      );
+      final bytes = req.toBytes();
+      // Reference parity (node-oracledb writeColumnMetadata, DB_TYPE_JSON):
+      // contFlag = TNS_LOB_PREFETCH_FLAG and maxSize = lobPrefetchLength =
+      // TNS_JSON_MAX_LENGTH (32 MB) regardless of the user's maxSize, which
+      // only guards the materialized value client-side. No charset (csfrm 0)
+      // and NO locator buffer size — JSON is not a locator bind.
+      final expectedMetadata = [
+        oraTypeJson, ttcBindUseIndicators, 0, 0,
+        4, 0x02, 0x00, 0x00, 0x00, // UB4 maxSize = 33554432 (32 MB)
+        0, // UB4 max num elements
+        4, 0x02, 0x00, 0x00, 0x00, // UB4 contFlag = TNS_LOB_PREFETCH_FLAG
+        0, // UB4 OID
+        0, // UB2 version
+        0, // UB2 charset = 0 (no charset form)
+        0, // csfrm = 0
+        4, 0x02, 0x00, 0x00, 0x00, // UB4 lob prefetch length = 32 MB
+        0, // UB4 oaccolid
+      ];
+      expect(_indexOfSub(bytes, expectedMetadata), greaterThanOrEqualTo(0),
+          reason: 'JSON bind metadata block not found in encoded request');
+    });
+
+    test('JSON bind value writes QLocator + length-prefixed OSON bytes', () {
+      final doc = <String, Object?>{'a': 1};
+      final oson = encodeOson(doc);
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t VALUES (:1)',
+        isQuery: false,
+        bindValues: [doc],
+      );
+      final bytes = req.toBytes();
+      // QLocator: UB4(40), then the 40-byte locator as length-prefixed
+      // bytes. Body starts 0x0026 (internal length 38), 0x0004 (QLocator
+      // version), 0x61 (value-based | abstract | blob), 0x08 (init), zeros,
+      // 0x0001, then the OSON byte length as UInt64BE.
+      final expectedValue = [
+        1, 40, // UB4 QLocator length
+        40, // length prefix of the locator bytes
+        0x00, 0x26, 0x00, 0x04, 0x61, 0x08, 0x00, 0x00, 0x00, 0x01,
+        ..._u64be(oson.length), // UInt64BE payload length (full 8-byte BE)
+        ...List.filled(22, 0), // unused trailer fields
+        ..._bytesWithLength(oson),
+      ];
+      expect(_indexOfSub(bytes, expectedValue), greaterThanOrEqualTo(0),
+          reason: 'JSON QLocator + OSON value bytes not found');
+    });
+
+    test('JSON bind QLocator payload length is big-endian across all 8 bytes',
+        () {
+      // The small-doc fixtures above keep the high 7 length bytes zero, so they
+      // cannot tell a big-endian writer from a little-endian one for the
+      // multi-byte case. Force OSON > 255 bytes (a long string member) so the
+      // payload length spans two bytes, then assert the UInt64BE encoding
+      // explicitly — a byte-swapped writer would now fail.
+      final doc = <String, Object?>{'s': 'x' * 400};
+      final oson = encodeOson(doc);
+      expect(oson.length, greaterThan(255),
+          reason: 'fixture must exercise the multi-byte length field');
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t VALUES (:1)',
+        isQuery: false,
+        bindValues: [doc],
+      );
+      final bytes = req.toBytes();
+      final lengthField = _u64be(oson.length);
+      // The high bytes are zero but byte 6 (second-least-significant) is now
+      // non-zero, so order matters: confirm the exact BE field is present.
+      expect(lengthField[6], isNot(0),
+          reason: 'length must span >1 byte to test endianness');
+      // Assert only the 40-byte QLocator (which carries the payload-length
+      // field); the trailing OSON bytes use chunked length prefixing above 255
+      // bytes and are covered by the round-trip tests, not this endianness pin.
+      final expectedLocator = [
+        1, 40,
+        40,
+        0x00, 0x26, 0x00, 0x04, 0x61, 0x08, 0x00, 0x00, 0x00, 0x01,
+        ...lengthField,
+        ...List.filled(22, 0),
+      ];
+      expect(_indexOfSub(bytes, expectedLocator), greaterThanOrEqualTo(0),
+          reason: 'big-endian UInt64BE payload length not found for >255-byte '
+              'OSON');
+    });
+
+    test('JSON null bind writes an OSON null payload, not a null indicator',
+        () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+              value: null,
+              oraType: oraTypeJson,
+              maxSize: 4000,
+              dir: BindDir.inputOutput),
+        ],
+      );
+      final bytes = req.toBytes();
+      // node-oracledb excludes JSON from the null-indicator shortcut: a null
+      // JSON bind ships writeOson(null) — QLocator + OSON scalar null.
+      final osonNull = encodeOson(null);
+      final expectedTail = [
+        1, 40, // UB4 QLocator length — present even for null
+        40,
+        0x00, 0x26, 0x00, 0x04, 0x61, 0x08, 0x00, 0x00, 0x00, 0x01,
+        ..._u64be(osonNull.length), // UInt64BE payload length (full 8-byte BE)
+        ...List.filled(22, 0),
+        ..._bytesWithLength(osonNull),
+      ];
+      expect(_indexOfSub(bytes, expectedTail), greaterThanOrEqualTo(0),
+          reason: 'null JSON bind must ship an OSON null payload');
+    });
+
+    test('Map and List bind values infer oraTypeJson; Uint8List stays RAW',
+        () {
+      expect(BindVariable(value: <String, Object?>{'a': 1}).oraType,
+          equals(oraTypeJson));
+      expect(
+          BindVariable(value: <Object?>[1, 2]).oraType, equals(oraTypeJson));
+      // Regression traps: bytes stay RAW, strings stay VARCHAR.
+      expect(BindVariable(value: Uint8List(3)).oraType, equals(oraTypeRaw));
+      expect(BindVariable(value: '{"a":1}').oraType, equals(oraTypeVarchar));
+    });
+
+    test('invalid nested JSON values fail at BindVariable construction', () {
+      expect(
+        () => BindVariable(value: <String, Object?>{'t': DateTime.utc(2026)}),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(
+        () => BindVariable(value: <Object?>[double.nan]),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(
+        () => BindVariable(value: <Object, Object?>{1: 'bad key'}),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('JSON binds are not deferred in SQL long-data ordering', () {
+      // The 32 MB metadata maxSize must NOT push JSON values into the
+      // deferred long-data section: node-oracledb classifies long binds by
+      // the variable's own maxSize, which stays small for JSON.
+      final doc = <String, Object?>{'k': 'v'};
+      final oson = encodeOson(doc);
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t VALUES (:1, :2)',
+        isQuery: false,
+        bindValues: [doc, 'abc'],
+      );
+      final bytes = req.toBytes();
+      final jsonIdx = _indexOfSub(bytes, [..._bytesWithLength(oson)]);
+      final shortIdx = _indexOfSub(bytes, [3, 0x61, 0x62, 0x63]);
+      expect(jsonIdx, greaterThanOrEqualTo(0));
+      expect(shortIdx, greaterThan(jsonIdx),
+          reason: 'JSON (bind :1) must be written before abc (bind :2) — '
+              'in bind order, not deferred');
     });
   });
 
@@ -2491,6 +2835,15 @@ Uint8List _buildPayload(List<List<int>> messages) {
   }
   return Uint8List.fromList(out);
 }
+
+/// Fixed-width 8-byte big-endian field (NOT Oracle's variable-length UB8).
+/// Mirrors the QLocator OSON payload-length field, which production writes as
+/// two `writeUint32BE` words (high word always 0) — see
+/// `_writeOsonValue` in execute_message.dart.
+List<int> _u64be(int v) => [
+      0, 0, 0, 0, // high word
+      (v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff, // low word
+    ];
 
 List<int> _ub4(int v) {
   if (v == 0) return [0];

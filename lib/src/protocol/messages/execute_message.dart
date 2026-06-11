@@ -15,6 +15,7 @@ import '../buffer.dart';
 import '../constants.dart';
 import '../data_types.dart' as dt;
 import '../lob_locator.dart';
+import '../oson.dart';
 import 'base.dart';
 
 /// Direction of a [BindVariable] on the wire.
@@ -49,7 +50,15 @@ class BindVariable {
     int? oraType,
     this.maxSize,
     this.dir = BindDir.input,
-  }) : oraType = oraType ?? _inferType(value);
+  }) : oraType = oraType ?? _inferType(value) {
+    // JSON binds (inferred from a Map/List value or declared explicitly)
+    // must hold a valid JSON structure. Validating at construction surfaces
+    // bad nested members (DateTime, Uint8List, NaN, non-String keys, ...) at
+    // the call site instead of mid-encode (Story 4.4).
+    if (this.oraType == oraTypeJson) {
+      assertValidJsonBindValue(value, 'value');
+    }
+  }
 
   /// The Dart value to send (or null for SQL NULL / OUT bind).
   final Object? value;
@@ -75,7 +84,7 @@ class BindVariable {
         errorCode: oraBindTypeError,
         message: 'Unsupported bind value type: ${value.runtimeType}. '
             'Supported types: String, int, double, DateTime, '
-            'OracleTimestampTz, Uint8List, null',
+            'OracleTimestampTz, Uint8List, Map, List, null',
       );
     }
     return oraType;
@@ -330,7 +339,12 @@ class ExecuteRequest extends Message {
       // encoding (Story 4.1).
       final deferredLongBinds = <BindVariable>[];
       for (final bind in binds) {
-        if (!isPlSql && _maxSizeFor(bind) > ttcMaxVarcharBindBytes) {
+        // JSON is excluded from the deferral despite its 32 MB metadata
+        // maxSize: node-oracledb classifies long binds by the variable's own
+        // (small) maxSize, so JSON values stay in bind order on the wire.
+        if (!isPlSql &&
+            _wireTypeFor(bind) != oraTypeJson &&
+            _maxSizeFor(bind) > ttcMaxVarcharBindBytes) {
           deferredLongBinds.add(bind);
           continue;
         }
@@ -363,17 +377,21 @@ class ExecuteRequest extends Message {
       buffer.writeUint8(0); // scale
       buffer.writeUB4(maxSize);
       buffer.writeUB4(0); // max num elements (not array)
-      // LOB binds request prefetch metadata (length + chunk size inline with
-      // the returned locator) — node-oracledb writeColumnMetadata sets
-      // TNS_LOB_PREFETCH_FLAG for every LOB-typed bind.
-      buffer.writeUB4(oraType == oraTypeClob || oraType == oraTypeBlob
+      // LOB and JSON binds request prefetch metadata — node-oracledb
+      // writeColumnMetadata sets TNS_LOB_PREFETCH_FLAG for every LOB-typed
+      // bind and for DB_TYPE_JSON (whose document then travels inline).
+      buffer.writeUB4(oraType == oraTypeClob ||
+              oraType == oraTypeBlob ||
+              oraType == oraTypeJson
           ? tnsLobPrefetchFlag
           : 0);
       buffer.writeUB4(0); // OID
       buffer.writeUB2(0); // version
       buffer.writeUB2(csfrm != 0 ? ttcCharsetUtf8 : 0);
       buffer.writeUint8(csfrm);
-      buffer.writeUB4(0); // max chars (LOB prefetch length)
+      // Max chars (LOB prefetch length): TNS_JSON_MAX_LENGTH for JSON
+      // (node-oracledb sets lobPrefetchLength = maxSize = 32 MB), 0 otherwise.
+      buffer.writeUB4(oraType == oraTypeJson ? tnsJsonMaxLength : 0);
       if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
         buffer.writeUB4(0); // oaccolid
       }
@@ -396,14 +414,18 @@ class ExecuteRequest extends Message {
       buffer.writeUint8(0);
       buffer.writeUB4(_defineBufferSize(col));
       buffer.writeUB4(0); // max num elements (not array)
-      buffer.writeUB4(oraType == oraTypeClob || oraType == oraTypeBlob
+      buffer.writeUB4(oraType == oraTypeClob ||
+              oraType == oraTypeBlob ||
+              oraType == oraTypeJson
           ? tnsLobPrefetchFlag
           : 0);
       buffer.writeUB4(0); // OID
       buffer.writeUB2(0); // version
       buffer.writeUB2(col.csfrm != 0 ? ttcCharsetUtf8 : 0);
       buffer.writeUint8(col.csfrm);
-      buffer.writeUB4(0); // max chars (LOB prefetch length)
+      // Max chars (LOB prefetch length): mirrors bind metadata — JSON
+      // defines declare the 32 MB document bound.
+      buffer.writeUB4(oraType == oraTypeJson ? tnsJsonMaxLength : 0);
       if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
         buffer.writeUB4(0); // oaccolid
       }
@@ -418,6 +440,8 @@ class ExecuteRequest extends Message {
       case oraTypeClob:
       case oraTypeBlob:
         return _lobLocatorBindBufferSize;
+      case oraTypeJson:
+        return tnsJsonMaxLength;
       case oraTypeNumber:
       case oraTypeInteger:
       case oraTypeFloat:
@@ -438,6 +462,13 @@ class ExecuteRequest extends Message {
   void _writeBindValue(WriteBuffer buffer, BindVariable bind) {
     final value = bind.value;
     final oraType = _wireTypeFor(bind);
+    if (oraType == oraTypeJson) {
+      // JSON binds always ship an OSON payload — node-oracledb excludes
+      // JSON from the null-indicator shortcut and encodes null as the OSON
+      // scalar null (writeBindParamsColumn → writeOson).
+      _writeOsonValue(buffer, value);
+      return;
+    }
     if (value == null) {
       // NULL signaled by a zero-length indicator byte.
       buffer.writeUint8(0);
@@ -502,6 +533,35 @@ class ExecuteRequest extends Message {
     }
   }
 
+  /// Writes a JSON bind value: a 40-byte value-based "QLocator" followed by
+  /// the OSON document as length-prefixed bytes (node-oracledb
+  /// `packet.js writeOson` / `writeQLocator`, byte-for-byte).
+  static void _writeOsonValue(WriteBuffer buffer, Object? value) {
+    final oson = encodeOson(value);
+    final locator = WriteBuffer()
+      ..writeUint16BE(38) // internal length
+      ..writeUint16BE(tnsLobQLocatorVersion)
+      ..writeUint8(
+          tnsLobLocFlagsValueBased | tnsLobLocFlagsBlob | tnsLobLocFlagsAbstract)
+      ..writeUint8(tnsLobLocFlagsInit)
+      ..writeUint16BE(0) // additional flags
+      ..writeUint16BE(1) // byt1
+      ..writeUint32BE(0) // payload length (UInt64BE high word)
+      ..writeUint32BE(oson.length) // payload length (UInt64BE low word)
+      ..writeUint16BE(0) // unused
+      ..writeUint16BE(0) // csid
+      ..writeUint16BE(0) // unused
+      ..writeUint32BE(0) // unused (UInt64BE × 2)
+      ..writeUint32BE(0)
+      ..writeUint32BE(0)
+      ..writeUint32BE(0);
+    final locatorBytes = locator.toBytes();
+    assert(locatorBytes.length == 40, 'QLocator must be exactly 40 bytes');
+    buffer.writeUB4(locatorBytes.length);
+    buffer.writeBytesWithLength(locatorBytes);
+    buffer.writeBytesWithLength(oson);
+  }
+
   int _wireTypeFor(BindVariable bind) {
     // Normalize VARCHAR2 (9) to VARCHAR (1) for wire (Oracle accepts both but
     // node-oracledb sends type 1 / DB_TYPE_VARCHAR).
@@ -519,6 +579,12 @@ class ExecuteRequest extends Message {
     final wireType = _wireTypeFor(bind);
     if (wireType == oraTypeClob || wireType == oraTypeBlob) {
       return _lobLocatorBindBufferSize;
+    }
+    if (wireType == oraTypeJson) {
+      // The wire metadata always declares the JSON maximum (node-oracledb
+      // writeColumnMetadata); the user's OracleBind maxSize only guards the
+      // returned document client-side and never reaches the wire.
+      return tnsJsonMaxLength;
     }
     if (bind.maxSize != null) return bind.maxSize!;
     final v = bind.value;
@@ -1095,7 +1161,8 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
         final meta = s.bindMetadata[bindIdx];
         final value = _decodeValueByOraType(buf, meta.oraType,
             strict: s.strictTypes,
-            preserveTimestampTimeZone: s.preserveTimestampTimeZone);
+            preserveTimestampTimeZone: s.preserveTimestampTimeZone,
+            outMaxSize: meta.maxSize);
         // After the value bytes, an OUT bind carries an SB4 "actual num bytes"
         // trailer (matches node-oracledb processColumnData !inFetch path).
         buf.skipSB4();
@@ -1175,11 +1242,17 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
 /// reject NCLOB, which shares the CLOB type indicator). The OUT-bind path
 /// passes 0: the public bind API cannot declare NCHAR types, and the
 /// locator-level variable-length-charset flag is re-checked at read time.
+///
+/// [outMaxSize] is the OUT/IN OUT bind's declared `maxSize`, supplied only by
+/// the OUT-bind decode path. Used by JSON (type 119) to enforce the declared
+/// OSON byte bound on returned documents; CLOB/BLOB enforce theirs later in
+/// the transport's materialize step, and other types are bounded server-side.
 Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
     {required bool strict,
     int? scale,
     bool preserveTimestampTimeZone = false,
-    int csfrm = 0}) {
+    int csfrm = 0,
+    int? outMaxSize}) {
   switch (oraType) {
     case oraTypeLong:
     case oraTypeLongRaw:
@@ -1283,18 +1356,30 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
         chunkSize: chunkSize,
       );
     case oraTypeJson:
-      // JSON (OSON) has its own wire format this driver cannot consume yet.
-      // Fail loud in the real decode pass (AC5); the lenient probe keeps the
-      // historical best-effort consumption.
-      if (strict) {
+      // Native JSON wire shape (node-oracledb packet.js readOson): the
+      // LOB-prefetch form with the OSON document inline — UB4 locator-ish
+      // length (0 ⇒ SQL NULL, nothing follows), UB8 size + UB4 chunk size
+      // (both unused), length-prefixed OSON data, length-prefixed locator
+      // (unused — the document already arrived, no LOB READ needed).
+      final jsonMarker = buf.readUB4();
+      if (jsonMarker == 0) return null; // SQL NULL
+      buf.skipUB8(); // size (unused)
+      buf.skipUB4(); // chunk size (unused)
+      final osonBytes = buf.readBytesWithLength();
+      buf.skipBytesChunked(); // locator (unused)
+      if (!strict) return null; // probe pass: bytes consumed, value unused
+      // OUT/IN OUT binds declare maxSize in OSON bytes; an oversized return
+      // fails loud instead of truncating (Story 4.4 AC3). Columns pass no
+      // bound (outMaxSize == null).
+      if (outMaxSize != null && osonBytes.length > outMaxSize) {
         throw OracleException(
-          errorCode: oraUnsupportedType,
-          message: 'JSON columns are not supported yet (Oracle type '
-              '$oraType). Support is planned for a later Epic 4 story.',
+          errorCode: oraBindTypeError,
+          message: 'JSON OUT bind returned ${osonBytes.length} OSON bytes '
+              'but OracleBind maxSize is $outMaxSize — increase maxSize to '
+              'at least the largest document the block can return',
         );
       }
-      buf.readBytesWithLength();
-      return null;
+      return decodeOson(Uint8List.fromList(osonBytes));
     default:
       buf.readBytesWithLength();
       return null;
