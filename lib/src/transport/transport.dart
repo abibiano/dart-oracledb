@@ -144,6 +144,14 @@ class Transport {
   @visibleForTesting
   set debugSdu(int value) => _sdu = value;
 
+  /// Test-only seam exposing the current TTC sequence counter.
+  ///
+  /// Exists for the sequence-wrap integration smoke test, which samples the
+  /// counter across 300+ executes to prove it passes through the 256 wrap on
+  /// a live connection. Surfaced to tests via
+  /// `OracleConnection.debugSequence`; not a public API.
+  int get debugSequence => _sequence;
+
   /// Worst-case bytes a single cursor id occupies in a close-cursor piggyback:
   /// a UB4 is encoded as a 1-byte length plus up to 4 value bytes.
   static const int _closeCursorIdBytes = 5;

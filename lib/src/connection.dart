@@ -115,6 +115,14 @@ class OracleConnection {
   @visibleForTesting
   int get debugReuseExecutes => _transport.debugReuseExecutes;
 
+  /// Current TTC sequence-counter value on the underlying transport.
+  ///
+  /// Exists for the sequence-wrap integration smoke test, which samples the
+  /// counter across 300+ executes to prove it passes through the 256 wrap on
+  /// a live connection. Not part of the public API.
+  @visibleForTesting
+  int get debugSequence => _transport.debugSequence;
+
   /// Whether the connection is currently open and usable.
   ///
   /// Returns `false` if the connection has been closed or if the
