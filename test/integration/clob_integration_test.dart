@@ -18,10 +18,32 @@
 @Tags(['integration'])
 library;
 
+import 'dart:typed_data';
+
 import 'package:oracledb/oracledb.dart';
 import 'package:test/test.dart';
 
 import 'test_helper.dart';
+
+/// Deterministic pseudo-random Latin-1-supplement text (U+00C0–U+00FF).
+///
+/// Every character is ONE UTF-16 code unit that encodes to TWO bytes in
+/// both UTF-16BE and UTF-8, so the temp-CLOB WRITE payload is exactly
+/// `2 * length` bytes under either charset branch of `_createTempClob`,
+/// and the UTF-8 size (also `2 * length`) exceeds the 32,767-byte VARCHAR
+/// bind limit for every boundary size used below — forcing the plain
+/// PL/SQL String bind through the temp-CLOB path. The sequence does not
+/// repeat at chunk-sized intervals, so chunk misordering or duplication
+/// cannot cancel out in an equality check.
+String patternLatin1Text(int length, {int seed = 0}) {
+  final units = Uint16List(length);
+  var state = seed ^ 0x5DEECE66;
+  for (var i = 0; i < length; i++) {
+    state = (state * 1103515245 + 12345) & 0x7FFFFFFF;
+    units[i] = 0xC0 + ((state >> 16) & 0x3F);
+  }
+  return String.fromCharCodes(units);
+}
 
 void main() {
   group(
@@ -425,6 +447,163 @@ void main() {
         );
         expect(result.outBinds['p'], equals('$text world'));
       });
+
+      // ---------------------------------------------------------------
+      // Temp-LOB large-write validation: wire-chunk boundaries + ~1 MB
+      // (spec-temp-lob-large-write-validation)
+      // ---------------------------------------------------------------
+      //
+      // Charset derivation: `_createTempClob` selects the WRITE encoding
+      // from the created locator's variable-length-charset flag (locator
+      // byte 6, bit 0x80). Oracle sets that flag on every temporary /
+      // PL/SQL-created CLOB on both 23ai and 21c (Story 4.1 evidence: only
+      // the UTF-16BE branch makes PL/SQL CLOB binds round-trip at all), so
+      // the encoded WRITE payload is UTF-16BE — exactly 2 bytes per UTF-16
+      // code unit. `WriteBuffer.writeBytesWithLength` then splits payloads
+      // above 253 bytes into 0xFE long-form chunks of at most 65,535 bytes.
+      //
+      // Boundary sizes: a UTF-16BE payload always has an EVEN byte count,
+      // so encoded sizes of exactly 65,535 and 65,537 bytes are unreachable
+      // with whole characters; the nearest reachable boundary set is
+      //   32,767 chars -> 65,534 bytes (largest reachable single-chunk WRITE)
+      //   32,768 chars -> 65,536 bytes (first two-chunk WRITE: 65,535 + 1)
+      //   32,769 chars -> 65,538 bytes (two chunks: 65,535 + 3)
+      // The content is Latin-1-supplement text (see [patternLatin1Text]):
+      // 2 bytes per char in BOTH UTF-16BE and UTF-8, so the byte math holds
+      // even under the (never observed for temp CLOBs) UTF-8 branch, and
+      // the UTF-8 size pushes the plain-String PL/SQL bind over the
+      // 32,767-byte VARCHAR limit into the temp-CLOB conversion.
+
+      for (final (chars, encodedBytes) in const [
+        (32767, 65534),
+        (32768, 65536),
+        (32769, 65538),
+      ]) {
+        test('temp-CLOB boundary WRITE of $chars chars '
+            '($encodedBytes-byte payload) round-trips exactly', () async {
+          final text = patternLatin1Text(chars, seed: chars);
+          final result = await connection.execute(
+            'BEGIN $copyProc(:src, :ret); END;',
+            {
+              'src': text,
+              'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
+            },
+          );
+          expect(connection.debugPendingTempLobCount, greaterThan(0),
+              reason: 'the IN bind must have traveled through an internal '
+                  'temporary CLOB');
+          final value = result.outBinds['ret'] as String?;
+          expect(value, isNotNull);
+          expect(value!.length, equals(chars));
+          expect(value, equals(text));
+        });
+      }
+
+      test('~1 MB-scale ASCII temp-CLOB IN round-trips exactly', () async {
+        // 500,000 ASCII chars -> a 1,000,000-byte UTF-16BE WRITE payload
+        // (16 wire chunks) fragmented across many SDU packets; the OUT side
+        // drains the same value back through a multi-LOB_DATA read. The
+        // indexed segments make the content non-repeating, so chunk loss,
+        // duplication, or reordering cannot cancel out.
+        final text = List.generate(
+            50000, (i) => 'large${i.toString().padLeft(5, '0')}').join();
+        expect(text.length, equals(500000));
+        final result = await connection.execute(
+          'BEGIN $copyProc(:src, :ret); END;',
+          {
+            'src': text,
+            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 600000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, greaterThan(0),
+            reason: 'the IN bind must have traveled through an internal '
+                'temporary CLOB');
+        final value = result.outBinds['ret'] as String?;
+        expect(value, isNotNull);
+        expect(value!.length, equals(500000));
+        expect(value, equals(text));
+      }, timeout: const Timeout(Duration(minutes: 5)));
+
+      test('~1 MB-scale multibyte temp-CLOB IN round-trips char-exactly',
+          () async {
+        // Mixes 2-byte UTF-8 chars (é, ñ, ü), 3-byte UTF-8 chars (日本語),
+        // and a supplementary-plane emoji (😀 — a surrogate pair, 4-byte
+        // UTF-8) with an ASCII counter. Each segment is 16 UTF-16 code
+        // units; 31,250 segments give exactly 500,000 units -> a
+        // 1,000,000-byte UTF-16BE WRITE payload whose 65,535-byte wire
+        // chunks split mid-segment, so any boundary corruption (split
+        // surrogate pair, mis-spliced chunk) breaks the equality below.
+        final buffer = StringBuffer();
+        for (var i = 0; i < 31250; i++) {
+          buffer.write('s${i.toString().padLeft(7, '0')}é日本語😀ñü');
+        }
+        final text = buffer.toString();
+        expect(text.length, equals(500000));
+        final result = await connection.execute(
+          'BEGIN $copyProc(:src, :ret); END;',
+          {
+            'src': text,
+            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 600000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, greaterThan(0),
+            reason: 'the IN bind must have traveled through an internal '
+                'temporary CLOB');
+        final value = result.outBinds['ret'] as String?;
+        expect(value, isNotNull);
+        expect(value!.length, equals(500000));
+        expect(value, equals(text));
+      }, timeout: const Timeout(Duration(minutes: 5)));
+
+      test('~1 MB-scale CLOB IN OUT round-trips through temp CLOB and '
+          'read-back', () async {
+        // The server-side append proves the procedure operated on the full
+        // value (the prefix equality below pins the content; the appended
+        // suffix pins that the OUT data came from the server).
+        final text = patternLatin1Text(500000, seed: 99);
+        final result = await connection.execute(
+          'BEGIN $appendProc(:p); END;',
+          {
+            'p': OracleBind.inOut(
+                value: text, type: OracleDbType.clob, maxSize: 600000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, greaterThan(0),
+            reason: 'the IN side of the IN OUT bind must have traveled '
+                'through an internal temporary CLOB');
+        final value = result.outBinds['p'] as String?;
+        expect(value, isNotNull);
+        expect(value!.length, equals(500006));
+        expect(value, equals('$text world'));
+      }, timeout: const Timeout(Duration(minutes: 5)));
+
+      test('~1 MB-scale multibyte CLOB IN OUT round-trips through temp CLOB '
+          'with a server-side append', () async {
+        // The strongest charset proof at scale: the server interprets the
+        // multibyte value (appends to it), so a symmetric encode/decode
+        // defect cannot cancel out the way it could in a copy round-trip.
+        // Same segment mix as the multibyte IN test: 16 UTF-16 units each.
+        final buffer = StringBuffer();
+        for (var i = 0; i < 31250; i++) {
+          buffer.write('s${i.toString().padLeft(7, '0')}é日本語😀ñü');
+        }
+        final text = buffer.toString();
+        expect(text.length, equals(500000));
+        final result = await connection.execute(
+          'BEGIN $appendProc(:p); END;',
+          {
+            'p': OracleBind.inOut(
+                value: text, type: OracleDbType.clob, maxSize: 600000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, greaterThan(0),
+            reason: 'the IN side of the IN OUT bind must have traveled '
+                'through an internal temporary CLOB');
+        final value = result.outBinds['p'] as String?;
+        expect(value, isNotNull);
+        expect(value!.length, equals(500006));
+        expect(value, equals('$text world'));
+      }, timeout: const Timeout(Duration(minutes: 5)));
 
       test('failed large-IN/tiny-OUT execute leaves the connection usable '
           'and the temp-LOB queue drains to 0', () async {

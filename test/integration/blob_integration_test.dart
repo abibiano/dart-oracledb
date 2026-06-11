@@ -421,6 +421,89 @@ void main() {
         expect(value.sublist(40000), equals([0xCA, 0xFE]));
       });
 
+      // ---------------------------------------------------------------
+      // Temp-LOB large-write validation: wire-chunk boundaries + ~1 MB
+      // (spec-temp-lob-large-write-validation)
+      // ---------------------------------------------------------------
+      //
+      // Encoding derivation: `_createTempBlob` passes the Uint8List to the
+      // LOB WRITE operation unchanged (no charset conversion), so the
+      // encoded WRITE payload size equals the input byte count exactly. On
+      // the wire the payload travels through
+      // `WriteBuffer.writeBytesWithLength`: above 253 bytes it uses the
+      // 0xFE long form, splitting the payload into UB4-length-prefixed
+      // chunks of at most 65,535 bytes. 65,535 bytes is therefore the
+      // largest single-chunk WRITE, 65,536 the first two-chunk WRITE
+      // (65,535 + 1), and 65,537 the first with a 2-byte tail chunk.
+
+      for (final size in const [65535, 65536, 65537]) {
+        test('temp-BLOB boundary WRITE of $size bytes round-trips '
+            'byte-exactly', () async {
+          // > 32,767 bytes, so the plain Uint8List PL/SQL IN bind converts
+          // to an internal temporary BLOB and the WRITE payload is exactly
+          // [size] bytes — straddling the 65,535-byte wire-chunk edge.
+          final bytes = patternBytes(size, seed: size);
+          final result = await connection.execute(
+            'BEGIN $copyProc(:src, :ret); END;',
+            {
+              'src': bytes,
+              'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 70000),
+            },
+          );
+          expect(connection.debugPendingTempLobCount, greaterThan(0),
+              reason: 'the IN bind must have traveled through an internal '
+                  'temporary BLOB');
+          final value = result.outBinds['ret'] as Uint8List?;
+          expect(value, isNotNull);
+          expect(value!.length, equals(size));
+          expect(value, equals(bytes));
+        });
+      }
+
+      test('~1 MB temp-BLOB IN round-trips byte-exactly', () async {
+        // 1,000,000 bytes: a 16-chunk wire WRITE fragmented across many SDU
+        // packets, and a multi-LOB_DATA drain on the read-back. The pattern
+        // is non-repeating so chunk loss, duplication, or reordering cannot
+        // cancel out in the equality check.
+        final bytes = patternBytes(1000000, seed: 17);
+        final result = await connection.execute(
+          'BEGIN $copyProc(:src, :ret); END;',
+          {
+            'src': bytes,
+            'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 1100000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, greaterThan(0),
+            reason: 'the IN bind must have traveled through an internal '
+                'temporary BLOB');
+        final value = result.outBinds['ret'] as Uint8List?;
+        expect(value, isNotNull);
+        expect(value!.length, equals(1000000));
+        expect(value, equals(bytes));
+      }, timeout: const Timeout(Duration(minutes: 5)));
+
+      test('~1 MB temp-BLOB IN OUT round-trips through write and read-back',
+          () async {
+        // The prefix equality below pins the full content; the appended
+        // 0xCAFE sentinel pins that the OUT data came from the server.
+        final bytes = patternBytes(1000000, seed: 19);
+        final result = await connection.execute(
+          'BEGIN $flipProc(:p); END;',
+          {
+            'p': OracleBind.inOut(
+                value: bytes, type: OracleDbType.blob, maxSize: 1100000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, greaterThan(0),
+            reason: 'the IN side of the IN OUT bind must have traveled '
+                'through an internal temporary BLOB');
+        final value = result.outBinds['p'] as Uint8List?;
+        expect(value, isNotNull);
+        expect(value!.length, equals(1000002));
+        expect(Uint8List.sublistView(value, 0, 1000000), equals(bytes));
+        expect(value.sublist(1000000), equals([0xCA, 0xFE]));
+      }, timeout: const Timeout(Duration(minutes: 5)));
+
       test('BLOB OUT value beyond maxSize fails loud, not truncated',
           () async {
         await expectLater(

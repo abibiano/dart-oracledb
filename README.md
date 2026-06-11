@@ -316,8 +316,10 @@ needed (or exposed):
   in server-chunk-sized pieces; values above 64 KiB are covered by tests.
 - **DML** — bind an ordinary `String` into a `CLOB` column with named or
   positional binds. Strings above the 32,767-byte VARCHAR bind limit are
-  handled automatically (Oracle's long-data path for SQL, an internal
-  temporary CLOB for PL/SQL).
+  handled automatically: Oracle's long-data path for SQL (covered by tests to
+  40,000 characters) and an internal temporary CLOB for PL/SQL (validated
+  live to ~1 MB per value, ASCII and mixed multibyte/emoji, on both supported
+  server lines).
 - **PL/SQL OUT / IN OUT** — declare
   `OracleBind.out(type: OracleDbType.clob, maxSize: ...)` or
   `OracleBind.inOut(value: ..., type: OracleDbType.clob, maxSize: ...)`;
@@ -343,8 +345,9 @@ is needed (or exposed):
   ever touches the bytes; values above 64 KiB are covered by tests.
 - **DML** — bind an ordinary `Uint8List` into a `BLOB` column with named or
   positional binds. Values above the 32,767-byte scalar bind limit are
-  handled automatically (Oracle's long-data path for SQL, an internal
-  temporary BLOB for PL/SQL). An **empty** `Uint8List` bound as a plain value
+  handled automatically: Oracle's long-data path for SQL (covered by tests to
+  40,000 bytes) and an internal temporary BLOB for PL/SQL (validated live to
+  ~1 MB per value on both supported server lines). An **empty** `Uint8List` bound as a plain value
   in SQL DML stores SQL NULL (it travels as a zero-length RAW, and Oracle maps
   that to NULL — matching node-oracledb). To store an empty-but-not-NULL BLOB,
   bind through `OracleBind(value: Uint8List(0), type: OracleDbType.blob)`,
@@ -358,9 +361,15 @@ is needed (or exposed):
   empty BLOB value (length 0), which Oracle treats as distinct from SQL
   NULL — unlike CLOB's empty string.
 
-Unbounded/multi-gigabyte LOBs are not claimed: values are materialized in
-memory as a single `String` / `Uint8List`. NCLOB and BFILE columns are not
-yet supported and fail with a clear `OracleException` (see roadmap).
+Large LOB binds through the internal temporary-LOB path are validated live on
+both Oracle 23ai and 21c: a 1,000,000-byte BLOB and 500,000-character CLOBs
+(ASCII and mixed multibyte/emoji — ~1 MB as the on-wire UTF-16BE payload) as
+IN binds and IN OUT round trips, plus IN binds straddling the 64 KiB
+wire-chunk boundary exactly (BLOB at 65,535/65,536/65,537 payload bytes; CLOB
+at the nearest even UTF-16BE sizes 65,534/65,536/65,538). Unbounded/multi-gigabyte LOBs are
+still not claimed: values are materialized in memory as a single `String` /
+`Uint8List`. NCLOB and BFILE columns are not yet supported and fail with a
+clear `OracleException` (see roadmap).
 
 ### JSON support
 
