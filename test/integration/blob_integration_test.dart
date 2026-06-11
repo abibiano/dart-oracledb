@@ -460,6 +460,44 @@ void main() {
         });
       }
 
+      // Inline-bind -> temp-LOB routing edge: the conversion threshold is
+      // `bytes.length > ttcMaxRawBindBytes` (32,767), so exactly 32,767
+      // bytes must stay an inline RAW bind and 32,768 must convert.
+
+      test('exactly 32,767 bytes stays an inline RAW bind (no temp BLOB)',
+          () async {
+        // TO_BLOB(:src) isolates the client-side routing edge (which
+        // happens before encoding, independent of the SQL text) from
+        // server-version-dependent implicit RAW->BLOB conversion rules.
+        final bytes = patternBytes(32767, seed: 21);
+        final result = await connection.execute(
+          'BEGIN $copyProc(TO_BLOB(:src), :ret); END;',
+          {
+            'src': bytes,
+            'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 40000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, equals(0),
+            reason: 'a 32,767-byte value must take the inline RAW path '
+                'and create no temp BLOB');
+        expect(result.outBinds['ret'], equals(bytes));
+      });
+
+      test('32,768 bytes converts to a temp BLOB', () async {
+        final bytes = patternBytes(32768, seed: 22);
+        final result = await connection.execute(
+          'BEGIN $copyProc(:src, :ret); END;',
+          {
+            'src': bytes,
+            'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 40000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, equals(1),
+            reason: 'one byte over the limit must convert to exactly one '
+                'temp BLOB');
+        expect(result.outBinds['ret'], equals(bytes));
+      });
+
       test('~1 MB temp-BLOB IN round-trips byte-exactly', () async {
         // 1,000,000 bytes: a 16-chunk wire WRITE fragmented across many SDU
         // packets, and a multi-LOB_DATA drain on the read-back. The pattern

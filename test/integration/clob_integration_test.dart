@@ -18,6 +18,7 @@
 @Tags(['integration'])
 library;
 
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:oracledb/oracledb.dart';
@@ -498,6 +499,94 @@ void main() {
           expect(value, equals(text));
         });
       }
+
+      // Inline-bind -> temp-LOB routing edge: the conversion threshold is
+      // `utf8.encode(value).length > ttcMaxVarcharBindBytes` (32,767), so
+      // exactly 32,767 UTF-8 bytes must stay an inline VARCHAR bind and
+      // 32,768 must convert. `debugPendingTempLobCount` distinguishes the
+      // two paths: the free-temp queue drains at the start of each execute
+      // and only this execute's temp LOBs remain queued afterwards.
+
+      test('exactly 32,767 UTF-8 bytes stays an inline VARCHAR bind '
+          '(no temp CLOB)', () async {
+        final text = List.generate(
+            3277, (i) => 'inl${i.toString().padLeft(7, '0')}')
+            .join()
+            .substring(0, 32767);
+        expect(utf8.encode(text).length, equals(32767));
+        final result = await connection.execute(
+          'BEGIN $copyProc(:src, :ret); END;',
+          {
+            'src': text,
+            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, equals(0),
+            reason: 'a 32,767-byte value must take the inline VARCHAR '
+                'path and create no temp CLOB');
+        expect(result.outBinds['ret'], equals(text));
+      });
+
+      test('32,768 UTF-8 bytes converts to a temp CLOB', () async {
+        final text = List.generate(
+            3277, (i) => 'cnv${i.toString().padLeft(7, '0')}')
+            .join()
+            .substring(0, 32768);
+        expect(utf8.encode(text).length, equals(32768));
+        final result = await connection.execute(
+          'BEGIN $copyProc(:src, :ret); END;',
+          {
+            'src': text,
+            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, equals(1),
+            reason: 'one byte over the limit must convert to exactly one '
+                'temp CLOB');
+        expect(result.outBinds['ret'], equals(text));
+      });
+
+      test('multibyte text at exactly 32,767 UTF-8 bytes stays inline: '
+          '16,383 two-byte chars + 1 ASCII char', () async {
+        // Fourth quadrant of the {inline, convert} x {ASCII, multibyte}
+        // matrix: a regression that overcounts bytes only for non-ASCII
+        // content (e.g. a worst-case bytes-per-char estimate) would wrongly
+        // convert this value, and no other test would notice.
+        final text = '${patternLatin1Text(16383, seed: 7)}x';
+        expect(utf8.encode(text).length, equals(32767));
+        final result = await connection.execute(
+          'BEGIN $copyProc(:src, :ret); END;',
+          {
+            'src': text,
+            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, equals(0),
+            reason: 'exactly 32,767 UTF-8 bytes must stay inline even '
+                'when the character count is far below the limit');
+        expect(result.outBinds['ret'], equals(text));
+      });
+
+      test('routing measures UTF-8 bytes, not characters: 16,384 two-byte '
+          'chars (32,768 bytes) convert to a temp CLOB', () async {
+        // Latin-1-supplement chars are 2 UTF-8 bytes each: the char count
+        // (16,384) is far below the limit while the byte count (32,768)
+        // is one over it — a chars-instead-of-bytes regression in the
+        // routing check would send this through the inline path.
+        final text = patternLatin1Text(16384, seed: 42);
+        expect(utf8.encode(text).length, equals(32768));
+        final result = await connection.execute(
+          'BEGIN $copyProc(:src, :ret); END;',
+          {
+            'src': text,
+            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
+          },
+        );
+        expect(connection.debugPendingTempLobCount, equals(1),
+            reason: 'the threshold must be measured in UTF-8 bytes, '
+                'not characters');
+        expect(result.outBinds['ret'], equals(text));
+      });
 
       test('~1 MB-scale ASCII temp-CLOB IN round-trips exactly', () async {
         // 500,000 ASCII chars -> a 1,000,000-byte UTF-16BE WRITE payload
