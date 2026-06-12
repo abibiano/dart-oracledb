@@ -323,6 +323,76 @@ void main() {
             throwsA(isA<BufferException>()));
       });
     });
+
+    // Subtype contract for the TTC completion probes: only a genuine
+    // out-of-bytes condition (_checkAvailable) throws BufferUnderflowException
+    // ("more packets may be coming"); face-value malformations (sign bit on
+    // an unsigned read, integer-too-large, invalid seek) stay the plain
+    // BufferException parent so the probes can escalate them.
+    group('underflow vs malformation subtype contract', () {
+      test('readBytes past the end throws BufferUnderflowException', () {
+        final buffer = ReadBuffer(Uint8List.fromList([0x01, 0x02]));
+        expect(() => buffer.readBytes(5),
+            throwsA(isA<BufferUnderflowException>()));
+      });
+
+      test('BufferUnderflowException IS a BufferException', () {
+        expect(() => ReadBuffer(Uint8List.fromList([0x01])).readUint32BE(),
+            throwsA(isA<BufferUnderflowException>()));
+        expect(() => ReadBuffer(Uint8List.fromList([0x01])).readUint32BE(),
+            throwsA(isA<BufferException>()),
+            reason: 'real-decoder catch sites that catch the parent type '
+                'must still cover underflow');
+      });
+
+      test('skip past the end throws BufferUnderflowException', () {
+        final buffer = ReadBuffer(Uint8List.fromList([0x01, 0x02]));
+        expect(
+            () => buffer.skip(3), throwsA(isA<BufferUnderflowException>()));
+      });
+
+      test('a variable-length integer cut mid-value underflows', () {
+        // Size byte promises 2 value bytes; only 1 is present.
+        final buffer = ReadBuffer(Uint8List.fromList([2, 0x01]));
+        expect(
+            () => buffer.readUB2(), throwsA(isA<BufferUnderflowException>()));
+      });
+
+      test('"integer too large" is a BufferException but NOT an underflow',
+          () {
+        // UB2 size byte 4 > maxSize 2 — malformed on its face; the value
+        // bytes are all present, so this is NOT an out-of-bytes condition.
+        final data = Uint8List.fromList([4, 0xAA, 0xBB, 0xCC, 0xDD]);
+        expect(() => ReadBuffer(data).readUB2(),
+            throwsA(isA<BufferException>()));
+        expect(() => ReadBuffer(data).readUB2(),
+            throwsA(isNot(isA<BufferUnderflowException>())));
+      });
+
+      test('sign bit on an unsigned read is NOT an underflow', () {
+        final bare = Uint8List.fromList([0x80]);
+        expect(() => ReadBuffer(bare).readUB4(),
+            throwsA(isA<BufferException>()));
+        expect(() => ReadBuffer(bare).readUB4(),
+            throwsA(isNot(isA<BufferUnderflowException>())));
+
+        final withValue = Uint8List.fromList([0x81, 0x05]);
+        expect(() => ReadBuffer(withValue).readUB2(),
+            throwsA(isA<BufferException>()));
+        expect(() => ReadBuffer(withValue).readUB2(),
+            throwsA(isNot(isA<BufferUnderflowException>())));
+      });
+
+      test('invalid seek is NOT an underflow', () {
+        final buffer = ReadBuffer(Uint8List.fromList([0x01, 0x02]));
+        expect(() => buffer.seek(3), throwsA(isA<BufferException>()));
+        expect(() => buffer.seek(3),
+            throwsA(isNot(isA<BufferUnderflowException>())));
+        expect(() => buffer.seek(-1), throwsA(isA<BufferException>()));
+        expect(() => buffer.seek(-1),
+            throwsA(isNot(isA<BufferUnderflowException>())));
+      });
+    });
   });
 
   group('WriteBuffer', () {

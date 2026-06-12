@@ -243,7 +243,9 @@ void _walkLobOpMessage(
 /// response. Mirrors [ttcStreamIsComplete] for EXECUTE responses: used by the
 /// transport to detect end-of-response on pre-23.4 servers, which emit no
 /// TNS-level end-of-request flags. Returns false on buffer underrun
-/// (more packets needed).
+/// ([BufferUnderflowException] — more packets needed); any other
+/// [BufferException] is a face-value malformation and is rethrown as an
+/// [OracleException] with [oraProtocolError].
 bool lobOpStreamIsComplete(
   Uint8List payload, {
   required int operation,
@@ -265,8 +267,19 @@ bool lobOpStreamIsComplete(
           endOfRequestSupport: endOfRequestSupport);
     }
     return state.endOfResponse;
-  } on BufferException {
+  } on BufferUnderflowException {
+    // The buffer genuinely ran out of bytes: more TNS packets are needed.
     return false;
+  } on BufferException catch (e) {
+    // Any other BufferException is a face-value malformation (sign-bit on an
+    // unsigned read, integer-too-large, ...): waiting for more packets can
+    // never repair it, so fail loud instead of spinning the receive loop.
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message: 'Malformed TTC stream detected by the LOB completion probe: '
+          '${e.message}',
+      cause: e,
+    );
   }
 }
 

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:oracledb/src/errors.dart';
+import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/messages/auth_message.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
@@ -367,6 +368,73 @@ void main() {
         // Cap exhaustion is a framing hazard: the transport must be poisoned.
         expect(transport.isCorrupted, isTrue);
         expect(transport.isConnected, isFalse);
+
+        await transport.disconnect();
+        await server.close();
+      });
+    });
+
+    // Probe underflow/malformation distinction: on the pre-23.4 path
+    // (_supportsEndOfRequest defaults to false) the completion probe walks
+    // the accumulated TTC bytes after every DATA packet. A face-value
+    // malformed encoding (here: a sign-bit size byte at an unsigned-integer
+    // position inside a STATUS message) can never be repaired by more
+    // packets, so the receive loop must fail immediately with
+    // oraProtocolError AND poison the transport — no receive-loop spin, no
+    // 30 s timeout.
+    group('malformed TTC stream detected by the completion probe', () {
+      test('probe malformation throws oraProtocolError and poisons',
+          () async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((s) {
+          // The client poisons (destroying its socket) as soon as the probe
+          // throws; swallow any post-disconnect write error.
+          unawaited(s.done.catchError((_) {}));
+          s.listen((_) {
+            // One DATA packet: data-flags 0x0000, then a STATUS message (type
+            // 9) whose UB4 call-status carries the sign-bit size byte 0x81 —
+            // malformed on its face at an unsigned position.
+            const payload = <int>[0x00, 0x00, ttcMsgTypeStatus, 0x81, 0x05];
+            final packetLen = tnsHeaderSize + payload.length;
+            s.add(<int>[
+              (packetLen >> 8) & 0xFF, packetLen & 0xFF, // length (BE)
+              0x00, 0x00, // checksum
+              tnsPacketData, // type = 6
+              0x00, // marker
+              0x00, 0x00, // header checksum
+              ...payload,
+            ]);
+          }, onError: (_) {});
+        });
+
+        final transport = Transport();
+        await transport.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+
+        await expectLater(
+          transport.sendCommit(timeout: const Duration(seconds: 5)),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message',
+                  contains('Malformed TTC stream'))
+              .having((e) => e.message, 'message', contains('poisoned'))
+              // Pin the cause chain: transport wrapper -> probe error ->
+              // originating BufferException.
+              .having((e) => e.cause, 'cause', isA<OracleException>())
+              .having((e) => (e.cause as OracleException?)?.cause,
+                  'cause.cause', isA<BufferException>())),
+        );
+
+        // A malformed stream is a framing hazard: the transport must be
+        // poisoned and subsequent RPCs must fail fast with the distinct
+        // connection-closed error rather than read desynced bytes.
+        expect(transport.isCorrupted, isTrue);
+        expect(transport.isConnected, isFalse);
+        await expectLater(
+          transport.sendRollback(timeout: const Duration(seconds: 5)),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+        );
 
         await transport.disconnect();
         await server.close();

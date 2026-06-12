@@ -2733,6 +2733,121 @@ void main() {
         isFalse,
       );
     });
+
+    // Probe underflow/malformation distinction: a face-value malformed
+    // integer encoding can never be repaired by more packets, so the probe
+    // must throw OracleException(oraProtocolError) instead of reporting
+    // "need more packets" (which would spin the receive loop into the
+    // cap/timeout backstop). Genuine truncation keeps returning false —
+    // pinned by the exhaustive sweep above.
+    group('completion probe malformation escalation', () {
+      // PARAMETER body whose numKv UB2 position carries [malformedNumKv]
+      // followed by enough bytes that the failure cannot be an underflow.
+      Uint8List malformedAtNumKv(List<int> malformedNumKv) => _buildPayload([
+            [
+              ttcMsgTypeParameter,
+              ..._ub2(2), // numParams
+              ..._ub4(0x123456), // param 1
+              ..._ub4(0), // param 2
+              ..._ub2(0), // transaction length
+              ...malformedNumKv, // numKv UB2 position — malformed encoding
+              0xAA, 0xBB, 0xCC, 0xDD, // bytes present: NOT an underflow
+            ],
+            _errorMessage(errorNum: 0, rowCount: 1),
+            [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+          ]);
+
+      final protocolError = isA<OracleException>()
+          .having((e) => e.errorCode, 'errorCode', oraProtocolError);
+
+      test('"integer too large" (UB2 size byte 4 > maxSize 2) throws', () {
+        final payload = malformedAtNumKv([0x04]);
+        // The cause-message pin proves the escalation fired at the intended
+        // malformation, not some other (possibly underflow-adjacent) point.
+        expect(
+            () => ttcStreamIsComplete(payload),
+            throwsA(isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having((e) => e.cause.toString(), 'cause',
+                    contains('Integer too large'))));
+      });
+
+      test('sign-bit size byte (0x80) at an unsigned position throws', () {
+        final payload = malformedAtNumKv([0x80]);
+        expect(
+            () => ttcStreamIsComplete(payload),
+            throwsA(isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having((e) => e.cause.toString(), 'cause',
+                    contains('negative integer'))));
+      });
+
+      test('probe never throws on decodable-shape values the strict decoder '
+          'rejects (region-id TSTZ, BCE DATE)', () {
+        // Regression (code review of this change): the probe used to run the
+        // strict value decoders on DATE/TIMESTAMP slices, so a region-id
+        // TIMESTAMP WITH TIME ZONE or a BCE DATE — both legitimate wire
+        // data — escaped the probe as OracleException and poisoned the
+        // transport through the probe-throw path. The probe must stop at
+        // byte consumption; only the strict pass may reject the values.
+        final payload = _buildPayload([
+          _rowHeader(),
+          [
+            ttcMsgTypeRowData,
+            // 13-byte TSTZ slice with the region-id flag (byte 11 bit 0x80).
+            ..._bytesWithLength(
+                const [120, 121, 6, 12, 11, 31, 31, 0, 0, 0, 0, 0x80, 0x01]),
+            // 7-byte BCE DATE slice (century byte 99 < 100).
+            ..._bytesWithLength(const [99, 150, 6, 12, 1, 1, 1]),
+          ],
+          _errorMessage(errorNum: 1403),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        const cols = [
+          ColumnMetadata(
+              name: 'TS', oracleType: oraTypeTimestampTz, maxLength: 13),
+          ColumnMetadata(name: 'D', oracleType: oraTypeDate, maxLength: 7),
+        ];
+        expect(ttcStreamIsComplete(payload, expectedColumns: cols), isTrue,
+            reason: 'the probe must consume the slices and locate the '
+                'terminal messages without value-decoding them');
+        // The strict pass still rejects the values loudly — a per-query
+        // error, with no transport poisoning involved.
+        expect(
+          () => decodeExecuteResponse(payload,
+              isQuery: true, expectedColumns: cols),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
+        );
+      });
+
+      test('the probe error carries the BufferException as cause', () {
+        final payload = malformedAtNumKv([0x04]);
+        expect(
+          () => ttcStreamIsComplete(payload),
+          throwsA(isA<OracleException>()
+              .having((e) => e.cause, 'cause', isA<BufferException>())
+              .having((e) => e.message, 'message',
+                  contains('Malformed TTC stream'))),
+        );
+      });
+
+      test('real decoder wrap on the same malformed payloads is unchanged',
+          () {
+        // decodeExecuteResponse catches the parent BufferException and wraps
+        // it as oraProtocolError — the subtype split must not change that.
+        expect(
+          () => decodeExecuteResponse(malformedAtNumKv([0x04]),
+              isQuery: false),
+          throwsA(protocolError),
+        );
+        expect(
+          () => decodeExecuteResponse(malformedAtNumKv([0x80]),
+              isQuery: false),
+          throwsA(protocolError),
+        );
+      });
+    });
   });
 }
 

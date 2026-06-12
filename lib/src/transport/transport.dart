@@ -1417,7 +1417,7 @@ class Transport {
   ///   * `_supportsEndOfRequest == false` (Oracle pre-23.4 / 21c / 19c) — there
   ///     is no TNS-level end-of-response marker. End-of-response is encoded in
   ///     the TTC message stream itself (STATUS / ERROR / END_OF_REQUEST). We
-  ///     scan accumulated bytes after each packet using [_ttcStreamEndsResponse]
+  ///     scan accumulated bytes after each packet using [ttcStreamIsComplete]
   ///     and keep reading more packets if the response is incomplete. This
   ///     matches node-oracledb thin (`packet.js waitForPackets`), which only
   ///     batches packets for `endOfRequestSupport == true`.
@@ -1434,13 +1434,38 @@ class Transport {
     // shape, not a generic length-prefixed value, so the metadata-less
     // fallback would misalign the stream on pre-23.4 servers (where this
     // probe — not TNS data flags — detects end-of-response).
-    bool isComplete(Uint8List accumulated) => completionProbe != null
-        ? completionProbe(accumulated)
-        : ttcStreamIsComplete(accumulated,
-            ttcFieldVersion: _ttcFieldVersion,
-            endOfRequestSupport: _supportsEndOfRequest,
-            expectedColumns: expectedColumns,
-            bindMetadata: bindMetadata);
+    //
+    // A probe may also THROW (OracleException, oraProtocolError) when the
+    // accumulated bytes are malformed on their face — waiting for more
+    // packets can never repair that. A malformed stream means framing
+    // desync: any later read on this socket would decode garbage, so poison
+    // the transport before propagating (same rationale as the AC10 cap and
+    // the mid-query REFUSE below). The connection must not be reused.
+    bool isComplete(Uint8List accumulated) {
+      try {
+        return completionProbe != null
+            ? completionProbe(accumulated)
+            : ttcStreamIsComplete(accumulated,
+                ttcFieldVersion: _ttcFieldVersion,
+                endOfRequestSupport: _supportsEndOfRequest,
+                expectedColumns: expectedColumns,
+                bindMetadata: bindMetadata);
+      } on OracleException catch (e) {
+        _poison();
+        throw OracleException(
+          errorCode: e.errorCode,
+          message: '${e.message}. Transport poisoned — close this connection '
+              'and open a new one.',
+          cause: e,
+        );
+      } catch (e) {
+        // Any other throw escaping a probe is equally a framing-desync
+        // hazard (the probe contract is return-bool-or-OracleException);
+        // poison so the guarantee is self-contained, then propagate as-is.
+        _poison();
+        rethrow;
+      }
+    }
     final chunks = <Uint8List>[];
     var packetsRead = 0;
     while (true) {

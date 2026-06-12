@@ -13,6 +13,30 @@ class BufferException implements Exception {
   String toString() => 'BufferException: $message';
 }
 
+/// Exception thrown only when the buffer genuinely ran out of bytes
+/// (a read or skip past the end of the underlying data).
+///
+/// This is the one true "more bytes may be coming" signal: the TTC
+/// completion probes (`ttcStreamIsComplete`, `lobOpStreamIsComplete`)
+/// interpret it as "need more packets" and keep the transport reading,
+/// while any other [BufferException] (sign-bit on an unsigned read,
+/// integer-too-large, invalid seek, malformed length-prefixed payloads)
+/// means the stream is malformed on its face and is escalated to a
+/// protocol error.
+///
+/// Known limit: a garbage *length* field that drives an oversized
+/// `skip`/`readBytes` past the end produces this same exception and is
+/// indistinguishable from a genuinely partial stream without protocol-level
+/// knowledge. That case intentionally stays "need more packets"; the
+/// receive-loop packet cap and timeout are the backstop for it.
+class BufferUnderflowException extends BufferException {
+  /// Creates a buffer underflow exception with the given message.
+  const BufferUnderflowException(super.message);
+
+  @override
+  String toString() => 'BufferUnderflowException: $message';
+}
+
 /// A read-only buffer for parsing binary data with explicit endianness methods.
 ///
 /// This class wraps a [Uint8List] and provides methods to read primitive
@@ -40,8 +64,8 @@ class ReadBuffer {
 
   void _checkAvailable(int bytes) {
     if (_position + bytes > _data.length) {
-      throw BufferException(
-        'Buffer overflow: need $bytes bytes at position $_position, '
+      throw BufferUnderflowException(
+        'Buffer underflow: need $bytes bytes at position $_position, '
         'but only ${_data.length - _position} available',
       );
     }

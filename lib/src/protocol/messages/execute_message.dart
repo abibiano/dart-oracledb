@@ -804,8 +804,11 @@ class ExecuteResponse {
 
 /// Returns true if the accumulated TTC bytes contain a complete response
 /// (i.e. a STATUS or END_OF_REQUEST terminal message). Returns false if the
-/// scanner runs out of bytes mid-message, signalling that more TNS DATA
-/// packets are still needed.
+/// scanner runs out of bytes mid-message ([BufferUnderflowException]),
+/// signalling that more TNS DATA packets are still needed. Any other
+/// [BufferException] means the stream is malformed on its face (no number
+/// of additional packets can repair it) and is rethrown as an
+/// [OracleException] with [oraProtocolError].
 ///
 /// Used by the transport layer to detect end-of-response on Oracle pre-23.4
 /// servers, which do not emit TNS-level end-of-request flags. Discards
@@ -836,8 +839,19 @@ bool ttcStreamIsComplete(Uint8List data,
       _dispatch(msgType, buffer, state);
     }
     return state.endOfResponse;
-  } on BufferException {
+  } on BufferUnderflowException {
+    // The buffer genuinely ran out of bytes: more TNS packets are needed.
     return false;
+  } on BufferException catch (e) {
+    // Any other BufferException is a face-value malformation (sign-bit on an
+    // unsigned read, integer-too-large, ...): waiting for more packets can
+    // never repair it, so fail loud instead of spinning the receive loop.
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message: 'Malformed TTC stream detected by the completion probe: '
+          '${e.message}',
+      cause: e,
+    );
   }
 }
 
@@ -1289,6 +1303,7 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
     case oraTypeVarnum:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
+      if (!strict) return null; // probe pass: bytes consumed, value unused
       // The slice from readBytesWithLength already constrains the field, so we
       // do not need to pass `length` to decodeNumber here.
       // AC7: a declared fixed scale (> 0) forces double; scale null (bare
@@ -1297,10 +1312,17 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
     case oraTypeDate:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
+      // Probe pass stops after byte consumption: the value decoders below
+      // can throw on data the wire legitimately carries (BCE dates,
+      // region-id TIMESTAMP WITH TIME ZONE), and a probe throw poisons the
+      // transport — the probe's contract is that decodable-shape bytes
+      // never make it throw.
+      if (!strict) return null;
       return dt.decodeDate(ReadBuffer(bytes));
     case oraTypeTimestampTz:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
+      if (!strict) return null; // probe pass: bytes consumed, value unused
       // Story 7.9 AC13: opt-in wrapper preserves the wire offset; default
       // stays the UTC DateTime contract (Story 7.1 AC1).
       return preserveTimestampTimeZone
@@ -1310,6 +1332,7 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
     case oraTypeTimestampLtz:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
+      if (!strict) return null; // probe pass: bytes consumed, value unused
       return dt.decodeTimestamp(ReadBuffer(bytes));
     case oraTypeClob:
     case oraTypeBlob:

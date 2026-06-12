@@ -305,6 +305,26 @@ void main() {
               sendAmount: false),
           isFalse);
     });
+
+    test('malformed encoding escalates to OracleException, not '
+        '"need more packets"', () {
+      // STATUS call-status UB4 position carries a sign-bit size byte with
+      // its value bytes present — not an underflow, malformed on its face.
+      final payload = Uint8List.fromList([
+        ttcMsgTypeStatus, 0x81, 0x05, 0xAA, 0xBB,
+      ]);
+      expect(
+        () => lobOpStreamIsComplete(payload,
+            operation: tnsLobOpRead,
+            sourceLocatorLength: 0,
+            sendAmount: false),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+            .having((e) => e.message, 'message',
+                contains('LOB completion probe'))
+            .having((e) => e.cause, 'cause', isA<BufferException>())),
+      );
+    });
   });
 
   group('LobLocator', () {
