@@ -32,6 +32,9 @@ export 'src/protocol/constants.dart'
 // Connection API
 export 'src/connection.dart' show OracleConnection;
 
+// Connection pooling
+export 'src/pool.dart' show OraclePool;
+
 // Query Results
 export 'src/result.dart' show OracleResult, OracleRow;
 export 'src/protocol/messages/execute_message.dart' show ColumnMetadata;
