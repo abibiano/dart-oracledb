@@ -2,17 +2,31 @@
 
 ## 0.9.3
 
-Protocol-robustness fixes plus a documentation refresh.
+Large-object and binary type support, JSON, plus protocol hardening.
+
+### Features
+- **CLOB**: read and write Character Large Objects; inline binding for values up to 32,767 bytes, temp-LOB protocol for larger payloads.
+- **BLOB**: read and write Binary Large Objects with the same inline/temp-LOB routing boundary.
+- **RAW**: read and write `RAW` columns with comprehensive edge-case coverage.
+- **JSON**: native `OracleDbType.json` bind type; values are encoded/decoded via OSON; `JSON` column support requires a tablespace with 8k+ block size.
 
 ### Bug Fixes
 - Malformed TTC streams now fail loudly instead of spinning the receive loop, surfacing protocol corruption as an error rather than a hang.
 - TIMESTAMP payloads of lengths other than 7/11/13 bytes are now tolerated, matching node-oracledb decode behavior.
+- `RETURN_PARAMETER` key-value and registration sections are now read unconditionally, fixing edge cases in PL/SQL returning clauses.
+- OUT-bind `maxSize` is now validated before the network round-trip; oversized values are rejected with a clear error rather than a server-side failure.
+- Single-round-trip BLOB read guard prevents partial reads from silently truncating large binary results.
+- OSON zero-length number now encodes to the same wire representation as node-oracledb (parity fix).
 
 ### Documentation
-- Add a Document Project reference set (project overview, architecture, API reference, development guide) under `docs/`.
+- Add a project reference set (overview, architecture, API reference, development guide) under `docs/`.
 - Document the tablespace requirement for creating JSON columns.
 
 ## 0.9.2
+
+### Bug Fixes
+- Reverted a false-positive protocol-error guard on multi-batch column-count mismatches: Oracle legitimately sends fewer column bytes than the total column count during multi-batch fetches, and the guard was incorrectly raising `oraProtocolError` on valid server responses.
+- `ClientInfo` static finals in `auth_message.dart` are now guarded with try-catch IIFEs, matching the safe pattern already used in `fast_auth_message.dart`, preventing crashes if the environment is partially unavailable during connection setup.
 
 ### Documentation
 - Update README platform support to reflect Android and iOS as declared native Dart targets while keeping web explicitly unsupported.
@@ -28,7 +42,7 @@ Protocol-robustness fixes plus a documentation refresh.
 
 ## 0.9.0
 
-First stable-leaning release. The core driver — connections, authentication, queries, DML, transactions, statement caching, and PL/SQL — is validated against Oracle 23ai and Oracle 21c. 1.0.0 will follow once LOB support and connection pooling land.
+First stable-leaning release. The core driver — connections, authentication, queries, DML, transactions, statement caching, and PL/SQL — is validated against Oracle 23ai and Oracle 21c. LOB (CLOB/BLOB), RAW, and JSON type support landed in 0.9.3. 1.0.0 will follow once connection pooling lands.
 
 ### Features
 - PL/SQL execution: stored procedures and functions with OUT / IN OUT bind parameters via `OracleBind.out` / `OracleBind.inOut`; values returned through `OracleResult.outBinds` (by name or position)
