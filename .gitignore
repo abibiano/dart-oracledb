@@ -229,3 +229,14 @@ _bmad/
 _bmad-output/
 .claude/
 .agents/
+
+# =============================================================================
+# Vendored reference submodule (node-oracledb)
+# =============================================================================
+# node-oracledb is a git submodule kept only as a protocol reference. Some of
+# its internal files (e.g. test fixtures matching the generic `*.pem` rule
+# above) otherwise collide with our ignore patterns, which makes
+# `dart pub publish` warn about "checked-in files ignored by a .gitignore".
+# Un-ignore the submodule's contents so no parent pattern matches them. The
+# whole tree is still excluded from the published package via .pubignore.
+!reference/node-oracledb/**
