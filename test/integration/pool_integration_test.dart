@@ -1,5 +1,5 @@
-/// Integration tests for Stories 5.1 and 5.2 — `OraclePool` against a live
-/// Oracle server.
+/// Integration tests for Stories 5.1, 5.2, and 5.3 — `OraclePool` against a
+/// live Oracle server.
 ///
 /// Must pass against both supported environments:
 ///
@@ -7,10 +7,12 @@
 ///   RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test/integration/pool_integration_test.dart --no-color
 ///
 /// Scope: pool creation, prewarm counts, pool-wide option threading, failure
-/// cleanup, close() of idle sessions (Story 5.1), and acquire/release
-/// borrower semantics — idle reuse, rollback-on-release, on-demand growth,
-/// and `withConnection` cleanup (Story 5.2). Acquire timeouts and idle
-/// shrinking are Story 5.3 and are NOT exercised here.
+/// cleanup, close() of idle sessions (Story 5.1), acquire/release borrower
+/// semantics — idle reuse, rollback-on-release, on-demand growth, and
+/// `withConnection` cleanup (Story 5.2) — plus acquire wait timeouts, idle
+/// cleanup down to minConnections, and close-time draining of checked-out
+/// sessions (Story 5.3). Session tagging is Story 5.4 and is NOT exercised
+/// here.
 @Tags(['integration'])
 library;
 
@@ -18,6 +20,23 @@ import 'package:oracledb/oracledb.dart';
 import 'package:test/test.dart';
 
 import 'test_helper.dart';
+
+/// Polls [condition] every 50ms until it holds, failing after [timeout].
+/// Timer-driven pool behavior (idle cleanup) lands asynchronously; polling
+/// beats a long fixed sleep and keeps the failure message meaningful.
+Future<void> waitUntil(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 10),
+  String? reason,
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail(reason ?? 'condition not met within $timeout');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+  }
+}
 
 void main() {
   if (!integrationEnabled) {
@@ -32,6 +51,8 @@ void main() {
   Future<OraclePool> createTestPool({
     required int minConnections,
     required int maxConnections,
+    Duration? acquireTimeout,
+    Duration idleTimeout = Duration.zero,
     int statementCacheSize = 30,
     bool preserveTimestampTimeZone = false,
   }) {
@@ -42,6 +63,8 @@ void main() {
       minConnections: minConnections,
       maxConnections: maxConnections,
       timeout: connectTimeout,
+      acquireTimeout: acquireTimeout,
+      idleTimeout: idleTimeout,
       statementCacheSize: statementCacheSize,
       preserveTimestampTimeZone: preserveTimestampTimeZone,
     );
@@ -286,5 +309,133 @@ void main() {
         }
       },
     );
+  });
+
+  group('OraclePool timeouts and cleanup against live Oracle (Story 5.3)', () {
+    test('a queued acquire on an exhausted pool times out with ORA-12170, '
+        'then succeeds after the borrower releases', () async {
+      final pool = await createTestPool(
+        minConnections: 0,
+        maxConnections: 1,
+        acquireTimeout: const Duration(milliseconds: 500),
+      );
+      try {
+        final holder = await pool.acquire();
+        await expectLater(
+          pool.acquire(),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraConnectTimeout)
+                .having((e) => e.message, 'message', contains('timed out')),
+          ),
+        );
+
+        // The timed-out wait left no debris: releasing and reacquiring
+        // serves the same healthy physical session.
+        await pool.release(holder);
+        final again = await pool.acquire();
+        expect(identical(again, holder), isTrue);
+        final result = await again.execute('SELECT 1 FROM DUAL');
+        expect(result.rows.single[0], equals(1));
+        await pool.release(again);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a queued acquire is served within its acquireTimeout when the '
+        'borrower releases in time', () async {
+      final pool = await createTestPool(
+        minConnections: 0,
+        maxConnections: 1,
+        acquireTimeout: const Duration(seconds: 10),
+      );
+      try {
+        final holder = await pool.acquire();
+        final waiting = pool.acquire();
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        await pool.release(holder);
+        final conn = await waiting;
+        expect(identical(conn, holder), isTrue);
+        final result = await conn.execute('SELECT 2 FROM DUAL');
+        expect(result.rows.single[0], equals(2));
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('idle cleanup shrinks a grown pool back to minConnections and the '
+        'survivor keeps serving queries', () async {
+      final pool = await createTestPool(
+        minConnections: 1,
+        maxConnections: 3,
+        idleTimeout: const Duration(milliseconds: 500),
+      );
+      try {
+        // Grow to maxConnections, then park everything idle.
+        final c1 = await pool.acquire();
+        final c2 = await pool.acquire();
+        final c3 = await pool.acquire();
+        expect(pool.connectionsOpen, equals(3));
+        await pool.release(c1);
+        await pool.release(c2);
+        await pool.release(c3);
+        expect(pool.connectionsIdle, equals(3));
+
+        await waitUntil(
+          () => pool.connectionsOpen == 1,
+          reason:
+              'idle cleanup must shrink the pool back to minConnections, '
+              'got open=${pool.connectionsOpen}',
+        );
+        expect(pool.connectionsIdle, equals(1));
+        expect(pool.connectionsInUse, equals(0));
+
+        // The retained session is alive and authenticated, and using it
+        // does not let the pool dip below minConnections afterwards.
+        final result = await pool.withConnection(
+          (conn) => conn.execute('SELECT 3 FROM DUAL'),
+        );
+        expect(result.rows.single[0], equals(3));
+        await Future<void>.delayed(const Duration(seconds: 1));
+        expect(
+          pool.connectionsOpen,
+          equals(1),
+          reason: 'the pool must never shrink below minConnections',
+        );
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('close(drainTimeout: ...) waits for a checked-out live connection '
+        'and finishes the moment it is released', () async {
+      final pool = await createTestPool(minConnections: 0, maxConnections: 1);
+      final conn = await pool.acquire();
+
+      var closed = false;
+      final closing = pool
+          .close(drainTimeout: const Duration(seconds: 30))
+          .then((_) => closed = true);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(
+        closed,
+        isFalse,
+        reason: 'close must keep waiting while the borrower holds a session',
+      );
+      expect(pool.isClosed, isTrue);
+
+      // The borrower can still finish its in-flight work during the drain.
+      final result = await conn.execute('SELECT 4 FROM DUAL');
+      expect(result.rows.single[0], equals(4));
+
+      await pool.release(conn);
+      await closing; // early completion — far before the 30s drain budget
+      expect(closed, isTrue);
+      expect(pool.connectionsOpen, equals(0));
+      expect(pool.connectionsIdle, equals(0));
+      expect(pool.connectionsInUse, equals(0));
+    });
   });
 }

@@ -56,15 +56,24 @@ typedef PoolConnectionFactory = Future<OracleConnection> Function();
 /// they are fixed at create time and applied to every physical connection
 /// the pool ever opens. They cannot vary per acquire.
 ///
-/// **Scope note (Story 5.2):** this class covers pool creation, state
-/// inspection, acquire/release borrower semantics, [withConnection], and
-/// [close]. Acquire timeouts, idle shrinking, full close-time drain of
-/// checked-out sessions, and session tagging arrive in Stories 5.3–5.4.
+/// Pool-layer timeouts are opt-in and validated at create time:
+/// `acquireTimeout` bounds how long a queued [acquire] waits once the pool
+/// is exhausted (`null` waits indefinitely), `idleTimeout` shrinks surplus
+/// idle sessions back toward `minConnections` ([Duration.zero] disables
+/// shrinking), and `close(drainTimeout: ...)` waits for borrowed sessions
+/// to come back before completing.
+///
+/// **Scope note:** this class covers pool creation, state inspection,
+/// acquire/release borrower semantics, [withConnection], acquire wait
+/// timeouts, idle shrinking, and close-time draining of checked-out
+/// sessions. Connection (session) tagging is not yet implemented.
 class OraclePool {
   OraclePool._(
     this._connectionFactory, {
     required this.minConnections,
     required this.maxConnections,
+    required this.acquireTimeout,
+    required this.idleTimeout,
   });
 
   /// Number of physical connections opened eagerly at [create] time.
@@ -72,6 +81,17 @@ class OraclePool {
 
   /// Upper bound on physical connections this pool will ever hold open.
   final int maxConnections;
+
+  /// How long a queued [acquire] may wait for a connection once the pool is
+  /// exhausted, before failing with an [OracleException] (ORA-12170).
+  /// `null` means wait indefinitely. Never bounds physical connection
+  /// establishment — the connect `timeout` option does that.
+  final Duration? acquireTimeout;
+
+  /// How long a surplus idle connection (beyond [minConnections]) may sit
+  /// unused before the pool destroys it. [Duration.zero] disables idle
+  /// cleanup entirely.
+  final Duration idleTimeout;
 
   /// Opens one authenticated physical connection with the pool-wide options.
   /// Stored so [acquire] can grow the pool on demand up to [maxConnections]
@@ -86,10 +106,10 @@ class OraclePool {
   final Set<OracleConnection> _inUse = <OracleConnection>{};
 
   /// Acquirers waiting FIFO for a connection while the pool is exhausted.
-  /// Waiters are always removed from the queue before being completed, so a
-  /// completer in this queue is never completed twice.
-  final Queue<Completer<OracleConnection>> _waiters =
-      Queue<Completer<OracleConnection>>();
+  /// Each waiter carries its own optional acquire-timeout timer; every
+  /// completion path funnels through [_PoolWaiter]'s guarded methods, so a
+  /// waiter is never completed twice.
+  final Queue<_PoolWaiter> _waiters = Queue<_PoolWaiter>();
 
   /// Physical connection opens currently awaiting the factory. Counted
   /// against [maxConnections] so concurrent acquires cannot over-open, but
@@ -103,6 +123,27 @@ class OraclePool {
   /// [_pendingOpens]; also excluded from the public open/idle/in-use counts so
   /// `connectionsOpen == connectionsIdle + connectionsInUse` always holds.
   int _draining = 0;
+
+  /// When each idle connection was parked, keyed by identity. An entry
+  /// exists iff the connection is in [_idle]; idle cleanup uses it to find
+  /// surplus sessions that outlived [idleTimeout].
+  final Map<OracleConnection, DateTime> _idleSince =
+      <OracleConnection, DateTime>{};
+
+  /// The single pending idle-cleanup timer, aimed at the moment the oldest
+  /// idle connection becomes eligible for shrinking. Null whenever idle
+  /// cleanup is disabled, no surplus idle session exists, or the pool is
+  /// closed.
+  Timer? _idleCleanupTimer;
+
+  /// Completes when the last borrowed/draining session leaves the pool
+  /// after [close] started waiting for borrowers. Non-null only once a
+  /// close drain has begun waiting.
+  Completer<void>? _drainCompleter;
+
+  /// The one and only close() run; later close() calls join it so repeated
+  /// closes are idempotent even while a drain wait is still pending.
+  Future<void>? _closeFuture;
 
   bool _isClosed = false;
 
@@ -144,12 +185,26 @@ class OraclePool {
   /// creates — during prewarm and when [acquire] grows the pool on demand.
   /// See [OracleConnection.connect] for their individual semantics.
   ///
+  /// [acquireTimeout] bounds how long a queued [acquire] waits for a
+  /// connection once the pool is exhausted; `null` (the default) waits
+  /// indefinitely, preserving pre-5.3 behavior. It never bounds physical
+  /// connection establishment — [timeout] does that. `Duration.zero` is
+  /// rejected: disabling the wait limit must be spelled `null` explicitly.
+  ///
+  /// [idleTimeout] is how long surplus idle sessions (those beyond
+  /// [minConnections]) may sit unused before the pool closes them, shrinking
+  /// back toward [minConnections]. [Duration.zero] (the default) disables
+  /// idle cleanup entirely; sessions then stay open until borrowed, found
+  /// unhealthy, or the pool closes.
+  ///
   /// All configuration is validated before any network work:
   ///
   /// - `minConnections >= 0`
   /// - `maxConnections > 0`
   /// - `minConnections <= maxConnections`
   /// - `timeout > Duration.zero`
+  /// - `acquireTimeout > Duration.zero` when supplied (`null` disables)
+  /// - `idleTimeout >= Duration.zero` (`Duration.zero` disables)
   /// - `0 <= statementCacheSize <= 65535`
   ///
   /// Invalid values throw [ArgumentError] naming the offending parameter.
@@ -168,6 +223,8 @@ class OraclePool {
     int minConnections = 0,
     int maxConnections = 4,
     Duration timeout = const Duration(seconds: 60),
+    Duration? acquireTimeout,
+    Duration idleTimeout = Duration.zero,
     TlsConfig? tls,
     int statementCacheSize = 30,
     bool preserveTimestampTimeZone = false,
@@ -176,10 +233,13 @@ class OraclePool {
     if (timeout <= Duration.zero) {
       throw ArgumentError.value(timeout, 'timeout', 'must be positive');
     }
+    _checkPoolTimeouts(acquireTimeout, idleTimeout);
     _checkStatementCacheSize(statementCacheSize);
     return _createValidated(
       minConnections: minConnections,
       maxConnections: maxConnections,
+      acquireTimeout: acquireTimeout,
+      idleTimeout: idleTimeout,
       connectionFactory: () => OracleConnection.connect(
         connectionString,
         user: user,
@@ -202,11 +262,16 @@ class OraclePool {
     required PoolConnectionFactory connectionFactory,
     int minConnections = 0,
     int maxConnections = 4,
+    Duration? acquireTimeout,
+    Duration idleTimeout = Duration.zero,
   }) {
     _checkPoolSize(minConnections, maxConnections);
+    _checkPoolTimeouts(acquireTimeout, idleTimeout);
     return _createValidated(
       minConnections: minConnections,
       maxConnections: maxConnections,
+      acquireTimeout: acquireTimeout,
+      idleTimeout: idleTimeout,
       connectionFactory: connectionFactory,
     );
   }
@@ -214,12 +279,16 @@ class OraclePool {
   static Future<OraclePool> _createValidated({
     required int minConnections,
     required int maxConnections,
+    required Duration? acquireTimeout,
+    required Duration idleTimeout,
     required PoolConnectionFactory connectionFactory,
   }) async {
     final pool = OraclePool._(
       connectionFactory,
       minConnections: minConnections,
       maxConnections: maxConnections,
+      acquireTimeout: acquireTimeout,
+      idleTimeout: idleTimeout,
     );
     await pool._prewarm();
     _log.info(
@@ -249,6 +318,30 @@ class OraclePool {
         minConnections,
         'minConnections',
         'must be <= maxConnections ($maxConnections)',
+      );
+    }
+  }
+
+  /// Validates the pool-layer timeout options. Disabled semantics are
+  /// explicit by design: `acquireTimeout: null` waits indefinitely (zero
+  /// would be ambiguous and is rejected), `idleTimeout: Duration.zero`
+  /// disables idle cleanup.
+  static void _checkPoolTimeouts(
+    Duration? acquireTimeout,
+    Duration idleTimeout,
+  ) {
+    if (acquireTimeout != null && acquireTimeout <= Duration.zero) {
+      throw ArgumentError.value(
+        acquireTimeout,
+        'acquireTimeout',
+        'must be positive (use null to wait indefinitely)',
+      );
+    }
+    if (idleTimeout < Duration.zero) {
+      throw ArgumentError.value(
+        idleTimeout,
+        'idleTimeout',
+        'must be >= Duration.zero (Duration.zero disables idle cleanup)',
       );
     }
   }
@@ -290,7 +383,7 @@ class OraclePool {
         await _closeIdleBestEffort();
         rethrow;
       }
-      _idle.add(conn);
+      _parkIdle(conn);
     }
   }
 
@@ -315,8 +408,9 @@ class OraclePool {
   ///    new connection is opened with the pool-wide options captured at
   ///    [create] time.
   /// 3. **Wait** — otherwise the call waits in FIFO order until [release]
-  ///    hands it a healthy connection or the pool is closed. There is no
-  ///    wait timeout yet (Story 5.3 adds one).
+  ///    hands it a healthy connection, the pool is closed, or (with a
+  ///    configured [acquireTimeout]) the wait times out with an
+  ///    [OracleException] carrying error code ORA-12170.
   ///
   /// Always pair with [release] in `try`/`finally` — or use [withConnection],
   /// which does so for you:
@@ -339,16 +433,21 @@ class OraclePool {
 
     // 1. Idle reuse. A connection can die while parked (server-side idle
     // timeout, network drop): hand out only sessions that still look alive,
-    // destroying stale ones as they surface.
+    // destroying stale ones as they surface. Either way the connection
+    // leaves _idle, so its idle-age record goes with it and the cleanup
+    // timer is re-aimed at the remaining oldest idle session.
     while (_idle.isNotEmpty) {
       final conn = _idle.removeLast();
+      _idleSince.remove(conn);
       if (conn.isHealthy) {
         _inUse.add(conn);
+        _scheduleIdleCleanup();
         return conn;
       }
       _log.fine('Discarding unhealthy idle connection during acquire');
       await _destroyBestEffort(conn);
     }
+    _scheduleIdleCleanup();
 
     // 2. Grow on demand. _pendingOpens and _draining are bumped synchronously
     // before their awaits, so concurrent acquires (and in-flight releases) each
@@ -373,15 +472,35 @@ class OraclePool {
         throw _poolClosedException();
       }
       _inUse.add(conn);
+      // Growing past minConnections can make an already-idle session surplus;
+      // re-aim the idle-cleanup timer so it is eventually shrunk even if no
+      // further park happens (the idle-reuse branch above schedules likewise).
+      _scheduleIdleCleanup();
       return conn;
     }
 
     // 3. Exhausted: wait FIFO. release() transfers a connection directly to
-    // the oldest waiter (already marked in-use), and close() fails every
-    // pending waiter with a pool-closed error.
-    final waiter = Completer<OracleConnection>();
+    // the oldest active waiter (already marked in-use), close() fails every
+    // pending waiter with a pool-closed error, and the optional
+    // acquireTimeout bounds the wait below.
+    final waiter = _PoolWaiter();
+    final timeout = acquireTimeout;
+    if (timeout != null) {
+      waiter.timer = Timer(timeout, () {
+        // Leave the queue first so a concurrent release/provision can never
+        // pick this waiter up; completeError is a no-op if it somehow
+        // already completed.
+        _waiters.remove(waiter);
+        waiter.completeError(
+          OracleException(
+            errorCode: oraConnectTimeout,
+            message: 'Connection pool acquire timed out after $timeout',
+          ),
+        );
+      });
+    }
     _waiters.add(waiter);
-    return waiter.future;
+    return waiter.completer.future;
   }
 
   /// Returns a borrowed connection to the pool.
@@ -402,8 +521,9 @@ class OraclePool {
   ///   back a dead session itself, and the borrower already saw the error
   ///   that killed it — surfacing another one here would mask it in
   ///   `finally` blocks);
-  /// - pool already closed → destroyed silently (close-time drain of
-  ///   checked-out sessions is Story 5.3).
+  /// - pool already closed → destroyed silently, and if this was the last
+  ///   outstanding borrowed session, a pending `close(drainTimeout: ...)`
+  ///   completes its drain early.
   Future<void> release(OracleConnection connection) async {
     if (!_inUse.remove(connection)) {
       throw ArgumentError.value(
@@ -426,6 +546,7 @@ class OraclePool {
       // fail loudly: this is a caller bug, not a recoverable state.
       _draining--;
       await _destroyBestEffort(connection);
+      _notifyDrainIfIdle();
       unawaited(_provisionForWaiters());
       throw const OracleException(
         errorCode: oraProtocolError,
@@ -439,6 +560,7 @@ class OraclePool {
       _draining--;
       _log.fine('Pool closed before release; destroying connection');
       await _destroyBestEffort(connection);
+      _notifyDrainIfIdle();
       return;
     }
 
@@ -449,6 +571,7 @@ class OraclePool {
       _draining--;
       _log.fine('Discarding unhealthy connection on release');
       await _destroyBestEffort(connection);
+      _notifyDrainIfIdle();
       unawaited(_provisionForWaiters());
       return;
     }
@@ -460,6 +583,7 @@ class OraclePool {
       // never be reused. Propagate the rollback failure unchanged.
       _draining--;
       await _destroyBestEffort(connection);
+      _notifyDrainIfIdle();
       unawaited(_provisionForWaiters());
       rethrow;
     }
@@ -472,6 +596,7 @@ class OraclePool {
       _draining--;
       _log.fine('Pool closed during release; destroying connection');
       await _destroyBestEffort(connection);
+      _notifyDrainIfIdle();
       return;
     }
 
@@ -479,19 +604,21 @@ class OraclePool {
       _draining--;
       _log.fine('Connection unhealthy after rollback; discarding');
       await _destroyBestEffort(connection);
+      _notifyDrainIfIdle();
       unawaited(_provisionForWaiters());
       return;
     }
 
-    if (_waiters.isNotEmpty) {
+    final waiter = _takeNextActiveWaiter();
+    if (waiter != null) {
       // Direct handoff: the connection stays in-use and goes to the oldest
-      // waiter, so a later acquire() cannot steal it out of _idle.
+      // active waiter, so a later acquire() cannot steal it out of _idle.
       _inUse.add(connection);
       _draining--;
-      _waiters.removeFirst().complete(connection);
+      waiter.complete(connection);
       return;
     }
-    _idle.add(connection);
+    _parkIdle(connection);
     _draining--;
   }
 
@@ -537,8 +664,12 @@ class OraclePool {
   /// Opens replacement connections for queued waiters after a discard or a
   /// failed grow freed capacity, so waiters are not stranded behind capacity
   /// nobody will ever release. If a replacement open fails, the oldest
-  /// waiter receives that error — failing loudly beats waiting forever on a
-  /// pool with no acquire timeout yet.
+  /// active waiter receives that error — failing loudly beats waiting until
+  /// an acquire timeout (or forever, without one).
+  ///
+  /// Timed-out waiters never trigger replacement opens: their timers remove
+  /// them from [_waiters] synchronously, so the loop condition only sees
+  /// waiters that are still waiting.
   Future<void> _provisionForWaiters() async {
     while (!_isClosed &&
         _waiters.isNotEmpty &&
@@ -549,9 +680,7 @@ class OraclePool {
         conn = await _connectionFactory();
       } catch (e, st) {
         _pendingOpens--;
-        if (_waiters.isNotEmpty) {
-          _waiters.removeFirst().completeError(e, st);
-        }
+        _takeNextActiveWaiter()?.completeError(e, st);
         return;
       }
       _pendingOpens--;
@@ -561,42 +690,168 @@ class OraclePool {
         await _destroyBestEffort(conn);
         return;
       }
-      if (_waiters.isEmpty) {
-        // The last waiter was satisfied by a regular release in the
-        // meantime; keep the fresh connection for the next borrower.
-        _idle.add(conn);
+      final waiter = _takeNextActiveWaiter();
+      if (waiter == null) {
+        // Every waiter was satisfied by a regular release — or timed out —
+        // while the open was in flight; keep the fresh connection for the
+        // next borrower.
+        _parkIdle(conn);
         return;
       }
       _inUse.add(conn);
-      _waiters.removeFirst().complete(conn);
+      waiter.complete(conn);
     }
   }
 
-  /// Closes the pool, destroys its idle physical connections, and fails all
-  /// pending [acquire] waiters with a pool-closed error.
+  /// Closes the pool: rejects future acquires immediately, fails all
+  /// pending [acquire] waiters with a pool-closed error, cancels every pool
+  /// timer (acquire-timeout and idle-cleanup), and destroys the idle
+  /// physical connections.
   ///
-  /// Safe to call multiple times (idempotent). After closing, [isClosed]
-  /// is `true` permanently: future acquires are rejected, a grow-on-demand
+  /// By default ([drainTimeout] omitted/`null`, or [Duration.zero]) close
+  /// does **not** wait for borrowers: connections currently checked out stay
+  /// with their borrowers and are destroyed when they are eventually
+  /// released. With a positive [drainTimeout], close additionally waits
+  /// until every borrowed connection has been released (each is destroyed
+  /// as it comes back) or until the timeout expires, whichever comes first;
+  /// sessions still outstanding at the deadline are again destroyed on
+  /// their eventual release.
+  ///
+  /// Safe to call multiple times (idempotent): repeated and concurrent
+  /// calls join the first close run — even while its drain wait is still
+  /// pending — and complete when it does. After closing, [isClosed] is
+  /// `true` permanently: future acquires are rejected, a grow-on-demand
   /// open still in flight is destroyed when it lands, and a borrowed
   /// connection released later is destroyed instead of going idle.
   ///
-  /// **Story 5.2 limitation:** connections currently checked out are not
-  /// forcibly drained — borrowers keep them until they release. Full drain
-  /// semantics arrive with Story 5.3.
-  Future<void> close() async {
-    if (_isClosed) {
-      _log.fine('Pool already closed, ignoring close()');
-      return;
+  /// A negative [drainTimeout] throws [ArgumentError] without closing the
+  /// pool.
+  Future<void> close({Duration? drainTimeout}) {
+    if (drainTimeout != null && drainTimeout < Duration.zero) {
+      throw ArgumentError.value(
+        drainTimeout,
+        'drainTimeout',
+        'must not be negative (Duration.zero closes without waiting)',
+      );
     }
+    final existing = _closeFuture;
+    if (existing != null) {
+      _log.fine('Pool already closed or closing, joining existing close()');
+      return existing;
+    }
+    return _closeFuture = _close(drainTimeout);
+  }
+
+  Future<void> _close(Duration? drainTimeout) async {
     _log.info(
       'Closing pool ($connectionsIdle idle connection(s), '
+      '$connectionsInUse borrowed connection(s), '
       '${_waiters.length} pending waiter(s))',
     );
     _isClosed = true;
+    _idleCleanupTimer?.cancel();
+    _idleCleanupTimer = null;
     while (_waiters.isNotEmpty) {
+      // completeError cancels the waiter's acquire-timeout timer first, so
+      // a pool-closed rejection can never be followed by a timeout firing.
       _waiters.removeFirst().completeError(_poolClosedException());
     }
     await _closeIdleBestEffort();
+    if (drainTimeout == null || drainTimeout == Duration.zero) return;
+    if (_inUse.isEmpty && _draining == 0) return;
+    final drained = Completer<void>();
+    _drainCompleter = drained;
+    _log.info(
+      'Waiting up to $drainTimeout for ${_inUse.length + _draining} '
+      'borrowed connection(s) to be released',
+    );
+    await drained.future.timeout(
+      drainTimeout,
+      onTimeout: () => _log.warning(
+        'Pool close drain timed out after $drainTimeout with '
+        '${_inUse.length + _draining} connection(s) still outstanding; '
+        'they will be destroyed when released',
+      ),
+    );
+  }
+
+  /// Completes the close-drain wait if one is pending and the last
+  /// borrowed/draining session has now left the pool.
+  void _notifyDrainIfIdle() {
+    final drained = _drainCompleter;
+    if (drained != null &&
+        !drained.isCompleted &&
+        _inUse.isEmpty &&
+        _draining == 0) {
+      drained.complete();
+    }
+  }
+
+  /// Pops waiters until one that has not already been completed (e.g. by
+  /// its acquire timeout) surfaces, preserving FIFO order among survivors.
+  /// Returns null when no active waiter remains. Purely defensive: timed-out
+  /// waiters leave [_waiters] synchronously from their timer callback, so an
+  /// inactive entry should never actually be observed here.
+  _PoolWaiter? _takeNextActiveWaiter() {
+    while (_waiters.isNotEmpty) {
+      final waiter = _waiters.removeFirst();
+      if (waiter.isActive) return waiter;
+    }
+    return null;
+  }
+
+  /// Parks [conn] in the idle list, stamping its idle-since time and
+  /// re-aiming the idle-cleanup timer.
+  void _parkIdle(OracleConnection conn) {
+    _idle.add(conn);
+    _idleSince[conn] = DateTime.now();
+    _scheduleIdleCleanup();
+  }
+
+  /// (Re)schedules the single idle-cleanup timer for the moment the oldest
+  /// idle connection becomes eligible for shrinking — or cancels it when
+  /// idle cleanup is disabled, the pool is closed, or no surplus idle
+  /// session exists.
+  void _scheduleIdleCleanup() {
+    _idleCleanupTimer?.cancel();
+    _idleCleanupTimer = null;
+    if (_isClosed || idleTimeout == Duration.zero) return;
+    if (_idle.isEmpty || connectionsOpen <= minConnections) return;
+    // _idle is ordered by park time, so the first entry is the oldest and
+    // always the next to expire.
+    final oldestSince = _idleSince[_idle.first];
+    if (oldestSince == null) return; // defensive; _parkIdle always stamps
+    var remaining = idleTimeout - DateTime.now().difference(oldestSince);
+    if (remaining < Duration.zero) remaining = Duration.zero;
+    _idleCleanupTimer = Timer(remaining, () {
+      _idleCleanupTimer = null;
+      unawaited(_shrinkExpiredIdle());
+    });
+  }
+
+  /// Destroys idle connections that have outlived [idleTimeout], oldest
+  /// first, only while the pool stays above [minConnections]; then re-aims
+  /// the cleanup timer at the next candidate (if any). Retained idle
+  /// sessions are left untouched — no close, no rollback, statement cache
+  /// intact.
+  Future<void> _shrinkExpiredIdle() async {
+    while (!_isClosed &&
+        idleTimeout > Duration.zero &&
+        _idle.isNotEmpty &&
+        connectionsOpen > minConnections) {
+      final oldest = _idle.first;
+      final since = _idleSince[oldest];
+      if (since == null || DateTime.now().difference(since) < idleTimeout) {
+        break;
+      }
+      // Remove synchronously before the awaited destroy so a concurrent
+      // acquire can never be handed a session that is being torn down.
+      _idle.removeAt(0);
+      _idleSince.remove(oldest);
+      _log.fine('Closing surplus idle connection after $idleTimeout idle');
+      await _destroyBestEffort(oldest);
+    }
+    _scheduleIdleCleanup();
   }
 
   /// Closes every idle connection, swallowing (but logging) individual
@@ -605,6 +860,7 @@ class OraclePool {
   Future<void> _closeIdleBestEffort() async {
     final toClose = List<OracleConnection>.of(_idle);
     _idle.clear();
+    _idleSince.clear();
     for (final conn in toClose) {
       await _destroyBestEffort(conn);
     }
@@ -628,4 +884,34 @@ class OraclePool {
       'OraclePool(open: $connectionsOpen, '
       'idle: $connectionsIdle, inUse: $connectionsInUse, '
       'min: $minConnections, max: $maxConnections, closed: $_isClosed)';
+}
+
+/// A queued [OraclePool.acquire] call: its completer plus the optional
+/// acquire-timeout timer bounding the wait.
+///
+/// Every completion path funnels through [complete]/[completeError], which
+/// cancel the timer before completing — so a satisfied waiter can never be
+/// timed out later, a timed-out waiter can never be handed a connection,
+/// and no path completes the same completer twice.
+class _PoolWaiter {
+  final Completer<OracleConnection> completer = Completer<OracleConnection>();
+
+  /// Pending acquire-timeout timer; null when the pool has no
+  /// acquireTimeout configured, or after any completion path cancelled it.
+  Timer? timer;
+
+  /// Whether this waiter is still waiting for a connection.
+  bool get isActive => !completer.isCompleted;
+
+  void complete(OracleConnection connection) {
+    timer?.cancel();
+    timer = null;
+    if (!completer.isCompleted) completer.complete(connection);
+  }
+
+  void completeError(Object error, [StackTrace? stackTrace]) {
+    timer?.cancel();
+    timer = null;
+    if (!completer.isCompleted) completer.completeError(error, stackTrace);
+  }
 }

@@ -72,6 +72,22 @@ PoolConnectionFactory _failingFactory(
   };
 }
 
+/// Polls [condition] every 10ms until it holds, failing after [timeout].
+/// Keeps timer-driven pool tests deterministic without long fixed sleeps.
+Future<void> waitUntil(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 5),
+  String? reason,
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail(reason ?? 'condition not met within $timeout');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+}
+
 void main() {
   // A connect string whose host is never contacted: every test below either
   // fails validation before network work or uses minConnections: 0 so the
@@ -82,6 +98,8 @@ void main() {
     int minConnections = 0,
     int maxConnections = 2,
     Duration timeout = const Duration(seconds: 5),
+    Duration? acquireTimeout,
+    Duration idleTimeout = Duration.zero,
     int statementCacheSize = 30,
     bool preserveTimestampTimeZone = false,
   }) {
@@ -92,6 +110,8 @@ void main() {
       minConnections: minConnections,
       maxConnections: maxConnections,
       timeout: timeout,
+      acquireTimeout: acquireTimeout,
+      idleTimeout: idleTimeout,
       statementCacheSize: statementCacheSize,
       preserveTimestampTimeZone: preserveTimestampTimeZone,
     );
@@ -426,6 +446,8 @@ void main() {
     List<_FakeConnection> created, {
     int minConnections = 0,
     int maxConnections = 2,
+    Duration? acquireTimeout,
+    Duration idleTimeout = Duration.zero,
   }) {
     return OraclePool.createForTesting(
       connectionFactory: () async {
@@ -435,6 +457,8 @@ void main() {
       },
       minConnections: minConnections,
       maxConnections: maxConnections,
+      acquireTimeout: acquireTimeout,
+      idleTimeout: idleTimeout,
     );
   }
 
@@ -1133,6 +1157,603 @@ void main() {
         expect(pool.connectionsOpen, equals(0));
       } finally {
         await pool.close();
+      }
+    });
+  });
+
+  group('OraclePool timeout configuration (Story 5.3)', () {
+    test('rejects zero acquireTimeout (disabled must be explicit null)', () {
+      expect(
+        () => createNoNetwork(acquireTimeout: Duration.zero),
+        throwsA(
+          isA<ArgumentError>().having((e) => e.name, 'name', 'acquireTimeout'),
+        ),
+      );
+    });
+
+    test('rejects negative acquireTimeout', () {
+      expect(
+        () => createNoNetwork(acquireTimeout: const Duration(seconds: -1)),
+        throwsA(
+          isA<ArgumentError>().having((e) => e.name, 'name', 'acquireTimeout'),
+        ),
+      );
+    });
+
+    test('rejects negative idleTimeout', () {
+      expect(
+        () => createNoNetwork(idleTimeout: const Duration(milliseconds: -1)),
+        throwsA(
+          isA<ArgumentError>().having((e) => e.name, 'name', 'idleTimeout'),
+        ),
+      );
+    });
+
+    test('accepts and exposes configured pool timeouts', () async {
+      final pool = await createNoNetwork(
+        acquireTimeout: const Duration(seconds: 3),
+        idleTimeout: const Duration(minutes: 1),
+      );
+      try {
+        expect(pool.acquireTimeout, equals(const Duration(seconds: 3)));
+        expect(pool.idleTimeout, equals(const Duration(minutes: 1)));
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('defaults preserve Story 5.2 semantics: wait forever, never '
+        'shrink', () async {
+      final pool = await createNoNetwork();
+      try {
+        expect(pool.acquireTimeout, isNull);
+        expect(pool.idleTimeout, equals(Duration.zero));
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('validates pool timeouts before invoking the factory', () {
+      var factoryCalls = 0;
+      expect(
+        () => OraclePool.createForTesting(
+          connectionFactory: () async {
+            factoryCalls++;
+            return _FakeConnection();
+          },
+          minConnections: 2,
+          maxConnections: 4,
+          acquireTimeout: const Duration(seconds: -1),
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(factoryCalls, equals(0));
+    });
+
+    test('close() rejects a negative drainTimeout and leaves the pool '
+        'open', () async {
+      final pool = await createFakePool(<_FakeConnection>[]);
+      try {
+        expect(
+          () => pool.close(drainTimeout: const Duration(seconds: -1)),
+          throwsA(
+            isA<ArgumentError>().having((e) => e.name, 'name', 'drainTimeout'),
+          ),
+        );
+        expect(pool.isClosed, isFalse);
+      } finally {
+        await pool.close();
+      }
+    });
+  });
+
+  group('OraclePool acquire timeout', () {
+    test('a queued acquire fails with ORA-12170 after acquireTimeout and '
+        'leaves the waiter queue', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        maxConnections: 1,
+        acquireTimeout: const Duration(milliseconds: 60),
+      );
+      try {
+        final holder = await pool.acquire();
+        await expectLater(
+          pool.acquire(),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraConnectTimeout)
+                .having((e) => e.message, 'message', contains('timed out')),
+          ),
+        );
+        // The timed-out waiter is gone: this release parks the connection
+        // idle instead of handing it to a dead waiter.
+        await pool.release(holder);
+        expect(pool.connectionsIdle, equals(1));
+        expect(pool.connectionsInUse, equals(0));
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a release after one waiter timed out serves the oldest '
+        'still-active waiter', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        maxConnections: 1,
+        acquireTimeout: const Duration(milliseconds: 60),
+      );
+      try {
+        final holder = await pool.acquire();
+
+        // Waiter A times out and must be skipped without disturbing later
+        // waiters.
+        await expectLater(
+          pool.acquire(),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraConnectTimeout,
+            ),
+          ),
+        );
+
+        // Waiter B enqueues with a fresh budget; the release must hand the
+        // connection to B, the oldest waiter still active.
+        final fB = pool.acquire();
+        await pool.release(holder);
+        final conn = await fB;
+        expect(
+          identical(conn, holder),
+          isTrue,
+          reason: 'the surviving waiter must get the released connection',
+        );
+        expect(pool.connectionsInUse, equals(1));
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a satisfied waiter is not completed again by its timeout '
+        'timer', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        maxConnections: 1,
+        acquireTimeout: const Duration(milliseconds: 50),
+      );
+      try {
+        final holder = await pool.acquire();
+        final waiting = pool.acquire();
+        await pool.release(holder); // direct handoff well before the timeout
+        final conn = await waiting;
+        expect(identical(conn, holder), isTrue);
+        // Outlive the timeout: a leaked timer would fire here, try to
+        // complete the already-satisfied waiter, and surface as an
+        // unhandled async error or count drift.
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        expect(pool.connectionsInUse, equals(1));
+        expect(pool.connectionsIdle, equals(0));
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('close() rejects pending waiters with pool-closed, not a later '
+        'acquire timeout', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        maxConnections: 1,
+        acquireTimeout: const Duration(milliseconds: 50),
+      );
+      final holder = await pool.acquire();
+      final waiting = pool.acquire();
+      final rejected = expectLater(
+        waiting,
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraConnectionClosed,
+          ),
+        ),
+      );
+      await pool.close();
+      await rejected;
+      // Outlive the would-be timeout to prove the waiter's timer was
+      // cancelled (a second completion would fail the test as an unhandled
+      // async error).
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      await pool.release(holder);
+    });
+
+    test('acquireTimeout does not bound grow-on-demand connection '
+        'establishment', () async {
+      final gate = Completer<OracleConnection>();
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () => gate.future,
+        maxConnections: 1,
+        acquireTimeout: const Duration(milliseconds: 30),
+      );
+      try {
+        final pending = pool.acquire(); // grow path: no waiter, no timer
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        final conn = _FakeConnection();
+        gate.complete(conn);
+        expect(
+          identical(await pending, conn),
+          isTrue,
+          reason:
+              'physical connect time is bounded by the connect timeout, '
+              'never by acquireTimeout',
+        );
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a replacement open landing after its waiter timed out is parked '
+        'idle, not handed to the dead waiter', () async {
+      var calls = 0;
+      final gate = Completer<OracleConnection>();
+      _FakeConnection? first;
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async {
+          calls++;
+          if (calls == 1) return first = _FakeConnection();
+          return gate.future;
+        },
+        maxConnections: 1,
+        acquireTimeout: const Duration(milliseconds: 40),
+      );
+      try {
+        final conn = await pool.acquire();
+        final waiting = expectLater(
+          pool.acquire(),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraConnectTimeout,
+            ),
+          ),
+        );
+        // Discarding the unhealthy release frees capacity, so the pool
+        // starts a (gated) replacement open for the queued waiter.
+        first!.healthy = false;
+        await pool.release(conn);
+        await waiting; // the waiter times out while the open is in flight
+        final replacement = _FakeConnection();
+        gate.complete(replacement);
+        await waitUntil(
+          () => pool.connectionsIdle == 1,
+          reason: 'the late replacement must be parked idle',
+        );
+        expect(pool.connectionsInUse, equals(0));
+      } finally {
+        await pool.close();
+      }
+    });
+  });
+
+  group('OraclePool idle cleanup', () {
+    test('shrinks surplus idle connections after idleTimeout down to '
+        'minConnections, oldest first', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        minConnections: 1,
+        maxConnections: 3,
+        idleTimeout: const Duration(milliseconds: 60),
+      );
+      try {
+        final c1 = await pool.acquire();
+        final c2 = await pool.acquire();
+        final c3 = await pool.acquire();
+        expect(pool.connectionsOpen, equals(3));
+        await pool.release(c1);
+        await pool.release(c2);
+        await pool.release(c3);
+        expect(pool.connectionsIdle, equals(3));
+
+        await waitUntil(
+          () => pool.connectionsOpen == 1,
+          reason: 'idle cleanup must shrink surplus sessions to minConnections',
+        );
+        // Hold long enough for a buggy extra cleanup pass to fire.
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(
+          pool.connectionsOpen,
+          equals(1),
+          reason: 'the pool must never shrink below minConnections',
+        );
+        expect(pool.connectionsIdle, equals(1));
+        expect(created.where((c) => c.closeCalls == 1), hasLength(2));
+        final survivor = created.singleWhere((c) => c.closeCalls == 0);
+        expect(
+          identical(survivor, c3),
+          isTrue,
+          reason: 'cleanup destroys oldest-idle first, keeping the newest',
+        );
+        expect(identical(pool.debugIdleConnections.single, survivor), isTrue);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('idle cleanup never closes in-use connections and restarts '
+        'idle-age tracking on release', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        minConnections: 0,
+        maxConnections: 2,
+        idleTimeout: const Duration(milliseconds: 50),
+      );
+      try {
+        final c1 = await pool.acquire();
+        final c2 = await pool.acquire();
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(
+          pool.connectionsOpen,
+          equals(2),
+          reason: 'in-use sessions are never idle-timed-out',
+        );
+        expect(created.every((c) => c.closeCalls == 0), isTrue);
+
+        await pool.release(c1);
+        await waitUntil(
+          () => created[0].closeCalls == 1,
+          reason: 'a released surplus session must expire after release',
+        );
+        expect(pool.connectionsInUse, equals(1));
+        expect(created[1].closeCalls, equals(0));
+
+        await pool.release(c2);
+        await waitUntil(() => created[1].closeCalls == 1);
+        expect(pool.connectionsOpen, equals(0));
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('idleTimeout of Duration.zero disables idle cleanup', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        minConnections: 0,
+        maxConnections: 1,
+      );
+      try {
+        final conn = await pool.acquire();
+        await pool.release(conn);
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        expect(pool.connectionsIdle, equals(1));
+        expect(created.single.closeCalls, equals(0));
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('an idle connection reacquired before its idle deadline is not '
+        'destroyed by a stale cleanup pass', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        minConnections: 0,
+        maxConnections: 1,
+        idleTimeout: const Duration(milliseconds: 60),
+      );
+      try {
+        final conn = await pool.acquire();
+        await pool.release(conn);
+        final again = await pool.acquire(); // well before the 60ms deadline
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        expect(
+          created.single.closeCalls,
+          equals(0),
+          reason:
+              'a reacquired session must not be torn down by the cleanup '
+              'timer armed while it was idle',
+        );
+        expect(pool.connectionsInUse, equals(1));
+        await pool.release(again);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('retained idle sessions at minConnections are never touched by '
+        'cleanup (statement cache stays warm)', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        minConnections: 2,
+        maxConnections: 2,
+        idleTimeout: const Duration(milliseconds: 40),
+      );
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        // open == minConnections: nothing is surplus, nothing may be closed
+        // or pinged/rolled back by the cleanup pass.
+        expect(pool.connectionsIdle, equals(2));
+        for (final conn in created) {
+          expect(conn.closeCalls, equals(0));
+          expect(conn.rollbackCalls, equals(0));
+        }
+      } finally {
+        await pool.close();
+      }
+    });
+  });
+
+  group('OraclePool.close drain', () {
+    test('close waits for a borrowed connection and completes early when '
+        'it is released', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 1);
+      final conn = await pool.acquire();
+
+      var closed = false;
+      final closing = pool
+          .close(drainTimeout: const Duration(seconds: 30))
+          .then((_) => closed = true);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(closed, isFalse, reason: 'close must wait for the borrower');
+      expect(
+        pool.isClosed,
+        isTrue,
+        reason: 'new acquires are rejected as soon as the drain starts',
+      );
+
+      await pool.release(conn);
+      await closing; // completes early — far before the 30s drain timeout
+      expect(closed, isTrue);
+      expect(
+        created.single.closeCalls,
+        equals(1),
+        reason: 'a post-close release destroys the session',
+      );
+      expect(pool.connectionsOpen, equals(0));
+    });
+
+    test('acquire during a pending drain is rejected pool-closed', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 1);
+      final conn = await pool.acquire();
+      final closing = pool.close(drainTimeout: const Duration(seconds: 30));
+      await expectLater(
+        pool.acquire(),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraConnectionClosed,
+          ),
+        ),
+      );
+      await pool.release(conn);
+      await closing;
+    });
+
+    test('close completes at the drain deadline when a borrower never '
+        'releases; the late release still destroys the session', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 1);
+      final conn = await pool.acquire();
+
+      final stopwatch = Stopwatch()..start();
+      await pool.close(drainTimeout: const Duration(milliseconds: 80));
+      stopwatch.stop();
+      expect(
+        stopwatch.elapsed,
+        greaterThanOrEqualTo(const Duration(milliseconds: 70)),
+        reason: 'close must wait out the drain timeout for the borrower',
+      );
+      expect(
+        created.single.closeCalls,
+        equals(0),
+        reason: 'an un-released borrower is never forcibly closed',
+      );
+      expect(pool.connectionsInUse, equals(1));
+
+      await pool.release(conn);
+      expect(created.single.closeCalls, equals(1));
+      expect(pool.connectionsOpen, equals(0));
+    });
+
+    test('close(drainTimeout: Duration.zero) returns without waiting for '
+        'borrowers', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 1);
+      final conn = await pool.acquire();
+      await pool.close(drainTimeout: Duration.zero);
+      expect(pool.isClosed, isTrue);
+      expect(pool.connectionsInUse, equals(1));
+      await pool.release(conn);
+      expect(pool.connectionsOpen, equals(0));
+    });
+
+    test('repeated close() calls join the pending drain and stay '
+        'idempotent afterwards', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 1);
+      final conn = await pool.acquire();
+      final first = pool.close(drainTimeout: const Duration(seconds: 30));
+      final second = pool.close(); // must not bypass or restart the drain
+      var firstDone = false;
+      var secondDone = false;
+      unawaited(first.then((_) => firstDone = true));
+      unawaited(second.then((_) => secondDone = true));
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(firstDone, isFalse);
+      expect(
+        secondDone,
+        isFalse,
+        reason: 'a repeated close joins the pending drain',
+      );
+      await pool.release(conn);
+      await Future.wait<void>([first, second]);
+      await pool.close(); // already closed: still succeeds immediately
+      expect(pool.connectionsOpen, equals(0));
+    });
+
+    test('a close drain pending on a release suspended at rollback '
+        'completes once that release finishes', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 1);
+      final conn = await pool.acquire();
+      final gate = Completer<void>();
+      created.single.rollbackGate = gate;
+
+      // The release is suspended at its rollback await: the session is in
+      // the _draining window, neither in-use nor idle.
+      final releasing = pool.release(conn);
+      await Future<void>.delayed(Duration.zero);
+
+      var closed = false;
+      final closing = pool
+          .close(drainTimeout: const Duration(seconds: 30))
+          .then((_) => closed = true);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(
+        closed,
+        isFalse,
+        reason: 'the draining session still counts as outstanding',
+      );
+
+      gate.complete();
+      await releasing;
+      await closing;
+      expect(created.single.closeCalls, equals(1));
+      expect(pool.connectionsOpen, equals(0));
+    });
+
+    test('close with only idle sessions and a positive drainTimeout does '
+        'not wait', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        minConnections: 2,
+        maxConnections: 2,
+      );
+      final stopwatch = Stopwatch()..start();
+      await pool.close(drainTimeout: const Duration(seconds: 30));
+      stopwatch.stop();
+      expect(
+        stopwatch.elapsed,
+        lessThan(const Duration(seconds: 5)),
+        reason: 'no borrowers: close must not sit out the drain timeout',
+      );
+      expect(pool.connectionsOpen, equals(0));
+      for (final conn in created) {
+        expect(conn.closeCalls, equals(1));
       }
     });
   });

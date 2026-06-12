@@ -6,7 +6,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is in progress: `OraclePool.create()` builds a pool of prewarmed authenticated sessions, `acquire()`/`release()` borrow and recycle them (with automatic rollback of uncommitted work on release), and `withConnection()` wraps the pair leak-safely; acquire timeouts, idle cleanup, and session tagging are not yet available. Depend on `oracledb: ^0.9.3`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once connection pooling lands.
+> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is in progress: `OraclePool.create()` builds a pool of prewarmed authenticated sessions, `acquire()`/`release()` borrow and recycle them (with automatic rollback of uncommitted work on release), `withConnection()` wraps the pair leak-safely, queued acquires can be bounded with `acquireTimeout`, surplus idle sessions shrink back to `minConnections` with `idleTimeout`, and `close(drainTimeout: ...)` waits for borrowed sessions on shutdown; session tagging is not yet available. Depend on `oracledb: ^0.9.3`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once connection pooling lands.
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -130,6 +130,8 @@ final pool = await OraclePool.create(
   password: 'testpassword',
   minConnections: 2,  // opened and authenticated up front
   maxConnections: 10, // hard upper bound; acquire() waits FIFO when exhausted
+  acquireTimeout: const Duration(seconds: 30), // bound queued waits (null = wait forever)
+  idleTimeout: const Duration(minutes: 5), // shrink surplus idle sessions (zero = never)
 );
 
 try {
@@ -147,11 +149,20 @@ try {
   );
   print(result.rows.first[0]);
 } finally {
-  await pool.close();
+  // Optionally wait for borrowed sessions to come back before shutting down.
+  await pool.close(drainTimeout: const Duration(seconds: 10));
 }
 ```
 
-`release()` rolls back any uncommitted transaction before the session is handed to the next borrower, and quietly destroys sessions that are no longer healthy. Acquire timeouts, idle cleanup, and session tagging are not yet implemented (see roadmap).
+`release()` rolls back any uncommitted transaction before the session is handed to the next borrower, and quietly destroys sessions that are no longer healthy.
+
+Pool timeouts are opt-in and validated at create time:
+
+- `acquireTimeout` bounds how long a queued `acquire()` waits once the pool is exhausted; on expiry the acquire fails with an `OracleException` (ORA-12170). The default `null` waits indefinitely. It never bounds physical connection establishment — the `timeout` option does that.
+- `idleTimeout` closes surplus idle sessions (beyond `minConnections`) that sit unused longer than the configured duration; the pool never shrinks below `minConnections`, and retained sessions keep their statement cache warm. The default `Duration.zero` disables shrinking.
+- `close(drainTimeout: ...)` rejects new acquires immediately, then waits for checked-out sessions to be released (destroying each as it comes back) until the drain timeout expires. Omitting `drainTimeout` (or passing `Duration.zero`) closes without waiting — borrowed sessions are destroyed whenever they are eventually released. Repeated `close()` calls are idempotent and join a pending drain.
+
+Session tagging is not yet implemented (see roadmap).
 
 ### Queries
 
@@ -466,7 +477,7 @@ This package implements a subset of the full Oracle driver feature set. Below is
 | Query execution & transactions                  | ✅ Done        |
 | PL/SQL execution (stored procedures, functions) | ✅ Done        |
 | Advanced data types (CLOB, BLOB, RAW, JSON)     | ✅ Done        |
-| Connection pooling                              | 🚧 In progress — pool creation and acquire/release/`withConnection` done; acquire timeouts, idle cleanup, and session tagging pending |
+| Connection pooling                              | 🚧 In progress — pool creation, acquire/release/`withConnection`, acquire timeouts, idle cleanup, and close draining done; session tagging pending |
 
 ### Planned After 1.0
 
