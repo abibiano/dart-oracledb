@@ -52,7 +52,7 @@ First stable-leaning release. The core driver — connections, authentication, q
 - `OracleTimestampTz` now implements `Comparable` (ordering by the UTC instant, tie-breaking on `offsetMinutes`, so `compareTo == 0` iff `==`), stores the offset as a single `offsetMinutes`, and adds a `fromHourMinute` factory (`tzHourOffset`/`tzMinuteOffset` remain available as getters). `OracleTimestampTz` is new in 0.9.0 and was never published in any earlier release, so the `offsetMinutes` constructor shape is not a breaking change for released users
 
 ### Bug Fixes
-- SELECT results were silently capped at 50 rows in all previous 0.1.0-alpha releases; full result sets are now fetched (bounded by a 1,000-batch safety cap — see Known Limitations in the README)
+- SELECT results were silently capped at 50 rows in all previous 0.1.0-alpha releases; full result sets are now fetched (bounded by a 1,000-batch safety cap)
 - Re-executing a cached multi-batch SELECT no longer truncates the result to one prefetch window: the server echoes cursor id 0 on a cached-cursor re-execute, and the fetch drain now falls back to the request's own cursor id (`moreRowsToFetch` is cleared only by ORA-01403, matching node-oracledb thin semantics)
 - Duplicate-column bit vectors are now cleared after every decoded row (a stale vector silently sheared all later columns of the next row), and a duplicate marked on the first row of a FETCH round is resolved against the last row of the previous round; a duplicate with no prior row anywhere raises a protocol error on the strict decode pass instead of a misaligned decode (the lenient stream-completion probe instead skips the marker byte-accurately and substitutes null, by design)
 - PL/SQL OUT binds of `TIMESTAMP WITH TIME ZONE` now honor the connection's `preserveTimestampTimeZone` flag (previously they always decoded to a UTC `DateTime`)
@@ -122,6 +122,3 @@ Initial alpha release.
 
 macOS, Windows, Linux, iOS, Android (not web — requires `dart:io` TCP sockets).
 
-### Known limitations
-
-PL/SQL execution, connection pooling, CLOB/BLOB/JSON types, and batch operations are not yet implemented. See the [README](README.md#project-status) for the roadmap.
