@@ -426,6 +426,119 @@ void main() {
       });
     });
 
+    // Release 1.0 closeout (deferred item: recycled session stale cursor).
+    // node-oracledb (withData.js processErrorInfo + protocol.js
+    // _processMessage) transparently recovers from a cached SELECT cursor
+    // whose result shape changed under it (e.g. cross-session DDL): the server
+    // reports ORA-01007 / ORA-00932 on re-execute, the driver clears the dead
+    // cursor and re-executes ONCE as a full parse. Bounded to a single retry,
+    // queries only.
+    group('describe-mismatch transparent re-execute', () {
+      test('a query ORA-01007 re-executes once and succeeds transparently',
+          () async {
+        final t = _FakeTransport()
+          ..nextResponses.add(ExecuteResponse(
+              isSuccess: false, errorCode: 1007, errorMessage: 'ORA-01007'))
+          ..nextResponses.add(ExecuteResponse(isSuccess: true));
+        final conn = OracleConnection.forTesting(transport: t);
+
+        // No throw: the describe mismatch is recovered behind the caller's back.
+        await conn.execute('SELECT 1 FROM dual');
+        expect(t.executeCalls, equals(2),
+            reason: 'one failed re-execute + one transparent full re-parse');
+      });
+
+      test('a query ORA-00932 also triggers the single re-execute', () async {
+        final t = _FakeTransport()
+          ..nextResponses.add(ExecuteResponse(
+              isSuccess: false, errorCode: 932, errorMessage: 'ORA-00932'))
+          ..nextResponses.add(ExecuteResponse(isSuccess: true));
+        final conn = OracleConnection.forTesting(transport: t);
+
+        await conn.execute('SELECT 1 FROM dual');
+        expect(t.executeCalls, equals(2));
+      });
+
+      test('the retry is bounded to once — a second mismatch propagates',
+          () async {
+        final t = _FakeTransport()
+          ..nextResponses.add(ExecuteResponse(
+              isSuccess: false, errorCode: 1007, errorMessage: 'ORA-01007'))
+          ..nextResponses.add(ExecuteResponse(
+              isSuccess: false, errorCode: 1007, errorMessage: 'ORA-01007'));
+        final conn = OracleConnection.forTesting(transport: t);
+
+        await expectLater(
+          conn.execute('SELECT 1 FROM dual'),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', 1007)),
+        );
+        expect(t.executeCalls, equals(2),
+            reason: 'exactly one re-attempt, then the error surfaces');
+      });
+
+      test('a non-query (DML) describe-mismatch error is NOT retried',
+          () async {
+        final t = _FakeTransport()
+          ..nextResponses.add(ExecuteResponse(
+              isSuccess: false, errorCode: 1007, errorMessage: 'ORA-01007'));
+        final conn = OracleConnection.forTesting(transport: t);
+
+        await expectLater(
+          conn.execute('INSERT INTO story_close_t VALUES (1)'),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', 1007)),
+        );
+        expect(t.executeCalls, equals(1),
+            reason: 'the re-execute is queries-only (node-oracledb parity)');
+      });
+
+      test('a non-describe-mismatch query error (ORA-00942) is NOT retried',
+          () async {
+        final t = _FakeTransport()
+          ..nextResponses.add(ExecuteResponse(
+              isSuccess: false, errorCode: 942, errorMessage: 'ORA-00942'));
+        final conn = OracleConnection.forTesting(transport: t);
+
+        await expectLater(
+          conn.execute('SELECT 1 FROM no_such_table'),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', 942)),
+        );
+        expect(t.executeCalls, equals(1),
+            reason: 'only ORA-01007 / ORA-00932 are recoverable describe '
+                'mismatches; a missing table must surface immediately');
+      });
+
+      test('the dead cached cursor is cleared and queued for close on retry',
+          () async {
+        final t = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: t);
+
+        // First execute caches cursor 100 for this SQL.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 100));
+        await conn.execute('SELECT 1 FROM dual');
+        expect(conn.debugCacheSize, equals(1));
+
+        // Re-execute hits ORA-01007 on the cached cursor; the retry clears it
+        // and re-parses, the server assigning a fresh cursor 101.
+        t.nextResponses
+          ..add(ExecuteResponse(
+              isSuccess: false, errorCode: 1007, errorMessage: 'ORA-01007'))
+          ..add(ExecuteResponse(isSuccess: true, cursorId: 101));
+        await conn.execute('SELECT 1 FROM dual');
+
+        expect(t.executeCalls, equals(3),
+            reason: 'parse + failed re-execute + transparent full re-parse');
+        expect(t.lastCursorId, equals(0),
+            reason: 'the retry is a full parse, not a cached re-execute');
+        expect(t.lastCursorsToClose, contains(100),
+            reason: 'the dead cursor is queued and piggybacked on the retry');
+        expect(conn.debugCacheSize, equals(1),
+            reason: 'the freshly parsed cursor (101) is cached');
+      });
+    });
+
     group('bind-signature cache identity', () {
       test('same SQL with different bind types do not share a cached cursor',
           () async {

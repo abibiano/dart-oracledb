@@ -221,8 +221,21 @@ const int oraProtocolViolation = 12585;
 /// Unsupported network datatype.
 const int oraUnsupportedType = 3115;
 
-/// Inconsistent datatypes.
+/// Inconsistent datatypes (ORA-00932). Also reported by the server when a
+/// cached SELECT cursor's column types changed under it (e.g. cross-session
+/// DDL); see [oraVarNotInSelectList] for the re-execute retry contract.
+/// Mirrors node-oracledb `TNS_ERR_INCONSISTENT_DATA_TYPES`.
 const int oraDataTypeNotSupported = 932;
+
+/// Variable not in select list (ORA-01007). A cached SELECT cursor whose
+/// result shape changed under it (e.g. a column dropped by cross-session DDL)
+/// reports this on re-execute. Together with [oraDataTypeNotSupported] these
+/// are the two "describe-mismatch" codes on which node-oracledb
+/// (`withData.js processErrorInfo`) transparently clears the cursor and
+/// re-executes the statement ONCE, for queries only. Integrity/constraint
+/// violations (ORA-00001 etc.) carry different codes and so never match this
+/// gate — re-running them would change nothing.
+const int oraVarNotInSelectList = 1007;
 
 // ============================================================================
 // TTC Message Types

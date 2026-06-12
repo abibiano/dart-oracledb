@@ -347,6 +347,32 @@ class OraclePool {
     );
   }
 
+  /// Test-only: constructs a pool and starts prewarm WITHOUT awaiting it,
+  /// returning the pool together with its in-flight prewarm future. This is
+  /// the only seam that exposes the pool reference *during* prewarm — [create]
+  /// withholds it until prewarm resolves, which is exactly why the prewarm
+  /// close-race is otherwise unreachable. A test can [close] the returned pool
+  /// while a gated factory holds an open in flight, then complete the gate, to
+  /// exercise the post-await `_isClosed` recheck in [_prewarm]. Not part of the
+  /// public API — production code must use [create].
+  @visibleForTesting
+  static (OraclePool, Future<void>) createRacingPrewarmForTesting({
+    required PoolConnectionFactory connectionFactory,
+    int minConnections = 1,
+    int maxConnections = 4,
+  }) {
+    _checkPoolSize(minConnections, maxConnections);
+    final pool = OraclePool._(
+      connectionFactory,
+      minConnections: minConnections,
+      maxConnections: maxConnections,
+      acquireTimeout: null,
+      idleTimeout: Duration.zero,
+      sessionCallback: null,
+    );
+    return (pool, pool._prewarm());
+  }
+
   static Future<OraclePool> _createValidated({
     required int minConnections,
     required int maxConnections,
@@ -456,6 +482,16 @@ class OraclePool {
         await _closeIdleBestEffort();
         rethrow;
       }
+      if (_isClosed) {
+        // close() ran while this factory open was in flight. It became
+        // reachable for concurrent close() once Stories 5.2/5.3 landed; the
+        // close already drained whatever was idle when it ran, so parking this
+        // post-close connection would leak its socket/session. Destroy it and
+        // stop prewarming (mirrors the post-await _isClosed guards in the
+        // acquire grow path and _provisionForWaiters).
+        await _destroyBestEffort(conn);
+        return;
+      }
       if (_sessionCallback != null) _neverBorrowed.add(conn);
       _parkIdle(conn);
     }
@@ -549,18 +585,27 @@ class OraclePool {
         conn = await _connectionFactory();
       } catch (_) {
         _pendingOpens--;
+        // A failed in-flight open during a close(drainTimeout:) drain may be
+        // the last connection the drain is waiting on; wake it.
+        _notifyDrainIfIdle();
         // The failed open released capacity; don't strand queued waiters
         // behind capacity nobody will use.
         unawaited(_provisionForWaiters());
         rethrow;
       }
-      _pendingOpens--;
       if (_isClosed) {
         // The pool closed while the open was in flight; close() could not
         // see this connection, so destroy it here instead of leaking it.
+        // Decrement _pendingOpens only AFTER the teardown completes: a
+        // close(drainTimeout:) drain counts this open, and decrementing before
+        // the await would let a sibling in-flight open drive the count to zero
+        // and resolve the drain while THIS socket teardown is still pending.
         await _destroyBestEffort(conn);
+        _pendingOpens--;
+        _notifyDrainIfIdle();
         throw _poolClosedException();
       }
+      _pendingOpens--;
       _inUse.add(conn);
       // Growing past minConnections can make an already-idle session surplus;
       // re-aim the idle-cleanup timer so it is eventually shrunk even if no
@@ -956,15 +1001,23 @@ class OraclePool {
       } catch (e, st) {
         _pendingOpens--;
         _takeNextActiveWaiter()?.completeError(e, st);
+        // May be the last connection a close(drainTimeout:) drain awaits.
+        _notifyDrainIfIdle();
+        return;
+      }
+      if (_isClosed) {
+        // close() ran while the open was in flight and has already failed
+        // every waiter; just destroy the orphan connection. Decrement
+        // _pendingOpens only after the teardown completes so a sibling
+        // in-flight open cannot drive the count to zero and resolve a
+        // close(drainTimeout:) drain while this socket teardown is still
+        // pending (see the acquire grow path for the rationale).
+        await _destroyBestEffort(conn);
+        _pendingOpens--;
+        _notifyDrainIfIdle();
         return;
       }
       _pendingOpens--;
-      if (_isClosed) {
-        // close() ran while the open was in flight and has already failed
-        // every waiter; just destroy the orphan connection.
-        await _destroyBestEffort(conn);
-        return;
-      }
       if (_sessionCallback != null) _neverBorrowed.add(conn);
       final waiter = _takeNextActiveWaiter();
       if (waiter == null) {
@@ -1037,12 +1090,18 @@ class OraclePool {
     }
     await _closeIdleBestEffort();
     if (drainTimeout == null || drainTimeout == Duration.zero) return;
-    if (_inUse.isEmpty && _draining == 0) return;
+    // _pendingOpens counts grow-on-demand / waiter-provision opens still in
+    // flight at close time. Each self-destructs via the post-await _isClosed
+    // guard when it lands, but a caller passing drainTimeout expects every
+    // socket settled when close() returns — so wait for those too, not just
+    // borrowed (_inUse) and releasing (_draining) connections.
+    if (_inUse.isEmpty && _draining == 0 && _pendingOpens == 0) return;
     final drained = Completer<void>();
     _drainCompleter = drained;
     _log.info(
-      'Waiting up to $drainTimeout for ${_inUse.length + _draining} '
-      'borrowed connection(s) to be released',
+      'Waiting up to $drainTimeout for '
+      '${_inUse.length + _draining + _pendingOpens} '
+      'outstanding connection(s) to be released or self-disposed',
     );
     await drained.future.timeout(
       drainTimeout,
@@ -1055,13 +1114,16 @@ class OraclePool {
   }
 
   /// Completes the close-drain wait if one is pending and the last
-  /// borrowed/draining session has now left the pool.
+  /// borrowed/draining/in-flight session has now left the pool. Includes
+  /// `_pendingOpens` so a drain initiated while a grow-on-demand open is in
+  /// flight resolves only once that open has landed and self-disposed.
   void _notifyDrainIfIdle() {
     final drained = _drainCompleter;
     if (drained != null &&
         !drained.isCompleted &&
         _inUse.isEmpty &&
-        _draining == 0) {
+        _draining == 0 &&
+        _pendingOpens == 0) {
       drained.complete();
     }
   }

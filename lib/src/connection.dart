@@ -142,6 +142,14 @@ class OracleConnection {
   @visibleForTesting
   int get debugSequence => _transport.debugSequence;
 
+  /// Number of transparent describe-mismatch re-executes performed on this
+  /// connection (a cached SELECT cursor reported ORA-01007 / ORA-00932 and was
+  /// re-executed once as a full parse). Lets the cross-session-DDL recovery
+  /// integration test prove the retry path actually fired. Not a public API.
+  @visibleForTesting
+  int get debugDescribeRetries => _describeRetries;
+  int _describeRetries = 0;
+
   /// Whether an [execute] call is currently in flight on this connection.
   ///
   /// Package-internal quiescence seam for the connection pool: `release()`
@@ -548,130 +556,164 @@ class OracleConnection {
       }
     }
 
-    // Drain cursor IDs queued from prior LRU evictions, errors, or DDL
-    // invalidation, and flush at most one SDU-bounded chunk on this execute
-    // The piggyback rides the execute in a single un-fragmented packet,
-    // so an unbounded list could overflow the negotiated SDU. Any remainder is
-    // requeued (deduplicated) and piggybacks on later executes — no standalone
-    // close-cursor RPC is sent, and no ID is dropped.
-    final drained = _cache.drainCursorsToClose();
-    final chunkLimit = _transport.closeCursorChunkLimit;
-    final List<int> cursorsToClose;
-    if (drained.length <= chunkLimit) {
-      cursorsToClose = drained;
-    } else {
-      cursorsToClose = drained.sublist(0, chunkLimit);
-      _cache.requeueCursorsToClose(drained.sublist(chunkLimit));
-    }
+    // A cached SELECT cursor whose result shape changed under it (e.g. a
+    // column dropped/retyped by cross-session DDL — common on recycled pooled
+    // sessions) reports ORA-01007 / ORA-00932 on re-execute. node-oracledb
+    // (withData.js processErrorInfo + protocol.js _processMessage) recovers
+    // transparently: clear the dead cursor and re-execute the statement ONCE
+    // as a full parse. Bounded to a single retry, queries only — a genuine
+    // type error therefore still surfaces after exactly one re-attempt, and
+    // integrity/constraint violations carry other codes so never match.
+    var describeRetryUsed = false;
+    while (true) {
+      // Drain cursor IDs queued from prior LRU evictions, errors, or DDL
+      // invalidation, and flush at most one SDU-bounded chunk on this execute.
+      // The piggyback rides the execute in a single un-fragmented packet,
+      // so an unbounded list could overflow the negotiated SDU. Any remainder
+      // is requeued (deduplicated) and piggybacks on later executes — no
+      // standalone close-cursor RPC is sent, and no ID is dropped.
+      final drained = _cache.drainCursorsToClose();
+      final chunkLimit = _transport.closeCursorChunkLimit;
+      final List<int> cursorsToClose;
+      if (drained.length <= chunkLimit) {
+        cursorsToClose = drained;
+      } else {
+        cursorsToClose = drained.sublist(0, chunkLimit);
+        _cache.requeueCursorsToClose(drained.sublist(chunkLimit));
+      }
 
-    try {
-      final response = await _transport.sendExecute(
-        sql,
-        isQuery: isQuery,
-        isPlSql: isPlSql,
-        bindValues: bindList,
-        bindNames: bindNames,
-        bindMetadata: bindMetadata,
-        cursorId: cursorId,
-        expectedColumns: expectedColumns,
-        cursorsToClose: cursorsToClose,
-        preserveTimestampTimeZone: _preserveTimestampTimeZone,
-      );
+      try {
+        final response = await _transport.sendExecute(
+          sql,
+          isQuery: isQuery,
+          isPlSql: isPlSql,
+          bindValues: bindList,
+          bindNames: bindNames,
+          bindMetadata: bindMetadata,
+          cursorId: cursorId,
+          expectedColumns: expectedColumns,
+          cursorsToClose: cursorsToClose,
+          preserveTimestampTimeZone: _preserveTimestampTimeZone,
+        );
 
-      if (!response.isSuccess) {
+        if (!response.isSuccess) {
+          final code = response.errorCode;
+          // Describe-mismatch on a cached re-execute is recoverable; anything
+          // else (or a second occurrence) propagates. invalidate() below
+          // queues the dead cursor for close, so the retry's drain piggybacks
+          // it exactly as node-oracledb's clearCursor does.
+          final canRetry =
+              !describeRetryUsed &&
+              isQuery &&
+              (code == oc.oraVarNotInSelectList ||
+                  code == oc.oraDataTypeNotSupported);
+          if (cacheEntry != null) {
+            _cache.invalidate(cacheKey);
+            cacheEntry = null;
+          }
+          if (canRetry) {
+            describeRetryUsed = true;
+            _describeRetries++;
+            cursorId = 0; // force a full parse + re-DESCRIBE on the re-execute
+            expectedColumns = null;
+            _log.fine(
+              'Cached cursor describe mismatch (server error $code) on '
+              '"${_truncateSql(sql)}"; re-executing once with a full parse',
+            );
+            continue;
+          }
+          final serverMessage =
+              response.errorMessage ?? 'Query execution failed';
+          throw OracleException(
+            errorCode: code ?? oraProtocolError,
+            // Append a bounded SQL snippet so the message satisfies FR42
+            // ("clear error messages when queries fail") without ever exposing
+            // bind values — only the raw SQL with placeholders is included.
+            message: '$serverMessage [SQL: ${_truncateSql(sql)}]',
+            sql: sql,
+            offset: response.errorOffset,
+          );
+        }
+
+        // Update cache from a successful response.
+        if (eligible && cacheEntry != null) {
+          // Re-executed a cached cursor. A successful re-execute often echoes
+          // cursorId == 0 in the end-of-call message while the original cursor
+          // stays valid — node-oracledb (withData.js processErrorInfo) only
+          // overwrites the cursor id when the server returns a non-zero one.
+          // Mirror that: preserve the cached cursor on cursorId == 0 rather
+          // than invalidating a still-usable cursor; only an actual error
+          // (handled above) invalidates.
+          if (response.cursorId != 0) {
+            cacheEntry.cursorId = response.cursorId;
+          }
+          if (response.columnMetadata.isNotEmpty) {
+            // Server re-DESCRIBEd (e.g. shape changed): adopt fresh metadata so
+            // rows decode against the current shape, never the stale cached one.
+            cacheEntry.columnMetadata = response.columnMetadata;
+          }
+          _cache.release(cacheEntry);
+          cacheEntry = null;
+        } else if (eligible && response.cursorId != 0) {
+          // First execution (or post-retry full parse): store the freshly
+          // parsed cursor.
+          _cache.store(
+            StatementCacheEntry(
+              key: cacheKey,
+              cursorId: response.cursorId,
+              columnMetadata: response.columnMetadata,
+            ),
+          );
+        }
+
+        // A successful DDL can alter the result shape or invalidate
+        // server-side cursors of ANY cached SELECT/DML on this connection.
+        // There is no cheap way to map arbitrary SQL back to the schema objects
+        // it touches, so conservatively drop the whole per-connection cache:
+        // the next execution of each statement reparses and re-DESCRIBEs
+        // against the new shape rather than decoding rows with stale metadata.
+        //
+        // The trigger is "DDL-shaped": not a query, not PL/SQL, and not
+        // cache-eligible. Queries are excluded so a non-cacheable but still
+        // read-only statement — notably `SELECT ... FOR UPDATE` (eligible ==
+        // false) — does not wipe the cache. PL/SQL is excluded so ordinary
+        // procedure calls do not thrash it.
+        //
+        // ORDERING DEPENDENCY: the `!isQuery` guard is load-bearing. A
+        // `SELECT ... FOR UPDATE` satisfies both `!eligible` and `!isPlSql` but
+        // must NOT invalidate the cache. Removing or reordering `!isQuery` here
+        // would silently allow FOR UPDATE to wipe all cached cursors.
+        if (!eligible && !isPlSql && !isQuery) {
+          _cache.invalidateAll();
+        }
+
+        return OracleResult(
+          columnMetadata: response.columnMetadata,
+          rowData: response.rows,
+          rowsAffected: isPlSql ? null : response.rowsAffected,
+          outBinds: _buildOutBinds(
+            response: response,
+            bindNames: bindNames,
+            outBindNameIndex: outBindNameIndex,
+          ),
+          moreRowsAvailable: response.moreRowsToFetch,
+        );
+      } catch (e) {
         if (cacheEntry != null) {
           _cache.invalidate(cacheKey);
-          cacheEntry = null;
         }
-        final serverMessage = response.errorMessage ?? 'Query execution failed';
+        // sendExecute may have thrown before the close-cursor piggyback hit the
+        // wire. Put the drained IDs back so the next call (or close()) retries.
+        if (cursorsToClose.isNotEmpty) {
+          _cache.requeueCursorsToClose(cursorsToClose);
+        }
+        if (e is OracleException) rethrow;
         throw OracleException(
-          errorCode: response.errorCode ?? oraProtocolError,
-          // Append a bounded SQL snippet so the message satisfies FR42
-          // ("clear error messages when queries fail") without ever exposing
-          // bind values — only the raw SQL with placeholders is included.
-          message: '$serverMessage [SQL: ${_truncateSql(sql)}]',
-          sql: sql,
-          offset: response.errorOffset,
+          errorCode: oraProtocolError,
+          message: 'Query execution failed',
+          cause: e,
         );
       }
-
-      // Update cache from a successful response.
-      if (eligible && cacheEntry != null) {
-        // Re-executed a cached cursor. A successful re-execute often echoes
-        // cursorId == 0 in the end-of-call message while the original cursor
-        // stays valid — node-oracledb (withData.js processErrorInfo) only
-        // overwrites the cursor id when the server returns a non-zero one.
-        // Mirror that: preserve the cached cursor on cursorId == 0 rather than
-        // invalidating a still-usable cursor; only an actual error (handled
-        // above) invalidates.
-        if (response.cursorId != 0) {
-          cacheEntry.cursorId = response.cursorId;
-        }
-        if (response.columnMetadata.isNotEmpty) {
-          // Server re-DESCRIBEd (e.g. shape changed): adopt fresh metadata so
-          // rows decode against the current shape, never the stale cached one.
-          cacheEntry.columnMetadata = response.columnMetadata;
-        }
-        _cache.release(cacheEntry);
-        cacheEntry = null;
-      } else if (eligible && response.cursorId != 0) {
-        // First execution of this statement — store the freshly parsed cursor.
-        _cache.store(
-          StatementCacheEntry(
-            key: cacheKey,
-            cursorId: response.cursorId,
-            columnMetadata: response.columnMetadata,
-          ),
-        );
-      }
-
-      // A successful DDL can alter the result shape or invalidate
-      // server-side cursors of ANY cached SELECT/DML on this connection. There
-      // is no cheap way to map arbitrary SQL back to the schema objects it
-      // touches, so conservatively drop the whole per-connection cache: the next
-      // execution of each statement reparses and re-DESCRIBEs against the new
-      // shape rather than decoding rows with stale metadata.
-      //
-      // The trigger is "DDL-shaped": not a query, not PL/SQL, and not
-      // cache-eligible. Queries are excluded so a non-cacheable but still
-      // read-only statement — notably `SELECT ... FOR UPDATE` (eligible ==
-      // false) — does not wipe the cache. PL/SQL is excluded so ordinary
-      // procedure calls do not thrash it.
-      //
-      // ORDERING DEPENDENCY: the `!isQuery` guard is load-bearing. A
-      // `SELECT ... FOR UPDATE` satisfies both `!eligible` and `!isPlSql` but
-      // must NOT invalidate the cache. Removing or reordering `!isQuery` here
-      // would silently allow FOR UPDATE to wipe all cached cursors.
-      if (!eligible && !isPlSql && !isQuery) {
-        _cache.invalidateAll();
-      }
-
-      return OracleResult(
-        columnMetadata: response.columnMetadata,
-        rowData: response.rows,
-        rowsAffected: isPlSql ? null : response.rowsAffected,
-        outBinds: _buildOutBinds(
-          response: response,
-          bindNames: bindNames,
-          outBindNameIndex: outBindNameIndex,
-        ),
-        moreRowsAvailable: response.moreRowsToFetch,
-      );
-    } catch (e) {
-      if (cacheEntry != null) {
-        _cache.invalidate(cacheKey);
-      }
-      // sendExecute may have thrown before the close-cursor piggyback hit the
-      // wire. Put the drained IDs back so the next call (or close()) retries.
-      if (cursorsToClose.isNotEmpty) {
-        _cache.requeueCursorsToClose(cursorsToClose);
-      }
-      if (e is OracleException) rethrow;
-      throw OracleException(
-        errorCode: oraProtocolError,
-        message: 'Query execution failed',
-        cause: e,
-      );
     }
   }
 

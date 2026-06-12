@@ -26,6 +26,11 @@ class _FakeConnection extends OracleConnection {
   /// concurrent `close()` or `acquire()` into that window.
   Completer<void>? rollbackGate;
 
+  /// When set, [close] awaits this gate before completing (after bumping
+  /// [closeCalls]), letting a test suspend a connection's teardown to observe
+  /// whether a `close(drainTimeout:)` drain waits for it.
+  Completer<void>? closeGate;
+
   /// Scripted health: the pool must never recycle a connection reporting
   /// `isHealthy == false`.
   bool healthy = true;
@@ -54,6 +59,8 @@ class _FakeConnection extends OracleConnection {
   @override
   Future<void> close() async {
     closeCalls++;
+    final gate = closeGate;
+    if (gate != null) await gate.future;
     await super.close();
   }
 }
@@ -455,6 +462,52 @@ void main() {
         throwsA(isA<ArgumentError>()),
       );
       expect(factoryCalls, equals(0));
+    });
+
+    test('a prewarm open that lands after close() is destroyed, not parked '
+        '(Release 1.0 closeout)', () async {
+      // Regression for the Story 5.1 deferred prewarm/close race, now reachable
+      // once 5.2/5.3 made a pool reference live during opens. create() hides
+      // the reference until prewarm resolves, so use the racing seam: gate the
+      // second prewarm open, close the pool while it is in flight, then let it
+      // land. Without the post-await _isClosed recheck in _prewarm the
+      // connection is parked into _idle AFTER close() already drained it —
+      // leaking the socket/session.
+      final gates = <Completer<OracleConnection>>[];
+      final (pool, prewarm) = OraclePool.createRacingPrewarmForTesting(
+        connectionFactory: () {
+          final gate = Completer<OracleConnection>();
+          gates.add(gate);
+          return gate.future;
+        },
+        minConnections: 2,
+        maxConnections: 2,
+      );
+
+      // Let prewarm reach the first factory await, satisfy it so it parks
+      // idle, then let prewarm reach the second await.
+      await waitUntil(() => gates.length == 1);
+      final c0 = _FakeConnection();
+      gates[0].complete(c0);
+      await waitUntil(() => gates.length == 2);
+
+      // Close while the second open is in flight: close() drains the parked c0
+      // and marks the pool closed.
+      await pool.close();
+      expect(c0.closeCalls, equals(1),
+          reason: 'the already-parked prewarm connection is drained by close');
+
+      // The second open lands AFTER close().
+      final c1 = _FakeConnection();
+      gates[1].complete(c1);
+      await prewarm;
+
+      expect(c1.closeCalls, equals(1),
+          reason: 'a prewarm connection opened after close() must be '
+              'destroyed, not parked into the drained idle set');
+      expect(pool.connectionsIdle, equals(0),
+          reason: 'no post-close connection may survive in the idle set');
+      expect(pool.connectionsOpen, equals(0));
     });
   });
 
@@ -1791,6 +1844,121 @@ void main() {
       for (final conn in created) {
         expect(conn.closeCalls, equals(1));
       }
+    });
+
+    test('close(drainTimeout:) waits for an in-flight grow open to '
+        'self-dispose (Release 1.0 closeout)', () async {
+      // A grow-on-demand open in flight at close time is never borrowed, but a
+      // caller passing drainTimeout expects every socket settled when close()
+      // returns. The drain must account for _pendingOpens, not just _inUse /
+      // _draining — without the fix close() returns immediately while the
+      // orphan socket teardown is still pending.
+      final gates = <Completer<OracleConnection>>[];
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () {
+          final gate = Completer<OracleConnection>();
+          gates.add(gate);
+          return gate.future;
+        },
+        minConnections: 0,
+        maxConnections: 1,
+      );
+
+      // An acquire grows on demand and parks on the factory gate.
+      final pending = pool.acquire();
+      await waitUntil(() => gates.length == 1);
+
+      // Close with a generous drain timeout: it must NOT resolve while the
+      // in-flight open is still outstanding.
+      final closing = pool.close(drainTimeout: const Duration(seconds: 30));
+      var closeDone = false;
+      unawaited(closing.then((_) => closeDone = true));
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(closeDone, isFalse,
+          reason: 'close(drainTimeout:) must wait for the in-flight open');
+
+      // The open lands after close(): the acquire is rejected pool-closed and
+      // the orphan connection self-disposes, which wakes the drain.
+      final c = _FakeConnection();
+      gates[0].complete(c);
+      await expectLater(
+        pending,
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+      );
+      await closing;
+      expect(closeDone, isTrue,
+          reason: 'the drain resolves once _pendingOpens reaches 0');
+      expect(c.closeCalls, equals(1),
+          reason: 'the orphaned in-flight open is destroyed');
+      expect(pool.connectionsOpen, equals(0));
+    });
+
+    test('close(drainTimeout:) waits for ALL concurrent in-flight opens to '
+        'finish tearing down, not just the first (Release 1.0 closeout)',
+        () async {
+      // Two grow-on-demand opens are in flight at close time. _pendingOpens is
+      // decremented only AFTER each orphan's teardown completes, so the first
+      // teardown finishing must NOT resolve the drain while the second is still
+      // tearing down. (Decrementing before the await would let the first open
+      // drive the count to zero and resolve the drain early.)
+      final gates = <Completer<OracleConnection>>[];
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () {
+          final gate = Completer<OracleConnection>();
+          gates.add(gate);
+          return gate.future;
+        },
+        minConnections: 0,
+        maxConnections: 2,
+      );
+
+      final pendingA = pool.acquire();
+      final pendingB = pool.acquire();
+      await waitUntil(() => gates.length == 2);
+
+      final closing = pool.close(drainTimeout: const Duration(seconds: 30));
+      var closeDone = false;
+      unawaited(closing.then((_) => closeDone = true));
+
+      // Both opens land after close() and suspend inside _destroyBestEffort at
+      // a gated close(). Each acquire throws pool-closed only once its own
+      // teardown completes, so attach the rejection expectations WITHOUT
+      // awaiting them yet (awaiting here would deadlock against the gates).
+      final cA = _FakeConnection()..closeGate = Completer<void>();
+      final cB = _FakeConnection()..closeGate = Completer<void>();
+      final rejA = expectLater(
+        pendingA,
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+      );
+      final rejB = expectLater(
+        pendingB,
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+      );
+      gates[0].complete(cA);
+      gates[1].complete(cB);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(closeDone, isFalse,
+          reason: 'both teardowns are still gated');
+
+      // Finish only the FIRST teardown: the drain must still be pending,
+      // because _pendingOpens is decremented after the teardown (not before).
+      cA.closeGate!.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(closeDone, isFalse,
+          reason: 'the drain must wait for the second teardown too');
+
+      // Finish the second teardown: now the drain resolves.
+      cB.closeGate!.complete();
+      await closing;
+      expect(closeDone, isTrue);
+      await rejA;
+      await rejB;
+      expect(cA.closeCalls, equals(1));
+      expect(cB.closeCalls, equals(1));
+      expect(pool.connectionsOpen, equals(0));
     });
   });
 

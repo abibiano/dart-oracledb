@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.0.0
+
+First stable release. Connection pooling — the milestone the 0.9.0 notes named
+as the 1.0 gate — is complete, and the public API now follows semantic
+versioning (breaking changes bump the major version). The full driver is
+validated against Oracle 23ai and Oracle 21c.
+
+### Features
+
+- **Connection pooling** (`OraclePool`): `create()` builds a pool of prewarmed,
+  authenticated sessions (`minConnections`/`maxConnections`); `acquire()` /
+  `release()` borrow and recycle sessions, rolling back uncommitted work on
+  release; `withConnection()` wraps the acquire/release pair leak-safely;
+  `acquireTimeout` bounds queued waits when the pool is exhausted; `idleTimeout`
+  shrinks surplus idle sessions back toward `minConnections`;
+  `close(drainTimeout: ...)` drains borrowed sessions on shutdown; and session
+  tagging (`acquire(tag: ...)` with an optional `sessionCallback`) reuses
+  session state such as NLS settings across borrowers.
+
+### Bug Fixes
+
+- **Pooled sessions recover from cross-session DDL transparently**: a cached
+  `SELECT` cursor whose result shape changed under it (e.g. a column dropped by
+  another session) reported `ORA-01007` / `ORA-00932` to the caller on
+  re-execute. The driver now mirrors node-oracledb — for queries, on those two
+  describe-mismatch codes, it clears the dead cursor and re-executes once as a
+  full parse — so the caller sees correct rows instead of a spurious error.
+  Bounded to a single retry; integrity/constraint violations are never retried.
+- **No connection leak when a pool is closed mid-prewarm**: `OraclePool` now
+  rechecks the closed flag after each connection open during prewarm and
+  destroys a connection opened after `close()` rather than parking it into the
+  drained idle set.
+- **`close(drainTimeout:)` waits for in-flight opens**: the close drain now
+  accounts for grow-on-demand / waiter-provision connection opens still in
+  flight, so a positive `drainTimeout` resolves only once those have landed and
+  self-disposed rather than while a socket teardown is still pending.
+
 ## 0.9.3
 
 Large-object and binary type support, JSON, plus protocol hardening.
