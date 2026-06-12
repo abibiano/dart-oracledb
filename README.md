@@ -400,6 +400,16 @@ Client, no LOB read round trips:
   (the binary wire encoding) and bounds the returned document — a larger
   return fails loudly instead of truncating.
 
+**Creating `JSON` tables — tablespace requirement.** A native `JSON` column
+requires a tablespace that uses **Automatic Segment Space Management (ASSM)**.
+The default `USERS` tablespace qualifies; the `SYSTEM` tablespace does not, so
+`CREATE TABLE ... (doc JSON)` run as a user whose default tablespace is
+`SYSTEM` (e.g. the `system` account) fails with **`ORA-43853: JSON type
+columns are not allowed in this tablespace`** on every server version. Add an
+explicit `TABLESPACE USERS` (or any ASSM tablespace) to the `CREATE TABLE`, or
+grant the schema a default ASSM tablespace. This is an environment/DDL
+requirement, not a driver limitation.
+
 **Native vs. textual JSON.** This support covers the dedicated `JSON` column
 type (OSON-backed, 21c+). JSON *text* stored in `VARCHAR2`/`CLOB`/`BLOB`
 columns — the pre-21c pattern with `IS JSON` constraints — keeps its ordinary
