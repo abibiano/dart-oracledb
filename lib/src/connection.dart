@@ -44,8 +44,8 @@ class OracleConnection {
     required this._connectionInfo,
     required int statementCacheSize,
     this._preserveTimestampTimeZone = false,
-  })  : _cache = StatementCache(statementCacheSize),
-        _isClosed = false;
+  }) : _cache = StatementCache(statementCacheSize),
+       _isClosed = false;
 
   /// Test-only constructor that injects a [Transport] directly, bypassing the
   /// network handshake performed by [connect].
@@ -60,10 +60,11 @@ class OracleConnection {
     ConnectionInfo? connectionInfo,
     int statementCacheSize = 30,
     this._preserveTimestampTimeZone = false,
-  })  : _connectionInfo = connectionInfo ??
-            const ConnectionInfo(host: 'test', port: 0, serviceName: 'test'),
-        _cache = StatementCache(statementCacheSize),
-        _isClosed = false;
+  }) : _connectionInfo =
+           connectionInfo ??
+           const ConnectionInfo(host: 'test', port: 0, serviceName: 'test'),
+       _cache = StatementCache(statementCacheSize),
+       _isClosed = false;
 
   final Transport _transport;
   final ConnectionInfo _connectionInfo;
@@ -140,6 +141,16 @@ class OracleConnection {
   /// a live connection. Not part of the public API.
   @visibleForTesting
   int get debugSequence => _transport.debugSequence;
+
+  /// Whether an [execute] call is currently in flight on this connection.
+  ///
+  /// Package-internal quiescence seam for the connection pool: `release()`
+  /// must never issue a rollback while an execute is still using the TTC
+  /// stream, so it checks this flag and discards busy connections instead.
+  /// Not part of the public API — production callers outside this package
+  /// must not depend on it.
+  @internal
+  bool get isExecuting => _executeInProgress;
 
   /// Whether the connection is currently open and usable.
   ///
@@ -236,11 +247,17 @@ class OracleConnection {
   static void _checkStatementCacheSize(int statementCacheSize) {
     if (statementCacheSize < 0) {
       throw ArgumentError.value(
-          statementCacheSize, 'statementCacheSize', 'must be >= 0');
+        statementCacheSize,
+        'statementCacheSize',
+        'must be >= 0',
+      );
     }
     if (statementCacheSize > maxStatementCacheSize) {
-      throw ArgumentError.value(statementCacheSize, 'statementCacheSize',
-          'must be <= $maxStatementCacheSize (the maximum statement cache size)');
+      throw ArgumentError.value(
+        statementCacheSize,
+        'statementCacheSize',
+        'must be <= $maxStatementCacheSize (the maximum statement cache size)',
+      );
     }
   }
 
@@ -282,7 +299,8 @@ class OracleConnection {
     if (!_transport.isConnected) {
       throw const OracleException(
         errorCode: oraConnectionClosed,
-        message: 'Connection lost: the underlying transport is no longer '
+        message:
+            'Connection lost: the underlying transport is no longer '
             'connected (the server may have closed the socket, or a previous '
             'operation timed out and poisoned the connection).',
       );
@@ -360,7 +378,8 @@ class OracleConnection {
     if (_executeInProgress) {
       throw const OracleException(
         errorCode: oraProtocolError,
-        message: 'Concurrent execute() on a single OracleConnection is not '
+        message:
+            'Concurrent execute() on a single OracleConnection is not '
             'supported: another statement is still in progress. Await the '
             'previous execute() before starting another, or use a separate '
             'connection for concurrent work.',
@@ -376,7 +395,8 @@ class OracleConnection {
 
   Future<OracleResult> _executeGuarded(String sql, Object? bindValues) async {
     _log.fine(
-        'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}');
+      'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
+    );
 
     // Validate and prepare bind values
     List<dynamic>? bindList;
@@ -414,7 +434,8 @@ class OracleConnection {
         if (placeholderCount != bindValues.length) {
           throw OracleException(
             errorCode: oraBindMismatch,
-            message: 'Bind parameter count mismatch: SQL has $placeholderCount '
+            message:
+                'Bind parameter count mismatch: SQL has $placeholderCount '
                 'placeholders but ${bindValues.length} values provided',
           );
         }
@@ -422,7 +443,8 @@ class OracleConnection {
       } else {
         throw OracleException(
           errorCode: oraBindTypeError,
-          message: 'Bind values must be Map<String, dynamic> for named binds '
+          message:
+              'Bind values must be Map<String, dynamic> for named binds '
               'or List for positional binds. Got: ${bindValues.runtimeType}',
         );
       }
@@ -456,16 +478,17 @@ class OracleConnection {
             maxSize: raw.maxSize,
             dir: raw.direction,
           );
-          bindMetadata.add(BindMetadata(
-            oraType: raw.oracleTypeCode,
-            maxSize: raw.maxSize,
-            dir: raw.direction,
-          ));
+          bindMetadata.add(
+            BindMetadata(
+              oraType: raw.oracleTypeCode,
+              maxSize: raw.maxSize,
+              dir: raw.direction,
+            ),
+          );
         } else {
-          bindMetadata.add(BindMetadata(
-            oraType: _inferOraType(raw),
-            dir: BindDir.input,
-          ));
+          bindMetadata.add(
+            BindMetadata(oraType: _inferOraType(raw), dir: BindDir.input),
+          );
         }
       }
     }
@@ -493,8 +516,10 @@ class OracleConnection {
         // disables row prefetch); this driver's equivalent safeguard is to
         // close the old cursor (via the close-cursor piggyback on this same
         // execute) and re-parse, which re-establishes the prefetch shape.
-        final hasLobColumn = cacheEntry.columnMetadata.any((c) =>
-            c.oracleType == oc.oraTypeClob || c.oracleType == oc.oraTypeBlob);
+        final hasLobColumn = cacheEntry.columnMetadata.any(
+          (c) =>
+              c.oracleType == oc.oraTypeClob || c.oracleType == oc.oraTypeBlob,
+        );
         if (hasLobColumn && cacheEntry.cursorId != 0) {
           _cache.requeueCursorsToClose([cacheEntry.cursorId]);
           cacheEntry.cursorId = 0;
@@ -574,11 +599,13 @@ class OracleConnection {
         cacheEntry = null;
       } else if (eligible && response.cursorId != 0) {
         // First execution of this statement — store the freshly parsed cursor.
-        _cache.store(StatementCacheEntry(
-          key: cacheKey,
-          cursorId: response.cursorId,
-          columnMetadata: response.columnMetadata,
-        ));
+        _cache.store(
+          StatementCacheEntry(
+            key: cacheKey,
+            cursorId: response.cursorId,
+            columnMetadata: response.columnMetadata,
+          ),
+        );
       }
 
       // A successful DDL can alter the result shape or invalidate
@@ -690,7 +717,10 @@ class OracleConnection {
   Future<void> commit({Duration timeout = const Duration(seconds: 30)}) async {
     if (timeout <= Duration.zero) {
       throw ArgumentError.value(
-          timeout, 'timeout', 'must be a positive Duration');
+        timeout,
+        'timeout',
+        'must be a positive Duration',
+      );
     }
     _ensureOpen();
 
@@ -732,11 +762,15 @@ class OracleConnection {
   /// Throws [OracleException] if:
   /// - Connection is closed (ORA-03113)
   /// - Rollback operation fails or times out
-  Future<void> rollback(
-      {Duration timeout = const Duration(seconds: 30)}) async {
+  Future<void> rollback({
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
     if (timeout <= Duration.zero) {
       throw ArgumentError.value(
-          timeout, 'timeout', 'must be a positive Duration');
+        timeout,
+        'timeout',
+        'must be a positive Duration',
+      );
     }
     _ensureOpen();
 
@@ -891,13 +925,15 @@ class OracleConnection {
   }) async {
     _checkStatementCacheSize(statementCacheSize);
     _log.info(
-        'Connecting to: $connectionString${tls?.enabled == true ? ' (TLS)' : ''}');
+      'Connecting to: $connectionString${tls?.enabled == true ? ' (TLS)' : ''}',
+    );
 
     // Parse connection string
     final connectionInfo = parseEZConnect(connectionString);
     _log.fine(
-        'Parsed: host=${connectionInfo.host}, port=${connectionInfo.port}, '
-        'service=${connectionInfo.serviceName}');
+      'Parsed: host=${connectionInfo.host}, port=${connectionInfo.port}, '
+      'service=${connectionInfo.serviceName}',
+    );
 
     // Create and connect transport (TLS upgrade happens inside if enabled)
     final transport = Transport();
@@ -921,8 +957,10 @@ class OracleConnection {
 
     // Perform TNS connect handshake
     try {
-      final connectData =
-          _buildConnectData(connectionInfo, useTls: tls?.enabled ?? false);
+      final connectData = _buildConnectData(
+        connectionInfo,
+        useTls: tls?.enabled ?? false,
+      );
       await transport.sendConnectReceiveAccept(connectData);
     } catch (e) {
       await transport.disconnect();
@@ -1011,12 +1049,15 @@ class OracleConnection {
   /// If [useTls] is true, uses TCPS protocol indicator; otherwise uses TCP.
   /// Returns the complete CONNECT packet body including version info,
   /// SDU/TDU sizes, and the connect descriptor at the proper offset.
-  static Uint8List _buildConnectData(ConnectionInfo info,
-      {bool useTls = false}) {
+  static Uint8List _buildConnectData(
+    ConnectionInfo info, {
+    bool useTls = false,
+  }) {
     // Build TNS connect descriptor string
     // Format: (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP|TCPS)(HOST=host)(PORT=port))(CONNECT_DATA=(SERVICE_NAME=service)))
     final protocol = useTls ? 'TCPS' : 'TCP';
-    final tnsDescriptor = '(DESCRIPTION='
+    final tnsDescriptor =
+        '(DESCRIPTION='
         '(ADDRESS=(PROTOCOL=$protocol)(HOST=${info.host})(PORT=${info.port}))'
         '(CONNECT_DATA=(SERVICE_NAME=${info.serviceName})))';
     final descriptorBytes = Uint8List.fromList(utf8.encode(tnsDescriptor));

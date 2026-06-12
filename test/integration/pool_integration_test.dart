@@ -1,4 +1,4 @@
-/// Integration tests for Story 5.1 — `OraclePool.create()` against a live
+/// Integration tests for Stories 5.1 and 5.2 — `OraclePool` against a live
 /// Oracle server.
 ///
 /// Must pass against both supported environments:
@@ -7,8 +7,10 @@
 ///   RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test/integration/pool_integration_test.dart --no-color
 ///
 /// Scope: pool creation, prewarm counts, pool-wide option threading, failure
-/// cleanup, and close() of idle sessions. Borrower semantics (acquire/release)
-/// are Story 5.2 and are NOT exercised here.
+/// cleanup, close() of idle sessions (Story 5.1), and acquire/release
+/// borrower semantics — idle reuse, rollback-on-release, on-demand growth,
+/// and `withConnection` cleanup (Story 5.2). Acquire timeouts and idle
+/// shrinking are Story 5.3 and are NOT exercised here.
 @Tags(['integration'])
 library;
 
@@ -141,5 +143,148 @@ void main() {
       expect(pool.isClosed, isTrue);
       expect(pool.connectionsOpen, equals(0));
     });
+  });
+
+  group('OraclePool acquire/release against live Oracle', () {
+    test('a prewarmed connection executes, releases, and is reacquired as '
+        'the same healthy physical session', () async {
+      final pool = await createTestPool(minConnections: 1, maxConnections: 1);
+      try {
+        final conn = await pool.acquire();
+        expect(pool.connectionsIdle, equals(0));
+        expect(pool.connectionsInUse, equals(1));
+        expect(pool.connectionsOpen, equals(1));
+
+        final result = await conn.execute('SELECT 1 FROM DUAL');
+        expect(result.rows.single[0], equals(1));
+
+        await pool.release(conn);
+        expect(pool.connectionsIdle, equals(1));
+        expect(pool.connectionsInUse, equals(0));
+
+        // maxConnections: 1 forces reuse: the second acquire must hand back
+        // the very same physical session, still authenticated and usable.
+        final again = await pool.acquire();
+        expect(identical(again, conn), isTrue);
+        final secondResult = await again.execute('SELECT 2 FROM DUAL');
+        expect(secondResult.rows.single[0], equals(2));
+        await pool.release(again);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('uncommitted ad-hoc DML is rolled back on release', () async {
+      final table = uniqueTableName('pool52');
+      final pool = await createTestPool(minConnections: 1, maxConnections: 1);
+      try {
+        final conn = await pool.acquire();
+        // CREATE TABLE is DDL and auto-commits; the table survives release.
+        await conn.execute('CREATE TABLE $table (id NUMBER PRIMARY KEY)');
+        final id = nextTestId();
+        await conn.execute('INSERT INTO $table (id) VALUES (:1)', [id]);
+
+        // The uncommitted row is visible inside the borrowing session...
+        final before = await conn.execute(
+          'SELECT COUNT(*) FROM $table WHERE id = :1',
+          [id],
+        );
+        expect(before.rows.single[0], equals(1));
+
+        await pool.release(conn);
+
+        // ...but release must roll it back, so the recycled session no
+        // longer sees it.
+        final again = await pool.acquire();
+        final after = await again.execute(
+          'SELECT COUNT(*) FROM $table WHERE id = :1',
+          [id],
+        );
+        expect(
+          after.rows.single[0],
+          equals(0),
+          reason:
+              'release() must roll back uncommitted ad-hoc DML before '
+              'recycling the session',
+        );
+        await pool.release(again);
+      } finally {
+        await pool.close();
+        // The pool is closed; drop the table over a fresh connection.
+        await cleanUpConnection(
+          await connectForTest(),
+          dropStatements: ['DROP TABLE $table'],
+        );
+      }
+    });
+
+    test('withConnection releases after a callback failure and the pool '
+        'keeps serving healthy sessions', () async {
+      final pool = await createTestPool(minConnections: 1, maxConnections: 1);
+      try {
+        await expectLater(
+          pool.withConnection<void>((conn) async {
+            await conn.execute('SELECT 1 FROM DUAL');
+            throw StateError('callback failure');
+          }),
+          throwsA(isA<StateError>()),
+        );
+        expect(
+          pool.connectionsIdle,
+          equals(1),
+          reason:
+              'the connection must be back in the pool after the '
+              'callback error',
+        );
+        expect(pool.connectionsInUse, equals(0));
+
+        // The recycled session still serves queries.
+        final result = await pool.withConnection(
+          (conn) => conn.execute('SELECT 3 FROM DUAL'),
+        );
+        expect(result.rows.single[0], equals(3));
+        expect(pool.connectionsIdle, equals(1));
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test(
+      'grows on demand up to maxConnections with pool-wide options',
+      () async {
+        final pool = await createTestPool(
+          minConnections: 0,
+          maxConnections: 2,
+          statementCacheSize: 9,
+        );
+        try {
+          final first = await pool.acquire();
+          final second = await pool.acquire();
+          expect(identical(first, second), isFalse);
+          expect(pool.connectionsOpen, equals(2));
+          expect(pool.connectionsInUse, equals(2));
+          expect(pool.connectionsIdle, equals(0));
+
+          // Both grown sessions carry the pool-wide options from create time.
+          expect(first.statementCacheSize, equals(9));
+          expect(second.statementCacheSize, equals(9));
+
+          // Two separate physical sessions can execute concurrently.
+          final results = await Future.wait([
+            first.execute('SELECT 1 FROM DUAL'),
+            second.execute('SELECT 2 FROM DUAL'),
+          ]);
+          expect(results[0].rows.single[0], equals(1));
+          expect(results[1].rows.single[0], equals(2));
+
+          await pool.release(first);
+          await pool.release(second);
+          expect(pool.connectionsIdle, equals(2));
+          expect(pool.connectionsInUse, equals(0));
+        } finally {
+          await pool.close();
+        }
+      },
+    );
   });
 }

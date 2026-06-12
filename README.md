@@ -6,7 +6,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is in progress: `OraclePool.create()` builds a pool of prewarmed authenticated sessions and `close()` releases them, but borrower semantics (`acquire`/`release`) are not yet available. Depend on `oracledb: ^0.9.3`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once connection pooling lands.
+> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is in progress: `OraclePool.create()` builds a pool of prewarmed authenticated sessions, `acquire()`/`release()` borrow and recycle them (with automatic rollback of uncommitted work on release), and `withConnection()` wraps the pair leak-safely; acquire timeouts, idle cleanup, and session tagging are not yet available. Depend on `oracledb: ^0.9.3`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once connection pooling lands.
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -118,6 +118,40 @@ await OracleConnection.withConnection(
   },
 );
 ```
+
+### Connection Pooling
+
+`OraclePool` keeps a bounded set of authenticated sessions and recycles them across borrowers. Acquire and release always belong in `try`/`finally`:
+
+```dart
+final pool = await OraclePool.create(
+  'localhost:1521/FREEPDB1',
+  user: 'testuser',
+  password: 'testpassword',
+  minConnections: 2,  // opened and authenticated up front
+  maxConnections: 10, // hard upper bound; acquire() waits FIFO when exhausted
+);
+
+try {
+  final conn = await pool.acquire();
+  try {
+    final result = await conn.execute('SELECT SYSDATE FROM dual');
+    print(result.rows.first[0]);
+  } finally {
+    await pool.release(conn); // rolls back uncommitted work, recycles the session
+  }
+
+  // Or leak-safe by construction:
+  final result = await pool.withConnection(
+    (conn) => conn.execute('SELECT SYSDATE FROM dual'),
+  );
+  print(result.rows.first[0]);
+} finally {
+  await pool.close();
+}
+```
+
+`release()` rolls back any uncommitted transaction before the session is handed to the next borrower, and quietly destroys sessions that are no longer healthy. Acquire timeouts, idle cleanup, and session tagging are not yet implemented (see roadmap).
 
 ### Queries
 
@@ -432,7 +466,7 @@ This package implements a subset of the full Oracle driver feature set. Below is
 | Query execution & transactions                  | ✅ Done        |
 | PL/SQL execution (stored procedures, functions) | ✅ Done        |
 | Advanced data types (CLOB, BLOB, RAW, JSON)     | ✅ Done        |
-| Connection pooling                              | 🚧 In progress — pool creation (`OraclePool.create`/`close`) done; acquire/release pending |
+| Connection pooling                              | 🚧 In progress — pool creation and acquire/release/`withConnection` done; acquire timeouts, idle cleanup, and session tagging pending |
 
 ### Planned After 1.0
 
@@ -478,7 +512,7 @@ RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test
 - **Statement cache and external DDL** — top-level DDL executed on the same connection clears the statement cache, but DDL issued from another session (or inside a PL/SQL block) can leave stale cached SELECT metadata. This matches node-oracledb thin-mode behavior.
 - **CLOB/BLOB cursor re-parse** — result cursors for queries selecting CLOB or BLOB columns are always re-parsed, never blind-reused from the statement cache (fresh defines are required to keep the LOB-prefetch metadata); RAW queries keep normal cursor reuse.
 - **NUMBER beyond 2⁵³** — integer-valued NUMBERs larger than 2⁵³ decode to `double` and lose precision (Dart `double` limit; matches node-oracledb).
-- **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use separate connections for concurrent work until connection pooling lands (see roadmap).
+- **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work.
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
 - **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) are rejected on decode; offset-based zones (e.g. `+02:00`) are supported. Region-name compatibility is planned as a post-1.0 temporal enhancement.
 - **Very large result sets** — a single `execute()` is bounded by a safety cap of 1,000 fetch round-trips (about 50,000 rows at the default fetch size); if the cap is hit, a warning is logged, the rows fetched so far are returned, and `result.moreRowsAvailable` is `true` so the truncation is detectable. The same flag is also set (with a logged warning) in the rarer case where the server reports more rows pending but the driver has no usable cursor id to continue fetching — in either case `true` means the rows are an incomplete prefix of the full result set.

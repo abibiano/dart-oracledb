@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
 
 import 'connection.dart';
+import 'errors.dart';
 import 'statement_cache.dart';
 import 'transport/tls.dart';
 
@@ -19,7 +21,9 @@ typedef PoolConnectionFactory = Future<OracleConnection> Function();
 /// Use the static [create] factory to build a pool. Creation validates the
 /// configuration, then opens and authenticates exactly [minConnections]
 /// physical connections up front so the first borrowers skip the
-/// connect/authenticate cost:
+/// connect/authenticate cost. Borrow sessions with [acquire]/[release]
+/// (always pairing them in `try`/`finally`), or let [withConnection] handle
+/// the release for you:
 ///
 /// ```dart
 /// final pool = await OraclePool.create(
@@ -31,7 +35,17 @@ typedef PoolConnectionFactory = Future<OracleConnection> Function();
 /// );
 ///
 /// try {
-///   // Story 5.2 adds acquire()/release() borrower semantics.
+///   final conn = await pool.acquire();
+///   try {
+///     final result = await conn.execute('SELECT 1 FROM DUAL');
+///   } finally {
+///     await pool.release(conn);
+///   }
+///
+///   // Or equivalently, leak-safe by construction:
+///   final rows = await pool.withConnection(
+///     (conn) => conn.execute('SELECT 1 FROM DUAL'),
+///   );
 /// } finally {
 ///   await pool.close();
 /// }
@@ -42,10 +56,10 @@ typedef PoolConnectionFactory = Future<OracleConnection> Function();
 /// they are fixed at create time and applied to every physical connection
 /// the pool ever opens. They cannot vary per acquire.
 ///
-/// **Scope note (Story 5.1):** this class currently covers pool creation,
-/// state inspection, and [close] of idle sessions only. Borrower semantics
-/// (`acquire`/`release`), acquire timeouts, idle shrinking, and session
-/// tagging arrive in Stories 5.2–5.4.
+/// **Scope note (Story 5.2):** this class covers pool creation, state
+/// inspection, acquire/release borrower semantics, [withConnection], and
+/// [close]. Acquire timeouts, idle shrinking, full close-time drain of
+/// checked-out sessions, and session tagging arrive in Stories 5.3–5.4.
 class OraclePool {
   OraclePool._(
     this._connectionFactory, {
@@ -60,17 +74,35 @@ class OraclePool {
   final int maxConnections;
 
   /// Opens one authenticated physical connection with the pool-wide options.
-  /// Stored so later stories can grow the pool on demand up to
-  /// [maxConnections] using the exact same configuration.
+  /// Stored so [acquire] can grow the pool on demand up to [maxConnections]
+  /// using the exact same configuration as prewarm.
   final PoolConnectionFactory _connectionFactory;
 
   /// Idle (open, authenticated, not borrowed) physical connections.
   final List<OracleConnection> _idle = <OracleConnection>[];
 
-  /// Connections currently borrowed by callers. Always empty in Story 5.1 —
-  /// it exists so the count getters report a stable, accurate shape before
-  /// acquire/release land in Story 5.2.
-  final List<OracleConnection> _inUse = <OracleConnection>[];
+  /// Connections currently borrowed by callers. Identity-keyed: a connection
+  /// is a pool member only while it sits in exactly one of [_idle]/[_inUse].
+  final Set<OracleConnection> _inUse = <OracleConnection>{};
+
+  /// Acquirers waiting FIFO for a connection while the pool is exhausted.
+  /// Waiters are always removed from the queue before being completed, so a
+  /// completer in this queue is never completed twice.
+  final Queue<Completer<OracleConnection>> _waiters =
+      Queue<Completer<OracleConnection>>();
+
+  /// Physical connection opens currently awaiting the factory. Counted
+  /// against [maxConnections] so concurrent acquires cannot over-open, but
+  /// deliberately excluded from the public open/idle/in-use counts until the
+  /// connection actually exists.
+  int _pendingOpens = 0;
+
+  /// Physical connections removed from [_inUse] but still being cleaned up by
+  /// [release] (their rollback/health-check is in flight). The session is still
+  /// open, so its slot is reserved against [maxConnections] exactly like
+  /// [_pendingOpens]; also excluded from the public open/idle/in-use counts so
+  /// `connectionsOpen == connectionsIdle + connectionsInUse` always holds.
+  int _draining = 0;
 
   bool _isClosed = false;
 
@@ -109,8 +141,8 @@ class OraclePool {
   ///
   /// [timeout], [tls], [statementCacheSize], and [preserveTimestampTimeZone]
   /// are pool-wide options applied to every physical connection the pool
-  /// creates — now during prewarm and later when the pool grows. See
-  /// [OracleConnection.connect] for their individual semantics.
+  /// creates — during prewarm and when [acquire] grows the pool on demand.
+  /// See [OracleConnection.connect] for their individual semantics.
   ///
   /// All configuration is validated before any network work:
   ///
@@ -262,21 +294,308 @@ class OraclePool {
     }
   }
 
-  /// Closes the pool and destroys its idle physical connections.
+  /// The error every closed-pool rejection uses: future acquires, waiters
+  /// pending at close time, and grow-on-demand opens that complete after
+  /// close. ORA-03113 matches the closed-connection lifecycle contract used
+  /// elsewhere in this package.
+  static OracleException _poolClosedException() => const OracleException(
+    errorCode: oraConnectionClosed,
+    message: 'Connection pool is closed',
+  );
+
+  /// Borrows an authenticated connection from the pool.
+  ///
+  /// Resolution order:
+  ///
+  /// 1. **Idle reuse** — if an idle connection exists, it is returned
+  ///    immediately (most recently released first, keeping its statement
+  ///    cache warm).
+  /// 2. **Grow on demand** — otherwise, if fewer than [maxConnections]
+  ///    physical connections exist (counting opens already in flight), one
+  ///    new connection is opened with the pool-wide options captured at
+  ///    [create] time.
+  /// 3. **Wait** — otherwise the call waits in FIFO order until [release]
+  ///    hands it a healthy connection or the pool is closed. There is no
+  ///    wait timeout yet (Story 5.3 adds one).
+  ///
+  /// Always pair with [release] in `try`/`finally` — or use [withConnection],
+  /// which does so for you:
+  ///
+  /// ```dart
+  /// final conn = await pool.acquire();
+  /// try {
+  ///   await conn.execute('SELECT 1 FROM DUAL');
+  /// } finally {
+  ///   await pool.release(conn);
+  /// }
+  /// ```
+  ///
+  /// Throws [OracleException] with code ORA-03113 if the pool is closed (or
+  /// closes while this call is waiting or opening a new connection), and
+  /// rethrows the [OracleConnection.connect] failure unchanged if a
+  /// grow-on-demand open fails.
+  Future<OracleConnection> acquire() async {
+    if (_isClosed) throw _poolClosedException();
+
+    // 1. Idle reuse. A connection can die while parked (server-side idle
+    // timeout, network drop): hand out only sessions that still look alive,
+    // destroying stale ones as they surface.
+    while (_idle.isNotEmpty) {
+      final conn = _idle.removeLast();
+      if (conn.isHealthy) {
+        _inUse.add(conn);
+        return conn;
+      }
+      _log.fine('Discarding unhealthy idle connection during acquire');
+      await _destroyBestEffort(conn);
+    }
+
+    // 2. Grow on demand. _pendingOpens and _draining are bumped synchronously
+    // before their awaits, so concurrent acquires (and in-flight releases) each
+    // reserve capacity and can never collectively open past maxConnections.
+    if (connectionsOpen + _pendingOpens + _draining < maxConnections) {
+      _pendingOpens++;
+      final OracleConnection conn;
+      try {
+        conn = await _connectionFactory();
+      } catch (_) {
+        _pendingOpens--;
+        // The failed open released capacity; don't strand queued waiters
+        // behind capacity nobody will use.
+        unawaited(_provisionForWaiters());
+        rethrow;
+      }
+      _pendingOpens--;
+      if (_isClosed) {
+        // The pool closed while the open was in flight; close() could not
+        // see this connection, so destroy it here instead of leaking it.
+        await _destroyBestEffort(conn);
+        throw _poolClosedException();
+      }
+      _inUse.add(conn);
+      return conn;
+    }
+
+    // 3. Exhausted: wait FIFO. release() transfers a connection directly to
+    // the oldest waiter (already marked in-use), and close() fails every
+    // pending waiter with a pool-closed error.
+    final waiter = Completer<OracleConnection>();
+    _waiters.add(waiter);
+    return waiter.future;
+  }
+
+  /// Returns a borrowed connection to the pool.
+  ///
+  /// The connection must have been handed out by [acquire] (or
+  /// [withConnection]) on this pool and not yet released; anything else —
+  /// a foreign connection, an idle pool member, a double release — throws
+  /// [ArgumentError] without touching pool state.
+  ///
+  /// An ordinary release rolls back any uncommitted work (so the next
+  /// borrower never sees a stale transaction), then either hands the
+  /// connection to the oldest waiting [acquire] or parks it idle, statement
+  /// cache intact. Unsafe sessions are never recycled:
+  ///
+  /// - released while still executing → destroyed, throws [OracleException];
+  /// - rollback fails → destroyed, the rollback error propagates;
+  /// - closed or transport-unhealthy → destroyed silently (the server rolls
+  ///   back a dead session itself, and the borrower already saw the error
+  ///   that killed it — surfacing another one here would mask it in
+  ///   `finally` blocks);
+  /// - pool already closed → destroyed silently (close-time drain of
+  ///   checked-out sessions is Story 5.3).
+  Future<void> release(OracleConnection connection) async {
+    if (!_inUse.remove(connection)) {
+      throw ArgumentError.value(
+        connection,
+        'connection',
+        'is not currently borrowed from this pool '
+            '(foreign connection, double release, or never acquired)',
+      );
+    }
+
+    // The session is no longer in [_inUse] but is still physically open while
+    // we roll it back and health-check it. Reserve its slot so a concurrent
+    // acquire() cannot observe the (awaited) gap as free capacity and grow the
+    // pool past maxConnections. Decremented at every disposition below.
+    _draining++;
+
+    if (connection.isExecuting) {
+      // Rollback (or any TTC traffic) on a busy connection would interleave
+      // with the in-flight execute and corrupt the stream. Destroy it and
+      // fail loudly: this is a caller bug, not a recoverable state.
+      _draining--;
+      await _destroyBestEffort(connection);
+      unawaited(_provisionForWaiters());
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'Connection released while an execute() is still in '
+            'progress; the connection has been removed from the pool',
+      );
+    }
+
+    if (_isClosed) {
+      _draining--;
+      _log.fine('Pool closed before release; destroying connection');
+      await _destroyBestEffort(connection);
+      return;
+    }
+
+    if (!connection.isHealthy) {
+      // Dead or borrower-closed session: nothing to roll back over a dead
+      // transport (the server rolls back on session termination), so discard
+      // quietly rather than throwing from the caller's finally block.
+      _draining--;
+      _log.fine('Discarding unhealthy connection on release');
+      await _destroyBestEffort(connection);
+      unawaited(_provisionForWaiters());
+      return;
+    }
+
+    try {
+      await connection.rollback();
+    } catch (_) {
+      // Server-side transaction state is now unknown; this session must
+      // never be reused. Propagate the rollback failure unchanged.
+      _draining--;
+      await _destroyBestEffort(connection);
+      unawaited(_provisionForWaiters());
+      rethrow;
+    }
+
+    if (_isClosed) {
+      // close() can complete while the rollback above is in flight; the
+      // pre-rollback guard does not cover that window. Re-check (mirroring the
+      // grow path in acquire) and destroy rather than parking the session into
+      // an already-drained pool — a post-close release must never go idle.
+      _draining--;
+      _log.fine('Pool closed during release; destroying connection');
+      await _destroyBestEffort(connection);
+      return;
+    }
+
+    if (!connection.isHealthy) {
+      _draining--;
+      _log.fine('Connection unhealthy after rollback; discarding');
+      await _destroyBestEffort(connection);
+      unawaited(_provisionForWaiters());
+      return;
+    }
+
+    if (_waiters.isNotEmpty) {
+      // Direct handoff: the connection stays in-use and goes to the oldest
+      // waiter, so a later acquire() cannot steal it out of _idle.
+      _inUse.add(connection);
+      _draining--;
+      _waiters.removeFirst().complete(connection);
+      return;
+    }
+    _idle.add(connection);
+    _draining--;
+  }
+
+  /// Runs [callback] with a pooled connection, releasing it afterwards.
+  ///
+  /// Acquires a connection, invokes [callback] with it, and releases the
+  /// connection in all cases — the borrower can never leak it:
+  ///
+  /// ```dart
+  /// final rows = await pool.withConnection((conn) async {
+  ///   final result = await conn.execute('SELECT 1 FROM DUAL');
+  ///   return result.rows;
+  /// });
+  /// ```
+  ///
+  /// Error contract: a [callback] error propagates to the caller; a release
+  /// failure after a successful callback propagates; a release failure after
+  /// a callback error is logged and the original callback error is rethrown.
+  Future<T> withConnection<T>(
+    Future<T> Function(OracleConnection connection) callback,
+  ) async {
+    final conn = await acquire();
+    final T result;
+    try {
+      result = await callback(conn);
+    } catch (_) {
+      try {
+        await release(conn);
+      } catch (releaseError, releaseStack) {
+        _log.warning(
+          'release() failed after callback error; preserving the original '
+          'callback error',
+          releaseError,
+          releaseStack,
+        );
+      }
+      rethrow;
+    }
+    await release(conn);
+    return result;
+  }
+
+  /// Opens replacement connections for queued waiters after a discard or a
+  /// failed grow freed capacity, so waiters are not stranded behind capacity
+  /// nobody will ever release. If a replacement open fails, the oldest
+  /// waiter receives that error — failing loudly beats waiting forever on a
+  /// pool with no acquire timeout yet.
+  Future<void> _provisionForWaiters() async {
+    while (!_isClosed &&
+        _waiters.isNotEmpty &&
+        connectionsOpen + _pendingOpens + _draining < maxConnections) {
+      _pendingOpens++;
+      final OracleConnection conn;
+      try {
+        conn = await _connectionFactory();
+      } catch (e, st) {
+        _pendingOpens--;
+        if (_waiters.isNotEmpty) {
+          _waiters.removeFirst().completeError(e, st);
+        }
+        return;
+      }
+      _pendingOpens--;
+      if (_isClosed) {
+        // close() ran while the open was in flight and has already failed
+        // every waiter; just destroy the orphan connection.
+        await _destroyBestEffort(conn);
+        return;
+      }
+      if (_waiters.isEmpty) {
+        // The last waiter was satisfied by a regular release in the
+        // meantime; keep the fresh connection for the next borrower.
+        _idle.add(conn);
+        return;
+      }
+      _inUse.add(conn);
+      _waiters.removeFirst().complete(conn);
+    }
+  }
+
+  /// Closes the pool, destroys its idle physical connections, and fails all
+  /// pending [acquire] waiters with a pool-closed error.
   ///
   /// Safe to call multiple times (idempotent). After closing, [isClosed]
-  /// is `true` permanently.
+  /// is `true` permanently: future acquires are rejected, a grow-on-demand
+  /// open still in flight is destroyed when it lands, and a borrowed
+  /// connection released later is destroyed instead of going idle.
   ///
-  /// **Story 5.1 limitation:** the pool has no borrowers yet (no `acquire`),
-  /// so closing only needs to destroy idle sessions. Full drain semantics
-  /// for checked-out connections arrive with Story 5.3.
+  /// **Story 5.2 limitation:** connections currently checked out are not
+  /// forcibly drained — borrowers keep them until they release. Full drain
+  /// semantics arrive with Story 5.3.
   Future<void> close() async {
     if (_isClosed) {
       _log.fine('Pool already closed, ignoring close()');
       return;
     }
-    _log.info('Closing pool ($connectionsIdle idle connection(s))');
+    _log.info(
+      'Closing pool ($connectionsIdle idle connection(s), '
+      '${_waiters.length} pending waiter(s))',
+    );
     _isClosed = true;
+    while (_waiters.isNotEmpty) {
+      _waiters.removeFirst().completeError(_poolClosedException());
+    }
     await _closeIdleBestEffort();
   }
 
@@ -287,11 +606,18 @@ class OraclePool {
     final toClose = List<OracleConnection>.of(_idle);
     _idle.clear();
     for (final conn in toClose) {
-      try {
-        await conn.close();
-      } catch (e, st) {
-        _log.warning('Error closing pooled connection: $e', e, st);
-      }
+      await _destroyBestEffort(conn);
+    }
+  }
+
+  /// Closes one connection that is leaving the pool permanently, swallowing
+  /// (but logging) failures — destruction runs on cleanup paths where a
+  /// close error must never mask the caller's primary error.
+  Future<void> _destroyBestEffort(OracleConnection conn) async {
+    try {
+      await conn.close();
+    } catch (e, st) {
+      _log.warning('Error closing pooled connection: $e', e, st);
     }
   }
 
