@@ -94,8 +94,7 @@ void main() {
       }
     });
 
-    // Story 2.8: canonical ORA formatting and query context.
-    group('canonical ORA code formatting (Story 2.8)', () {
+    group('canonical ORA code formatting', () {
       test('low Oracle code is padded to ORA-NNNNN', () {
         const exception = OracleException(
           errorCode: 942,
@@ -132,10 +131,10 @@ void main() {
       });
     });
 
-    // Story 7.9 AC1 + F7: code is range-safe AND total — never emits
-    // malformed forms like ORA-000-1 and never throws; negative codes render
-    // as the ORA-invalid(<code>) sentinel, >=100000 keeps full digits.
-    group('range-safe ORA code formatting (Story 7.9 AC1, F7)', () {
+    // code is range-safe AND total — never emits malformed forms like
+    // ORA-000-1 and never throws; negative codes render as the
+    // ORA-invalid(<code>) sentinel, >=100000 keeps full digits.
+    group('range-safe ORA code formatting', () {
       test('code renders negative errorCode as ORA-invalid(...), no throw',
           () {
         const exception = OracleException(
@@ -192,7 +191,7 @@ void main() {
       });
     });
 
-    group('query error context (Story 2.8)', () {
+    group('query error context', () {
       test('sql and offset are null by default', () {
         const exception = OracleException(
           errorCode: 942,

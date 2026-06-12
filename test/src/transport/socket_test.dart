@@ -115,7 +115,7 @@ void main() {
       });
     });
 
-    group('liveness (Story 7.4 AC3)', () {
+    group('liveness', () {
       test('isConnected becomes false after remote close', () async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         // Accept then immediately tear the peer down so the client observes a
@@ -158,11 +158,11 @@ void main() {
       });
     });
 
-    // AC13 (Story 7.8): tagged at group level — not file level — so the
-    // pure unit tests above stay in the `quality` CI job's
-    // `--exclude-tags=integration` run while these Oracle-backed tests are
-    // cleanly excluded. The group-level env skip replaces the previous
-    // per-test markTestSkipped pattern (AC2 single source of truth).
+    // Tagged at group level — not file level — so the pure unit tests above
+    // stay in the `quality` CI job's `--exclude-tags=integration` run while
+    // these Oracle-backed tests are cleanly excluded. The group-level env skip
+    // replaces the previous per-test markTestSkipped pattern (single source of
+    // truth).
     group('integration tests',
         tags: 'integration',
         skip: !integrationEnabled ? 'Integration tests disabled' : null, () {

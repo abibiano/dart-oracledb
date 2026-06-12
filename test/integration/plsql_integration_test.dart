@@ -1,8 +1,7 @@
 /// Integration tests for PL/SQL stored-procedure execution.
 ///
-/// Story 3.1 — IN parameters; Story 3.2 — function returns; Story 3.3 — OUT
-/// and IN OUT parameters. All groups must pass against both supported
-/// environments:
+/// Covers IN parameters, function returns, and OUT/IN OUT parameters. All
+/// groups must pass against both supported environments:
 ///
 ///   RUN_INTEGRATION_TESTS=true dart test test/integration/plsql_integration_test.dart --no-color
 ///   RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test/integration/plsql_integration_test.dart --no-color
@@ -20,10 +19,9 @@ void main() {
     return;
   }
 
-  group('PL/SQL execution — Story 3.1', () {
-    // AC3 (Story 7.8): nullable handle assigned only once connect()
-    // succeeds; tearDown cleans up null-safely. `conn` is the non-null
-    // alias used by test bodies.
+  group('PL/SQL execution — IN parameters', () {
+    // Nullable handle assigned only once connect() succeeds; tearDown cleans
+    // up null-safely. `conn` is the non-null alias used by test bodies.
     OracleConnection? connHandle;
     late OracleConnection conn;
     final s31Table = uniqueTableName('s31_vals');
@@ -32,10 +30,10 @@ void main() {
       connHandle = await connectForTest();
       conn = connHandle!;
 
-      // Create story-scoped table and procedures; ignore only
+      // Create the table and procedures; ignore only
       // ORA-00955 ("name already used") so a previous failed run
       // doesn't block setup. A setUp failure leaves the close to
-      // tearDown's cleanUpConnection (AC3/AC4).
+      // tearDown's cleanUpConnection.
       await _ignoreOraCodes(
         () => conn.execute(
           'CREATE TABLE $s31Table (id NUMBER, name VARCHAR2(100))',
@@ -88,8 +86,7 @@ void main() {
       );
     });
 
-    // AC1 — positional IN binds
-    test('AC1: positional IN binds call procedure and insert row', () async {
+    test('positional IN binds call procedure and insert row', () async {
       await conn.execute(
         'BEGIN story31_proc_values(:1, :2); END;',
         [42, 'Alice'],
@@ -105,8 +102,7 @@ void main() {
       expect(result.rows.first[1], equals('Alice'));
     });
 
-    // AC2 — no-parameter procedure
-    test('AC2: no-parameter procedure executes successfully', () async {
+    test('no-parameter procedure executes successfully', () async {
       final result = await conn.execute('BEGIN story31_insert_default(); END;');
       expect(result.rows, isEmpty);
       await conn.execute('COMMIT');
@@ -117,9 +113,9 @@ void main() {
       expect(count, equals(1));
     });
 
-    // AC3 — procedure that raises an Oracle error
+    // procedure that raises an Oracle error
     test(
-        'AC3: procedure raising RAISE_APPLICATION_ERROR throws OracleException',
+        'procedure raising RAISE_APPLICATION_ERROR throws OracleException',
         () async {
       await expectLater(
         conn.execute('BEGIN story31_raise_error(); END;'),
@@ -133,8 +129,8 @@ void main() {
       );
     });
 
-    // AC4 — named bind syntax produces the same result as positional
-    test('AC4: named IN binds produce identical result to positional',
+    // named bind syntax produces the same result as positional
+    test('named IN binds produce identical result to positional',
         () async {
       await conn.execute(
         'BEGIN story31_proc_values(:p_id, :p_name); END;',
@@ -151,9 +147,9 @@ void main() {
       expect(result.rows.first[1], equals('Bob'));
     });
 
-    // AC4 — named binds with different ordering
+    // named binds with different ordering
     test(
-        'AC4: named binds pass correct values regardless of map iteration order',
+        'named binds pass correct values regardless of map iteration order',
         () async {
       await conn.execute(
         'BEGIN story31_proc_values(:p_id, :p_name); END;',
@@ -168,8 +164,8 @@ void main() {
       expect(result.rows.first[1], equals('Carol'));
     });
 
-    // AC5 — rowsAffected is null for PL/SQL (not a DML count)
-    test('AC5: PL/SQL result has null rowsAffected', () async {
+    // rowsAffected is null for PL/SQL (not a DML count)
+    test('PL/SQL result has null rowsAffected', () async {
       final result = await conn.execute(
         'BEGIN story31_proc_values(:1, :2); END;',
         [1, 'Test'],
@@ -178,16 +174,16 @@ void main() {
           reason: 'PL/SQL calls must not expose a DML row count');
     });
 
-    // AC5 — Epic 2 SELECT regression
-    test('AC5: SELECT still works after PL/SQL classification is added',
+    // SELECT regression
+    test('SELECT still works after PL/SQL classification is added',
         () async {
       final result = await conn.execute('SELECT 1 + 1 FROM dual');
       expect(result.rows, hasLength(1));
       expect(result.rows.first[0], equals(2));
     });
 
-    // AC5 — Epic 2 DML regression: rowsAffected still populated
-    test('AC5: DML rowsAffected is still populated after PL/SQL changes',
+    // DML regression: rowsAffected still populated
+    test('DML rowsAffected is still populated after PL/SQL changes',
         () async {
       await conn.execute(
         'INSERT INTO $s31Table (id, name) VALUES (:1, :2)',
@@ -233,7 +229,7 @@ void main() {
     });
   });
 
-  group('PL/SQL function returns — Story 3.2', () {
+  group('PL/SQL function returns', () {
     OracleConnection? connHandle;
     late OracleConnection conn;
 
@@ -241,9 +237,9 @@ void main() {
       connHandle = await connectForTest();
       conn = connHandle!;
 
-      // Story-scoped functions. CREATE OR REPLACE is idempotent so we don't
-      // need to ignore ORA-00955 here. A setUp failure leaves the close to
-      // tearDown's cleanUpConnection (AC3/AC4).
+      // CREATE OR REPLACE is idempotent so we don't need to ignore
+      // ORA-00955 here. A setUp failure leaves the close to tearDown's
+      // cleanUpConnection.
       await conn.execute('''
           CREATE OR REPLACE FUNCTION story32_add(
             p_a IN NUMBER,
@@ -322,8 +318,8 @@ void main() {
       );
     });
 
-    // AC1 — NUMBER return value with IN binds
-    test('AC1: NUMBER return — named OUT bind reads via result.outBinds[ret]',
+    // NUMBER return value with IN binds
+    test('NUMBER return — named OUT bind reads via result.outBinds[ret]',
         () async {
       final result = await conn.execute(
         'BEGIN :ret := story32_add(:a, :b); END;',
@@ -336,8 +332,8 @@ void main() {
       expect(result.outBinds['ret'], equals(5));
     });
 
-    // AC2 — NUMBER return decoded as Dart numeric
-    test('AC2: NUMBER return decoded as Dart int', () async {
+    // NUMBER return decoded as Dart numeric
+    test('NUMBER return decoded as Dart int', () async {
       final result = await conn.execute(
         'BEGIN :ret := story32_employee_count(:dept_id); END;',
         {
@@ -350,8 +346,8 @@ void main() {
       expect(ret, equals(70));
     });
 
-    // AC3 — VARCHAR2 return honors maxSize
-    test('AC3: VARCHAR2 return decoded as Dart String with explicit maxSize',
+    // VARCHAR2 return honors maxSize
+    test('VARCHAR2 return decoded as Dart String with explicit maxSize',
         () async {
       final result = await conn.execute(
         'BEGIN :ret := story32_greeting(:name); END;',
@@ -363,8 +359,8 @@ void main() {
       expect(result.outBinds['ret'], equals('Hello, Alex'));
     });
 
-    // AC4 — NULL return decodes as Dart null
-    test('AC4: NULL return value surfaces as Dart null', () async {
+    // NULL return decodes as Dart null
+    test('NULL return value surfaces as Dart null', () async {
       final result = await conn.execute(
         'BEGIN :ret := story32_null_text; END;',
         {
@@ -400,8 +396,8 @@ void main() {
       );
     });
 
-    // AC5 — Story 3.1 procedure regression: IN-only PL/SQL still works
-    test('AC5: Story 3.1 IN-only procedure call still succeeds', () async {
+    // procedure regression: IN-only PL/SQL still works
+    test('IN-only procedure call still succeeds', () async {
       // Use story32_add as a procedure-equivalent (returns into a local var).
       await conn.execute('''
         DECLARE
@@ -413,15 +409,15 @@ void main() {
       // No assertion needed — absence of OracleException is the contract.
     });
 
-    // AC5 — Epic 2 SELECT regression
-    test('AC5: SELECT still works after OUT bind plumbing is added', () async {
+    // SELECT regression
+    test('SELECT still works after OUT bind plumbing is added', () async {
       final result = await conn.execute('SELECT 99 FROM dual');
       expect(result.rows.first[0], equals(99));
       expect(result.outBinds.isEmpty, isTrue);
     });
 
-    // AC5 — raw map values still normalize as IN binds (no OracleBind wrapper)
-    test('AC5: raw map/list bind values normalize as IN binds', () async {
+    // raw map values still normalize as IN binds (no OracleBind wrapper)
+    test('raw map/list bind values normalize as IN binds', () async {
       final result = await conn.execute(
         'BEGIN :ret := story32_add(:a, :b); END;',
         {
@@ -464,8 +460,8 @@ void main() {
       expect(dt.minute, equals(30));
     });
 
-    // AC5 — DML rowsAffected is still populated after OUT bind plumbing
-    test('AC5: DML rowsAffected is still populated after OUT bind changes',
+    // DML rowsAffected is still populated after OUT bind plumbing
+    test('DML rowsAffected is still populated after OUT bind changes',
         () async {
       final dmlTable = uniqueTableName('s32_dml');
       await conn.execute(
@@ -484,7 +480,7 @@ void main() {
     });
   });
 
-  group('PL/SQL OUT and IN OUT parameters — Story 3.3', () {
+  group('PL/SQL OUT and IN OUT parameters', () {
     OracleConnection? connHandle;
     late OracleConnection conn;
     final s33DmlTable = uniqueTableName('s33_dml');
@@ -494,8 +490,7 @@ void main() {
       conn = connHandle!;
 
       // Procedure with two scalar OUT parameters (NUMBER + VARCHAR2).
-      // A setUp failure leaves the close to tearDown's cleanUpConnection
-      // (AC3/AC4).
+      // A setUp failure leaves the close to tearDown's cleanUpConnection.
       await conn.execute('''
           CREATE OR REPLACE PROCEDURE story33_out_values(
             p_id   OUT NUMBER,
@@ -567,7 +562,7 @@ void main() {
             'story33_null_out',
           ])
             'DROP PROCEDURE $name',
-          // AC7 DML regression test creates this table inline; guard here so
+          // The DML regression test creates this table inline; guard here so
           // a cancelled test cannot leak the table into subsequent setUp
           // calls.
           'DROP TABLE $s33DmlTable PURGE',
@@ -575,8 +570,8 @@ void main() {
       );
     });
 
-    // AC1 — scalar OUT parameters expose their values via outBinds
-    test('AC1: procedure with NUMBER+VARCHAR2 OUT params exposes both values',
+    // scalar OUT parameters expose their values via outBinds
+    test('procedure with NUMBER+VARCHAR2 OUT params exposes both values',
         () async {
       final result = await conn.execute(
         'BEGIN story33_out_values(:id, :name); END;',
@@ -589,8 +584,8 @@ void main() {
       expect(result.outBinds['name'], equals('Smith'));
     });
 
-    // AC2 — IN OUT parameter modified by the procedure surfaces the new value
-    test('AC2: IN OUT NUMBER parameter returns the modified value', () async {
+    // IN OUT parameter modified by the procedure surfaces the new value
+    test('IN OUT NUMBER parameter returns the modified value', () async {
       final result = await conn.execute(
         'BEGIN story33_inout_increment(:value); END;',
         {
@@ -600,8 +595,8 @@ void main() {
       expect(result.outBinds['value'], equals(42));
     });
 
-    // AC3 — multiple OUT/IN OUT via named binds accessible by name
-    test('AC3: mixed IN/OUT/IN OUT named binds — outputs accessible by name',
+    // multiple OUT/IN OUT via named binds accessible by name
+    test('mixed IN/OUT/IN OUT named binds — outputs accessible by name',
         () async {
       final result = await conn.execute(
         'BEGIN story33_multi_out(:in_val, :out_val, :inout_val); END;',
@@ -617,9 +612,9 @@ void main() {
       expect(result.outBinds['in_val'], isNull);
     });
 
-    // AC4 — positional binds: outputs are indexed by output position only
+    // positional binds: outputs are indexed by output position only
     test(
-        'AC4: positional mixed binds expose outputs at zero-based output index',
+        'positional mixed binds expose outputs at zero-based output index',
         () async {
       final result = await conn.execute(
         'BEGIN story33_multi_out(:1, :2, :3); END;',
@@ -637,8 +632,8 @@ void main() {
       expect(result.outBinds.length, equals(2));
     });
 
-    // AC5 — explicit NULL OUT surfaces as Dart null
-    test('AC5: explicit NULL OUT parameter surfaces as Dart null', () async {
+    // explicit NULL OUT surfaces as Dart null
+    test('explicit NULL OUT parameter surfaces as Dart null', () async {
       final result = await conn.execute(
         'BEGIN story33_null_out(:value); END;',
         {
@@ -648,9 +643,9 @@ void main() {
       expect(result.outBinds['value'], isNull);
     });
 
-    // AC6 — IN OUT VARCHAR2 grows in length; maxSize must cover the result
+    // IN OUT VARCHAR2 grows in length; maxSize must cover the result
     test(
-        'AC6: IN OUT VARCHAR2 with sufficient maxSize returns the longer '
+        'IN OUT VARCHAR2 with sufficient maxSize returns the longer '
         'value', () async {
       final result = await conn.execute(
         'BEGIN story33_inout_text(:text_value); END;',
@@ -665,7 +660,7 @@ void main() {
       expect(result.outBinds['text_value'], equals('abc_suffix'));
     });
 
-    // AC6 — undersized maxSize surfaces a clear server error (ORA-06502)
+    // undersized maxSize surfaces a clear server error (ORA-06502)
     // without corrupting subsequent operations.
     //
     // Oracle raises ORA-06502 ("character string buffer too small") on both
@@ -673,7 +668,7 @@ void main() {
     // maxSize. Asserting the code rather than message text keeps the test
     // resilient to translation/wording differences across server versions.
     test(
-        'AC6: undersized IN OUT VARCHAR2 maxSize raises ORA-06502 and the '
+        'undersized IN OUT VARCHAR2 maxSize raises ORA-06502 and the '
         'session remains usable', () async {
       // 'abc_suffix' is 10 bytes; declare maxSize=5 to force overflow.
       await expectLater(
@@ -699,8 +694,8 @@ void main() {
       expect(ok.rows.first[0], equals(1));
     });
 
-    // AC7 — Story 3.2 regression: pure OUT function return still works
-    test('AC7-story32-regression: OUT-only function return remains unchanged',
+    // regression: pure OUT function return still works
+    test('OUT-only function return remains unchanged',
         () async {
       await conn.execute('''
         CREATE OR REPLACE FUNCTION story33_add(
@@ -728,8 +723,8 @@ void main() {
       }
     });
 
-    // AC7 — Story 3.1 regression: pure IN-only procedure call still works
-    test('AC7-story31-regression: IN-only procedure call remains unchanged',
+    // regression: pure IN-only procedure call still works
+    test('IN-only procedure call remains unchanged',
         () async {
       await conn.execute('''
         CREATE OR REPLACE PROCEDURE story33_in_only(p_x IN NUMBER) AS
@@ -751,9 +746,9 @@ void main() {
       }
     });
 
-    // AC7 — Epic 2 regression: SELECT and DML still work after Story 3.3 plumbing
+    // regression: SELECT and DML still work after OUT/IN OUT plumbing
     test(
-        'AC7-epic2-regression: SELECT and DML still work alongside Story 3.3 binds',
+        'SELECT and DML still work alongside OUT/IN OUT binds',
         () async {
       final sel = await conn.execute('SELECT 7 FROM dual');
       expect(sel.rows.first[0], equals(7));
@@ -841,7 +836,7 @@ void main() {
     });
   });
 
-  // Story 7.3 AC4 — PL/SQL statement-cache exclusion evidence.
+  // PL/SQL statement-cache exclusion evidence.
   //
   // The classifier marks BEGIN/DECLARE/CALL blocks as cache-ineligible, so
   // OracleConnection.execute must never store them. These tests use the
@@ -856,11 +851,10 @@ void main() {
   //     session, so a zero PL/SQL count is not an artifact of a disabled
   //     cache.
   //
-  // The hook lives on OracleConnection (no public export) per Story 7.3
-  // task 4.3: "the smallest test-only or package-private instrumentation
-  // hook that can prove isCacheEligibleSql(sql) == false prevents
-  // _cache.store(...) for PL/SQL".
-  group('Story 7.3 AC4 — PL/SQL statement-cache exclusion', () {
+  // The hook lives on OracleConnection (no public export): the smallest
+  // test-only or package-private instrumentation hook that can prove
+  // isCacheEligibleSql(sql) == false prevents _cache.store(...) for PL/SQL.
+  group('PL/SQL statement-cache exclusion', () {
     OracleConnection? connHandle;
     late OracleConnection conn;
 
@@ -984,7 +978,7 @@ void main() {
     });
   });
 
-  group('Story 7.2 — bind-name and bind-spec validation', () {
+  group('bind-name and bind-spec validation', () {
     OracleConnection? connHandle;
     late OracleConnection conn;
 
@@ -1003,7 +997,7 @@ void main() {
     });
 
     test(
-        'AC10 — case-mismatched named bind (:RET vs key "ret") fails at '
+        'case-mismatched named bind (:RET vs key "ret") fails at '
         'bind preparation with oraBindMismatch and message naming :RET',
         () async {
       await expectLater(
@@ -1018,15 +1012,15 @@ void main() {
     });
 
     test(
-        'AC8 — repeated named IN bind reuses the same value in both '
+        'repeated named IN bind reuses the same value in both '
         'placeholders (first-occurrence contract)', () async {
-      // Oracle's PL/SQL parser rejects the strictest AC8 shape — repeating
+      // Oracle's PL/SQL parser rejects the strictest shape — repeating
       // an OUT placeholder (e.g. `BEGIN p(:v); p(:v); END;`) raises
       // ORA-01006 "Bind variable does not exist", so we cannot construct
       // an integration fixture that round-trips a repeated *OUT* bind.
       // The first-occurrence semantics on the OracleOutBinds container are
       // pinned by a unit test in test/src/oracle_bind_test.dart
-      // ("AC8 — repeated named bind index maps to first occurrence").
+      // ("repeated named bind index maps to first occurrence").
       //
       // The supported closest behavior is repeated *IN* placeholders, where
       // Oracle uses the single value supplied under the bind name at every

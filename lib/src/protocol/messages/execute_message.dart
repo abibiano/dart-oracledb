@@ -3,7 +3,7 @@
 /// Implements the wire format used by Oracle Database 12.2+ (validated against
 /// Oracle 23ai), modeled after node-oracledb's thin client. The previous
 /// implementation in this file used an invented format that Oracle rejected
-/// at the first byte after auth; Story 6.3 replaced it.
+/// at the first byte after auth; it has since been replaced.
 library;
 
 import 'dart:convert';
@@ -54,7 +54,7 @@ class BindVariable {
     // JSON binds (inferred from a Map/List value or declared explicitly)
     // must hold a valid JSON structure. Validating at construction surfaces
     // bad nested members (DateTime, Uint8List, NaN, non-String keys, ...) at
-    // the call site instead of mid-encode (Story 4.4).
+    // the call site instead of mid-encode.
     if (this.oraType == oraTypeJson) {
       assertValidJsonBindValue(value, 'value');
     }
@@ -157,7 +157,7 @@ class ExecuteRequest extends Message {
   final int ttcFieldVersion;
 
   /// When non-null, this message is a DEFINE call for an already-open query
-  /// cursor (Story 4.1): it establishes column defines — with the LOB
+  /// cursor: it establishes column defines — with the LOB
   /// prefetch cont-flag on CLOB columns — instead of executing. Mirrors
   /// node-oracledb's `requiresDefine` execute variant (`_handleDefines`):
   /// options carry DEFINE without EXECUTE/FETCH/PARSE, no binds travel, and
@@ -255,7 +255,7 @@ class ExecuteRequest extends Message {
     buffer.writeUint8(0); // al8kv
     buffer.writeUint8(0); // al8kvl
 
-    // defines: normally absent (the server describes); the Story 4.1 define
+    // defines: normally absent (the server describes); the define
     // call announces one define per query column here (al8doac pointer).
     if (defines != null) {
       buffer.writeUint8(1);
@@ -336,7 +336,7 @@ class ExecuteRequest extends Message {
       // Oracle's long-data ordering, mirrored from node-oracledb
       // writeBindParamsRow (`foundLong`). PL/SQL never reaches this path:
       // oversized PL/SQL strings are converted to temporary CLOBs before
-      // encoding (Story 4.1).
+      // encoding.
       final deferredLongBinds = <BindVariable>[];
       for (final bind in binds) {
         // JSON is excluded from the deferral despite its 32 MB metadata
@@ -493,10 +493,10 @@ class ExecuteRequest extends Message {
         buffer.writeBytesWithLength(dt.encodeTimestamp(value as DateTime));
         return;
       case oraTypeTimestampTz:
-        // OracleTimestampTz binds carry their original offset on the wire
-        // (Story 7.9 AC13). A plain DateTime under an explicit TZ oraType is
+        // OracleTimestampTz binds carry their original offset on the wire.
+        // A plain DateTime under an explicit TZ oraType is
         // encoded as its UTC instant wrapped at an explicit +00:00 offset
-        // (full 13-byte payload): empirically (P3, validated against 23ai
+        // (full 13-byte payload): empirically (validated against 23ai
         // and 21c) the server mishandles an 11-byte offset-less TSTZ bind —
         // it echoes invalid all-zero zone bytes back, corrupting the value.
         if (value is OracleTimestampTz) {
@@ -685,7 +685,7 @@ class ColumnMetadata {
   /// `DATE`, and other non-byte-sized types Oracle reports `size == 0`, so this
   /// value is **not meaningful** and must not be used to size allocations for
   /// those types — their precision/scale (NUMBER) or fixed wire width
-  /// (DATE/TIMESTAMP) govern decoding instead (AC7).
+  /// (DATE/TIMESTAMP) govern decoding instead.
   final int maxLength;
 
   /// Numeric precision.
@@ -726,7 +726,7 @@ class BindMetadata {
 
 /// Result of an EXECUTE / FETCH response cycle.
 ///
-/// Immutable (Story 7.9 AC3): all fields are `final` and the list fields are
+/// Immutable: all fields are `final` and the list fields are
 /// unmodifiable defensive copies, so decode state ([_DecodeState]) or any
 /// caller-held list is never aliased into a response. Multi-round FETCH
 /// accumulation happens in transport-local lists, never by mutating a
@@ -830,7 +830,7 @@ bool ttcStreamIsComplete(Uint8List data,
     endOfRequestSupport: endOfRequestSupport,
     // The probe only needs to locate the terminal message; decode unsupported
     // types leniently here so an unsupported LONG column cannot make the probe
-    // throw (the real decode pass raises the clear error — AC5).
+    // throw (the real decode pass raises the clear error).
     strictTypes: false,
   );
   try {
@@ -940,7 +940,7 @@ class _DecodeState {
   final bool isQuery;
   final int ttcFieldVersion;
 
-  /// Opt-in (Story 7.9 AC13): when true, `TIMESTAMP WITH TIME ZONE` columns
+  /// Opt-in: when true, `TIMESTAMP WITH TIME ZONE` columns
   /// decode to `OracleTimestampTz` instead of a UTC `DateTime`. Byte
   /// consumption is identical either way, so the completion probe can leave
   /// this false.
@@ -948,7 +948,7 @@ class _DecodeState {
 
   /// When true (the real [decodeExecuteResponse] pass), decoding an
   /// unsupported column/bind type — currently LONG and LONG RAW — raises a
-  /// clear [OracleException] (AC5). When false (the [ttcStreamIsComplete]
+  /// clear [OracleException]. When false (the [ttcStreamIsComplete]
   /// completion probe), the same bytes are consumed leniently so the probe can
   /// still locate the terminal message; the real decode pass surfaces the
   /// unsupported error afterwards.
@@ -1059,7 +1059,7 @@ ColumnMetadata _processColumnInfo(ReadBuffer buf, int ttcFieldVersion) {
   // Precision and scale are SIGNED Int8 on the wire (node-oracledb base.js
   // processColumnInfo uses readInt8): bare NUMBER and FLOAT report scale
   // -127 (0x81) as the "no declared scale" sentinel, which an unsigned read
-  // would misparse as 129 (AC7).
+  // would misparse as 129.
   final precisionRaw = buf.readUint8();
   final scaleRaw = buf.readUint8();
   final precision = precisionRaw > 127 ? precisionRaw - 256 : precisionRaw;
@@ -1077,7 +1077,7 @@ ColumnMetadata _processColumnInfo(ReadBuffer buf, int ttcFieldVersion) {
   // >= 12.2. This mirrors the encode-side gate in
   // `ExecuteRequest._writeBindMetadata` and node-oracledb `processColumnInfo`
   // (base.js). Reading it unconditionally would misalign the buffer against a
-  // pre-12.2 server that never sent the field (AC2).
+  // pre-12.2 server that never sent the field.
   if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
     buf.skipUB4(); // oaccolid
   }
@@ -1158,7 +1158,7 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
   // SELECT responses use ROW_DATA after DESCRIBE_INFO + ROW_HEADER to ship
   // result rows. The two never mix on the same statement.
   if (!s.isQuery && s.outBindIndices.isNotEmpty) {
-    // AC3: A single PL/SQL execution produces exactly one ROW_DATA with all
+    // A single PL/SQL execution produces exactly one ROW_DATA with all
     // OUT bind values. `outBindsDecoded` is the authoritative guard against
     // re-decoding — relying on `outBindValues.isEmpty` would re-enable
     // decode whenever every OUT bind decoded to NULL.
@@ -1249,8 +1249,8 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
 /// [scale] is the column's declared scale when decoding a SELECT column
 /// (null for bare `NUMBER`). The OUT-bind path always passes null:
 /// `BindMetadata` carries no precision/scale, so OUT binds cannot honor the
-/// AC7 fixed-scale-forces-double contract — they keep the int-vs-double
-/// heuristic (documented limitation, Story 7.8 AC7).
+/// fixed-scale-forces-double contract — they keep the int-vs-double
+/// heuristic (documented limitation).
 ///
 /// [csfrm] is the character set form when decoding a SELECT column (used to
 /// reject NCLOB, which shares the CLOB type indicator). The OUT-bind path
@@ -1270,8 +1270,9 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
   switch (oraType) {
     case oraTypeLong:
     case oraTypeLongRaw:
-      // AC5: LONG / LONG RAW are not supported until Epic 4 implements proper
-      // LONG/LOB streaming semantics. Decoding them through the generic
+      // LONG / LONG RAW are not supported until proper
+      // LONG/LOB streaming semantics are implemented. Decoding them through
+      // the generic
       // length-prefix path (which treats a 0xFF prefix as null) would silently
       // corrupt a 255-byte LONG payload, so fail loud with a clear unsupported
       // error instead. The completion probe (strict == false) still consumes
@@ -1280,7 +1281,7 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
         throw OracleException(
           errorCode: oraUnsupportedType,
           message: 'LONG and LONG RAW columns are not supported yet (Oracle '
-              'type $oraType). Support is planned for Epic 4 (LOB/LONG '
+              'type $oraType). Support is planned (LOB/LONG '
               'streaming); until then these columns cannot be fetched.',
         );
       }
@@ -1306,7 +1307,7 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       if (!strict) return null; // probe pass: bytes consumed, value unused
       // The slice from readBytesWithLength already constrains the field, so we
       // do not need to pass `length` to decodeNumber here.
-      // AC7: a declared fixed scale (> 0) forces double; scale null (bare
+      // A declared fixed scale (> 0) forces double; scale null (bare
       // NUMBER) or 0 (e.g. NUMBER(10)) keeps the int heuristic.
       return dt.decodeNumber(ReadBuffer(bytes), forceDouble: (scale ?? 0) > 0);
     case oraTypeDate:
@@ -1323,8 +1324,8 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
       if (!strict) return null; // probe pass: bytes consumed, value unused
-      // Story 7.9 AC13: opt-in wrapper preserves the wire offset; default
-      // stays the UTC DateTime contract (Story 7.1 AC1).
+      // Opt-in wrapper preserves the wire offset; default
+      // stays the UTC DateTime contract.
       return preserveTimestampTimeZone
           ? dt.decodeTimestampTz(ReadBuffer(bytes))
           : dt.decodeTimestamp(ReadBuffer(bytes));
@@ -1341,9 +1342,9 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       // (node-oracledb withData.js processColumnData): UB4 locator length
       // (0 ⇒ SQL NULL and nothing follows), then — except for BFILE — a UB8
       // LOB length (characters for CLOB, bytes for BLOB) and UB4 chunk
-      // size, then the locator as length-prefixed bytes. Stories 4.1/4.2
-      // support CLOB and BLOB; BFILE/NCLOB fail loud rather than decode
-      // silently (AC5). The lenient completion probe consumes the identical
+      // size, then the locator as length-prefixed bytes. CLOB and BLOB are
+      // supported; BFILE/NCLOB fail loud rather than decode
+      // silently. The lenient completion probe consumes the identical
       // bytes so the terminal message stays locatable.
       if (strict && oraType == oraTypeBfile) {
         throw OracleException(
@@ -1392,7 +1393,7 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       buf.skipBytesChunked(); // locator (unused)
       if (!strict) return null; // probe pass: bytes consumed, value unused
       // OUT/IN OUT binds declare maxSize in OSON bytes; an oversized return
-      // fails loud instead of truncating (Story 4.4 AC3). Columns pass no
+      // fails loud instead of truncating. Columns pass no
       // bound (outMaxSize == null).
       if (outMaxSize != null && osonBytes.length > outMaxSize) {
         throw OracleException(
@@ -1446,14 +1447,14 @@ void _processIoVector(ReadBuffer buf, _DecodeState s) {
   final numBinds = temp32 * 256 + temp16;
   buf.skipUB4(); // num iters this time
   buf.skipUB2(); // uac buffer length
-  // AC3: fast-fetch bit-vector length and rowid length are Oracle UB2
+  // Fast-fetch bit-vector length and rowid length are Oracle UB2
   // *variable-length* integers (a size byte then that many big-endian bytes),
   // NOT fixed two-byte raw lengths — confirmed against node-oracledb
   // processIOVector (reference/node-oracledb/lib/thin/protocol/messages/
   // withData.js:264-271), which reads both with `readUB2()` and then
   // `skipBytes(numBytes)`. Despite the "Len" suffix they must be read with
   // readUB2(), not readUint16BE(). The payloads (when present) are opaque
-  // here — Story 3.1 OUT-parameter handling does not consume fast-fetch or
+  // here — OUT-parameter handling does not consume fast-fetch or
   // rowid bytes — so they are skipped before the direction bytes are read.
   final fastFetchLen = buf.readUB2();
   if (fastFetchLen > 0) buf.skip(fastFetchLen);
@@ -1463,7 +1464,7 @@ void _processIoVector(ReadBuffer buf, _DecodeState s) {
   // Realistic Oracle bind counts are well under 65535 — Oracle's documented
   // hard limit is 65535 binds per statement. A computed `numBinds` beyond
   // that bound indicates either a corrupted stream or a server-protocol
-  // change; bail out before iterating into unknown bytes (AC9).
+  // change; bail out before iterating into unknown bytes.
   if (numBinds > 65535) {
     throw OracleException(
       errorCode: oraProtocolError,
@@ -1480,7 +1481,7 @@ void _processIoVector(ReadBuffer buf, _DecodeState s) {
   s.outBindsDecoded = false;
   for (var i = 0; i < numBinds; i++) {
     final dir = buf.readUint8();
-    // AC1: Only the three documented TTC bind directions are valid. Any
+    // Only the three documented TTC bind directions are valid. Any
     // other byte means the stream is misaligned or the server protocol has
     // drifted — raise a protocol error rather than silently treat unknown
     // bytes as outputs.
@@ -1494,7 +1495,7 @@ void _processIoVector(ReadBuffer buf, _DecodeState s) {
       );
     }
 
-    // AC2: When metadata is available for this bind, the server-reported
+    // When metadata is available for this bind, the server-reported
     // direction must agree with the client-declared one. A mismatch is a
     // hard error — silently following the server direction would re-decode
     // unexpected bytes and corrupt later result extraction. This check fires
@@ -1634,7 +1635,7 @@ TtcErrorInfo decodeTtcErrorBody(ReadBuffer buf,
   }
   final num = buf.readUB4(); // extended error number
   // Extended row count and 20.1+ extras are version-gated (matches node-oracledb).
-  // AC8: a pre-12.2 server does not send the UB8 row-count field at all, so
+  // A pre-12.2 server does not send the UB8 row-count field at all, so
   // leave [rowCount] null rather than defaulting it to 0 — "the server reported
   // 0 rows" and "the server reported nothing" are distinct, and the public
   // `OracleResult.rowsAffected` contract surfaces the absence as null.

@@ -34,7 +34,7 @@ file-by-file (see `reference/` and the architecture doc).
 | Statement caching (cursor reuse, parse skipping) | ✅ |
 | Data types — NUMBER, VARCHAR2/CHAR, DATE, TIMESTAMP, TIMESTAMP WITH TIME ZONE, RAW, CLOB, BLOB, native JSON (OSON) | ✅ |
 | Connection health check (`ping`) | ✅ |
-| Connection pooling | ⏳ Planned (Epic 5, backlog) |
+| Connection pooling | ⏳ Planned |
 
 ## Technology Stack
 
@@ -102,7 +102,6 @@ A clean **three-layer** design (transport → protocol → public API). See
 - `example/example.dart` — runnable usage example.
 - `docker-compose.yml` / `docker/` — local Oracle 23ai + 21c containers.
 - `reference/` — node-oracledb reference sources used during porting.
-- `_bmad-output/` — BMad planning & implementation artifacts (PRD, architecture, epics, story specs, retros).
 
 See [source-tree-analysis.md](./source-tree-analysis.md) for the annotated tree.
 
@@ -110,10 +109,7 @@ See [source-tree-analysis.md](./source-tree-analysis.md) for the annotated tree.
 
 Pre-1.0 (`0.9.2`). Core connectivity, query/DML/transaction, PL/SQL, and the full
 scalar + LOB + JSON data-type surface are implemented and validated against both
-Oracle 23ai and 21c. The main remaining pre-1.0 epic is **Connection Pooling**
-(Epic 5). Detailed status lives in
-`_bmad-output/implementation-artifacts/sprint-status.yaml` and the per-epic
-retrospectives.
+Oracle 23ai and 21c. The main remaining pre-1.0 work is **connection pooling**.
 
 **Known limitations** (see README for the authoritative list): single in-flight
 `execute()` per connection (overlapping calls are rejected, not serialized — use

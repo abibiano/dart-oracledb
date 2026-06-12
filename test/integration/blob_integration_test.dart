@@ -1,4 +1,4 @@
-/// Integration tests for BLOB support (Story 4.2) — query decode, DML binds,
+/// Integration tests for BLOB support — query decode, DML binds,
 /// and PL/SQL OUT / IN OUT binds, all as Dart `Uint8List` round-trips.
 ///
 /// BLOB values travel as LOB locators on the wire: queries return locators
@@ -7,11 +7,11 @@
 /// use Oracle's long-data ordering, and PL/SQL BLOB binds travel through
 /// internal temporary BLOBs. Payloads beyond the server chunk size (~8 KiB)
 /// stream back as multiple LOB_DATA messages inside the single READ response,
-/// so the >64 KiB tests prove the multi-chunk drain end-to-end (AC4). No
+/// so the >64 KiB tests prove the multi-chunk drain end-to-end. No
 /// character set conversion of any kind may touch the bytes.
 ///
-/// Must pass on Oracle 23ai (FREEPDB1) and Oracle 21c (XEPDB1) per the
-/// dual-environment rule in project-context.md. No FAST_AUTH-specific paths
+/// Must pass on Oracle 23ai (FREEPDB1) and Oracle 21c (XEPDB1).
+/// No FAST_AUTH-specific paths
 /// are exercised, so no `Transport.supportsFastAuth` probe is needed.
 ///
 ///   RUN_INTEGRATION_TESTS=true dart test test/integration/blob_integration_test.dart --no-color
@@ -41,7 +41,7 @@ Uint8List patternBytes(int length, {int seed = 0}) {
 
 void main() {
   group(
-    'BLOB support (Story 4.2)',
+    'BLOB support',
     skip: !integrationEnabled ? 'Integration tests disabled' : null,
     () {
       OracleConnection? connectionHandle;
@@ -102,7 +102,7 @@ void main() {
       });
 
       // ---------------------------------------------------------------
-      // Query decode (AC1, AC4)
+      // Query decode
       // ---------------------------------------------------------------
 
       test('SQL NULL BLOB decodes to null', () async {
@@ -192,8 +192,8 @@ void main() {
         }
       });
 
-      test('BLOB and CLOB columns coexist in one result set (AC5)', () async {
-        // Story 4.1 CLOB behavior must remain intact next to BLOB decode.
+      test('BLOB and CLOB columns coexist in one result set', () async {
+        // CLOB behavior must remain intact next to BLOB decode.
         final aux = uniqueTableName('blobmix');
         await connection.execute(
             'CREATE TABLE $aux (id NUMBER, b BLOB, c CLOB)');
@@ -213,7 +213,7 @@ void main() {
       });
 
       // ---------------------------------------------------------------
-      // DML binds (AC2)
+      // DML binds
       // ---------------------------------------------------------------
 
       test('named and positional binds INSERT into BLOB columns', () async {
@@ -261,7 +261,7 @@ void main() {
 
       test('empty Uint8List bound as a plain value in SQL DML stores NULL',
           () async {
-        // Regression (Story 4.2 review): a plain empty Uint8List travels as a
+        // Regression: a plain empty Uint8List travels as a
         // zero-length RAW and Oracle's '' IS NULL rule stores SQL NULL. This
         // matches node-oracledb. The empty-but-not-NULL BLOB guarantee applies
         // only to the explicit OracleBind(type: blob) path (see the IN OUT
@@ -303,7 +303,7 @@ void main() {
       });
 
       // ---------------------------------------------------------------
-      // PL/SQL OUT / IN OUT (AC3)
+      // PL/SQL OUT / IN OUT
       // ---------------------------------------------------------------
 
       test('BLOB OUT bind returns null when the procedure assigns NULL',
@@ -423,7 +423,6 @@ void main() {
 
       // ---------------------------------------------------------------
       // Temp-LOB large-write validation: wire-chunk boundaries + ~1 MB
-      // (spec-temp-lob-large-write-validation)
       // ---------------------------------------------------------------
       //
       // Encoding derivation: `_createTempBlob` passes the Uint8List to the
@@ -558,7 +557,7 @@ void main() {
       });
 
       // ---------------------------------------------------------------
-      // Statement cache interplay (AC7 — Story 7.6 protection)
+      // Statement cache interplay
       // ---------------------------------------------------------------
 
       test('repeated BLOB SELECT through the statement cache stays correct',
@@ -609,7 +608,7 @@ void main() {
       });
 
       // ---------------------------------------------------------------
-      // Connection / resource safety (AC6)
+      // Connection / resource safety
       // ---------------------------------------------------------------
 
       test('execute() works normally after a BLOB materialization', () async {

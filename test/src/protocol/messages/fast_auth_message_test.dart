@@ -1,4 +1,4 @@
-/// Unit tests for FAST_AUTH protocol message construction (AC1).
+/// Unit tests for FAST_AUTH protocol message construction.
 ///
 /// Validates that FastAuthRequest correctly embeds:
 /// 1. Protocol negotiation (includes message type byte — spec text was incorrect)
@@ -17,7 +17,7 @@ import 'package:oracledb/src/protocol/messages/fast_auth_message.dart';
 import 'package:test/test.dart';
 
 void main() {
-  group('FAST_AUTH Protocol Message Construction (AC1)', () {
+  group('FAST_AUTH Protocol Message Construction', () {
     late FastAuthRequest fastAuthMessage;
     late Uint8List clientNonce;
     late Uint8List compileCaps;
@@ -45,8 +45,7 @@ void main() {
       );
     });
 
-    test('AC1.1: Protocol negotiation embedded (includes message type byte)',
-        () {
+    test('Protocol negotiation embedded (includes message type byte)', () {
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
@@ -70,8 +69,7 @@ void main() {
               'Protocol message should be near start after FAST_AUTH header');
     });
 
-    test('AC1.2: DataTypes negotiation embedded (includes message type byte)',
-        () {
+    test('DataTypes negotiation embedded (includes message type byte)', () {
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
@@ -87,7 +85,7 @@ void main() {
           reason: 'DataTypes should follow Protocol');
     });
 
-    test('AC1.3: AUTH_PHASE_ONE embedded with full function header', () {
+    test('AUTH_PHASE_ONE embedded with full function header', () {
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
@@ -119,7 +117,7 @@ void main() {
           reason: 'AUTH_PHASE_ONE should follow DataTypes');
     });
 
-    test('AC1.4: Sequence counter initialized to 1 for FAST_AUTH', () {
+    test('Sequence counter initialized to 1 for FAST_AUTH', () {
       final buffer = WriteBuffer();
       final messageWithSeq1 = FastAuthRequest(
         username: 'testuser',
@@ -151,13 +149,13 @@ void main() {
           reason: 'FAST_AUTH should use sequence=1');
     });
 
-    test('AC1.5: Complete message structure is reasonable size', () {
+    test('Complete message structure is reasonable size', () {
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
 
       // FAST_AUTH message body is ~200-300 bytes (without TNS packet wrapper)
-      // The ~2780 bytes mentioned in AC1 includes TNS packet headers and padding
+      // The ~2780 bytes for the full packet includes TNS packet headers and padding
       // This test validates just the message construction, not the full packet
       expect(bytes.length, greaterThan(150),
           reason:
@@ -167,7 +165,7 @@ void main() {
               'FAST_AUTH message body should be under 500 bytes (actual: ${bytes.length})');
     });
 
-    test('AC1.6: Message type is ttcMsgTypeFastAuth (34)', () {
+    test('Message type is ttcMsgTypeFastAuth (34)', () {
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
@@ -177,7 +175,7 @@ void main() {
           reason: 'First byte should be FAST_AUTH message type (34)');
     });
 
-    test('AC1.7: Protocol version is 6 (Oracle 8.1+)', () {
+    test('Protocol version is 6 (Oracle 8.1+)', () {
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
@@ -199,7 +197,7 @@ void main() {
           reason: 'Protocol version should be 6 (Oracle 8.1+)');
     });
 
-    test('AC1.8: Driver name "dart-oracledb" is embedded', () {
+    test('Driver name "dart-oracledb" is embedded', () {
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
@@ -222,7 +220,7 @@ void main() {
       expect(found, isTrue, reason: 'Driver name "dart-oracledb" not found');
     });
 
-    test('AC1.9: DataTypes message includes UTF-8 charset (873)', () {
+    test('DataTypes message includes UTF-8 charset (873)', () {
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
@@ -249,7 +247,7 @@ void main() {
           reason: 'UTF-8 charset (873) should be in DataTypes message');
     });
 
-    test('AC1.10: Username is embedded in AUTH_PHASE_ONE', () {
+    test('Username is embedded in AUTH_PHASE_ONE', () {
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
@@ -273,7 +271,7 @@ void main() {
       expect(found, isTrue, reason: 'Username "testuser" should be embedded');
     });
 
-    test('AC1.11: Message structure has all three components in order', () {
+    test('Message structure has all three components in order', () {
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
@@ -313,7 +311,7 @@ void main() {
     });
 
     test(
-        'AC1.12: Capabilities are trimmed (trailing zeros removed) in DataTypes',
+        'Capabilities are trimmed (trailing zeros removed) in DataTypes',
         () {
       // Create caps with trailing zeros
       final capsWithZeros = Uint8List(48);

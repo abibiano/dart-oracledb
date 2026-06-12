@@ -1,12 +1,11 @@
-/// Integration smoke test for the TTC sequence-counter wrap at 256
-/// (spec-sequence-wrap-256-validation).
+/// Integration smoke test for the TTC sequence-counter wrap at 256.
 ///
 /// Must pass against both supported environments:
 ///
 ///   RUN_INTEGRATION_TESTS=true dart test test/integration/sequence_wrap_integration_test.dart --no-color
 ///   RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test/integration/sequence_wrap_integration_test.dart --no-color
 ///
-/// Background: the production wrap landed in Story 7.5 AC3 —
+/// Background: the production wrap —
 /// `Transport.nextSequence()` advances `(seq + 1) % 256`, cycling
 /// `1…255, 0, 1…` byte-identical to node-oracledb `packet.js`
 /// `writeSeqNum()` — and a unit test pins the full 257-call cycle. What was
@@ -29,9 +28,8 @@ void main() {
   }
 
   group('Sequence counter wrap at 256 — live-server smoke', () {
-    // AC3 (Story 7.8): nullable handle assigned only once connect()
-    // succeeds; tearDown cleans up null-safely. `conn` is the non-null
-    // alias used by test bodies.
+    // Nullable handle assigned only once connect() succeeds; tearDown cleans
+    // up null-safely. `conn` is the non-null alias used by test bodies.
     OracleConnection? connHandle;
     late OracleConnection conn;
     final testTable = uniqueTableName('seq_wrap');
@@ -50,8 +48,8 @@ void main() {
     tearDown(() async {
       final c = connHandle;
       connHandle = null;
-      // AC4 (Story 7.8): close() is guaranteed even if the DROP fails, and a
-      // close failure never masks the DROP error.
+      // close() is guaranteed even if the DROP fails, and a close failure
+      // never masks the DROP error.
       await cleanUpConnection(
         c,
         dropStatements: ['DROP TABLE $testTable PURGE'],

@@ -222,7 +222,7 @@ class AuthFlow {
       hashInput.setRange(0, passwordKey.length, passwordKey);
       hashInput.setRange(passwordKey.length, hashInput.length, params.salt);
       final fullHash = sha512Hash(hashInput);
-      // AC1: guard the slice so a short/corrupted digest raises a meaningful
+      // Guard the slice so a short/corrupted digest raises a meaningful
       // OracleException instead of an opaque RangeError.
       passwordHash =
           requirePasswordHashPrefix(fullHash, 32); // First 32 bytes for AES-256
@@ -231,7 +231,7 @@ class AuthFlow {
     } else {
       // SHA512 (O5LOGON / pre-12c) verifier: simple salted hash.
       //
-      // AC7: SHA-512 produces a 64-byte digest, but AES-256-CBC requires a
+      // SHA-512 produces a 64-byte digest, but AES-256-CBC requires a
       // 32-byte key. Using the full 64-byte hash as the AES key throws an
       // "Invalid key length" error inside pointycastle. Slice to the first 32
       // bytes — consistent with the PBKDF2 branch above and node-oracledb's
@@ -249,7 +249,7 @@ class AuthFlow {
 
     // Step 3: Decrypt server's AUTH_SESSKEY with passwordHash to get sessionKeyParta
     final encodedServerKey = params.serverNonce; // AUTH_SESSKEY from server
-    // AC5: the server key must be a positive multiple of the 16-byte AES block
+    // The server key must be a positive multiple of the 16-byte AES block
     // AND at least 32 bytes so the downstream `sublist(0, 32)` mixing step is
     // safe. A malformed/short AUTH_SESSKEY (e.g. odd-length hex falling back to
     // a 16-byte placeholder) would otherwise surface as a raw pointycastle
@@ -330,8 +330,8 @@ class AuthFlow {
     // path produces a 32-byte passwordKey, so its speedy-key plaintext would be
     // 48 bytes → 64 bytes encrypted, and the `sublist(0, 80)` slice (sized for
     // the PBKDF2 path's 64-byte passwordKey) would throw. Gating here both
-    // prevents that crash (AC7) and matches the reference: the speedy key is
-    // never even written to the wire for non-12c verifiers (AC6).
+    // prevents that crash and matches the reference: the speedy key is
+    // never even written to the wire for non-12c verifiers.
     if (params.isPbkdf2) {
       final speedyKeySalt = generateNonce(16);
       final speedyKeyInput = Uint8List(16 + passwordKey.length);
@@ -423,7 +423,7 @@ class AuthFlow {
     // capability — 23ai uses the combined FAST_AUTH envelope; pre-23 runs the
     // classical Protocol + DataTypes + AUTH_PHASE_ONE sequence.
     //
-    // State-transition contract (AC10, AC11): `phaseOneSent` is only entered
+    // State-transition contract: `phaseOneSent` is only entered
     // once we are actually sending the phase-one packet — never before the
     // preceding negotiation succeeds — and any failure escaping either branch
     // leaves AuthState at `failed`, never stuck at `phaseOneSent`.
@@ -438,7 +438,7 @@ class AuthFlow {
         );
         phaseOneResponseData = await transport.receiveData();
       } catch (e) {
-        // AC11: sendFastAuth or the buffered phase-one receiveData can throw a
+        // sendFastAuth or the buffered phase-one receiveData can throw a
         // non-OracleException (e.g. SocketException). Mark auth failed before
         // the error propagates so state is never left at phaseOneSent.
         updateState(AuthState.failed);
@@ -447,7 +447,7 @@ class AuthFlow {
     } else {
       _log.fine(
           'Server does not advertise FAST_AUTH; using classical AUTH_PHASE_ONE/TWO');
-      // AC10: protocol negotiation runs BEFORE any state advance. If it throws,
+      // Protocol negotiation runs BEFORE any state advance. If it throws,
       // the phase-one packet was never written, so state stays `notStarted`.
       await transport.sendProtocolNegotiation();
       final phaseOneRequest = AuthPhaseOneRequest(
@@ -456,7 +456,7 @@ class AuthFlow {
         sequence: transport.nextSequence(),
       );
       updateState(AuthState.phaseOneSent);
-      // AC4: bound the classical AUTH_PHASE_ONE receive with the same
+      // Bound the classical AUTH_PHASE_ONE receive with the same
       // authTimeout used for AUTH_PHASE_TWO. The timeout is passed into the
       // transport so it can poison the socket on expiry — a plain Future.timeout
       // here would not cancel the in-flight socket read.
@@ -492,7 +492,7 @@ class AuthFlow {
     _log.fine(
         'Received AUTH_PHASE_ONE response (${phaseOneResponseData.length} bytes)');
 
-    // AC9: AuthPhaseOneResponse.decode now raises on a TTC ERROR message.
+    // AuthPhaseOneResponse.decode raises on a TTC ERROR message.
     // Mark auth failed so a fail-loud server error does not strand state.
     // Catch all exceptions (not only OracleException) so a BufferException
     // from a malformed packet also transitions to failed rather than leaving
@@ -529,7 +529,7 @@ class AuthFlow {
       verifierType: verifierParams.verifierType,
     );
 
-    // AC8: write the 23ai token-number field only when BOTH the negotiated
+    // Write the 23ai token-number field only when BOTH the negotiated
     // field version allows it AND the server advertised FAST_AUTH. A pre-23
     // classical server can leave `_ttcFieldVersion` at its default 24 (no
     // compileCaps to lower it), so gating on field version alone would wrongly

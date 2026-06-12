@@ -9,9 +9,9 @@ import 'test_helper.dart';
 void main() {
   group('Query execution',
       skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
-    // AC3 (Story 7.8): nullable handle assigned only once connect()
-    // succeeds; tearDown cleans up null-safely. `connection` is the
-    // non-null alias used by test bodies.
+    // Nullable handle assigned only once connect() succeeds; tearDown
+    // cleans up null-safely. `connection` is the non-null alias used by
+    // test bodies.
     OracleConnection? connectionHandle;
     late OracleConnection connection;
 
@@ -55,8 +55,8 @@ void main() {
       );
     });
 
-    // Story 7.9 AC3: multi-round FETCH accumulation. With the default
-    // prefetch of 50 rows, 250 rows force at least 4 extra FETCH round
+    // Multi-round FETCH accumulation. With the default prefetch of 50
+    // rows, 250 rows force at least 4 extra FETCH round
     // trips — the path that accumulates rows across responses now that
     // ExecuteResponse is immutable.
     test('SELECT spanning multiple FETCH batches returns all rows', () async {
@@ -101,16 +101,16 @@ void main() {
     });
   });
 
-  // F1: cached-cursor re-execution of a multi-batch SELECT. The server often
+  // Cached-cursor re-execution of a multi-batch SELECT. The server often
   // echoes cursorId == 0 on the re-execute while the original cursor stays
   // open; pre-fix the drain gate keyed on the echoed id and silently
   // truncated the SECOND execution to one prefetch window (50 rows).
-  // F2/F3: low-cardinality ORDER BY validates end-to-end value correctness
+  // Low-cardinality ORDER BY validates end-to-end value correctness
   // for a data shape that MAY trigger Oracle's duplicate-column bit-vector
   // compression within and across fetch-batch boundaries. The test cannot
   // assert the server actually used the optimization (that is the server's
   // choice); the crafted-bytes unit tests pin the decoder mechanism itself.
-  group('Multi-batch fetch hardening (F1, F2, F3)',
+  group('Multi-batch fetch hardening',
       skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     final table = uniqueTableName('fetch_drain');
     OracleConnection? connectionHandle;
@@ -212,8 +212,6 @@ void main() {
       await cleanUpConnection(c);
     });
 
-    // Story 2.3 - Bind Parameter Support
-
     test('positional bind with string value', () async {
       final result = await connection.execute(
         'SELECT :1 as val FROM dual',
@@ -300,8 +298,8 @@ void main() {
       expect(
         () => connection.execute(
           'SELECT :1 FROM dual',
-          // Duration has no Oracle mapping. (Map/List became valid native
-          // JSON binds in Story 4.4, so they no longer serve as invalid.)
+          // Duration has no Oracle mapping. (Map/List are valid native
+          // JSON binds, so they no longer serve as invalid.)
           [const Duration(seconds: 1)],
         ),
         throwsA(isA<OracleException>()
@@ -326,7 +324,6 @@ void main() {
     });
   });
 
-  // Story 2.6 - Basic Data Type Mapping
   group('Data type mapping',
       skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     OracleConnection? connectionHandle;
@@ -352,8 +349,8 @@ void main() {
         ''');
       } on OracleException catch (e) {
         // ORA-00955: leftover table from a previous run — reuse it. Any
-        // setUp failure leaves the close to tearDown's cleanUpConnection
-        // (AC3/AC4), so no session leaks into the next test.
+        // setUp failure leaves the close to tearDown's cleanUpConnection,
+        // so no session leaks into the next test.
         if (e.errorCode != 955) rethrow;
         await connection.execute('TRUNCATE TABLE $testTable');
       }
@@ -545,8 +542,8 @@ void main() {
 
       expect(row['INT_COL'], isA<int>());
       expect(row['INT_COL'], equals(0));
-      // NUMBER(10,2) zero — declared fixed scale forces double since
-      // Story 7.8 AC7 (node-oracledb always-Number contract).
+      // NUMBER(10,2) zero — declared fixed scale forces double
+      // (node-oracledb always-Number contract).
       expect(row['DECIMAL_COL'], isA<double>());
       expect(row['DECIMAL_COL'], equals(0));
     });
@@ -607,7 +604,6 @@ void main() {
     });
   });
 
-  // Story 2.4 - DML Operations (INSERT, UPDATE, DELETE)
   group('DML operations',
       skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     OracleConnection? connectionHandle;
@@ -647,7 +643,7 @@ void main() {
       );
     });
 
-    // Task 4: INSERT tests
+    // INSERT tests
     test('INSERT with positional binds returns rowsAffected=1', () async {
       final result = await connection.execute(
         'INSERT INTO $testTable (id, name, value) VALUES (:1, :2, :3)',
@@ -719,7 +715,7 @@ void main() {
       expect(verify.rows[0]['CNT'], equals(5));
     });
 
-    // Task 5: UPDATE tests
+    // UPDATE tests
     test('UPDATE single row returns rowsAffected=1', () async {
       // Insert test data
       await connection.execute(
@@ -776,7 +772,7 @@ void main() {
       expect(result.rowsAffected, equals(1));
     });
 
-    // Task 6: DELETE tests
+    // DELETE tests
     test('DELETE single row returns rowsAffected=1', () async {
       await connection.execute(
         'INSERT INTO $testTable (id, name) VALUES (:1, :2)',
@@ -840,7 +836,7 @@ void main() {
       );
     });
 
-    // Task 7: Verify data persistence (same connection)
+    // Verify data persistence (same connection)
     test('INSERT then SELECT verifies data inserted', () async {
       await connection.execute(
         'INSERT INTO $testTable (id, name, value) VALUES (:1, :2, :3)',
@@ -898,7 +894,7 @@ void main() {
       expect(verify.rows[0]['CNT'], equals(2));
     });
 
-    // Task 8: Error handling tests
+    // Error handling tests
     test('ORA-00942 table not found for INSERT', () async {
       expect(
         () => connection.execute(
@@ -930,11 +926,10 @@ void main() {
     });
   });
 
-  // Story 2.5 - Transaction Management (commit, rollback, runTransaction)
   group('Transaction management',
       skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
-    // AC3 (Story 7.8): nullable handles assigned only once each connect()
-    // succeeds; tearDown cleans up null-safely.
+    // Nullable handles assigned only once each connect() succeeds;
+    // tearDown cleans up null-safely.
     OracleConnection? conn1Handle;
     OracleConnection? conn2Handle;
     late OracleConnection conn1;
@@ -981,7 +976,7 @@ void main() {
       }
     });
 
-    // Task 3: commit() tests
+    // commit() tests
 
     test('commit makes inserted row visible to another connection', () async {
       await conn1.execute(
@@ -1061,7 +1056,7 @@ void main() {
       );
     });
 
-    // Task 4: rollback() tests
+    // rollback() tests
 
     test('rollback undoes INSERT so row is not visible', () async {
       await conn1.execute(
@@ -1169,7 +1164,7 @@ void main() {
       );
     });
 
-    // Task 5: runTransaction() tests
+    // runTransaction() tests
 
     test('runTransaction auto-commits on success and returns callback value',
         () async {
@@ -1207,8 +1202,7 @@ void main() {
         throwsA(predicate(
           (e) => identical(e, original),
           'is the same instance as the original Exception '
-          '(AC5 requires the ORIGINAL exception to be rethrown, '
-          'not a wrapper)',
+          '(the ORIGINAL exception must be rethrown, not a wrapper)',
         )),
       );
 
@@ -1325,7 +1319,7 @@ void main() {
 
     test(
         'repeated SELECT with different bind values returns correct results '
-        '(cursor reuse, AC1)', () async {
+        '(cursor reuse)', () async {
       // Execute the same SELECT three times with different bind values.
       // If cursor reuse is broken the server would return corrupt data or a
       // protocol error; expect correct results each time.
@@ -1339,7 +1333,7 @@ void main() {
       }
     });
 
-    test('repeated DML still reports rowsAffected correctly (AC1)', () async {
+    test('repeated DML still reports rowsAffected correctly', () async {
       // Insert three rows individually using the same SQL, then update them
       // using the same SQL, and verify rowsAffected each time.
       for (var i = 1; i <= 3; i++) {
@@ -1359,12 +1353,11 @@ void main() {
     });
 
     test(
-        'statementCacheSize: 50 accepts and reports the configured value '
-        '(AC2)', () {
+        'statementCacheSize: 50 accepts and reports the configured value', () {
       expect(conn.statementCacheSize, equals(50));
     });
 
-    test('statementCacheSize defaults to 30 when omitted (AC2)', () async {
+    test('statementCacheSize defaults to 30 when omitted', () async {
       // Connect with no statementCacheSize argument and confirm the public
       // getter exposes the documented default of 30. Live-connection check
       // because the value cannot be observed without constructing an
@@ -1386,7 +1379,7 @@ void main() {
 
     test(
         'statementCacheSize: 1 evicts LRU — SQL A then SQL B then SQL A again '
-        'succeeds without errors (AC3)', () async {
+        'succeeds without errors', () async {
       // With cache size 1: execute SQL-A (stored), execute SQL-B (evicts A),
       // execute SQL-A again (re-parse required, evicts B). Oracle must not
       // return a cursor-already-closed or invalid cursor error.
@@ -1428,13 +1421,13 @@ void main() {
     });
   });
 
-  // Story 7.6 — Statement cache correctness.
+  // Statement cache correctness.
   //
   // Uses the transport-level parse/reuse instrumentation
   // (`debugFullParseExecutes` / `debugReuseExecutes`) so the evidence does not
   // depend on V$OPEN_CURSOR or any privileged view — it runs identically on
   // Oracle 23ai and 21c with the default test user.
-  group('Story 7.6 — statement cache correctness',
+  group('statement cache correctness',
       skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     Future<OracleConnection> openConn({int statementCacheSize = 50}) {
       return connectForTest(statementCacheSize: statementCacheSize);
@@ -1449,8 +1442,8 @@ void main() {
     }
 
     test(
-        'cursor reuse and reparse-after-eviction proven by instrumentation '
-        '(AC8)', () async {
+        'cursor reuse and reparse-after-eviction proven by instrumentation',
+        () async {
       final c = await openConn(statementCacheSize: 1);
       addTearDown(() async {
         try {
@@ -1486,7 +1479,7 @@ void main() {
 
     test(
         'same SQL with number then string bind does not reuse an incompatible '
-        'cursor (AC3)', () async {
+        'cursor', () async {
       final c = await openConn();
       addTearDown(() async {
         try {
@@ -1516,8 +1509,8 @@ void main() {
     });
 
     test(
-        'DDL changing result shape forces fresh metadata, not stale decode '
-        '(AC2)', () async {
+        'DDL changing result shape forces fresh metadata, not stale decode',
+        () async {
       final c = await openConn();
       final table = uniqueTableName('s76_ddl');
       addTearDown(() async {
@@ -1538,7 +1531,7 @@ void main() {
       expect(r1.columns.length, equals(2));
       expect(c.debugCacheSize, greaterThanOrEqualTo(1));
 
-      // DDL alters the result shape; AC2 requires the whole cache be dropped.
+      // DDL alters the result shape; the whole cache must be dropped.
       await c.execute('ALTER TABLE $table DROP COLUMN label');
       expect(c.debugCacheSize, equals(0),
           reason: 'DDL must invalidate the per-connection statement cache');
@@ -1551,7 +1544,7 @@ void main() {
       expect(r2.columnNames.single.toUpperCase(), equals('ID'));
     });
 
-    test('SELECT ... FOR UPDATE is not cached but still returns rows (AC6)',
+    test('SELECT ... FOR UPDATE is not cached but still returns rows',
         () async {
       final c = await openConn();
       final table = uniqueTableName('s76_upd');
@@ -1578,7 +1571,7 @@ void main() {
           reason: 'FOR UPDATE must still return the locked row');
       expect(c.debugCacheSize, equals(before),
           reason:
-              'SELECT ... FOR UPDATE must be excluded from the cache (AC6)');
+              'SELECT ... FOR UPDATE must be excluded from the cache');
       await c.rollback(); // release the row lock
 
       // A plain (non-locking) SELECT on the same table IS cacheable.
@@ -1588,10 +1581,10 @@ void main() {
     });
   });
 
-  // Story 7.3 — SQL classification across CTE and MERGE shapes.
+  // SQL classification across CTE and MERGE shapes.
   //
-  // Confirms that the classifier changes in Story 7.3 preserve the user-
-  // visible `OracleResult.rowsAffected` contract end-to-end:
+  // Confirms that the classifier preserves the user-visible
+  // `OracleResult.rowsAffected` contract end-to-end:
   //
   //   * `WITH cte AS (...) SELECT` remains a query (rows returned, no
   //     misclassification as DML).
@@ -1606,7 +1599,7 @@ void main() {
   // changes, rowsAffected is reported correctly — see the WITH-CTE unit
   // tests in `test/src/sql_classifier_test.dart`. The integration suite
   // covers the supported Oracle shapes here.
-  group('Story 7.3 — CTE/MERGE classification end-to-end',
+  group('CTE/MERGE classification end-to-end',
       skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     OracleConnection? connectionHandle;
     late OracleConnection connection;
@@ -1624,8 +1617,7 @@ void main() {
         ''');
       } on OracleException catch (e) {
         // ORA-00955: leftover table from a previous run — reuse it. Any
-        // setUp failure leaves the close to tearDown's cleanUpConnection
-        // (AC3/AC4).
+        // setUp failure leaves the close to tearDown's cleanUpConnection.
         if (e.errorCode != 955) rethrow;
         await connection.execute('TRUNCATE TABLE $testTable');
       }
@@ -1651,8 +1643,7 @@ void main() {
       expect(result.rows, hasLength(2));
       expect(result.rows[0]['ID'], equals(1));
       expect(result.rows[1]['ID'], equals(2));
-      // Pre-7.3 this was already `null` because `WITH => query`, but the
-      // new code reaches the same conclusion through the explicit
+      // The classifier reaches this conclusion through the explicit
       // terminal-verb scan — pin the contract here so a future regression
       // in the CTE-DML path cannot silently flip SELECT to DML.
       expect(result.rowsAffected, isNull,
@@ -1680,7 +1671,7 @@ void main() {
       expect(verify.rows.single['VAL'], equals('cte-insert'));
     });
 
-    test('MERGE INTO ... reports rowsAffected (Story 7.3 AC1 parity)',
+    test('MERGE INTO ... reports rowsAffected (parity with INSERT/UPDATE/DELETE)',
         () async {
       // Seed an existing row and a new row via a source that MERGE can
       // pick up.
@@ -1699,7 +1690,7 @@ void main() {
       );
 
       // Oracle reports 2 (1 update + 1 insert) for a MERGE that touches
-      // both branches. Story 7.3 must classify this as DML so rowsAffected
+      // both branches. The classifier must treat this as DML so rowsAffected
       // is populated.
       expect(result.rowsAffected, equals(2),
           reason: 'MERGE must populate rowsAffected like INSERT/UPDATE/DELETE');
@@ -1739,7 +1730,6 @@ void main() {
     });
   });
 
-  // Story 2.8 - Query Error Handling
   group('Query error handling',
       skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     OracleConnection? connectionHandle;
@@ -1759,8 +1749,7 @@ void main() {
         ''');
       } on OracleException catch (e) {
         // ORA-00955: leftover table from a previous run — reuse it. Any
-        // setUp failure leaves the close to tearDown's cleanUpConnection
-        // (AC3/AC4).
+        // setUp failure leaves the close to tearDown's cleanUpConnection.
         if (e.errorCode != 955) rethrow;
         await connection.execute('TRUNCATE TABLE $testTable');
       }
@@ -1775,7 +1764,7 @@ void main() {
       );
     });
 
-    test('AC1: syntax error surfaces ORA-009xx with failing SQL in message',
+    test('syntax error surfaces ORA-009xx with failing SQL in message',
         () async {
       // Invalid SQL — Oracle returns ORA-00900 ("invalid SQL statement") or
       // ORA-00933 ("SQL command not properly ended") depending on the parser
@@ -1792,7 +1781,7 @@ void main() {
       );
     });
 
-    test('AC2: table-not-found surfaces ORA-00942 with Oracle text', () async {
+    test('table-not-found surfaces ORA-00942 with Oracle text', () async {
       await expectLater(
         connection.execute('SELECT * FROM definitely_missing_story28'),
         throwsA(isA<OracleException>()
@@ -1805,7 +1794,7 @@ void main() {
       );
     });
 
-    test('AC3: duplicate primary key surfaces ORA-00001', () async {
+    test('duplicate primary key surfaces ORA-00001', () async {
       await connection.execute(
         'INSERT INTO $testTable (id, label) VALUES (:1, :2)',
         [1, 'first'],
@@ -1824,7 +1813,7 @@ void main() {
       );
     });
 
-    test('AC4: Oracle SQL error position is preserved as structured offset',
+    test('Oracle SQL error position is preserved as structured offset',
         () async {
       // The exact offset Oracle reports for a parse error is server-version
       // dependent, so assert that *some* non-null offset is exposed and that
@@ -1845,7 +1834,7 @@ void main() {
       }
     });
 
-    test('AC5: bind values do not appear in failing-query message or toString',
+    test('bind values do not appear in failing-query message or toString',
         () async {
       const sentinel = 'story28_secret_bind_value';
       try {

@@ -77,7 +77,7 @@ void main() {
       expect(result.rowsAffected, equals(5));
     });
 
-    test('outBinds defaults to an empty container (Story 3.2)', () {
+    test('outBinds defaults to an empty container', () {
       final result = OracleResult(
         columnMetadata: const [],
         rowData: const [],

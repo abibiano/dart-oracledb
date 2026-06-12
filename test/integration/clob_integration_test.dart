@@ -1,4 +1,4 @@
-/// Integration tests for CLOB support (Story 4.1) — query decode, DML binds,
+/// Integration tests for CLOB support — query decode, DML binds,
 /// and PL/SQL OUT / IN OUT binds, all as Dart `String` round-trips.
 ///
 /// CLOB values travel as LOB locators on the wire: queries return locators
@@ -7,10 +7,10 @@
 /// Oracle's long-data ordering, and PL/SQL CLOB binds travel through internal
 /// temporary CLOBs. Payloads beyond ~8060 characters (the server chunk size)
 /// require at least two LOB READ round trips, so the >64 KiB tests prove the
-/// multi-chunk drain end-to-end (AC4).
+/// multi-chunk drain end-to-end.
 ///
-/// Must pass on Oracle 23ai (FREEPDB1) and Oracle 21c (XEPDB1) per the
-/// dual-environment rule in project-context.md. No FAST_AUTH-specific paths
+/// Must pass on Oracle 23ai (FREEPDB1) and Oracle 21c (XEPDB1).
+/// No FAST_AUTH-specific paths
 /// are exercised, so no `Transport.supportsFastAuth` probe is needed.
 ///
 ///   RUN_INTEGRATION_TESTS=true dart test test/integration/clob_integration_test.dart --no-color
@@ -48,7 +48,7 @@ String patternLatin1Text(int length, {int seed = 0}) {
 
 void main() {
   group(
-    'CLOB support (Story 4.1)',
+    'CLOB support',
     skip: !integrationEnabled ? 'Integration tests disabled' : null,
     () {
       OracleConnection? connectionHandle;
@@ -107,7 +107,7 @@ void main() {
       });
 
       // ---------------------------------------------------------------
-      // Query decode (AC1, AC4)
+      // Query decode
       // ---------------------------------------------------------------
 
       test('SQL NULL CLOB decodes to null', () async {
@@ -202,7 +202,7 @@ void main() {
       test('supplementary-plane CLOB across chunk boundaries round-trips '
           'exactly', () async {
         final id = nextTestId();
-        // Regression for the multi-chunk CLOB read (Story 4.1 code review).
+        // Regression for the multi-chunk CLOB read.
         // Emoji are supplementary-plane characters: one Oracle/UCS-2 unit pair
         // is a Dart surrogate pair (two UTF-16 code units). A value far larger
         // than the server chunk size (~8060 chars) guarantees surrogate pairs
@@ -253,7 +253,7 @@ void main() {
       });
 
       // ---------------------------------------------------------------
-      // DML binds (AC2)
+      // DML binds
       // ---------------------------------------------------------------
 
       test('named and positional binds INSERT into CLOB columns', () async {
@@ -313,7 +313,7 @@ void main() {
       });
 
       // ---------------------------------------------------------------
-      // PL/SQL OUT / IN OUT (AC3)
+      // PL/SQL OUT / IN OUT
       // ---------------------------------------------------------------
 
       test('CLOB OUT bind returns null when the procedure assigns NULL',
@@ -451,14 +451,13 @@ void main() {
 
       // ---------------------------------------------------------------
       // Temp-LOB large-write validation: wire-chunk boundaries + ~1 MB
-      // (spec-temp-lob-large-write-validation)
       // ---------------------------------------------------------------
       //
       // Charset derivation: `_createTempClob` selects the WRITE encoding
       // from the created locator's variable-length-charset flag (locator
       // byte 6, bit 0x80). Oracle sets that flag on every temporary /
-      // PL/SQL-created CLOB on both 23ai and 21c (Story 4.1 evidence: only
-      // the UTF-16BE branch makes PL/SQL CLOB binds round-trip at all), so
+      // PL/SQL-created CLOB on both 23ai and 21c (only the UTF-16BE branch
+      // makes PL/SQL CLOB binds round-trip at all), so
       // the encoded WRITE payload is UTF-16BE — exactly 2 bytes per UTF-16
       // code unit. `WriteBuffer.writeBytesWithLength` then splits payloads
       // above 253 bytes into 0xFE long-form chunks of at most 65,535 bytes.
@@ -741,7 +740,7 @@ void main() {
       });
 
       // ---------------------------------------------------------------
-      // Statement cache interplay (AC7 — Story 7.6 protection)
+      // Statement cache interplay
       // ---------------------------------------------------------------
 
       test('repeated CLOB SELECT through the statement cache stays correct',

@@ -1,12 +1,7 @@
-/// Security tests (NFR5) - Credential protection validation
+/// Security tests - Credential protection validation
 ///
 /// Validates that authentication code NEVER exposes passwords or usernames
 /// in logs, error messages, or exceptions.
-///
-/// Background: Epic 1 had 3 security violations caught in review:
-/// - Story 1.4: Password in logs
-/// - Story 1.5: Credentials in error messages
-/// - Story 1.8: Username exposure
 @Tags(['integration', 'security'])
 library;
 
@@ -46,7 +41,7 @@ void main() {
     logMessages.clear();
   });
 
-  group('NFR5: Credential Protection (AC3, AC4)', () {
+  group('Credential Protection', () {
     const invalidPassword = 'WRONG_PASSWORD';
     const testSecret = 'SECRET_PASSWORD_123';
 

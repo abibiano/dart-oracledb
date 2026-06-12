@@ -6,17 +6,17 @@ import 'package:oracledb/oracledb.dart';
 
 import 'test_helper.dart';
 
-/// Story 7.9 AC13 — opt-in `OracleTimestampTz` wrapper for
+/// Opt-in `OracleTimestampTz` wrapper for
 /// `TIMESTAMP WITH TIME ZONE` columns:
 /// * default connections keep decoding TSTZ to a UTC `DateTime`
-///   (Story 7.1 AC1 contract unchanged);
+///   (contract unchanged);
 /// * `preserveTimestampTimeZone: true` connections decode TSTZ to
 ///   `OracleTimestampTz` exposing the UTC instant AND the original offset;
 /// * binding an `OracleTimestampTz` back preserves the offset server-side
 ///   (verified via `TO_CHAR(..., 'TZH:TZM')`), so SELECT → UPDATE round-trips
 ///   do not silently rewrite zones to +00:00.
 void main() {
-  group('TIMESTAMP WITH TIME ZONE wrapper — Story 7.9 AC13',
+  group('TIMESTAMP WITH TIME ZONE wrapper',
       skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     final table = uniqueTableName('story79_tstz');
     OracleConnection? setupHandle;
@@ -69,8 +69,7 @@ void main() {
           equals(DateTime.utc(2024, 3, 15, 10, 30, 45, 123, 456)));
     });
 
-    test('default connection keeps the UTC DateTime contract (Story 7.1)',
-        () async {
+    test('default connection keeps the UTC DateTime contract', () async {
       final id = nextTestId();
       await tzConnection.execute(
         'INSERT INTO $table (id, ts) VALUES (:1, '
@@ -150,7 +149,7 @@ void main() {
       expect(reread.rows.single['TS'], equals(value));
     });
 
-    // F10: zone bytes encode +20/+60 (never zero), so a +00:00 TSTZ value
+    // zone bytes encode +20/+60 (never zero), so a +00:00 TSTZ value
     // must still arrive as a full 13-byte payload — the strict
     // decodeTimestampTz (which rejects 7/11-byte payloads) must accept it.
     test('offset +00:00 round-trips on a preserve connection (13-byte '
@@ -188,18 +187,18 @@ void main() {
     });
   });
 
-  // F5: OracleDbType.timestampTz OUT / IN OUT binds — the documented TSTZ
+  // OracleDbType.timestampTz OUT / IN OUT binds — the documented TSTZ
   // PL/SQL round-trip, exercised on BOTH a preserve connection (expects the
   // OracleTimestampTz wrapper with the server-sent offset) and a default
   // connection (expects the plain UTC DateTime contract).
-  group('PL/SQL TIMESTAMP WITH TIME ZONE binds (F5)',
+  group('PL/SQL TIMESTAMP WITH TIME ZONE binds',
       skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     const outBlock = 'BEGIN '
         ":ret := TO_TIMESTAMP_TZ('2024-03-15 10:30:45 +05:30', "
         "'YYYY-MM-DD HH24:MI:SS TZH:TZM'); "
         'END;';
     // IN OUT goes through a procedure so the bind name appears exactly once
-    // in the block (same pattern as the Story 3.3 IN OUT tests).
+    // in the block (same pattern as the other IN OUT tests).
     const inOutProc = 'f5_tstz_shift';
     const inOutBlock = 'BEGIN $inOutProc(:v); END;';
     final inOutValue = OracleTimestampTz.fromHourMinute(
@@ -285,7 +284,7 @@ void main() {
       }
     });
 
-    // P3: a plain DateTime under OracleDbType.timestampTz is encoded as its
+    // A plain DateTime under OracleDbType.timestampTz is encoded as its
     // UTC instant at an explicit +00:00 offset (full 13-byte payload). The
     // empirical run that motivated this: an 11-byte offset-less TSTZ bind
     // made the server echo invalid all-zero zone bytes back (corrupting the

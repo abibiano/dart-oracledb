@@ -8,7 +8,7 @@ import 'dart:typed_data';
 import 'package:logging/logging.dart';
 // Protocol/auth-flow test: needs Transport + AuthFlow + packet internals that
 // are not on the public surface. No public test-only API exists; the `src/`
-// imports are pinned intentionally (Story 7.8 AC12).
+// imports are pinned intentionally.
 import 'package:oracledb/src/crypto/auth.dart';
 import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/transport/packet.dart';
@@ -63,11 +63,11 @@ void main() {
       print(
           'Time elapsed: ${elapsedMs}ms (${(elapsedMs / 1000).toStringAsFixed(1)}s)');
 
-      // AC3: Verify fast failure (< 6 seconds with margin for network/system overhead)
+      // Verify fast failure (< 6 seconds with margin for network/system overhead)
       expect(elapsedMs, lessThan(6000),
           reason: 'Expected error within 6s, got ${elapsedMs}ms');
 
-      // AC3: Verify error code or message
+      // Verify error code or message
       expect(e, isA<OracleException>());
       final oraErr = e as OracleException;
       expect(
@@ -78,7 +78,7 @@ void main() {
         reason: 'Expected ORA-01017 or authentication failed message',
       );
 
-      // AC3 + NFR5: Verify password not in error
+      // Verify password not in error
       expect(oraErr.message, isNot(contains(password)));
 
       print(

@@ -12,7 +12,7 @@ import 'dart:typed_data';
 import 'package:logging/logging.dart';
 // Protocol/auth-flow test: needs Transport + AuthFlow + packet internals that
 // are not on the public surface. No public test-only API exists; the `src/`
-// imports are pinned intentionally (Story 7.8 AC12).
+// imports are pinned intentionally.
 import 'package:oracledb/src/crypto/auth.dart';
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';

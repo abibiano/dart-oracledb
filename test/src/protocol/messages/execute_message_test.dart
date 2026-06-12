@@ -1,5 +1,5 @@
 /// Unit tests for ExecuteRequest / ExecuteResponse / FetchRequest using the
-/// real Oracle TTC EXECUTE wire format introduced in Story 6.3.
+/// real Oracle TTC EXECUTE wire format.
 ///
 /// These tests validate the structural shape of encoded requests and the
 /// decoder's response loop against hand-crafted fixtures. Behavioral
@@ -251,10 +251,10 @@ void main() {
     });
   });
 
-  // Story 7.9 AC3: ExecuteResponse is immutable — list fields are
-  // unmodifiable and the constructor takes defensive copies, so decode
-  // state (or any caller-held list) is never aliased into the response.
-  group('ExecuteResponse immutability (Story 7.9 AC3)', () {
+  // ExecuteResponse is immutable — list fields are unmodifiable and the
+  // constructor takes defensive copies, so decode state (or any caller-held
+  // list) is never aliased into the response.
+  group('ExecuteResponse immutability', () {
     test('decoded response list fields are unmodifiable', () {
       final payload = _buildPayload([
         _rowHeader(),
@@ -345,9 +345,9 @@ void main() {
       expect(r.moreRowsToFetch, isFalse);
     });
 
-    // Story 7.9 AC3: ERROR num=0 on a query is a batch boundary — the cursor
-    // is still open and more rows are pending (node-oracledb thin only
-    // clears moreRowsToFetch on ORA-01403).
+    // ERROR num=0 on a query is a batch boundary — the cursor is still open
+    // and more rows are pending (node-oracledb thin only clears
+    // moreRowsToFetch on ORA-01403).
     test('query batch boundary (num=0, open cursor) signals more rows', () {
       final payload = _buildPayload([
         _errorMessage(errorNum: 0, cursorId: 7),
@@ -361,8 +361,8 @@ void main() {
               'filled — the transport must keep FETCHing');
     });
 
-    // F1: a cached-cursor re-execute legitimately echoes cursorId == 0 while
-    // the original cursor stays open, so the batch-boundary signal must NOT
+    // A cached-cursor re-execute legitimately echoes cursorId == 0 while the
+    // original cursor stays open, so the batch-boundary signal must NOT
     // be gated on the echoed id (node-oracledb clears moreRowsToFetch only on
     // ORA-01403). The transport supplies the request's own cursor id.
     test('query batch boundary with a zero cursor echo still signals more '
@@ -415,7 +415,7 @@ void main() {
       expect(r.moreRowsToFetch, isFalse);
     });
 
-    // Story 2.8: preserve SQL error offset on failure responses.
+    // Preserve SQL error offset on failure responses.
     test('error response exposes SQL error offset from TTC ERROR', () {
       final payload = _buildPayload([
         _errorMessage(
@@ -442,10 +442,10 @@ void main() {
     });
   });
 
-  // Story 7.7 AC1, AC2: column-metadata decode gates must mirror what each
-  // negotiated TTC field version actually sends. A fixture built for version V
-  // must decode without buffer misalignment when decoded at version V.
-  group('Story 7.8 — real UB8 test helper (AC5)', () {
+  // Column-metadata decode gates must mirror what each negotiated TTC field
+  // version actually sends. A fixture built for version V must decode without
+  // buffer misalignment when decoded at version V.
+  group('real UB8 test helper', () {
     test('_ub8 emits identical bytes to WriteBuffer.writeUB8 per size class',
         () {
       const values = [
@@ -490,8 +490,8 @@ void main() {
     });
   });
 
-  group('Story 7.8 — decodeExecuteResponse coverage (AC6)', () {
-    test('NUMBER column variants decode through ROW_DATA (a)', () {
+  group('decodeExecuteResponse coverage', () {
+    test('NUMBER column variants decode through ROW_DATA', () {
       // 42 → [0xC1, 43]; 123.45 → exp 1, digits [1,23,45] → [0xC2, 2, 24, 46];
       // -5 → complement digit 101-5=96, exp ~0xC1=0x3E, 0x66 terminator;
       // 0 → special single byte 0x80.
@@ -524,7 +524,7 @@ void main() {
       expect(row[3], equals(0));
     });
 
-    test('mixed-type OUT/IN/IN OUT binds decode into correct slots (b)', () {
+    test('mixed-type OUT/IN/IN OUT binds decode into correct slots', () {
       // Directions [OUT DATE, IN NUMBER, IN OUT VARCHAR]: ROW_DATA carries
       // values only for the OUT and IN OUT slots, in SQL order. Distinct
       // types prove value↔slot pairing, not just index ordering.
@@ -557,7 +557,7 @@ void main() {
       expect(r.outBindValues[1], equals('xyz'));
     });
 
-    test('multi-column DESCRIBE_INFO parses names, types, precision, scale (c)',
+    test('multi-column DESCRIBE_INFO parses names, types, precision, scale',
         () {
       final payload = _buildPayload([
         _describeInfo([
@@ -588,7 +588,7 @@ void main() {
       expect(r.columnMetadata[2].scale, isNull);
     });
 
-    test('chunked (0xFE) VARCHAR payload reassembles across chunks (d)', () {
+    test('chunked (0xFE) VARCHAR payload reassembles across chunks', () {
       // 300 bytes split into 200 + 100 chunks via the long-length indicator;
       // the chunk loop ends on a zero-length UB4.
       final chunkA = List.filled(200, 0x41); // 'A'
@@ -620,7 +620,7 @@ void main() {
       expect((value as String).length, equals(300));
     });
 
-    test('DML rowsAffected decodes single and large non-trivial counts (e)',
+    test('DML rowsAffected decodes single and large non-trivial counts',
         () {
       for (final count in [1, 100000]) {
         final payload = _buildPayload([
@@ -633,7 +633,7 @@ void main() {
     });
   });
 
-  group('Story 7.8 — fixed-scale NUMBER decode (AC7)', () {
+  group('fixed-scale NUMBER decode', () {
     List<int> numberColumnPayload({required int scaleByte}) => _buildPayload([
           _describeInfo([
             _columnInfo(
@@ -692,7 +692,7 @@ void main() {
     });
   });
 
-  group('Story 7.7 — column metadata version gating (AC1, AC2)', () {
+  group('column metadata version gating', () {
     // Decodes a single-column DESCRIBE_INFO built for [version] and asserts the
     // column survived round-trip intact (a misaligned gate corrupts the name or
     // throws). Uses a query response terminated by ORA-01403 + STATUS.
@@ -717,32 +717,32 @@ void main() {
       expect(r.columnMetadata.single.oracleType, equals(oraTypeVarchar));
     }
 
-    test('AC2: pre-12.2 server sends no oaccolid — decode stays aligned', () {
+    test('pre-12.2 server sends no oaccolid — decode stays aligned', () {
       // Field version 7 is below the 12.2 threshold (8); the server omits
       // oaccolid. The decoder must skip the oaccolid read or it over-reads.
       expectColumnDecodes(7);
     });
 
-    test('AC2: 12.2 server sends oaccolid — decode consumes it', () {
+    test('12.2 server sends oaccolid — decode consumes it', () {
       expectColumnDecodes(ttcCcapFieldVersion12_2); // 8
     });
 
-    test('AC1: pre-23.4 server sends no vector tail — decode stays aligned',
+    test('pre-23.4 server sends no vector tail — decode stays aligned',
         () {
       // Version 23 has 12.2 + 23.1 + 23.1-ext3 fields but NOT the 23.4 vector
       // tail; reading the vector bytes here would misalign the buffer.
       expectColumnDecodes(23);
     });
 
-    test('AC1: 23.4 server sends the vector tail — decode consumes it', () {
+    test('23.4 server sends the vector tail — decode consumes it', () {
       expectColumnDecodes(ttcCcapFieldVersion23_4); // 24
     });
   });
 
-  // Story 7.7 AC3: fast-fetch and rowid lengths in IO_VECTOR are UB2
-  // variable-length integers; their payloads must be skipped exactly before
-  // the direction bytes are read.
-  group('Story 7.7 — IO_VECTOR fast-fetch / rowid skip (AC3)', () {
+  // Fast-fetch and rowid lengths in IO_VECTOR are UB2 variable-length
+  // integers; their payloads must be skipped exactly before the direction
+  // bytes are read.
+  group('IO_VECTOR fast-fetch / rowid skip', () {
     test('non-zero fast-fetch and rowid payloads are skipped before directions',
         () {
       // One OUT NUMBER bind. Inject a 3-byte fast-fetch payload and a 2-byte
@@ -775,10 +775,10 @@ void main() {
     });
   });
 
-  // Story 7.7 AC5: LONG / LONG RAW are not supported until Epic 4. Decoding one
-  // must surface a clear unsupported-type error, not silently corrupt via the
-  // 0xFF-as-null length heuristic.
-  group('Story 7.7 — LONG / LONG RAW unsupported (AC5)', () {
+  // LONG / LONG RAW are not yet supported. Decoding one must surface a clear
+  // unsupported-type error, not silently corrupt via the 0xFF-as-null length
+  // heuristic.
+  group('LONG / LONG RAW unsupported', () {
     Uint8List longColumnResponse(int oraType) => _buildPayload([
           _describeInfo([
             _columnInfo(name: 'BODY', oraType: oraType, maxSize: 0),
@@ -819,9 +819,9 @@ void main() {
     });
   });
 
-  // Story 7.7 AC8: a pre-12.2 server sends no extended row-count field, so an
-  // absent count must surface as null (distinct from a confirmed 0).
-  group('Story 7.7 — pre-12.2 DML row-count is null (AC8)', () {
+  // A pre-12.2 server sends no extended row-count field, so an absent count
+  // must surface as null (distinct from a confirmed 0).
+  group('pre-12.2 DML row-count is null', () {
     test('pre-12.2 DML success leaves rowsAffected null, not 0', () {
       final payload = _buildPayload([
         _errorMessage(errorNum: 0, ttcFieldVersion: 7),
@@ -846,7 +846,7 @@ void main() {
     });
   });
 
-  group('Story 3.2 — OUT bind encoding', () {
+  group('OUT bind encoding', () {
     test('PL/SQL with OUT bind writes metadata and null indicator for OUT', () {
       final req = ExecuteRequest(
         sql: 'BEGIN :ret := myfunc(:a); END;',
@@ -925,7 +925,7 @@ void main() {
     });
   });
 
-  group('Story 3.2 — OUT bind decoding', () {
+  group('OUT bind decoding', () {
     test('IO_VECTOR + ROW_DATA decodes a NUMBER OUT bind', () {
       // bind 0: OUT NUMBER (return), bind 1: IN NUMBER. Server reports
       // direction 16 for OUT, direction 32 for IN.
@@ -1002,7 +1002,7 @@ void main() {
       expect(r.outBindValues, equals([null]));
     });
 
-    test('Story 3.3 — IN OUT bind writes input value into ROW_DATA', () {
+    test('IN OUT bind writes input value into ROW_DATA', () {
       // For an IN OUT bind, the input value must appear in ROW_DATA (unlike
       // an OUT-only bind, which writes only the null-indicator byte). Use
       // the integer 5, which Oracle encodes as bytes [0xC1, 6] (2 bytes).
@@ -1033,9 +1033,9 @@ void main() {
       expect(bytes[rowDataIdx + 3], equals(0x06));
     });
 
-    test('Story 3.3 — OUT bind still writes the null-indicator byte', () {
-      // Regression for Story 3.2 OUT-only behavior: a pure OUT bind must not
-      // write input bytes, only the length=0 null indicator. This guards
+    test('OUT bind still writes the null-indicator byte', () {
+      // Regression for OUT-only behavior: a pure OUT bind must not write
+      // input bytes, only the length=0 null indicator. This guards
       // against the IN OUT change above touching OUT-only emission.
       final req = ExecuteRequest(
         sql: 'BEGIN :ret := myfunc; END;',
@@ -1057,7 +1057,7 @@ void main() {
       expect(bytes[rowDataIdx + 1], equals(0));
     });
 
-    test('Story 3.3 — IN OUT in non-PL/SQL statement throws OracleException',
+    test('IN OUT in non-PL/SQL statement throws OracleException',
         () {
       expect(
         () => ExecuteRequest(
@@ -1076,7 +1076,7 @@ void main() {
       );
     });
 
-    test('Story 3.3 — IO_VECTOR with mixed OUT (16) and IN OUT (48) directions',
+    test('IO_VECTOR with mixed OUT (16) and IN OUT (48) directions',
         () {
       // Server reports directions [OUT, IN, IN OUT] for three binds.
       // Both OUT and IN OUT must show up in outBindIndices, in SQL order,
@@ -1113,7 +1113,7 @@ void main() {
       expect(r.outBindValues, equals([5, 6]));
     });
 
-    test('Story 3.3 — IN OUT alone (direction 48) decodes returned value', () {
+    test('IN OUT alone (direction 48) decodes returned value', () {
       final payload = _buildPayload([
         _ioVector([48]),
         [
@@ -1157,8 +1157,8 @@ void main() {
     });
   });
 
-  group('Story 7.2 — IO_VECTOR and OUT-bind hardening', () {
-    test('AC1 — unknown direction byte raises OracleException', () {
+  group('IO_VECTOR and OUT-bind hardening', () {
+    test('unknown direction byte raises OracleException', () {
       // Synthesize an IO_VECTOR with a direction byte (99) that is neither
       // tnsBindDirInput (32), tnsBindDirOutput (16), nor tnsBindDirInputOutput
       // (48). The decoder must surface a protocol error rather than treat
@@ -1181,7 +1181,7 @@ void main() {
       );
     });
 
-    test('AC2 — server OUT for client-declared IN raises mismatch', () {
+    test('server OUT for client-declared IN raises mismatch', () {
       // Client declared bind 0 as IN; server reports direction 16 (OUT).
       // The two views disagree —
       // raise a protocol error rather than silently follow the server.
@@ -1205,7 +1205,7 @@ void main() {
       );
     });
 
-    test('AC2 — server OUT vs client IN OUT raises mismatch', () {
+    test('server OUT vs client IN OUT raises mismatch', () {
       final payload = _buildPayload([
         _ioVector([16]),
         _errorMessage(errorNum: 0),
@@ -1227,7 +1227,7 @@ void main() {
       );
     });
 
-    test('AC2 — server IN OUT vs client OUT raises mismatch', () {
+    test('server IN OUT vs client OUT raises mismatch', () {
       final payload = _buildPayload([
         _ioVector([48]),
         _errorMessage(errorNum: 0),
@@ -1250,11 +1250,11 @@ void main() {
     });
 
     test(
-        'AC3 — all-null OUT-bind decode does not re-enable decoding on '
+        'all-null OUT-bind decode does not re-enable decoding on '
         'subsequent ROW_DATA-style state transitions', () {
-      // Pre-Story-7.2 the double-decode guard used `outBindValues.isEmpty`.
-      // After this story it uses an explicit `outBindsDecoded` flag, so the
-      // first decode is the authoritative one regardless of whether every
+      // The double-decode guard used to use `outBindValues.isEmpty`. It now
+      // uses an explicit `outBindsDecoded` flag, so the first decode is the
+      // authoritative one regardless of whether every
       // decoded value happened to be null. We exercise this by running the
       // same payload through ttcStreamIsComplete (one decode pass) and then
       // decodeExecuteResponse (a second pass on the same bytes) — both
@@ -1285,7 +1285,7 @@ void main() {
       expect(r.outBindValues, equals([null]));
     });
 
-    test('AC9 — numBinds > 65535 raises OracleException', () {
+    test('numBinds > 65535 raises OracleException', () {
       // Hand-craft an IO_VECTOR whose temp32 high field is 256, producing
       // numBinds = 256 * 256 + 0 = 65536 (just over the Oracle bind ceiling).
       // The decoder must reject this rather than try to iterate that many
@@ -1314,9 +1314,9 @@ void main() {
       );
     });
 
-    test('AC2 — server IN for client-declared OUT raises mismatch', () {
-      // Review patch: the previous implementation `continue`d on direction 32
-      // before running the consistency check, silently dropping a server-IN
+    test('server IN for client-declared OUT raises mismatch', () {
+      // A previous implementation `continue`d on direction 32 before running
+      // the consistency check, silently dropping a server-IN
       // for a bind the client declared OUT. The fix moves the consistency
       // check ahead of the input-direction shortcut so this asymmetric case
       // is caught too.
@@ -1341,7 +1341,7 @@ void main() {
       );
     });
 
-    test('AC2 — server IN for client-declared IN OUT raises mismatch', () {
+    test('server IN for client-declared IN OUT raises mismatch', () {
       final payload = _buildPayload([
         _ioVector([32]),
         _errorMessage(errorNum: 0),
@@ -1363,7 +1363,7 @@ void main() {
       );
     });
 
-    test('AC2 — missing metadata leaves stream alignment to ROW_DATA', () {
+    test('missing metadata leaves stream alignment to ROW_DATA', () {
       // When `bindMetadata.length` is smaller than the server-reported bind
       // count, the consistency check has nothing to compare against; the
       // decoder should fall through to the conservative ROW_DATA branch
@@ -1399,11 +1399,11 @@ void main() {
     });
   });
 
-  // F2 / F3: duplicate-column bit-vector lifecycle. A bit vector describes
-  // exactly one row (node-oracledb withData.js:252 clears it after each
-  // processRowData); the duplicate source for the first row of a FETCH
-  // continuation is the last row of the previous round.
-  group('duplicate-column bit vector lifecycle (F2, F3)', () {
+  // Duplicate-column bit-vector lifecycle. A bit vector describes exactly one
+  // row (node-oracledb withData.js:252 clears it after each processRowData);
+  // the duplicate source for the first row of a FETCH continuation is the
+  // last row of the previous round.
+  group('duplicate-column bit vector lifecycle', () {
     const cols = [
       ColumnMetadata(name: 'C0', oracleType: oraTypeVarchar, maxLength: 100),
       ColumnMetadata(name: 'C1', oracleType: oraTypeVarchar, maxLength: 100),
@@ -1535,9 +1535,9 @@ void main() {
     });
   });
 
-  // F14b: empty list inputs reuse canonical const empty lists (no per-DML
+  // Empty list inputs reuse canonical const empty lists (no per-DML
   // allocations) while staying unmodifiable.
-  group('ExecuteResponse empty-list canonicalization (F14b)', () {
+  group('ExecuteResponse empty-list canonicalization', () {
     test('empty list fields are canonical const instances', () {
       final a = ExecuteResponse(isSuccess: true);
       final b = ExecuteResponse(isSuccess: true);
@@ -1559,10 +1559,10 @@ void main() {
     });
   });
 
-  // Story 4.1 — CLOB locator decode (AC4/AC5). The LOB-prefetch wire shape
-  // is UB4 locator length (0 ⇒ SQL NULL), UB8 LOB length, UB4 chunk size,
-  // then the locator as length-prefixed bytes.
-  group('Story 4.1 — CLOB locator decode', () {
+  // CLOB locator decode. The LOB-prefetch wire shape is UB4 locator length
+  // (0 ⇒ SQL NULL), UB8 LOB length, UB4 chunk size, then the locator as
+  // length-prefixed bytes.
+  group('CLOB locator decode', () {
     final clobColumn = [
       _columnInfo(
           name: 'DOC', oraType: oraTypeClob, maxSize: 4000, csfrm: 1),
@@ -1594,7 +1594,7 @@ void main() {
       expect(loc.oracleType, equals(oraTypeClob));
       expect(loc.chunkSize, equals(8060));
       expect(loc.locator, equals(locatorBytes));
-      // AC: ColumnMetadata survives decode for CLOB columns.
+      // ColumnMetadata survives decode for CLOB columns.
       expect(r.columnMetadata.single.oracleType, equals(oraTypeClob));
       expect(r.columnMetadata.single.csfrm, equals(1));
       expect(r.columnMetadata.single.name, equals('DOC'));
@@ -1658,7 +1658,7 @@ void main() {
       expect(loc.chunkSize, equals(4000));
     });
 
-    test('BLOB column decodes to a byte-typed LobLocator (Story 4.2)', () {
+    test('BLOB column decodes to a byte-typed LobLocator', () {
       final payload = _buildPayload([
         _describeInfo([
           _columnInfo(name: 'B', oraType: oraTypeBlob, maxSize: 4000),
@@ -1680,7 +1680,7 @@ void main() {
       expect(ttcStreamIsComplete(payload), isTrue);
     });
 
-    test('BLOB OUT bind decodes through the locator shape (Story 4.2)', () {
+    test('BLOB OUT bind decodes through the locator shape', () {
       final payload = _buildPayload([
         _ioVector([16]),
         [
@@ -1705,7 +1705,7 @@ void main() {
       expect(loc.length, equals(9));
     });
 
-    test('BFILE column still fails loud in the strict pass (Story 4.2)', () {
+    test('BFILE column still fails loud in the strict pass', () {
       final payload = _buildPayload([
         _describeInfo([
           _columnInfo(name: 'F', oraType: oraTypeBfile, maxSize: 4000),
@@ -1754,12 +1754,12 @@ void main() {
 
   });
 
-  // Story 4.4 — JSON (type 119) decode: the wire shape is the LOB-prefetch
-  // form with the OSON document inline (node-oracledb packet.js readOson):
-  // UB4 locator-ish length (0 ⇒ SQL NULL, nothing follows), UB8 size and
-  // UB4 chunk size (both unused), length-prefixed OSON data, length-prefixed
-  // locator (unused). No LOB READ round trips and no LobLocator.
-  group('Story 4.4 — JSON column decode (type 119)', () {
+  // JSON (type 119) decode: the wire shape is the LOB-prefetch form with the
+  // OSON document inline (node-oracledb packet.js readOson): UB4 locator-ish
+  // length (0 ⇒ SQL NULL, nothing follows), UB8 size and UB4 chunk size (both
+  // unused), length-prefixed OSON data, length-prefixed locator (unused). No
+  // LOB READ round trips and no LobLocator.
+  group('JSON column decode (type 119)', () {
     List<int> jsonValue(Object? doc) {
       final oson = encodeOson(doc);
       return [
@@ -1836,7 +1836,7 @@ void main() {
     test('unsupported OSON scalar node still fails loud in the strict pass',
         () {
       // Scalar OSON document whose node is BINARY_DOUBLE (0x36) — outside
-      // the supported standard-JSON scope (AC5).
+      // the supported standard-JSON scope.
       final badOson = [
         0xff, 0x4a, 0x5a, 0x01, // magic + version
         0x00, 0x12, // flags: INLINE_LEAF | IS_SCALAR
@@ -1938,7 +1938,7 @@ void main() {
     });
   });
 
-  group('Story 4.4 — JSON bind encode', () {
+  group('JSON bind encode', () {
     test('JSON bind metadata: type 119, prefetch flag, 32MB sizes, csfrm 0',
         () {
       final req = ExecuteRequest(
@@ -2114,9 +2114,9 @@ void main() {
     });
   });
 
-  // Story 4.1 — CLOB bind encode: locator-sized metadata with the LOB
-  // prefetch cont-flag, locator value writes, and SQL long-data ordering.
-  group('Story 4.1 — CLOB bind encode', () {
+  // CLOB bind encode: locator-sized metadata with the LOB prefetch
+  // cont-flag, locator value writes, and SQL long-data ordering.
+  group('CLOB bind encode', () {
     test('CLOB bind metadata: type 112, prefetch flag, locator buffer size',
         () {
       final req = ExecuteRequest(
@@ -2239,9 +2239,9 @@ void main() {
     });
   });
 
-  // Story 4.2 — BLOB bind encode: locator-sized metadata with the LOB
-  // prefetch cont-flag, no character set form, and locator value writes.
-  group('Story 4.2 — BLOB bind encode', () {
+  // BLOB bind encode: locator-sized metadata with the LOB prefetch
+  // cont-flag, no character set form, and locator value writes.
+  group('BLOB bind encode', () {
     test('BLOB bind metadata: type 113, prefetch flag, locator buffer size',
         () {
       final req = ExecuteRequest(
@@ -2356,11 +2356,11 @@ void main() {
     });
   });
 
-  // Story 4.3 — RAW stays a length-prefixed scalar (type 23): no LOB
-  // locator, no prefetch cont-flag, no temporary-LOB conversion. These
-  // tests pin the wire shape so future LOB work cannot silently route RAW
-  // through the Story 4.1/4.2 locator path.
-  group('Story 4.3 — RAW scalar encode/decode', () {
+  // RAW stays a length-prefixed scalar (type 23): no LOB locator, no
+  // prefetch cont-flag, no temporary-LOB conversion. These tests pin the
+  // wire shape so future LOB work cannot silently route RAW through the
+  // LOB locator path.
+  group('RAW scalar encode/decode', () {
     test('plain Uint8List bind infers oraTypeRaw, not BLOB', () {
       final bind = BindVariable(value: Uint8List.fromList([1, 2, 3]));
       expect(bind.oraType, equals(oraTypeRaw));
@@ -2549,9 +2549,9 @@ void main() {
     });
   });
 
-  // Story 4.1 — define-mode ExecuteRequest (the DEFINE call sent for open
-  // CLOB query cursors, mirroring node-oracledb `_handleDefines`).
-  group('Story 4.1 — define-mode ExecuteRequest', () {
+  // Define-mode ExecuteRequest (the DEFINE call sent for open CLOB query
+  // cursors, mirroring node-oracledb `_handleDefines`).
+  group('define-mode ExecuteRequest', () {
     const clobCol = ColumnMetadata(
         name: 'DOC', oracleType: oraTypeClob, maxLength: 4000, csfrm: 1);
     const numberCol = ColumnMetadata(
@@ -2692,9 +2692,9 @@ void main() {
     });
 
     test('completion probe consumes CLOB OUT binds byte-accurately', () {
-      // The pre-23.4 completion probe walks OUT binds with bindMetadata
-      // (Story 4.1): a CLOB OUT bind ships the locator shape, which the
-      // metadata-less fallback (bytes-with-length) would misparse.
+      // The pre-23.4 completion probe walks OUT binds with bindMetadata:
+      // a CLOB OUT bind ships the locator shape, which the metadata-less
+      // fallback (bytes-with-length) would misparse.
       final locator = List<int>.filled(40, 0x55);
       final prefix = <int>[
         ..._ioVector([16]),
@@ -2872,7 +2872,7 @@ int _indexOfSub(List<int> haystack, List<int> needle) {
 ///
 /// [fastFetch] and [rowid] inject non-zero variable-length (UB2) payloads so a
 /// test can prove `_processIoVector` skips exactly those bytes before reading
-/// the direction bytes (AC3). Both default to empty (UB2 length 0).
+/// the direction bytes. Both default to empty (UB2 length 0).
 List<int> _ioVector(List<int> directions,
     {List<int> fastFetch = const [], List<int> rowid = const []}) {
   return [
@@ -3045,7 +3045,7 @@ List<int> _ub2(int v) {
 
 /// Emits a real variable-length UB8 mirroring `WriteBuffer.writeUB8`:
 /// size byte 0/1/2/4/8 followed by that many big-endian payload bytes,
-/// including the 8-byte form for values above 2³² (Story 7.8 AC5).
+/// including the 8-byte form for values above 2³².
 /// Deliberately decoupled from [_ub4], which caps at the 4-byte form.
 List<int> _ub8(int v) {
   if (v == 0) return [0];
@@ -3123,7 +3123,7 @@ List<int> _errorMessage({
   out.addAll(_ub4(errorNum)); // extended error number
   // Extended row count (UB8) is only sent by 12.2+ servers; 20.1+ adds the
   // sql-type + checksum pair. A pre-12.2 fixture omits both, matching what an
-  // older server would send (AC8).
+  // older server would send.
   if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
     out.addAll(_ub8(rowCount)); // extended row count
     if (ttcFieldVersion >= ttcCcapFieldVersion20_1) {

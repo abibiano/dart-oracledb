@@ -4,7 +4,7 @@
 /// Ported from the bundled node-oracledb reference implementation:
 /// `reference/node-oracledb/lib/impl/datahandlers/oson.js` (encoder/decoder)
 /// and `reference/node-oracledb/lib/impl/datahandlers/constants.js` (format
-/// constants). Scope is standard JSON documents (Story 4.4): objects, arrays,
+/// constants). Scope is standard JSON documents: objects, arrays,
 /// strings, numbers, booleans, and null. Oracle-specific OSON scalar kinds
 /// (dates, timestamps, intervals, binary, vector, JsonId, ...) fail loud.
 ///
@@ -91,7 +91,7 @@ const int _maxFieldNameBytes = 255;
 /// name reported in the error.
 ///
 /// `Uint8List` is deliberately rejected even though it is a `List<int>`:
-/// plain bytes must remain RAW/BLOB behavior (Story 4.4 regression trap), and
+/// plain bytes must remain RAW/BLOB behavior, and
 /// the OSON binary scalar is not part of the supported standard-JSON scope.
 void assertValidJsonBindValue(Object? value, String name) {
   if (value == null) return;
@@ -516,7 +516,7 @@ class _OsonEncoder {
 /// Throws [OracleException]:
 /// - `oraProtocolError` for malformed/truncated payloads or bad magic bytes;
 /// - `oraUnsupportedType` for unsupported OSON versions and Oracle-specific
-///   scalar node types outside the standard-JSON scope (AC5 — never decode
+///   scalar node types outside the standard-JSON scope (never decode
 ///   them silently to `null`).
 Object? decodeOson(Uint8List data) {
   try {
@@ -681,8 +681,8 @@ class _OsonDecoder {
         // packed 0x40/0x50 nodes, with the length in a separate uint8.
         final numberLength = _buf.readUint8();
         return numberLength == 0 ? 0 : _decodeNumber(numberLength);
-      // Oracle-specific scalar kinds are out of the Story 4.4 standard-JSON
-      // scope: fail loud (AC5) rather than decode silently to null. Each
+      // Oracle-specific scalar kinds are out of the standard-JSON
+      // scope: fail loud rather than decode silently to null. Each
       // case is named so the error message tells callers what the document
       // actually contains.
       case _nodeDate:
@@ -831,7 +831,7 @@ class _OsonDecoder {
       OracleException(
         errorCode: oraUnsupportedType,
         message: 'Unsupported OSON node type '
-            '0x${nodeType.toRadixString(16)} ($kind). Story 4.4 supports '
+            '0x${nodeType.toRadixString(16)} ($kind). This driver supports '
             'standard JSON values only: objects, arrays, strings, numbers, '
             'booleans, and null.',
       );

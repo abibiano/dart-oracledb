@@ -25,7 +25,7 @@ import 'protocol/constants.dart' as oc;
 import 'protocol/messages/execute_message.dart' show BindDir;
 import 'protocol/oson.dart' show assertValidJsonBindValue;
 
-// AC5: Direction enum boundary.
+// Direction enum boundary.
 //
 // `OracleBind.direction` exposes the internal `BindDir` enum (defined in
 // `protocol/messages/execute_message.dart`) because the public API for
@@ -35,7 +35,7 @@ import 'protocol/oson.dart' show assertValidJsonBindValue;
 // public `OracleBind.direction` field is the only allowed touch-point for
 // consumers, and it satisfies that contract via its enum `name`. There is
 // no separate public `BindDirection` enum in this codebase. Keep this
-// boundary stable unless a future story explicitly promotes the protocol
+// boundary stable unless a future change explicitly promotes the protocol
 // enum into the public API.
 
 /// Dart-facing Oracle data type for binds.
@@ -77,8 +77,8 @@ enum OracleDbType {
   /// bind. A returned CLOB longer than `maxSize` fails loud with
   /// [OracleException] instead of being truncated. On the wire the bind is
   /// always a LOB locator: IN OUT `String` values travel through an internal
-  /// temporary CLOB, and returned locators are read back into `String`
-  /// (Story 4.1). The empty string binds as SQL NULL, consistent with
+  /// temporary CLOB, and returned locators are read back into `String`.
+  /// The empty string binds as SQL NULL, consistent with
   /// Oracle's `'' IS NULL` semantics.
   clob,
 
@@ -90,7 +90,7 @@ enum OracleDbType {
   /// [OracleException] instead of being truncated. On the wire the bind is
   /// always a LOB locator: IN / IN OUT `Uint8List` values travel through an
   /// internal temporary BLOB, and returned locators are read back into
-  /// `Uint8List` (Story 4.2). An empty `Uint8List` binds as an empty BLOB
+  /// `Uint8List`. An empty `Uint8List` binds as an empty BLOB
   /// value (length 0), which is distinct from SQL NULL.
   blob,
 
@@ -104,7 +104,7 @@ enum OracleDbType {
   /// truncated. IN OUT values must be `Map<String, Object?>`,
   /// `List<Object?>`, or `null`; members may be `null`, `bool`, finite `num`,
   /// `String`, and nested maps/lists. Values travel as OSON (Oracle's binary
-  /// JSON) under wire type 119 (Story 4.4).
+  /// JSON) under wire type 119.
   json,
 }
 
@@ -176,7 +176,7 @@ class OracleBind {
         message: 'OracleBind(type: $type) requires maxSize',
       );
     }
-    // AC6: For IN OUT binds (and any future spec that passes a non-null
+    // For IN OUT binds (and any future spec that passes a non-null
     // value into `_validate`), the value's Dart runtime type must match the
     // declared Oracle type. Catching this at construction is much friendlier
     // than letting a mismatch surface as a ClassCastError during wire
@@ -352,8 +352,7 @@ class OracleOutBinds {
   /// Returns `null` if the name/index is not in this container or if the
   /// value is SQL NULL. Throws [ArgumentError] for any key type other than
   /// [int] or [String] — silent `null` would hide caller bugs such as
-  /// passing a `Symbol` or a `num` that does not fit the int contract
-  /// (AC7).
+  /// passing a `Symbol` or a `num` that does not fit the int contract.
   Object? operator [](Object key) {
     if (key is int) {
       if (key < 0 || key >= _values.length) return null;

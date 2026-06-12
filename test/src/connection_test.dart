@@ -96,8 +96,7 @@ void main() {
       });
 
       test('OracleException with oraConnectionClosed has correct format', () {
-        // Verify the exception format matches AC3 requirements
-        // AC3: "then a 'connection closed' error is thrown"
+        // Verify the "connection closed" error is thrown in the right format.
         const exception = OracleException(
           errorCode: oraConnectionClosed,
           message: 'Connection is closed',
@@ -105,15 +104,15 @@ void main() {
 
         expect(exception.errorCode, equals(3113));
         expect(exception.message, contains('closed'));
-        // Story 2.8: canonical 5-digit ORA padding for codes below 10000.
+        // Canonical 5-digit ORA padding for codes below 10000.
         expect(exception.toString(), contains('ORA-03113'));
         expect(exception.toString(), contains('Connection is closed'));
       });
 
-      // Note: Full AC3 behavior ("operations throw after close") will be
-      // verified in Epic 2 when execute() and query operations are added.
-      // The _ensureOpen() guard method is implemented and ready to be
-      // called by those operations. See lib/src/connection.dart:68
+      // Note: Full "operations throw after close" behavior is verified once
+      // execute() and query operations are exercised. The _ensureOpen() guard
+      // method is implemented and ready to be called by those operations.
+      // See lib/src/connection.dart:68
     });
 
     group('lifecycle error codes', () {
@@ -198,12 +197,12 @@ void main() {
       });
     });
 
-    group('OracleBind normalization (Story 3.3)', () {
+    group('OracleBind normalization', () {
       // These tests validate the OracleBind public API shape and verify that
       // reading bind properties does not modify caller-owned collections.
       // They do NOT call execute() — execute() requires a live Oracle
       // connection and its copy-before-mutate protection is covered by the
-      // Story 3.3 integration tests ('execute() does not mutate caller-owned
+      // integration tests ('execute() does not mutate caller-owned
       // named bind map').
 
       test(
@@ -230,7 +229,7 @@ void main() {
       test(
           'positional bind list is not mutated when interrogating OracleBind '
           'specs', () {
-        // Repro of the Story 3.2 caller-owned list mutation. Build a list of
+        // Repro of the caller-owned list mutation. Build a list of
         // mixed raw and OracleBind values and ensure read-only inspection
         // does not alter it. Execute() copies the list internally, but this
         // guards against future refactors that might bypass the copy.
@@ -298,7 +297,7 @@ void main() {
       });
     });
 
-    group('_ensureOpen liveness guard (Story 7.4 AC3)', () {
+    group('_ensureOpen liveness guard', () {
       test('execute() fails fast when transport is not connected', () async {
         // forTesting injects an unconnected Transport: isConnected is false even
         // though the connection was never explicitly closed. The new liveness
@@ -337,7 +336,7 @@ void main() {
       });
     });
 
-    group('concurrency contract (AC1)', () {
+    group('concurrency contract', () {
       test('rejects a second execute() while the first is in flight', () async {
         final t = _FakeTransport();
         final gate = Completer<void>();
@@ -381,7 +380,7 @@ void main() {
       });
     });
 
-    group('cached re-execute cursorId == 0 (AC5)', () {
+    group('cached re-execute cursorId == 0', () {
       test(
           'successful re-execute with cursorId == 0 preserves the cached entry',
           () async {
@@ -427,7 +426,7 @@ void main() {
       });
     });
 
-    group('bind-signature cache identity (AC3)', () {
+    group('bind-signature cache identity', () {
       test('same SQL with different bind types do not share a cached cursor',
           () async {
         final t = _FakeTransport();
@@ -449,7 +448,7 @@ void main() {
       });
     });
 
-    group('DDL invalidates the statement cache (AC2)', () {
+    group('DDL invalidates the statement cache', () {
       test('successful non-cacheable statement clears all cached cursors',
           () async {
         final t = _FakeTransport();
@@ -481,7 +480,7 @@ void main() {
       });
     });
 
-    group('server re-DESCRIBE on cached re-execute (AC2)', () {
+    group('server re-DESCRIBE on cached re-execute', () {
       test(
           'server-sent columnMetadata on a cached re-execute updates the cached '
           'entry so subsequent executes receive the new shape as expectedColumns',
@@ -502,7 +501,7 @@ void main() {
         // Second execute: re-execute of the cached cursor. Server sends a fresh
         // DESCRIBE_INFO with a different column [Y] — simulating a shape change
         // that Oracle surfaced during decode (e.g. implicit re-parse).
-        // cursorId echoed as 0 (normal for cached re-execute per AC5).
+        // cursorId echoed as 0 (normal for cached re-execute).
         t.nextResponses.add(ExecuteResponse(
             isSuccess: true, cursorId: 0, columnMetadata: [col2]));
         await conn.execute('SELECT x FROM t');
@@ -519,7 +518,7 @@ void main() {
       });
     });
 
-    group('SELECT ... FOR UPDATE is not cached (AC6)', () {
+    group('SELECT ... FOR UPDATE is not cached', () {
       test(
           'FOR UPDATE statement does not populate the cache, '
           'while a plain SELECT does', () async {
@@ -532,7 +531,7 @@ void main() {
         expect(conn.debugCacheSize, equals(1),
             reason: 'plain SELECT must be cached');
 
-        // SELECT ... FOR UPDATE is not cache-eligible (AC6) — it must not
+        // SELECT ... FOR UPDATE is not cache-eligible — it must not
         // add a second entry even though it looks like a query.
         t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
         await conn.execute('SELECT id FROM t WHERE id = :1 FOR UPDATE', [1]);
@@ -542,7 +541,7 @@ void main() {
       });
     });
 
-    group('close-cursor piggyback chunking (AC4)', () {
+    group('close-cursor piggyback chunking', () {
       test('a large close backlog is flushed in SDU-bounded chunks, none lost',
           () async {
         // SDU=84: budget = (84÷2) - 32 = 10; limit = 10÷5 = 2.
@@ -583,7 +582,7 @@ void main() {
       });
     });
 
-    group('statementCacheSize upper bound (AC7)', () {
+    group('statementCacheSize upper bound', () {
       test('value above the cap rejects before network', () {
         expect(
           () => OracleConnection.connect(
@@ -636,10 +635,10 @@ void main() {
       });
     });
 
-    // Story 7.9 AC10: negative statementCacheSize is rejected by BOTH
-    // constructors with ArgumentError (enforced once in StatementCache so the
-    // two paths cannot diverge — Story 7.6 lesson).
-    group('negative statementCacheSize rejected (Story 7.9 AC10)', () {
+    // Negative statementCacheSize is rejected by BOTH constructors with
+    // ArgumentError (enforced once in StatementCache so the two paths cannot
+    // diverge).
+    group('negative statementCacheSize rejected', () {
       test('connect(..., statementCacheSize: -1) throws ArgumentError', () {
         expect(
           () => OracleConnection.connect(
@@ -663,9 +662,9 @@ void main() {
       });
     });
 
-    // Story 7.9 AC2: SQL snippet truncation must not split a surrogate pair
-    // when a supplementary-plane character straddles the 200-char boundary.
-    group('rune-aware SQL truncation (Story 7.9 AC2)', () {
+    // SQL snippet truncation must not split a surrogate pair when a
+    // supplementary-plane character straddles the 200-char boundary.
+    group('rune-aware SQL truncation', () {
       bool hasUnpairedSurrogate(String s) =>
           s.runes.any((r) => r >= 0xD800 && r <= 0xDFFF);
 
@@ -717,7 +716,7 @@ class _FakeTransport extends Transport {
   final List<ExecuteResponse> nextResponses = <ExecuteResponse>[];
 
   /// When set, [sendExecute] awaits this gate before returning, letting a test
-  /// hold a call "in flight" to exercise the overlap guard (AC1).
+  /// hold a call "in flight" to exercise the overlap guard.
   Completer<void>? executeGate;
 
   int executeCalls = 0;

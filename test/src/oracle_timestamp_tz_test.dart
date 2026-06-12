@@ -4,7 +4,7 @@ import 'package:oracledb/oracledb.dart';
 import 'package:test/test.dart';
 
 void main() {
-  group('OracleTimestampTz (Story 7.9 AC13)', () {
+  group('OracleTimestampTz', () {
     final instant = DateTime.utc(2024, 3, 15, 5, 0, 45, 123);
 
     test('exposes the UTC instant and offset parts', () {
@@ -126,7 +126,7 @@ void main() {
           () => OracleTimestampTz.fromOffset(
               instant, const Duration(minutes: 5, seconds: 30)),
           throwsArgumentError);
-      // F9 regression: a sub-second component (whole-second count divisible
+      // Regression: a sub-second component (whole-second count divisible
       // by 60) used to slip past the old `inSeconds % 60` check.
       expect(
           () => OracleTimestampTz.fromOffset(

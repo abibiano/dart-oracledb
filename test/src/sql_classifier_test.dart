@@ -162,8 +162,8 @@ void main() {
       expect(isCacheEligibleSql('CALL my_proc()'), isFalse);
     });
 
-    // Story 7.3 — MERGE classification parity with INSERT/UPDATE/DELETE.
-    test('MERGE is eligible (Story 7.3 AC1)', () {
+    // MERGE classification parity with INSERT/UPDATE/DELETE.
+    test('MERGE is eligible', () {
       expect(
         isCacheEligibleSql(
           'MERGE INTO target t USING source s ON (t.id = s.id) '
@@ -173,7 +173,7 @@ void main() {
       );
     });
 
-    test('MERGE is not a query (Story 7.3 AC1)', () {
+    test('MERGE is not a query', () {
       expect(
         isQuerySql(
           'MERGE INTO target t USING source s ON (t.id = s.id) '
@@ -184,8 +184,8 @@ void main() {
     });
   });
 
-  // Story 7.3 — CTE-with-DML classification.
-  group('WITH-CTE classification (Story 7.3 AC1)', () {
+  // CTE-with-DML classification.
+  group('WITH-CTE classification', () {
     test('WITH ... SELECT remains a query', () {
       const sql = 'WITH cte AS (SELECT 1 FROM dual) SELECT * FROM cte';
       expect(isQuerySql(sql), isTrue);
@@ -284,12 +284,11 @@ void main() {
     });
   });
 
-  // Story 7.3 — Leading parenthesis no longer reclassifies malformed SQL.
-  group('paren-prefixed SQL is not reclassified (Story 7.3 AC2)', () {
+  // Leading parenthesis no longer reclassifies malformed SQL.
+  group('paren-prefixed SQL is not reclassified', () {
     test('(BEGIN ... END;) is NOT classified as PL/SQL', () {
-      // Pre-7.3 behavior stripped the leading `(` and matched BEGIN. The
-      // story's contract is that a leading paren signals malformed input
-      // and the inner verb is not promoted.
+      // A leading `(` must not be stripped to match BEGIN: a leading paren
+      // signals malformed input and the inner verb is not promoted.
       expect(isPlSqlSql('(BEGIN NULL; END;)'), isFalse);
     });
 
@@ -322,11 +321,11 @@ void main() {
     });
   });
 
-  // Story 7.3 — CR-only line-comment termination.
-  group('CR-only line-comment termination (Story 7.3 AC3)', () {
+  // CR-only line-comment termination.
+  group('CR-only line-comment termination', () {
     test('CR-terminated -- comment lets SELECT through (isQuerySql)', () {
-      // Classic Mac line ending (\r only). Pre-7.3 the scanner only
-      // recognised \n and would swallow the whole line including SELECT.
+      // Classic Mac line ending (\r only). A scanner that only recognises \n
+      // would swallow the whole line including SELECT.
       expect(isQuerySql('-- comment\rSELECT 1 FROM dual'), isTrue);
     });
 
@@ -353,8 +352,8 @@ void main() {
     });
   });
 
-  // Story 7.6 AC6 — SELECT ... FOR UPDATE is a query but is NOT cache-eligible.
-  group('SELECT ... FOR UPDATE cache eligibility (Story 7.6 AC6)', () {
+  // SELECT ... FOR UPDATE is a query but is NOT cache-eligible.
+  group('SELECT ... FOR UPDATE cache eligibility', () {
     test('plain SELECT remains cache-eligible', () {
       expect(isCacheEligibleSql('SELECT id FROM emp WHERE id = :1'), isTrue);
     });
@@ -408,9 +407,9 @@ void main() {
     });
   });
 
-  // Story 7.6 AC9 — the three classifiers share one verb resolver and cannot
-  // drift apart on any WITH shape.
-  group('WITH classifier drift prevention (Story 7.6 AC9)', () {
+  // The three classifiers share one verb resolver and cannot drift apart on
+  // any WITH shape.
+  group('WITH classifier drift prevention', () {
     const withSelect = 'WITH c AS (SELECT 1 AS x FROM dual) SELECT x FROM c';
     const withInsert =
         'WITH c AS (SELECT 1 AS x FROM dual) INSERT INTO t SELECT x FROM c';
@@ -460,11 +459,11 @@ void main() {
     });
   });
 
-  // Story 7.9 AC15: Oracle q-quote (alternative quoting) literals inside a
-  // CTE header must not break the literal scan. An embedded raw ' inside
-  // q'[…]' previously exited the literal early, and a later real quote then
-  // opened a phantom literal that swallowed the terminal verb.
-  group('q-quote literals in CTE headers (Story 7.9 AC15)', () {
+  // Oracle q-quote (alternative quoting) literals inside a CTE header must not
+  // break the literal scan. An embedded raw ' inside q'[…]' must not exit the
+  // literal early, letting a later real quote open a phantom literal that
+  // swallows the terminal verb.
+  group('q-quote literals in CTE headers', () {
     test("q'[…]' with embedded apostrophe: CTE DML classified by verb", () {
       const sql = "WITH c AS (SELECT q'[it's fine]' AS v FROM dual) "
           'INSERT INTO t SELECT v FROM c';
@@ -510,9 +509,9 @@ void main() {
     });
   });
 
-  // Story 7.9 AC16: the CTE scanner has an explicit whitespace branch; a
-  // CR-terminated line comment inside the header must not swallow code.
-  group('CTE scanner whitespace handling (Story 7.9 AC16)', () {
+  // The CTE scanner has an explicit whitespace branch; a CR-terminated line
+  // comment inside the header must not swallow code.
+  group('CTE scanner whitespace handling', () {
     test('CR-terminated line comment inside CTE header', () {
       const sql = 'WITH c AS ( -- comment\r SELECT 1 AS v FROM dual) '
           'SELECT v FROM c';

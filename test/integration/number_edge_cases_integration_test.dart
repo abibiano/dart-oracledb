@@ -1,9 +1,9 @@
-/// Integration tests for Story 7.1 AC5 — NUMBER edge cases.
+/// Integration tests for NUMBER edge cases.
 ///
 /// Exercises round-trips for boundary values, precision-loss contracts,
 /// bare-NUMBER columns, pure fractions, NUMBER(p,s) zero, and the negative
 /// base-100-zero pair regression. Must pass on Oracle 23ai (FREEPDB1) and
-/// Oracle 21c (XEPDB1) per the dual-environment rule in project-context.md.
+/// Oracle 21c (XEPDB1).
 @Tags(['integration'])
 library;
 
@@ -14,14 +14,13 @@ import 'test_helper.dart';
 
 void main() {
   group(
-    'NUMBER edge cases (Story 7.1 AC5)',
+    'NUMBER edge cases',
     skip: !integrationEnabled ? 'Integration tests disabled' : null,
     () {
-      // AC3 (Story 7.8): `connectionHandle` is assigned only once connect()
-      // succeeds, so a setUp failure leaves it null and tearDown cleans up
-      // null-safely instead of masking the root failure with a
-      // LateInitializationError. `connection` is the non-null alias used by
-      // test bodies.
+      // `connectionHandle` is assigned only once connect() succeeds, so a
+      // setUp failure leaves it null and tearDown cleans up null-safely
+      // instead of masking the root failure with a LateInitializationError.
+      // `connection` is the non-null alias used by test bodies.
       OracleConnection? connectionHandle;
       late OracleConnection connection;
       final testTable = uniqueTableName('num_edge');
@@ -41,7 +40,7 @@ void main() {
         } on OracleException catch (e) {
           // ORA-00955: leftover table from a previous run — reuse it.
           // Any setUp failure leaves the close to tearDown's
-          // cleanUpConnection (AC3/AC4).
+          // cleanUpConnection.
           if (e.errorCode != 955) rethrow;
           await connection.execute('TRUNCATE TABLE $testTable');
         }
@@ -56,7 +55,7 @@ void main() {
         );
       });
 
-      // AC5.1 — int-vs-double boundary at ±2^53
+      // int-vs-double boundary at ±2^53
       test('SELECT 2^53 boundary returns numeric (int or double) without loss',
           () async {
         // 9007199254740992 is exactly representable as both an int and a
@@ -86,7 +85,7 @@ void main() {
         expect(result.rows.single['BARE_NUM'], equals(minSafe));
       });
 
-      // AC5.2 — 38-digit precision-loss contract
+      // 38-digit precision-loss contract
       test('SELECT 38-digit NUMBER documents bounded precision loss', () async {
         // Oracle NUMBER supports 38 significant decimal digits; Dart double
         // carries only ~15.95. The contract is that the returned value is
@@ -110,7 +109,7 @@ void main() {
         );
       });
 
-      // AC5.3 — bare NUMBER column with no precision/scale
+      // bare NUMBER column with no precision/scale
       test('SELECT bare NUMBER with no precision/scale round-trips', () async {
         final id = nextTestId();
         await connection.execute(
@@ -122,7 +121,7 @@ void main() {
         expect(result.rows.single['BARE_NUM'], closeTo(42.5, 0.0001));
       });
 
-      // AC5.4 — pure fractions
+      // pure fractions
       test('SELECT 0.0001 round-trips', () async {
         final id = nextTestId();
         await connection.execute(
@@ -145,8 +144,8 @@ void main() {
         expect(result.rows.single['BARE_NUM'], closeTo(0.000001, 1e-12));
       });
 
-      // AC5.5 / Story 7.8 AC7 — fixed-scale NUMBER(10,2) returns double even
-      // for integer-valued content (node-oracledb always-Number contract).
+      // fixed-scale NUMBER(10,2) returns double even for integer-valued
+      // content (node-oracledb always-Number contract).
       test('SELECT NUMBER(10,2) zero returns double zero', () async {
         final id = nextTestId();
         await connection.execute(
@@ -157,7 +156,7 @@ void main() {
         );
         final value = result.rows.single['DECIMAL_NUM'];
         expect(value, isA<double>(),
-            reason: 'declared fixed scale forces double (Story 7.8 AC7)');
+            reason: 'declared fixed scale forces double');
         expect(value, equals(0));
       });
 
@@ -183,8 +182,8 @@ void main() {
         expect(r2.rows.single['DECIMAL_NUM'], equals(-100.0));
       });
 
-      // Story 7.8 AC7 backward-compat guard: a bare NUMBER column (no
-      // declared scale) keeps the int-vs-double heuristic.
+      // Backward-compat guard: a bare NUMBER column (no declared scale)
+      // keeps the int-vs-double heuristic.
       test('SELECT bare NUMBER integer-valued still returns int', () async {
         final id = nextTestId();
         await connection.execute(
@@ -195,11 +194,11 @@ void main() {
         );
         final value = result.rows.single['BARE_NUM'];
         expect(value, isA<int>(),
-            reason: 'bare NUMBER keeps the int heuristic (AC7 scope)');
+            reason: 'bare NUMBER keeps the int heuristic');
         expect(value, equals(42));
       });
 
-      // Story 7.8 AC10 — >2^53 precision-loss boundary pinned.
+      // >2^53 precision-loss boundary pinned.
       test('SELECT 9007199254740993 (2^53+1) pins bounded precision loss',
           () async {
         // 2^53 + 1 is exactly halfway between the two nearest doubles
@@ -214,7 +213,7 @@ void main() {
             reason: '2^53+1 must round to 2^53 (bounded, predictable loss)');
       });
 
-      // AC5.6 — negative NUMBER with base-100 digit pair of 0
+      // negative NUMBER with base-100 digit pair of 0
       test('SELECT -100 (negative with zero base-100 pair) round-trips',
           () async {
         // -100 encodes as base-100 digits [1, 0] with exponent 1. This is the

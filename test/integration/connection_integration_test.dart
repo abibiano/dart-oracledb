@@ -94,7 +94,7 @@ void main() {
       );
     });
 
-    // Story 1.7: Connection Lifecycle Management Tests
+    // Connection Lifecycle Management Tests
 
     test('ping returns true for active connection', () async {
       final connection = await connectForTest();

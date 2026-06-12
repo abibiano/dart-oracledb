@@ -57,7 +57,6 @@ void main() {
       expect(decoded, equals(value));
     });
 
-    // Story 2.6 - Task 1: NUMBER Decimal Support Tests
     test('encodes positive decimal 0.5', () {
       final encoded = encodeNumber(0.5);
       expect(encoded.isNotEmpty, isTrue);
@@ -141,7 +140,6 @@ void main() {
       expect(decoded is int, isFalse);
     });
 
-    // Story 7.1 - AC3: non-finite rejection
     test('rejects double.nan', () {
       expect(
         () => encodeNumber(double.nan),
@@ -166,7 +164,6 @@ void main() {
       );
     });
 
-    // Story 7.1 - AC4: artifact-free digit extraction
     test('encodes 678.90 without trailing-9 mantissa artifacts', () {
       // Regression: the old toStringAsFixed(20) path produced a mantissa
       // ending in 9 because 678.9 has no exact IEEE 754 representation.
@@ -193,8 +190,7 @@ void main() {
 
     test('encodes integer-valued double without collapsing trailing zeros', () {
       // Regression guard: stripping trailing zeros from the full numeric
-      // string would turn 100 into 1. After Story 7.1 the trim is fractional
-      // only.
+      // string would turn 100 into 1. The trim is fractional only.
       for (final v in <num>[100, 1000, 1234567890, 100.0, 100.50]) {
         final encoded = encodeNumber(v);
         final decoded = decodeNumber(ReadBuffer(encoded));
@@ -220,7 +216,6 @@ void main() {
       expect(decoded, closeTo(v, 1e-15));
     });
 
-    // Story 7.1 - AC2: decodeNumber stops at declared length
     test('decodeNumber with explicit length stops at field boundary', () {
       // Encode -100 (negative number whose encoding may omit the 0x66
       // terminator at the declared length) followed by garbage bytes that
@@ -262,8 +257,8 @@ void main() {
     });
   });
 
-  group('Story 7.8 — NUMBER codec (AC7, AC8, AC9, AC10)', () {
-    // AC7 — forceDouble for declared fixed-scale columns.
+  group('NUMBER codec', () {
+    // forceDouble for declared fixed-scale columns.
     test('forceDouble returns double for integer-valued NUMBERs', () {
       // 42 → [0xC1, 43]; 0 → [0x80]; -5 → [0x3E, 96, 102].
       final fortyTwo = decodeNumber(
@@ -306,7 +301,7 @@ void main() {
       expect(v as double, closeTo(123.45, 1e-9));
     });
 
-    // AC8 — exact boundaries of the magnitude guard (the far-out-of-range
+    // Exact boundaries of the magnitude guard (the far-out-of-range
     // cases double.minPositive / 1e200 are pinned in the encode group above).
     test('encodeNumber accepts 1e-130 and rejects 1e126 at the boundary', () {
       expect(() => encodeNumber(1e-130), returnsNormally);
@@ -317,7 +312,7 @@ void main() {
       );
     });
 
-    // AC9 — canonical mantissa: trailing zero base-100 pairs are stripped,
+    // Canonical mantissa: trailing zero base-100 pairs are stripped,
     // matching reference/node-oracledb/lib/impl/datahandlers/buffer.js
     // writeOracleNumber ("strip any trailing zeroes", exponent adjusted).
     test('encodeNumber emits the canonical short form for 10000', () {
@@ -342,11 +337,11 @@ void main() {
         final decoded = decodeNumber(ReadBuffer(encodeNumber(v)));
         expect(decoded, equals(v), reason: 'round-trip failed for $v');
       }
-      // Story 7.1 guard: integer-part zeros must never collapse 100 → 1.
+      // Guard: integer-part zeros must never collapse 100 → 1.
       expect(decodeNumber(ReadBuffer(encodeNumber(100))), isNot(equals(1)));
     });
 
-    // AC10 — >2^53 precision-loss contract pinned at the wire level.
+    // >2^53 precision-loss contract pinned at the wire level.
     test('decodeNumber pins the 2^53+1 precision-loss contract', () {
       // 9007199254740993 (2^53 + 1) on the wire: exponent 8 → 0xC8, base-100
       // pairs [90,07,19,92,54,74,09,93] each +1.
@@ -362,7 +357,6 @@ void main() {
   });
 
   group('Oracle TIMESTAMP encoding', () {
-    // Story 2.6 - Task 2: TIMESTAMP Support Tests
     test('encodes timestamp to 11 bytes', () {
       final dt = DateTime(2025, 12, 16, 14, 30, 45, 123, 456);
       final encoded = encodeTimestamp(dt);
@@ -493,9 +487,9 @@ void main() {
       expect(dateEncoded.length, equals(7));
     });
 
-    // Story 7.1 - AC1: TSTZ decodes to a UTC DateTime.
-    // Story 7.9 corrected the field interpretation: the server sends the
-    // date/time fields already normalized to UTC (verified live + against
+    // TSTZ decodes to a UTC DateTime.
+    // The server sends the date/time fields already normalized to UTC
+    // (verified live + against
     // node-oracledb parseOracleDate); the offset bytes are presentation
     // metadata. The old `fields - offset` arithmetic double-applied the
     // offset and shifted every TSTZ instant.
@@ -555,7 +549,6 @@ void main() {
       );
     });
 
-    // Story 7.1 - AC6: sub-microsecond truncation contract
     test('truncates sub-microsecond fractional seconds toward zero', () {
       // Build an 11-byte TIMESTAMP whose nanosecond field is 123_456_789ns.
       // Expected: microseconds == 123_456 (floor). The rounding contract is
@@ -578,7 +571,6 @@ void main() {
       expect(decoded.millisecond * 1000 + decoded.microsecond, equals(123456));
     });
 
-    // Story 7.1 - AC7: BCE rejection
     test('rejects BCE TIMESTAMP (century byte < 100)', () {
       // Oracle encodes BCE century as 100 - abs(century). Any byte < 100 is BCE.
       final wire = Uint8List.fromList([
@@ -594,8 +586,8 @@ void main() {
     });
   });
 
-  // Story 7.9 AC13: opt-in TZ-preserving wrapper codec.
-  group('OracleTimestampTz codec (Story 7.9 AC13)', () {
+  // Opt-in TZ-preserving wrapper codec.
+  group('OracleTimestampTz codec', () {
     Uint8List tzWire(DateTime wallClockUtc, int tzByte11, int tzByte12) =>
         Uint8List.fromList(
             [...encodeTimestamp(wallClockUtc), tzByte11, tzByte12]);
@@ -633,7 +625,7 @@ void main() {
       expect(viaWrapper.utc, equals(viaDefault));
     });
 
-    // F10: TSTZ zone bytes encode +20/+60 and are never zero (even for
+    // TSTZ zone bytes encode +20/+60 and are never zero (even for
     // +00:00 → bytes 20/60), so Oracle's trailing-zero truncation can never
     // remove them. A 7/11-byte payload on this decoder means stream
     // misalignment — fail loud instead of fabricating a +00:00 offset.
@@ -657,7 +649,7 @@ void main() {
       );
     });
 
-    // F6: malformed zone-byte combinations must surface as protocol errors —
+    // Malformed zone-byte combinations must surface as protocol errors —
     // never as the OracleTimestampTz constructor's ArgumentError leaking out
     // of a decode path.
     test('decodeTimestampTz rejects bytes 34/90 (+14:30 — past the ceiling)',
@@ -744,7 +736,7 @@ void main() {
       expect(decoded, equals(value));
     });
 
-    // Migrated from the deleted `encodeValue` dispatch (F12): the live bind
+    // Migrated from the deleted `encodeValue` dispatch: the live bind
     // path encodes through `encodeTimestampTz` directly.
     test('encodeTimestampTz emits the +20/+60 zone bytes for +05:30', () {
       final value = OracleTimestampTz.fromHourMinute(
@@ -758,7 +750,7 @@ void main() {
       expect(wire[12], equals(90));
     });
 
-    // Migrated from the deleted `decodeValue` dispatch (F12): the live
+    // Migrated from the deleted `decodeValue` dispatch: the live
     // column path picks decodeTimestamp vs decodeTimestampTz by the
     // connection's preserveTimestampTimeZone flag.
     test('decodeTimestamp vs decodeTimestampTz: wrapper only when opted in',
@@ -767,7 +759,7 @@ void main() {
           tzWire(DateTime.utc(2024, 3, 15, 10, 30, 45), 20 + 5, 60 + 30);
       final byDefault = decodeTimestamp(ReadBuffer(wire));
       expect(byDefault, isA<DateTime>(),
-          reason: 'default decode contract (Story 7.1 AC1) is unchanged');
+          reason: 'default decode contract is unchanged');
       final optedIn = decodeTimestampTz(ReadBuffer(wire));
       expect(optedIn.utc, equals(byDefault));
       expect(optedIn.offsetMinutes, equals(330));
@@ -838,7 +830,6 @@ void main() {
       }
     });
 
-    // Story 7.1 - AC7: BCE rejection
     test('rejects BCE DATE (century byte < 100)', () {
       final wire = Uint8List.fromList([99, 100, 1, 1, 1, 1, 1]);
       expect(
@@ -903,8 +894,8 @@ void main() {
     });
   });
 
-  // Migrated from the deleted `encodeValue`/`decodeValue` test-only dispatch
-  // (F12): the same contracts pinned against the direct codec functions the
+  // Migrated from the deleted `encodeValue`/`decodeValue` test-only dispatch:
+  // the same contracts pinned against the direct codec functions the
   // live bind/column paths actually use.
   group('direct codec round-trips (former encodeValue/decodeValue)', () {
     test('encodes int as NUMBER and decodes it back', () {
@@ -938,7 +929,7 @@ void main() {
     });
   });
 
-  group('inferOraTypeForValue (shared bind inference, F11)', () {
+  group('inferOraTypeForValue (shared bind inference)', () {
     test('maps every supported Dart type to its wire type', () {
       expect(inferOraTypeForValue(null), equals(oraTypeVarchar));
       expect(inferOraTypeForValue('text'), equals(oraTypeVarchar));
@@ -963,7 +954,7 @@ void main() {
       expect(inferOraTypeForValue(true), isNull);
     });
 
-    test('Map and List bind values infer native JSON (Story 4.4)', () {
+    test('Map and List bind values infer native JSON', () {
       expect(inferOraTypeForValue(<String, Object?>{'a': 1}),
           equals(oraTypeJson));
       expect(inferOraTypeForValue(<Object?>[1, 2, 3]), equals(oraTypeJson));

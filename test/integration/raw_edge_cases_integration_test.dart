@@ -8,7 +8,7 @@
 /// and RAW PL/SQL binds untested. This file fills that gap.
 ///
 /// Must pass on Oracle 23ai (FREEPDB1) and Oracle 21c (XEPDB1) per the
-/// dual-environment rule in project-context.md. No FAST_AUTH-specific paths
+/// project's dual-environment testing rule. No FAST_AUTH-specific paths
 /// are exercised, so no `Transport.supportsFastAuth` probe is needed.
 ///
 ///   RUN_INTEGRATION_TESTS=true dart test test/integration/raw_edge_cases_integration_test.dart --no-color
@@ -40,9 +40,9 @@ void main() {
     'RAW / binary data round-trips',
     skip: !integrationEnabled ? 'Integration tests disabled' : null,
     () {
-      // AC3 (Story 7.8): nullable handle assigned only once connect()
-      // succeeds; tearDown cleans up null-safely. `connection` is the
-      // non-null alias used by test bodies.
+      // Nullable handle assigned only once connect() succeeds; tearDown
+      // cleans up null-safely. `connection` is the non-null alias used by
+      // test bodies.
       OracleConnection? connectionHandle;
       late OracleConnection connection;
       final testTable = uniqueTableName('raw_edge');
@@ -314,7 +314,7 @@ void main() {
         // The IN OUT logic lives in a procedure so the bind `:v` is referenced
         // exactly once in the calling block. Referencing a named bind twice in
         // one anonymous block hits the driver's first-occurrence contract and
-        // raises ORA-01006 — the same idiom the Story 3.3 IN OUT tests use.
+        // raises ORA-01006 — the same idiom the other IN OUT tests use.
         await connection.execute('''
           CREATE OR REPLACE PROCEDURE $appendProc(p IN OUT RAW) AS
           BEGIN

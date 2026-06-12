@@ -26,7 +26,7 @@ void main() {
         expect(() => StatementCache(-100), throwsArgumentError);
       });
 
-      // AC7: pathological sizes are rejected, never silently clamped.
+      // Pathological sizes are rejected, never silently clamped.
       test('accepts maxSize exactly at maxStatementCacheSize cap', () {
         final cache = StatementCache(maxStatementCacheSize);
         expect(cache.maxSize, equals(maxStatementCacheSize));
@@ -111,8 +111,8 @@ void main() {
       });
     });
 
-    // AC3: the bind signature participates in cache identity.
-    group('bind-signature keys (AC3)', () {
+    // The bind signature participates in cache identity.
+    group('bind-signature keys', () {
       StatementCacheKey numberKey(String sql) => StatementCacheKey(sql, const [
             BindSlotSignature(oraType: 2, dir: BindDir.input), // NUMBER
           ]);
@@ -297,8 +297,8 @@ void main() {
       });
     });
 
-    // AC2: DDL invalidates the whole per-connection cache.
-    group('invalidateAll (AC2)', () {
+    // DDL invalidates the whole per-connection cache.
+    group('invalidateAll', () {
       test('queues all non-inUse cursors and clears cache, stays usable', () {
         final cache = StatementCache(10);
         cache.store(StatementCacheEntry(key: _k('A'), cursorId: 1));

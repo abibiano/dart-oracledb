@@ -1,8 +1,7 @@
-/// Integration tests for Story 7.1 AC8 (CHAR padding) and AC9 (VARCHAR2
-/// multi-byte / boundary / empty-string semantics).
+/// Integration tests for CHAR padding and VARCHAR2 multi-byte / boundary /
+/// empty-string semantics.
 ///
-/// Must pass on Oracle 23ai (FREEPDB1) and Oracle 21c (XEPDB1) per the
-/// dual-environment rule in project-context.md.
+/// Must pass on Oracle 23ai (FREEPDB1) and Oracle 21c (XEPDB1).
 @Tags(['integration'])
 library;
 
@@ -13,12 +12,12 @@ import 'test_helper.dart';
 
 void main() {
   group(
-    'VARCHAR2 / CHAR edge cases (Story 7.1 AC8, AC9)',
+    'VARCHAR2 / CHAR edge cases',
     skip: !integrationEnabled ? 'Integration tests disabled' : null,
     () {
-      // AC3 (Story 7.8): nullable handle assigned only once connect()
-      // succeeds; tearDown cleans up null-safely. `connection` is the
-      // non-null alias used by test bodies.
+      // Nullable handle assigned only once connect() succeeds; tearDown
+      // cleans up null-safely. `connection` is the non-null alias used by
+      // test bodies.
       OracleConnection? connectionHandle;
       late OracleConnection connection;
       final testTable = uniqueTableName('vch_edge');
@@ -38,7 +37,7 @@ void main() {
         } on OracleException catch (e) {
           // ORA-00955: leftover table from a previous run — reuse it.
           // Any setUp failure leaves the close to tearDown's
-          // cleanUpConnection (AC3/AC4).
+          // cleanUpConnection.
           if (e.errorCode != 955) rethrow;
           await connection.execute('TRUNCATE TABLE $testTable');
         }
@@ -53,7 +52,7 @@ void main() {
         );
       });
 
-      // AC8 — CHAR(N) padding contract
+      // CHAR(N) padding contract
       test('CHAR(10) populated with "ab" returns server-side padding verbatim',
           () async {
         final id = nextTestId();
@@ -71,7 +70,7 @@ void main() {
         expect((value! as String).length, equals(10));
       });
 
-      // AC9.1 — multi-byte UTF-8 content (emoji, CJK, accented Latin)
+      // multi-byte UTF-8 content (emoji, CJK, accented Latin)
       test('VARCHAR2 round-trips emoji', () async {
         final id = nextTestId();
         await connection.execute(
@@ -105,7 +104,7 @@ void main() {
         expect(result.rows.single['V_UNICODE'], equals('café résumé'));
       });
 
-      // AC9.2 — VARCHAR2(100) exact 100-byte payload succeeds
+      // VARCHAR2(100) exact 100-byte payload succeeds
       test('VARCHAR2(100) populated with exactly 100 ASCII bytes succeeds',
           () async {
         final s = 'A' * 100; // 100 ASCII bytes
@@ -120,7 +119,7 @@ void main() {
         expect(result.rows.single['V100'], equals(s));
       });
 
-      // AC9.3 — over-length raises ORA-12899
+      // over-length raises ORA-12899
       test('VARCHAR2(100) populated with 101 bytes raises ORA-12899', () async {
         final s = 'A' * 101;
         final id = nextTestId();
@@ -134,7 +133,7 @@ void main() {
         );
       });
 
-      // AC9.4 — '' vs NULL semantics (SQL literal path)
+      // '' vs NULL semantics (SQL literal path)
       test("VARCHAR2 empty string '' is stored as NULL (Oracle convention)",
           () async {
         final id = nextTestId();
@@ -148,7 +147,7 @@ void main() {
         expect(result.rows.single['V100'], isNull);
       });
 
-      // AC9.4 — '' vs NULL semantics (driver bind path).
+      // '' vs NULL semantics (driver bind path).
       // The SQL-literal test above only exercises Oracle's SQL parser. This
       // test forces the value through `encodeVarchar` to confirm the driver
       // also surfaces ''-as-NULL semantics end-to-end.

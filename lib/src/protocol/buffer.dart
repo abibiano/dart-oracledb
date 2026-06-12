@@ -160,7 +160,7 @@ class ReadBuffer {
   /// Wire format: first byte is the size N (high bit set means signed-negative,
   /// rejected here when [signed] is false), followed by N big-endian bytes.
   ///
-  /// Sign-magnitude edge (AC6): a size byte of `0x80` is "negative sign bit set,
+  /// Sign-magnitude edge: a size byte of `0x80` is "negative sign bit set,
   /// zero value bytes" — the documented negative-zero sentinel. It decodes to
   /// `0` for every signed width (`-0 == 0` for Dart ints). An unsigned read of
   /// any sign-bit size byte (e.g. `0x80`, `0x81`) throws [BufferException]

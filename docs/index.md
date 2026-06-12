@@ -33,10 +33,6 @@
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — full developer setup & PR process
 - [CHANGELOG.md](../CHANGELOG.md) — release history
 - [CLAUDE.md](../CLAUDE.md) — AI-agent project instructions (esp. Apple-Silicon Oracle runtimes)
-- `_bmad-output/planning-artifacts/architecture.md` — original architecture decision record
-- `_bmad-output/project-context.md` — hard implementation rules (endianness, auth, testing, security)
-- `_bmad-output/planning-artifacts/prd.md`, `epics.md` — requirements & epic/story breakdown
-- `_bmad-output/implementation-artifacts/sprint-status.yaml` — live epic/story status + per-epic retros
 
 ## Getting Started
 
@@ -57,4 +53,4 @@
 | Touch authentication / crypto | [architecture.md](./architecture.md) §4 → `lib/src/crypto/` |
 | Find a file | [source-tree-analysis.md](./source-tree-analysis.md) |
 | Set up / run tests | [development-guide.md](./development-guide.md) |
-| Plan the next feature | `_bmad-output/` (PRD, epics, sprint-status) — Epic 5 (pooling) is next |
+| Plan the next feature | [project-overview.md](./project-overview.md) — connection pooling is the main remaining pre-1.0 item |

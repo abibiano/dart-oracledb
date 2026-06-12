@@ -143,7 +143,7 @@ class BindParser {
   /// `toSet()` so the comparison is against the count of *distinct* names.
   ///
   /// Exposed as a top-level static helper so unit tests can exercise the
-  /// guard without opening a live Oracle session (Story 7.3 AC5).
+  /// guard without opening a live Oracle session.
   static void validateNamedBindCount(
     List<String> bindNames,
     int providedValueCount,

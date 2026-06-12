@@ -140,7 +140,7 @@ Uint8List encodeNumber(num value) {
     }
   }
 
-  // Canonical mantissa (Story 7.8 AC9): strip trailing zero base-100 pairs so
+  // Canonical mantissa: strip trailing zero base-100 pairs so
   // 10000 emits [0xC3, 0x02], not [0xC3, 0x02, 0x01, 0x01]. The exponent
   // already encodes the magnitude, so decode is unchanged; this only matches
   // the byte form node-oracledb produces (buffer.js writeOracleNumber strips
@@ -191,7 +191,7 @@ Uint8List encodeNumber(num value) {
 /// scoped to a single field (e.g. a slice).
 ///
 /// [forceDouble] disables the int-vs-double heuristic so an integer-valued
-/// result is returned as [double] (Story 7.8 AC7). Column decode sets this
+/// result is returned as [double]. Column decode sets this
 /// for fixed-scale `NUMBER(p,s)` columns (declared scale > 0), matching
 /// node-oracledb's always-Number contract; bare `NUMBER` keeps the heuristic
 /// for backward compatibility.
@@ -468,7 +468,7 @@ Uint8List encodeTimestamp(DateTime dt) {
 }
 
 /// Encodes an [OracleTimestampTz] to the 13-byte Oracle `TIMESTAMP WITH TIME
-/// ZONE` wire format, preserving the original offset (Story 7.9 AC13).
+/// ZONE` wire format, preserving the original offset.
 ///
 /// Bytes 0-10 carry the **UTC instant** (the server interprets TSTZ fields
 /// as UTC — same convention as the decode direction and node-oracledb's
@@ -510,9 +510,10 @@ Uint8List encodeTimestampTz(OracleTimestampTz value) {
 /// discards the zone bytes). The returned [DateTime] is therefore the field
 /// values constructed directly in UTC — the absolute instant is preserved
 /// and the zone is dropped. Use a `preserveTimestampTimeZone: true`
-/// connection ([decodeTimestampTz]) to keep the zone (Story 7.9 AC13).
-/// ⚠️ Story 7.1 shipped this path as `wallClock - offset`, double-applying
-/// the offset and shifting every TSTZ instant; Story 7.9 corrected it.
+/// connection ([decodeTimestampTz]) to keep the zone.
+/// ⚠️ An earlier revision shipped this path as `wallClock - offset`,
+/// double-applying the offset and shifting every TSTZ instant; it has since
+/// been corrected.
 /// When `byte11 & 0x80 != 0`, byte 11 encodes a *region id* (e.g.
 /// `'America/Los_Angeles'`) rather than a numeric offset; the region table is
 /// not bundled with the driver, so this case raises [OracleException]
@@ -553,7 +554,7 @@ DateTime decodeTimestamp(ReadBuffer buffer) {
 
 /// Decodes Oracle `TIMESTAMP WITH TIME ZONE` wire bytes into the opt-in
 /// [OracleTimestampTz] wrapper, preserving the original offset alongside the
-/// absolute UTC instant (Story 7.9 AC13).
+/// absolute UTC instant.
 ///
 /// Wire shape and validation are identical to [decodeTimestamp] (same parser:
 /// BCE rejection, payload-length check, region-id rejection, offset-range
@@ -748,7 +749,7 @@ String decodeVarchar(ReadBuffer buffer, int length) {
 /// implicitly converts a DATE bind for TIMESTAMP columns, and DATE matches
 /// the second-precision wire form both existing call sites have always used.
 ///
-/// `Map` and `List` map to native JSON (OSON, type 119 — Story 4.4). The
+/// `Map` and `List` map to native JSON (OSON, type 119). The
 /// `Uint8List` check must stay ahead of the `List` check: plain bytes are
 /// RAW, never JSON.
 int? inferOraTypeForValue(Object? value) {

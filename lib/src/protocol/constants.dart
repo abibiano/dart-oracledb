@@ -326,7 +326,7 @@ const int tnsBindDirInput = 32;
 /// OUT bind — value flows server → client (function/procedure return values).
 const int tnsBindDirOutput = 16;
 
-/// IN OUT bind — value flows both directions (Story 3.3+).
+/// IN OUT bind — value flows both directions.
 const int tnsBindDirInputOutput = 48;
 
 // ============================================================================

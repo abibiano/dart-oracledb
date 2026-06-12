@@ -1,4 +1,4 @@
-/// Unit tests for LobOpRequest / decodeLobOpResponse (Story 4.1).
+/// Unit tests for LobOpRequest / decodeLobOpResponse.
 ///
 /// Encode fixtures mirror node-oracledb's thin `LobOpMessage`
 /// (reference/node-oracledb/lib/thin/protocol/messages/lobOp.js); decode

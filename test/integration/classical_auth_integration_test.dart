@@ -21,7 +21,7 @@ import 'dart:typed_data';
 import 'package:oracledb/oracledb.dart';
 // Auth-path probe: needs Transport.supportsFastAuth + the raw CONNECT packet
 // builder, neither of which is on the public surface. No public test-only
-// API exists; the `src/` imports are pinned intentionally (Story 7.8 AC12).
+// API exists; the `src/` imports are pinned intentionally.
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';

@@ -56,7 +56,7 @@ class Transport {
   /// Captured from the ACCEPT packet ([sendConnectReceiveAccept]); defaults to
   /// [tnsDefaultSdu] until then. A single [sendData] call is emitted as one TNS
   /// packet (no fragmentation), so the SDU bounds how large a single TTC message
-  /// — including any prepended close-cursor piggyback — may be (AC4).
+  /// — including any prepended close-cursor piggyback — may be.
   int _sdu = tnsDefaultSdu;
 
   /// Whether the server supports end-of-request markers.
@@ -99,7 +99,7 @@ class Transport {
   /// Token numbers are written when ttcFieldVersion >= 18.
   bool get shouldWriteTokenNumber => _ttcFieldVersion >= 18;
 
-  /// AC8: whether the AUTH_PHASE_TWO 23ai token-number field should be written.
+  /// Whether the AUTH_PHASE_TWO 23ai token-number field should be written.
   ///
   /// Gated on BOTH the negotiated field version ([shouldWriteTokenNumber]) AND
   /// the server-advertised FAST_AUTH capability ([supportsFastAuth]). A pre-23
@@ -110,7 +110,7 @@ class Transport {
   bool get shouldWriteAuthPhaseTwoToken =>
       _supportsFastAuth && shouldWriteTokenNumber;
 
-  /// AC3: gets the one-byte TTC function sequence number for the next message
+  /// Gets the one-byte TTC function sequence number for the next message
   /// and advances the counter.
   ///
   /// Oracle's TTC sequence is a single byte: node-oracledb's `writeSeqNum`
@@ -127,20 +127,20 @@ class Transport {
 
   /// Test-only seam to drive [ttcFieldVersion] without a live negotiation.
   ///
-  /// Used to exercise the token-number gating boundaries (AC4) and the pre-23
-  /// classical-server case (AC8) deterministically. Not part of the public API.
+  /// Used to exercise the token-number gating boundaries and the pre-23
+  /// classical-server case deterministically. Not part of the public API.
   @visibleForTesting
   set debugTtcFieldVersion(int version) => _ttcFieldVersion = version;
 
   /// Test-only seam to drive [supportsFastAuth] without a live ACCEPT packet.
   ///
   /// Used to exercise the AUTH_PHASE_TWO token gating for both 23ai (FAST_AUTH)
-  /// and pre-23 classical servers (AC8). Not part of the public API.
+  /// and pre-23 classical servers. Not part of the public API.
   @visibleForTesting
   set debugSupportsFastAuth(bool value) => _supportsFastAuth = value;
 
   /// Test-only seam to drive the negotiated SDU without a live ACCEPT packet,
-  /// used to exercise [closeCursorChunkLimit] boundaries (AC4).
+  /// used to exercise [closeCursorChunkLimit] boundaries.
   @visibleForTesting
   set debugSdu(int value) => _sdu = value;
 
@@ -167,7 +167,7 @@ class Transport {
   static const int _closeCursorPiggybackHeader = 32;
 
   /// Maximum number of cursor ids to flush in a single close-cursor piggyback so
-  /// the combined packet stays within the negotiated SDU (AC4).
+  /// the combined packet stays within the negotiated SDU.
   ///
   /// The piggyback is prepended to the execute message and the two travel in one
   /// un-fragmented TNS packet, so the cursor list must leave room for the execute
@@ -389,7 +389,7 @@ class Transport {
   @visibleForTesting
   set debugMaxFetchIterations(int value) => _maxFetchIterations = value;
 
-  /// Safety cap (AC10): the maximum number of TNS packets a single
+  /// Safety cap: the maximum number of TNS packets a single
   /// [_receiveAllTtcData] call will read while assembling one TTC response.
   ///
   /// On the pre-23.4 path there is no TNS-level end-of-response marker — the
@@ -408,7 +408,7 @@ class Transport {
   static const int _defaultMaxReceivePackets = 100000;
   int _maxReceivePackets = _defaultMaxReceivePackets;
 
-  /// Test-only seam to lower the receive-loop packet cap (AC10) so the
+  /// Test-only seam to lower the receive-loop packet cap so the
   /// never-terminating-stream guard can be exercised deterministically without
   /// flooding the loop with 100k packets. Not part of the public API.
   @visibleForTesting
@@ -425,7 +425,7 @@ class Transport {
 
   /// Number of full-parse EXECUTEs sent (cursorId == 0).
   ///
-  /// AC8 instrumentation: lets integration tests prove cursor reuse / parse
+  /// Instrumentation: lets integration tests prove cursor reuse / parse
   /// skipping at the transport layer without requiring `V$OPEN_CURSOR` or other
   /// privileged views. Surfaced to callers via
   /// `OracleConnection.debugFullParseExecutes`; not a public API.
@@ -434,7 +434,7 @@ class Transport {
   /// Number of cursor-reuse EXECUTEs sent (cursorId != 0, parse skipped).
   int get debugReuseExecutes => _reuseExecutes;
 
-  /// Temporary LOB locators awaiting a free-temp piggyback (Story 4.1).
+  /// Temporary LOB locators awaiting a free-temp piggyback.
   ///
   /// Internal temporary CLOBs created for bind values are not freed with a
   /// standalone RPC — node-oracledb frees them via a `TNS_FUNC_LOB_OP`
@@ -446,7 +446,7 @@ class Transport {
   int _tempLobsTotalSize = 0;
 
   /// Number of temp-LOB locators queued for the free piggyback. Exposed for
-  /// integration tests (Story 4.1 — temp-LOB lifecycle) via
+  /// integration tests (temp-LOB lifecycle) via
   /// `OracleConnection.debugPendingTempLobCount`; not a public API.
   int get debugPendingTempLobCount => _tempLobsToClose.length;
 
@@ -479,7 +479,7 @@ class Transport {
     _log.fine('Sending execute request (isQuery=$isQuery, isPlSql=$isPlSql, '
         'cursorId=$cursorId)...');
 
-    // AC8: record whether this execute reuses a cached server cursor (parse bit
+    // Record whether this execute reuses a cached server cursor (parse bit
     // cleared) or performs a full parse. The cursorId sent on the wire is the
     // authoritative signal — a non-zero id skips parse and omits the SQL bytes.
     if (cursorId == 0) {
@@ -488,7 +488,7 @@ class Transport {
       _reuseExecutes++;
     }
 
-    // Story 4.1: drain the temp-LOB free list BEFORE creating this call's
+    // Drain the temp-LOB free list BEFORE creating this call's
     // temp LOBs, so a locator bound by this execute can never be freed by
     // its own piggyback.
     final lobsToFree = List<Uint8List>.of(_tempLobsToClose);
@@ -496,7 +496,7 @@ class Transport {
     _tempLobsToClose.clear();
     _tempLobsTotalSize = 0;
 
-    // Stories 4.1/4.2: CLOB-typed String binds, BLOB-typed Uint8List binds
+    // CLOB-typed String binds, BLOB-typed Uint8List binds
     // (and PL/SQL strings beyond the 32767-byte VARCHAR limit) travel as
     // temporary-LOB locators, created here via LOB operations on this same
     // connection before the execute.
@@ -569,7 +569,7 @@ class Transport {
     // until EOF. The server may echo cursorId == 0 on a cached-cursor
     // re-execute while the original cursor stays open, so the drain falls
     // back to the request's own cursor id. ExecuteResponse is immutable
-    // (Story 7.9 AC3), so rows accumulate in a local list and a single final
+    // so rows accumulate in a local list and a single final
     // response is built after the loop — on both the success and the
     // fetch-failure paths.
     final effectiveCursorId =
@@ -585,14 +585,14 @@ class Transport {
           : expectedColumns;
       var allRows = List<List<Object?>>.of(response.rows);
       var moreRowsToFetch = true;
-      // Stories 4.1/4.2/4.4: for locator-LOB (CLOB/BLOB) and native JSON
+      // For locator-LOB (CLOB/BLOB) and native JSON
       // queries the server defers row delivery — the first execute returns
       // DESCRIBE only (zero rows). A DEFINE call (defines carrying the
       // LOB-prefetch cont-flag) re-executes the cursor and returns the first
       // row batch in the prefetch shape; subsequent FETCH rounds keep that
       // shape. Without it, FETCH rounds ship bare locators / bare JSON
       // values (no length/chunk prefix) that cannot be decoded — validated
-      // live on 23ai (Story 4.4): a JSON FETCH round without defines
+      // live on 23ai: a JSON FETCH round without defines
       // misaligns the stream. Mirrors node-oracledb `_handleDefines` and its
       // `requiresDefine = true` for CLOB/BLOB/JSON query columns.
       if (fetchColumns != null &&
@@ -693,7 +693,7 @@ class Transport {
     return buf.toBytes();
   }
 
-  /// Builds a free-temporary-LOBs piggyback (Story 4.1), byte-for-byte after
+  /// Builds a free-temporary-LOBs piggyback, byte-for-byte after
   /// node-oracledb `writeCloseTempLobsPiggyback` (base.js): a piggybacked
   /// `TNS_FUNC_LOB_OP` with operation `FREE_TEMP | ARRAY` followed by the raw
   /// locator bytes. Like close-cursor, it only ever rides another message —
@@ -735,7 +735,7 @@ class Transport {
     return buf.toBytes();
   }
 
-  /// Sends one TTC LOB operation and decodes its response (Story 4.1).
+  /// Sends one TTC LOB operation and decodes its response.
   ///
   /// Used internally by [sendExecute] for temp-CLOB creation/writes and for
   /// materializing CLOB locators into Strings. Callers above the transport
@@ -803,7 +803,7 @@ class Transport {
   }
 
   /// Converts LOB-destined bind values into temporary-LOB locators before
-  /// the execute is encoded (Stories 4.1/4.2).
+  /// the execute is encoded.
   ///
   /// Three conversions, all node-oracledb parity (connection.js `_bind`):
   /// * any CLOB-typed [BindVariable] holding a `String` — the declared
@@ -955,8 +955,7 @@ class Transport {
     );
   }
 
-  /// Creates a temporary BLOB on the server and writes [value] into it
-  /// (Story 4.2).
+  /// Creates a temporary BLOB on the server and writes [value] into it.
   ///
   /// Mirrors node-oracledb `lob.js create()` + `write()` for
   /// `DB_TYPE_BLOB`: CREATE_TEMP carries the charset form (0 for BLOB — no
@@ -1070,11 +1069,11 @@ class Transport {
 
   /// Replaces every [LobLocator] in a successful response's rows and OUT
   /// binds with its materialized value — `String` for CLOB, `Uint8List` for
-  /// BLOB (Stories 4.1/4.2).
+  /// BLOB.
   ///
   /// Runs inside [sendExecute] — and therefore inside the connection's
   /// single-execute guard — after the fetch drain, so all LOB reads complete
-  /// before the response escapes the transport (AC6). A failed LOB read
+  /// before the response escapes the transport. A failed LOB read
   /// fails the whole execute rather than returning a half-populated result.
   Future<ExecuteResponse> _materializeLobValues(
     ExecuteResponse response, {
@@ -1156,7 +1155,7 @@ class Transport {
   }
 
   /// Reads a CLOB locator's full value as a Dart String via a single TTC LOB
-  /// READ operation (AC4).
+  /// READ operation.
   ///
   /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`: one
   /// READ requesting the entire LOB length at 1-based offset 1. The server
@@ -1208,7 +1207,7 @@ class Transport {
         cause: e,
       );
     }
-    // Story 7.9 truncation guard. Oracle reports CLOB length in UCS-2 code
+    // Truncation guard. Oracle reports CLOB length in UCS-2 code
     // units (CLOBs are stored AL16UTF16), which equals Dart's UTF-16
     // `String.length` — so a short read is a real truncation, not a
     // code-point-vs-code-unit mismatch.
@@ -1223,7 +1222,7 @@ class Transport {
   }
 
   /// Reads a BLOB locator's full value as a Dart `Uint8List` via a single
-  /// TTC LOB READ operation (Story 4.2, AC1/AC4).
+  /// TTC LOB READ operation.
   ///
   /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`:
   /// one READ requesting the entire LOB byte length at 1-based offset 1. The
@@ -1313,7 +1312,7 @@ class Transport {
   }
 
   /// Sends a DEFINE call for an open query cursor whose result shape
-  /// contains a CLOB column (Story 4.1) and returns its decoded response.
+  /// contains a CLOB column and returns its decoded response.
   ///
   /// The call establishes column defines with the LOB prefetch cont-flag
   /// AND re-executes the cursor: its response carries the first row batch
@@ -1393,8 +1392,8 @@ class Transport {
         // underlying socket read: the server's (late) response may still arrive
         // and would otherwise be misread as the reply to the next RPC. Poison
         // the transport and destroy the socket so that can never happen. The
-        // message carries the operation name and elapsed wait (AC1); the
-        // poisoned state makes every subsequent send/receive fail fast (AC2).
+        // message carries the operation name and elapsed wait; the
+        // poisoned state makes every subsequent send/receive fail fast.
         _poison();
         throw OracleException(
           errorCode: oraConnectTimeout,
@@ -1430,7 +1429,7 @@ class Transport {
     // [ttcStreamIsComplete]; LOB operations substitute [lobOpStreamIsComplete]
     // because their LOB_DATA / RETURN_PARAMETER shapes are not walkable by
     // the EXECUTE decoder. The probe needs [bindMetadata] for byte-accurate
-    // OUT-bind consumption (Story 4.1): a CLOB OUT bind ships a locator
+    // OUT-bind consumption: a CLOB OUT bind ships a locator
     // shape, not a generic length-prefixed value, so the metadata-less
     // fallback would misalign the stream on pre-23.4 servers (where this
     // probe — not TNS data flags — detects end-of-response).
@@ -1439,7 +1438,7 @@ class Transport {
     // accumulated bytes are malformed on their face — waiting for more
     // packets can never repair that. A malformed stream means framing
     // desync: any later read on this socket would decode garbage, so poison
-    // the transport before propagating (same rationale as the AC10 cap and
+    // the transport before propagating (same rationale as the receive-packet cap and
     // the mid-query REFUSE below). The connection must not be reused.
     bool isComplete(Uint8List accumulated) {
       try {
@@ -1469,7 +1468,7 @@ class Transport {
     final chunks = <Uint8List>[];
     var packetsRead = 0;
     while (true) {
-      // AC10: bound the loop so a server response that never satisfies the
+      // Bound the loop so a server response that never satisfies the
       // completion probe cannot spin forever. Poison the transport before
       // throwing — a partially-read, non-terminating stream is a framing hazard
       // and the connection must not be reused.
@@ -1491,7 +1490,7 @@ class Transport {
         // with a RESET marker before I send the DATA response."
         //
         // Count MARKER packets against the cap (review patch): a server that
-        // floods MARKER packets would otherwise bypass the AC10 guard entirely.
+        // floods MARKER packets would otherwise bypass the receive-loop guard entirely.
         if (++packetsRead > _maxReceivePackets) {
           _poison();
           throw OracleException(
@@ -1511,7 +1510,7 @@ class Transport {
       if (packet.type == tnsPacketRefuse) {
         // A REFUSE arriving mid-query (post-auth) is NOT a credential failure —
         // mapping it to ORA-01017 would mislead the caller. Surface the actual
-        // refuse reason carried in the packet instead (AC7). Auth-time REFUSE is
+        // refuse reason carried in the packet instead. Auth-time REFUSE is
         // handled separately in receiveData() where ORA-01017 is correct.
         // Poison the transport — the server has unilaterally terminated the
         // session; subsequent RPCs must fail fast rather than read stale bytes.
@@ -1544,11 +1543,11 @@ class Transport {
         // the payload with the single-byte END_OF_REQUEST marker (0x1D). But
         // 0x1D can also occur legitimately as the final data byte of a NON-final
         // packet (e.g. inside NUMBER/RAW column data), so trusting it blindly
-        // could terminate a multi-packet response early. AC5 follow-up guard:
+        // could terminate a multi-packet response early. Follow-up guard:
         // only treat a trailing 0x1D as terminal once the accumulated TTC stream
         // actually parses to a complete response; otherwise keep reading.
         //
-        // AC11 cost note: like the pre-23.4 probe below, this sub-path
+        // Cost note: like the pre-23.4 probe below, this sub-path
         // re-concatenates and re-walks the full accumulation once per packet
         // when a flags=0x0000 error response spans multiple packets — O(N x
         // bytes). The trailing-0x1D check short-circuits the expensive probe so
@@ -1568,7 +1567,7 @@ class Transport {
         // accumulated TTC bytes for STATUS / END_OF_REQUEST. If the response
         // is complete, stop; otherwise wait for the next packet.
         //
-        // AC6 cost note: this probe re-walks the full accumulated buffer once
+        // Cost note: this probe re-walks the full accumulated buffer once
         // per inbound packet, so a response spanning N packets costs
         // O(N x bytes) — quadratic in the worst case. That worst case does not
         // arise in practice on the pre-23.4 path: fetches are batched by
@@ -1600,7 +1599,7 @@ class Transport {
   }
 
   /// Builds a protocol-level [OracleException] describing a mid-query REFUSE
-  /// packet, surfacing the server's actual refuse reason (AC7).
+  /// packet, surfacing the server's actual refuse reason.
   ///
   /// REFUSE payload layout (offsets relative to the stripped TNS payload, i.e.
   /// node-oracledb's absolute offsets minus the 8-byte header):
@@ -1685,7 +1684,7 @@ class Transport {
     var resendCount = 0;
 
     while (true) {
-      // AC12: fail fast if the transport was poisoned by a prior timeout on
+      // Fail fast if the transport was poisoned by a prior timeout on
       // this instance. `_receiveRawPacket` reads directly from the socket and,
       // unlike `send`/`receive`, has no built-in poisoned-state check; without
       // this guard a reused-after-timeout transport could read stale bytes left
@@ -2608,7 +2607,7 @@ class Transport {
   /// TNS DATA packets have a 2-byte data flags field at the start of
   /// the payload, followed by the actual TTC message data.
   ///
-  /// DATA-flags contract (AC9 — the default is intentionally version-gated, not
+  /// DATA-flags contract (the default is intentionally version-gated, not
   /// a constant, and is the Oracle-protocol-required behaviour):
   ///   * Oracle 23ai (`serverMajorVersion >= 23`): the default is
   ///     `_tnsDataFlagsEndOfRpc` (0x0800). 23ai requires the END_OF_RPC bit on
@@ -2629,7 +2628,7 @@ class Transport {
 
     // The negotiated SDU bounds the whole TNS packet: 8-byte header + 2-byte
     // data flags + payload. A TTC message larger than one packet's capacity
-    // (e.g. a >32K CLOB-bound execute, Story 4.1) is fragmented across
+    // (e.g. a >32K CLOB-bound execute) is fragmented across
     // multiple DATA packets — node-oracledb's WritePacket sends a packet per
     // SDU with data flags 0x0000 and puts the request flags (END_OF_RPC on
     // 23ai) only on the final packet (packet.js `_sendPacket`).

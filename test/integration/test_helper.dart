@@ -31,7 +31,7 @@ String get testPassword =>
 /// Connection string in `host:port/service` format.
 String get testConnectString => '$testHost:$testPort/$testService';
 
-/// Single source of truth for integration-test gating (Story 7.8 AC2).
+/// Single source of truth for integration-test gating.
 ///
 /// Tests run only when the env var is the literal string `'true'`: unset
 /// skips, `'false'` skips, any other value skips.
@@ -40,7 +40,7 @@ bool get integrationEnabled =>
 
 final Logger _log = Logger('oracledb.test_helper');
 
-/// Opens a connection with a fail-fast timeout (Story 7.8 AC14).
+/// Opens a connection with a fail-fast timeout.
 ///
 /// A hung listener fails within [timeout] — default 5s, generous for a local
 /// container yet far below `dart test`'s per-test timeout — instead of
@@ -64,8 +64,7 @@ Future<OracleConnection> connectForTest({
 
 final Random _random = Random();
 
-/// Returns a per-run-unique table name `t_<base>_<8 hex chars>` (Story 7.8
-/// AC1).
+/// Returns a per-run-unique table name `t_<base>_<8 hex chars>`.
 ///
 /// Call once per group (at declaration site) so setUp, test bodies, and
 /// tearDown all reference the same table, while two concurrent or
@@ -87,8 +86,7 @@ String uniqueTableName(String base) {
   return name;
 }
 
-/// Monotonically increasing primary-key generator seeded from a random base
-/// (Story 7.8 AC1).
+/// Monotonically increasing primary-key generator seeded from a random base.
 ///
 /// No two calls in a run return the same value, and the random base makes a
 /// collision with rows left over from a previous run against the same table
@@ -97,7 +95,7 @@ String uniqueTableName(String base) {
 int _nextId = _random.nextInt(1 << 20) * 1000;
 int nextTestId() => ++_nextId;
 
-/// Null-safe tearDown cleanup (Story 7.8 AC3/AC4).
+/// Null-safe tearDown cleanup.
 ///
 /// * A `null` [connection] (setUp failed before assignment) is a no-op, so
 ///   the root setUp failure is reported instead of a
@@ -108,7 +106,7 @@ int nextTestId() => ++_nextId;
 ///   an [OracleException] whose code is in [ignoreCodes] (e.g. ORA-00942
 ///   missing table, ORA-04043 missing procedure) is expected and ignored.
 /// * `close()` always runs. A close failure is logged via `package:logging`
-///   and never rethrown over the primary cleanup error (AC4).
+///   and never rethrown over the primary cleanup error.
 /// * The first unexpected drop failure is rethrown after close so genuine
 ///   cleanup problems still surface.
 Future<void> cleanUpConnection(
@@ -141,7 +139,7 @@ Future<void> cleanUpConnection(
     try {
       await connection.close();
     } catch (e) {
-      // Secondary cleanup failure: log, never mask the primary error (AC4).
+      // Secondary cleanup failure: log, never mask the primary error.
       _log.warning('tearDown close() failed: $e');
     }
   }

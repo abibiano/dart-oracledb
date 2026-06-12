@@ -1,13 +1,13 @@
 /// Opt-in time-zone-preserving wrapper for Oracle `TIMESTAMP WITH TIME ZONE`
-/// values (Story 7.9 AC13).
+/// values.
 library;
 
 /// An Oracle `TIMESTAMP WITH TIME ZONE` value that preserves the original
 /// time-zone offset alongside the absolute instant.
 ///
 /// By default the driver decodes every TIMESTAMP variant to a plain UTC
-/// [DateTime] (the offset is applied, then discarded — Story 7.1 contract).
-/// That is lossless for the *instant* but loses the *zone*: a
+/// [DateTime] (the offset is applied, then discarded). That is lossless for
+/// the *instant* but loses the *zone*: a
 /// `SELECT … UPDATE …` round-trip would silently rewrite `+05:30` data as
 /// `+00:00`. Opt in to this wrapper per connection:
 ///

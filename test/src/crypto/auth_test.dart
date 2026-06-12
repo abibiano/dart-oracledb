@@ -35,7 +35,7 @@ class MockTransport extends Transport {
 }
 
 /// Minimal test-only transport seam for driving [AuthFlow.authenticate] down a
-/// specific failure path (AC10, AC11) without a live Oracle server. Only the
+/// specific failure path without a live Oracle server. Only the
 /// methods needed to reach the failure point are overridden; each is wired to
 /// throw a caller-supplied error.
 class _FakeAuthTransport extends Transport {
@@ -105,7 +105,7 @@ void main() {
       );
 
       final str = exception.toString();
-      // Story 2.8: canonical 5-digit ORA padding for codes below 10000.
+      // Canonical 5-digit ORA padding for codes below 10000.
       expect(str, contains('ORA-01017'));
       expect(str, contains('invalid username/password'));
     });
@@ -266,8 +266,7 @@ void main() {
     });
   });
 
-  // Note: Mock-based authenticate tests skipped - FAST_AUTH protocol requires integration tests
-  // See Epic 1 Retrospective: "Integration tests are mandatory for protocol-level code"
+  // Note: Mock-based authenticate tests skipped - FAST_AUTH protocol requires integration tests.
   // Real FAST_AUTH testing is done in test/integration/auth_integration_test.dart and minimal_auth_test.dart
   group('AuthFlow.authenticate',
       skip: 'Mock transport incompatible with FAST_AUTH protocol', () {
@@ -435,7 +434,7 @@ void main() {
     });
   });
 
-  group('Hex-Encoded Crypto Values (AC2)', () {
+  group('Hex-Encoded Crypto Values', () {
     late AuthFlow auth;
     late VerifierParams params;
     late Uint8List clientNonce;
@@ -617,7 +616,7 @@ void main() {
     });
   });
 
-  group('PBKDF2 hash-slice guard (AC1)', () {
+  group('PBKDF2 hash-slice guard', () {
     test(
         'requirePasswordHashPrefix returns the first N bytes of a 64-byte hash',
         () {
@@ -640,8 +639,7 @@ void main() {
         () => requirePasswordHashPrefix(Uint8List(31), 32),
         throwsA(isA<OracleException>()
             .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
-        reason:
-            'AC1: a hash shorter than 32 bytes must fail loud, not RangeError',
+        reason: 'a hash shorter than 32 bytes must fail loud, not RangeError',
       );
     });
 
@@ -661,7 +659,7 @@ void main() {
     });
   });
 
-  group('SHA512 verifier path (AC7)', () {
+  group('SHA512 verifier path', () {
     test(
         'generatePasswordProof for SHA512 (0x939) does not crash on AES key length',
         () {
@@ -695,12 +693,12 @@ void main() {
       expect(auth.sessionKey, isNotNull,
           reason: 'session key must be derived on the SHA512 path');
       expect(auth.speedyKey, isNull,
-          reason: 'AC6/AC7: SHA512 path must never generate a speedy key; '
+          reason: 'SHA512 path must never generate a speedy key; '
               'only the 12c verifier (0x4815) emits AUTH_PBKDF2_SPEEDY_KEY');
     });
   });
 
-  group('Malformed server nonce guard (AC5)', () {
+  group('Malformed server nonce guard', () {
     test('short AUTH_SESSKEY raises OracleException, not a raw crypto error',
         () {
       final auth = AuthFlow();
@@ -720,7 +718,7 @@ void main() {
         throwsA(isA<OracleException>()
             .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
         reason:
-            'AC5: a non-block-aligned server key must surface a guarded error',
+            'a non-block-aligned server key must surface a guarded error',
       );
     });
 
@@ -745,7 +743,7 @@ void main() {
     });
   });
 
-  group('Auth state transitions on failure (AC10, AC11)', () {
+  group('Auth state transitions on failure', () {
     test(
         'classical path: protocol-negotiation failure does not advance to phaseOneSent',
         () async {
@@ -768,7 +766,7 @@ void main() {
       );
 
       expect(auth.state, isNot(equals(AuthState.phaseOneSent)),
-          reason: 'AC10: phaseOneSent must not be entered before the phase-one '
+          reason: 'phaseOneSent must not be entered before the phase-one '
               'packet is written');
       expect(auth.state, equals(AuthState.notStarted),
           reason: 'state must remain notStarted on negotiation failure');
@@ -792,7 +790,7 @@ void main() {
 
       expect(auth.state, equals(AuthState.failed),
           reason:
-              'AC11: a non-OracleException from FAST_AUTH must leave AuthState '
+              'a non-OracleException from FAST_AUTH must leave AuthState '
               'at failed, never stuck at phaseOneSent');
     });
   });

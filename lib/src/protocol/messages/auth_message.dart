@@ -255,7 +255,7 @@ class AuthPhaseOneResponse {
             'Session param: $key = ${value.length > 50 ? '${value.substring(0, 50)}...' : value}');
       }
     } else if (msgType == ttcMsgTypeError) {
-      // AC9: fail loud. A TTC ERROR during AUTH_PHASE_ONE carries a real Oracle
+      // Fail loud. A TTC ERROR during AUTH_PHASE_ONE carries a real Oracle
       // error (account locked, password expired, protocol failure, ...).
       // Previously this only logged a warning and returned empty sessionData,
       // silently masking the failure as "no verifier params". Raise an
@@ -453,7 +453,7 @@ class AuthPhaseTwoRequest {
     //       SESSION_CLIENT_VERSION, AUTH_ALTER_SESSION, AUTH_PASSWORD
     int numPairs = 6;
 
-    // AC6 — speedy-key wire decision: AUTH_PBKDF2_SPEEDY_KEY is written ONLY for
+    // Speedy-key wire decision: AUTH_PBKDF2_SPEEDY_KEY is written ONLY for
     // the 12c verifier type (0x4815). This matches node-oracledb
     // (`if (!verifier11G) buf.writeKeyValue("AUTH_PBKDF2_SPEEDY_KEY", ...)`),
     // whose only valid wire verifier types are 11g (0xb152 / 0x1b25, no speedy

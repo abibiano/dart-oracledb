@@ -2,7 +2,7 @@
 ///
 /// These are package-internal functions; not part of the public API.
 ///
-/// Story 7.3 contract:
+/// Classification contract:
 ///   - `skipSqlPrefixes` skips whitespace and comments. It does NOT skip
 ///     leading `(` — a SQL string that opens with `(` is treated as a
 ///     malformed prefix and classified as none of {query, PL/SQL, cache
@@ -17,7 +17,7 @@
 ///   - `MERGE` is recognized as a cache-eligible DML verb (parity with
 ///     INSERT/UPDATE/DELETE).
 ///
-/// Story 7.9 AC15: the depth-aware scanners recognize Oracle q-quote
+/// The depth-aware scanners recognize Oracle q-quote
 /// (alternative quoting) literals — `q'[…]'`, `q'{…}'`, `q'(…)'`, `q'<…>'`,
 /// and `q'X…X'` with any other delimiter — so an embedded raw `'` inside one
 /// cannot break the CTE-header scan. National literals (`n'…'`, `nq'…'`)
@@ -114,8 +114,8 @@ bool matchesKeyword(String sql, int pos, String keyword) {
 /// the identifier scan consumes the `n`/`nq` prefix and the remainder is
 /// treated as an ordinary `'…'` literal, so an `nq` literal with an embedded
 /// raw `'` can still mis-scan. They are vanishingly rare in CTE headers;
-/// classification of such statements is undefined (Story 7.9 AC15 covers
-/// plain q-quote only).
+/// classification of such statements is undefined (plain q-quote only is
+/// covered).
 int _skipNonCode(String sql, int pos) {
   final n = sql.length;
   final c = sql.codeUnitAt(pos);
@@ -123,8 +123,8 @@ int _skipNonCode(String sql, int pos) {
   // Oracle q-quote (alternative quoting) literal: q'X…X' where X is the
   // delimiter; `[ { ( <` pair with `] } ) >`, any other char closes with
   // itself. No escape sequence exists inside — the literal ends only at
-  // closing-delimiter + quote, so an embedded raw ' is plain content
-  // (Story 7.9 AC15). Clamps to end-of-string when unterminated.
+  // closing-delimiter + quote, so an embedded raw ' is plain content.
+  // Clamps to end-of-string when unterminated.
   if ((c == 0x71 || c == 0x51) && // q / Q
       pos + 2 < n &&
       sql.codeUnitAt(pos + 1) == 0x27) {
@@ -267,7 +267,7 @@ int _findCteTerminalVerb(String sql, int pos) {
       }
       continue;
     }
-    // Explicit whitespace branch (Story 7.9 AC16): space/tab/LF/CR are
+    // Explicit whitespace branch: space/tab/LF/CR are
     // consumed deliberately here, not via fallthrough, so a future early
     // exit added below cannot silently regress CR handling.
     if (_isWhitespace(c)) {
@@ -286,7 +286,7 @@ int _findCteTerminalVerb(String sql, int pos) {
 /// a leading `(` — see library doc).
 ///
 /// This is the single source of truth shared by [isQuerySql], [isPlSqlSql], and
-/// [isCacheEligibleSql] (AC9): for `WITH … ` it resolves the CTE terminal verb
+/// [isCacheEligibleSql]: for `WITH … ` it resolves the CTE terminal verb
 /// exactly once, so the three public helpers can never drift apart on how a SQL
 /// shape is classified.
 ({String verb, int pos}) _leadingVerb(String sql) {
@@ -307,7 +307,7 @@ int _findCteTerminalVerb(String sql, int pos) {
 }
 
 /// Returns true when the SELECT body beginning at [pos] carries a top-level
-/// `FOR UPDATE` clause (AC6).
+/// `FOR UPDATE` clause.
 ///
 /// Scans at paren-depth 0 (so `FOR UPDATE` inside a subquery, string literal, or
 /// comment is ignored) for the keyword `FOR` immediately followed — across
@@ -346,7 +346,7 @@ bool _hasForUpdateClause(String sql, int pos) {
       }
       continue;
     }
-    // Explicit whitespace branch (Story 7.9 AC16) — see _findCteTerminalVerb.
+    // Explicit whitespace branch — see _findCteTerminalVerb.
     if (_isWhitespace(c)) {
       pos++;
       continue;
@@ -377,12 +377,12 @@ bool isPlSqlSql(String sql) {
 /// `WITH ... {INSERT|UPDATE|DELETE|MERGE}` are eligible. DDL and PL/SQL
 /// (BEGIN, DECLARE, CALL) are not.
 ///
-/// AC6: `SELECT ... FOR UPDATE` is intentionally excluded. It remains a query
+/// `SELECT ... FOR UPDATE` is intentionally excluded. It remains a query
 /// ([isQuerySql] is unchanged), but the locking clause is kept out of the cursor
 /// cache so a reused cursor can never interact subtly with row-lock semantics.
 /// Locking selects are rarely hot-looped, so reparsing each time costs little
 /// while keeping correctness obvious. Shares [_leadingVerb] with the other
-/// classifiers (AC9) so the `WITH … SELECT` branch cannot drift.
+/// classifiers so the `WITH … SELECT` branch cannot drift.
 bool isCacheEligibleSql(String sql) {
   final r = _leadingVerb(sql);
   if (r.verb.isEmpty) return false;
@@ -390,7 +390,7 @@ bool isCacheEligibleSql(String sql) {
     return false;
   }
   if (r.verb == 'SELECT' && _hasForUpdateClause(sql, r.pos)) {
-    return false; // SELECT ... FOR UPDATE excluded from caching (AC6).
+    return false; // SELECT ... FOR UPDATE excluded from caching.
   }
   return _cteVerbs.contains(r.verb);
 }

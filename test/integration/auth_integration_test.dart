@@ -17,7 +17,7 @@ import 'dart:typed_data';
 // Protocol/auth-flow test: needs Transport + AuthFlow + packet internals that
 // are not on the public surface (`lib/oracledb.dart` exports the connection
 // API only). No public test-only API exists; the `src/` imports are pinned
-// intentionally (Story 7.8 AC12).
+// intentionally.
 import 'package:oracledb/src/crypto/auth.dart';
 import 'package:oracledb/src/crypto/verifier.dart';
 import 'package:oracledb/src/errors.dart';

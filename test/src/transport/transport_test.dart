@@ -139,7 +139,7 @@ void main() {
       });
     });
 
-    group('sequence counter (AC: 1, 4)', () {
+    group('sequence counter', () {
       test('nextSequence() starts at 1', () {
         final transport = Transport();
         expect(transport.nextSequence(), equals(1));
@@ -183,7 +183,7 @@ void main() {
                 'Default ttcFieldVersion is 24, which exceeds the 18 threshold');
       });
 
-      // AC3: the one-byte TTC sequence must wrap at 256, matching node-oracledb
+      // The one-byte TTC sequence must wrap at 256, matching node-oracledb
       // `writeSeqNum` (`seq = (seq + 1) % 256`, starting at 1). The cycle is
       // 1,2,…,255,0,1,… and the counter never grows beyond one byte.
       test('nextSequence() wraps to a one-byte cycle after 0xFF', () {
@@ -203,7 +203,7 @@ void main() {
         expect(seq.every((s) => s >= 0 && s <= 0xFF), isTrue);
       });
 
-      // AC4: shouldWriteTokenNumber boundary at the field-version threshold (18).
+      // shouldWriteTokenNumber boundary at the field-version threshold (18).
       test('shouldWriteTokenNumber boundary at negotiated field versions', () {
         final transport = Transport();
 
@@ -224,11 +224,10 @@ void main() {
             reason: 'default version 24 exceeds the threshold');
       });
 
-      // AC8: AUTH_PHASE_TWO 23ai token must be gated on FAST_AUTH presence so a
+      // AUTH_PHASE_TWO 23ai token must be gated on FAST_AUTH presence so a
       // pre-23 server (default field version 24, no compileCaps) never receives
       // use23aiFormat=true.
-      test('shouldWriteAuthPhaseTwoToken is gated on supportsFastAuth (AC8)',
-          () {
+      test('shouldWriteAuthPhaseTwoToken is gated on supportsFastAuth', () {
         final transport = Transport();
 
         // 23ai server: FAST_AUTH advertised + field version high → token.
@@ -245,17 +244,16 @@ void main() {
         transport.debugSupportsFastAuth = false;
         transport.debugTtcFieldVersion = 24;
         expect(transport.shouldWriteAuthPhaseTwoToken, isFalse,
-            reason:
-                'AC8: a pre-23 server must never be given use23aiFormat=true');
+            reason: 'a pre-23 server must never be given use23aiFormat=true');
 
         transport.debugTtcFieldVersion = 18;
         expect(transport.shouldWriteAuthPhaseTwoToken, isFalse);
       });
     });
 
-    // Story 7.6 AC4 — close-cursor piggyback must stay within the negotiated
-    // SDU; the chunk limit bounds how many cursor ids ride one execute.
-    group('closeCursorChunkLimit (Story 7.6 AC4)', () {
+    // Close-cursor piggyback must stay within the negotiated SDU; the chunk
+    // limit bounds how many cursor ids ride one execute.
+    group('closeCursorChunkLimit', () {
       test('defaults to a large bound at the default SDU', () {
         final transport = Transport();
         // Default SDU (8192) → (4096 - 32) / 5 = 812.
@@ -283,10 +281,10 @@ void main() {
       });
     });
 
-    // AC12: deterministic classical AUTH_PHASE_ONE timeout coverage. A local
+    // Deterministic classical AUTH_PHASE_ONE timeout coverage. A local
     // ServerSocket accepts and drains input but never replies, so the
     // transport-layer timeout fires without needing a wedged live Oracle.
-    group('classical AUTH_PHASE_ONE timeout (AC12)', () {
+    group('classical AUTH_PHASE_ONE timeout', () {
       test('sendAuthPhaseOne times out, throws oraConnectTimeout, and poisons',
           () async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
@@ -320,12 +318,12 @@ void main() {
       });
     });
 
-    // Story 7.7 AC10: the receive loop must be bounded. A server that keeps
-    // sending non-terminal DATA packets (a stream that never satisfies the TTC
+    // The receive loop must be bounded. A server that keeps sending
+    // non-terminal DATA packets (a stream that never satisfies the TTC
     // completion probe) must trip the packet cap, poison the transport, and
     // throw oraProtocolError rather than spin forever. Driven by a local
     // ServerSocket with the cap lowered via the test-only seam.
-    group('receive-loop iteration cap (AC10)', () {
+    group('receive-loop iteration cap', () {
       test('non-terminating DATA stream trips the cap and poisons', () async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         server.listen((s) {
@@ -505,9 +503,9 @@ void main() {
       });
     });
 
-    // Story 7.7 AC12: sendConnectReceiveAccept must honor a poisoned transport
-    // and fail fast before reading stale bytes off the wire.
-    group('poisoned-state guard on CONNECT/ACCEPT (AC12)', () {
+    // sendConnectReceiveAccept must honor a poisoned transport and fail fast
+    // before reading stale bytes off the wire.
+    group('poisoned-state guard on CONNECT/ACCEPT', () {
       test('sendConnectReceiveAccept fails fast on a poisoned transport',
           () async {
         // Poison the transport via the existing timeout seam: a server that
@@ -575,10 +573,10 @@ void main() {
       });
     });
 
-    // Story 7.4: deterministic lifecycle behaviour exercised against a local
-    // loopback ServerSocket (no Oracle required). Each test owns its server and
-    // tears it down so the suite stays hermetic.
-    group('RPC timeout poisoning (Story 7.4 AC1, AC2)', () {
+    // Deterministic lifecycle behaviour exercised against a local loopback
+    // ServerSocket (no Oracle required). Each test owns its server and tears it
+    // down so the suite stays hermetic.
+    group('RPC timeout poisoning', () {
       test('timed-out commit poisons the transport and fails subsequent RPCs',
           () async {
         // A server that accepts the connection, drains input, but never replies.
@@ -591,7 +589,7 @@ void main() {
         expect(transport.isConnected, isTrue);
         expect(transport.isCorrupted, isFalse);
 
-        // AC1: the timeout error names the operation and the elapsed wait.
+        // The timeout error names the operation and the elapsed wait.
         await expectLater(
           transport.sendCommit(timeout: const Duration(milliseconds: 200)),
           throwsA(isA<OracleException>()
@@ -600,11 +598,11 @@ void main() {
               .having((e) => e.message, 'message', contains('200ms'))),
         );
 
-        // AC2: the transport is poisoned and its socket force-destroyed.
+        // The transport is poisoned and its socket force-destroyed.
         expect(transport.isCorrupted, isTrue);
         expect(transport.isConnected, isFalse);
 
-        // AC2: a subsequent RPC fails fast with a DISTINCT error (not a second
+        // A subsequent RPC fails fast with a DISTINCT error (not a second
         // timeout) so callers know the transport itself is unusable.
         await expectLater(
           transport.sendRollback(timeout: const Duration(seconds: 5)),
@@ -617,7 +615,7 @@ void main() {
       });
     });
 
-    group('sendData DATA-flags contract (Story 7.4 AC9)', () {
+    group('sendData DATA-flags contract', () {
       Future<Uint8List> captureFirstPacket(
           Future<void> Function(Transport t) act) async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
@@ -657,7 +655,7 @@ void main() {
       });
     });
 
-    group('sendData SDU fragmentation (Story 4.1)', () {
+    group('sendData SDU fragmentation', () {
       test('a TTC message larger than the SDU spans multiple DATA packets',
           () async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
@@ -709,7 +707,7 @@ void main() {
       });
     });
 
-    group('mid-query REFUSE handling (Story 7.4 AC7)', () {
+    group('mid-query REFUSE handling', () {
       test('surfaces the real refuse reason, not invalid-credentials',
           () async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);

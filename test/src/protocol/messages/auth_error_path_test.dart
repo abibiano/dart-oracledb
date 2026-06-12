@@ -1,11 +1,11 @@
-/// Error path tests for authentication protocol (AC: 1, 3, 4).
+/// Error path tests for authentication protocol.
 ///
 /// Tests cover:
-/// - 7.1: Connection failure during auth (network calls — requires connectivity;
-///         guarded by RUN_INTEGRATION_TESTS=true)
-/// - 7.2: Protocol errors (malformed packets, wrong packet types — pure unit)
-/// - 7.3: Malformed auth responses (buffer underflows, missing keys — pure unit)
-/// - 7.4: Timeout scenarios (error code validation, message format — pure unit)
+/// - Connection failure during auth (network calls — requires connectivity;
+///   guarded by RUN_INTEGRATION_TESTS=true)
+/// - Protocol errors (malformed packets, wrong packet types — pure unit)
+/// - Malformed auth responses (buffer underflows, missing keys — pure unit)
+/// - Timeout scenarios (error code validation, message format — pure unit)
 @Tags(['unit', 'protocol'])
 library;
 
@@ -19,17 +19,17 @@ import 'package:oracledb/src/transport/packet.dart';
 import 'package:test/test.dart';
 
 void main() {
-  group('Auth Error Paths (AC: 1, 3, 4)', () {
+  group('Auth Error Paths', () {
     // =========================================================================
-    // Task 7.1: Connection failure during auth
+    // Connection failure during auth
     // These tests make real network calls and are guarded by RUN_INTEGRATION_TESTS.
     // =========================================================================
-    // AC13 (Story 7.8): integration-gated tests under test/src/ carry the
-    // integration tag so `--exclude-tags=integration` (quality CI job)
-    // excludes them without relying on the env-var skip alone.
+    // Integration-gated tests under test/src/ carry the integration tag so
+    // `--exclude-tags=integration` (quality CI job) excludes them without
+    // relying on the env-var skip alone.
     final runNetworkTests =
         Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
-    group('7.1 Connection failure during auth',
+    group('Connection failure during auth',
         tags: 'integration',
         skip: runNetworkTests
             ? null
@@ -68,8 +68,7 @@ void main() {
           fail('Expected OracleException');
         } on OracleException catch (e) {
           expect(e.cause, isNotNull,
-              reason:
-                  'Original cause must be preserved for debugging (project-context.md rule)');
+              reason: 'Original cause must be preserved for debugging');
           expect(e.message, isNotEmpty);
         }
       });
@@ -87,9 +86,9 @@ void main() {
           fail('Expected OracleException');
         } on OracleException catch (e) {
           expect(e.message, isNot(contains(secretPassword)),
-              reason: 'NFR5: password must never appear in error messages');
+              reason: 'password must never appear in error messages');
           expect(e.toString(), isNot(contains(secretPassword)),
-              reason: 'NFR5: password must never appear in toString()');
+              reason: 'password must never appear in toString()');
         }
       });
 
@@ -107,9 +106,9 @@ void main() {
     });
 
     // =========================================================================
-    // Task 7.2: Protocol errors
+    // Protocol errors
     // =========================================================================
-    group('7.2 Protocol errors', () {
+    group('Protocol errors', () {
       test('malformed TNS packet (too short) throws TnsPacketException', () {
         final invalidData = Uint8List.fromList([0x00, 0x08, 0x00]);
         expect(
@@ -173,9 +172,9 @@ void main() {
     });
 
     // =========================================================================
-    // Task 7.3: Malformed auth responses
+    // Malformed auth responses
     // =========================================================================
-    group('7.3 Malformed auth responses', () {
+    group('Malformed auth responses', () {
       test('AuthPhaseOneResponse.decode throws BufferException on empty data',
           () {
         expect(
@@ -253,9 +252,9 @@ void main() {
     });
 
     // =========================================================================
-    // Task 7.4: Timeout scenarios
+    // Timeout scenarios
     // =========================================================================
-    group('7.4 Timeout scenarios', () {
+    group('Timeout scenarios', () {
       test('oraInvalidCredentials error code is 1017 (ORA-01017)', () {
         expect(oraInvalidCredentials, equals(1017));
       });
@@ -284,7 +283,7 @@ void main() {
           message: 'Authentication failed: invalid username or password',
         );
         expect(timeoutError.message, isNot(contains(secretPassword)),
-            reason: 'NFR5: password must never appear in timeout error');
+            reason: 'password must never appear in timeout error');
         expect(timeoutError.toString(), isNot(contains(secretPassword)));
       });
 
@@ -295,7 +294,7 @@ void main() {
           errorCode: oraInvalidCredentials,
           message: 'Authentication failed: invalid username or password',
         );
-        // Story 2.8: canonical 5-digit ORA padding for codes below 10000.
+        // Canonical 5-digit ORA padding for codes below 10000.
         expect(e.toString(), contains('ORA-01017'),
             reason: 'ORA-01017 is the Oracle invalid-credentials error code');
         // The ~5-second Oracle 23ai brute-force delay is validated by the

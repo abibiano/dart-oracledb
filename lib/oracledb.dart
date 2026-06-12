@@ -17,7 +17,7 @@ export 'src/errors.dart'
         oraInvalidCredentials,
         oraTlsHandshakeFailed,
         oraTlsCertificateError,
-        // Bind parameter error codes (Story 2.3)
+        // Bind parameter error codes
         oraBindMismatch,
         oraBindTypeError;
 
@@ -36,10 +36,10 @@ export 'src/connection.dart' show OracleConnection;
 export 'src/result.dart' show OracleResult, OracleRow;
 export 'src/protocol/messages/execute_message.dart' show ColumnMetadata;
 
-// Output bind API (Story 3.2)
+// Output bind API
 export 'src/oracle_bind.dart' show OracleBind, OracleDbType, OracleOutBinds;
 
-// Time-zone-preserving TIMESTAMP WITH TIME ZONE wrapper (Story 7.9 AC13)
+// Time-zone-preserving TIMESTAMP WITH TIME ZONE wrapper
 export 'src/oracle_timestamp_tz.dart' show OracleTimestampTz;
 
 // TLS/SSL Configuration

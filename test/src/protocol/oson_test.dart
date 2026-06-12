@@ -1,7 +1,7 @@
-/// Unit tests for the OSON (Oracle binary JSON) codec (Story 4.4).
+/// Unit tests for the OSON (Oracle binary JSON) codec.
 ///
 /// Reference fixture bytes were generated with the bundled node-oracledb
-/// encoder (the AC4 source of truth). Generation command, run from
+/// encoder (the source of truth). Generation command, run from
 /// `reference/node-oracledb/`:
 ///
 /// ```bash
@@ -339,7 +339,7 @@ void main() {
       );
     });
 
-    test('unsupported Oracle-specific scalar nodes fail loud (AC5)', () {
+    test('unsupported Oracle-specific scalar nodes fail loud', () {
       // Scalar-document payloads with the node type swapped to each
       // unsupported Oracle-specific kind. Header: magic, v1, flags
       // INLINE_LEAF|IS_SCALAR, uint16 tree size, then the node.

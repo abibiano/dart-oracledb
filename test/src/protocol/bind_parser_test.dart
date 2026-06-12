@@ -131,7 +131,7 @@ void main() {
       });
     });
 
-    // Story 7.3 AC5 — Duplicate bind-name guard for PL/SQL inputs.
+    // Duplicate bind-name guard for PL/SQL inputs.
     //
     // The validator in connection.execute() was previously tested only against
     // plain SELECT/DML shapes. These tests pin the same guard against PL/SQL
@@ -139,7 +139,7 @@ void main() {
     // SQL positions and expect the bind map to provide one value per unique
     // name. Exercised via the package-internal helper so no live Oracle
     // session is required.
-    group('validateNamedBindCount (Story 7.3 AC5)', () {
+    group('validateNamedBindCount', () {
       test(
           'PL/SQL block with duplicate placeholder and wrong bind-map count '
           'throws ORA-01008', () {

@@ -1,14 +1,14 @@
-/// Integration tests for the native JSON data type (Story 4.4) — query
+/// Integration tests for the native JSON data type — query
 /// decode, DML binds, PL/SQL OUT / IN OUT binds, statement-cache behaviour,
 /// and fetch continuation.
 ///
 /// Native `JSON` columns (type 119, OSON-backed) require database
 /// `compatible >= 20`, so the suite feature-probes `CREATE TABLE ... (doc
 /// JSON)` once and skips with the server error preserved when the server
-/// cannot create native JSON columns (AC8).
+/// cannot create native JSON columns.
 ///
 /// Must pass on Oracle 23ai (FREEPDB1) and Oracle 21c (XEPDB1) per the
-/// dual-environment rule in project-context.md. No FAST_AUTH-specific paths
+/// project's dual-environment testing rule. No FAST_AUTH-specific paths
 /// are exercised, so no `Transport.supportsFastAuth` probe is needed.
 ///
 ///   RUN_INTEGRATION_TESTS=true dart test test/integration/json_data_type_integration_test.dart --no-color
@@ -22,7 +22,7 @@ import 'package:test/test.dart';
 import 'test_helper.dart';
 
 /// Non-null when the probe determined native JSON is unavailable; holds the
-/// server error for the skip reason (AC8).
+/// server error for the skip reason.
 String? nativeJsonUnavailable;
 
 /// Skips the current test when the server cannot create native JSON columns.
@@ -459,7 +459,7 @@ void main() {
           );
         });
 
-        test('repeated JSON SELECT reuses the cached cursor (AC7)', () async {
+        test('repeated JSON SELECT reuses the cached cursor', () async {
           if (skipWithoutNativeJson()) return;
           final id = nextTestId();
           final doc = <String, Object?>{'cached': true, 'id': id};
@@ -485,7 +485,7 @@ void main() {
         });
 
         test('>50-row JSON SELECT preserves every document across fetch '
-            'continuation (AC7)', () async {
+            'continuation', () async {
           if (skipWithoutNativeJson()) return;
           const rowCount = 60; // default prefetch window is 50
           final baseId = nextTestId();

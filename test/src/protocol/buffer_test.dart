@@ -182,12 +182,12 @@ void main() {
       });
     });
 
-    // Story 7.7 AC6: Oracle variable-length integers are sign-magnitude — the
-    // size byte's high bit is the sign, the low 7 bits are the value-byte count.
-    // A size byte of 0x80 is "negative sign set, zero value bytes": the
-    // documented sentinel decodes to 0 for every signed width (negative zero ==
-    // zero in Dart ints). Unsigned reads must reject any sign bit outright.
-    group('sign-magnitude variable integers (AC6)', () {
+    // Oracle variable-length integers are sign-magnitude — the size byte's
+    // high bit is the sign, the low 7 bits are the value-byte count. A size
+    // byte of 0x80 is "negative sign set, zero value bytes": the documented
+    // sentinel decodes to 0 for every signed width (negative zero == zero in
+    // Dart ints). Unsigned reads must reject any sign bit outright.
+    group('sign-magnitude variable integers', () {
       test('readSB1 decodes the 0x80 negative-zero sentinel as 0', () {
         expect(ReadBuffer(Uint8List.fromList([0x80])).readSB1(), equals(0));
       });
@@ -230,11 +230,11 @@ void main() {
       });
     });
 
-    // Story 7.7 AC4: readUB8 returns a native Dart int. The package is declared
-    // native-only (pubspec `platforms:` excludes web) precisely because dart2js
-    // would lose precision past 2^53 here; on the VM the full 8-byte range
-    // round-trips exactly. These pin the native contract.
-    group('readUB8 native-safe values (AC4)', () {
+    // readUB8 returns a native Dart int. The package is declared native-only
+    // (pubspec `platforms:` excludes web) precisely because dart2js would lose
+    // precision past 2^53 here; on the VM the full 8-byte range round-trips
+    // exactly. These pin the native contract.
+    group('readUB8 native-safe values', () {
       test('reads an 8-byte value below the 2^53 web-precision boundary', () {
         // 0x000FFFFFFFFFFFFF = 2^52 - 1, representable on web AND native.
         final data = Uint8List.fromList(

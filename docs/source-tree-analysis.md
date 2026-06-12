@@ -71,8 +71,7 @@ dart-oracledb/
 ├── CONTRIBUTING.md                   # Dev setup, dual-env test commands, PR process
 ├── CHANGELOG.md , LICENSE
 ├── CLAUDE.md                         # AI-agent project instructions (esp. dual-env test runtimes)
-├── pubspec.yaml , analysis_options.yaml , dart_test.yaml
-└── _bmad-output/                     # BMad artifacts: PRD, architecture, epics, story specs, retros, specs
+└── pubspec.yaml , analysis_options.yaml , dart_test.yaml
 ```
 
 ★ = primary entry points / highest-traffic files.

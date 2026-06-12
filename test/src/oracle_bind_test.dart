@@ -1,4 +1,4 @@
-/// Unit tests for the public OUT-bind API (Story 3.2 + Story 3.3 + Story 7.2).
+/// Unit tests for the public OUT-bind API.
 library;
 
 import 'dart:typed_data';
@@ -9,8 +9,8 @@ import 'package:oracledb/oracledb.dart';
 
 void main() {
   group('OracleBind exports — public surface', () {
-    // Story 3.3 finalized the public API: only OracleBind, OracleDbType, and
-    // OracleOutBinds are exposed. The internal BindDir enum used for the
+    // The public API exposes only OracleBind, OracleDbType, and
+    // OracleOutBinds. The internal BindDir enum used for the
     // direction field must NOT leak through the public package barrel.
     test('lib/oracledb.dart does not re-export BindDir or BindDirection', () {
       // Probe via reflection of a constructed instance: the field exists, but
@@ -98,8 +98,8 @@ void main() {
     });
 
     test('IN OUT accepts a null input value with explicit type', () {
-      // The story requires type to be supplied explicitly precisely so that
-      // null IN OUT binds carry the correct wire type.
+      // Type must be supplied explicitly precisely so that null IN OUT binds
+      // carry the correct wire type.
       final b = OracleBind.inOut(value: null, type: OracleDbType.number);
       expect(b.value, isNull);
       expect(b.type, equals(OracleDbType.number));
@@ -112,7 +112,7 @@ void main() {
     });
   });
 
-  group('Story 4.1 — OracleDbType.clob validation', () {
+  group('OracleDbType.clob validation', () {
     test('CLOB OUT bind requires maxSize', () {
       expect(
         () => OracleBind.out(type: OracleDbType.clob),
@@ -165,7 +165,7 @@ void main() {
     });
   });
 
-  group('Story 4.2 — OracleDbType.blob validation', () {
+  group('OracleDbType.blob validation', () {
     test('BLOB OUT bind requires maxSize', () {
       expect(
         () => OracleBind.out(type: OracleDbType.blob),
@@ -222,7 +222,7 @@ void main() {
     });
   });
 
-  group('Story 4.4 — OracleDbType.json validation', () {
+  group('OracleDbType.json validation', () {
     test('JSON OUT bind requires maxSize', () {
       expect(
         () => OracleBind.out(type: OracleDbType.json),
@@ -416,12 +416,12 @@ void main() {
     });
   });
 
-  group('Story 7.2 — OracleBind value/type validation (AC6)', () {
+  group('OracleBind value/type validation', () {
     test(
-        'AC6 example: inOut(value: DateTime, type: number) throws '
+        'inOut(value: DateTime, type: number) throws '
         'ArgumentError at construction', () {
-      // The exact AC example: value's runtime type (DateTime) does not match
-      // the declared Oracle type (number). This must surface as an
+      // Value's runtime type (DateTime) does not match the declared Oracle
+      // type (number). This must surface as an
       // ArgumentError at the named-constructor call site rather than as a
       // ClassCastError deep inside wire encoding.
       expect(
@@ -560,9 +560,9 @@ void main() {
     });
   });
 
-  // F5a: OracleDbType.timestampTz — the documented TSTZ bind round-trip is
+  // OracleDbType.timestampTz — the documented TSTZ bind round-trip is
   // now actually declarable.
-  group('OracleDbType.timestampTz (F5a)', () {
+  group('OracleDbType.timestampTz', () {
     test('OUT bind constructs without maxSize (fixed wire size)', () {
       final bind = OracleBind.out(type: OracleDbType.timestampTz);
       expect(bind.type, equals(OracleDbType.timestampTz));
@@ -601,8 +601,8 @@ void main() {
     });
   });
 
-  group('Story 7.2 — OracleOutBinds lookup contract (AC7, AC8)', () {
-    test('AC7 — unsupported key type throws ArgumentError', () {
+  group('OracleOutBinds lookup contract', () {
+    test('unsupported key type throws ArgumentError', () {
       // The contract is "int (index) or String (name)" — any other key type
       // must fail loudly rather than return null and hide the caller bug.
       final out = OracleOutBinds(values: [1], names: {'v': 0});
@@ -611,7 +611,7 @@ void main() {
       expect(() => out[true], throwsA(isA<ArgumentError>()));
     });
 
-    test('AC7 — known string and index lookups remain non-throwing', () {
+    test('known string and index lookups remain non-throwing', () {
       final out = OracleOutBinds(values: [1], names: {'v': 0});
       expect(out['v'], equals(1));
       expect(out[0], equals(1));
@@ -621,7 +621,7 @@ void main() {
       expect(out[5], isNull);
     });
 
-    test('AC8 — repeated named bind index maps to first occurrence', () {
+    test('repeated named bind index maps to first occurrence', () {
       // First-occurrence semantics for a repeated named IN OUT bind:
       // both placeholders share the bind name, but `outBinds['v']` reports
       // the value bound at the first SQL position. We construct the

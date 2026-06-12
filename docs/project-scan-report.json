@@ -19,7 +19,7 @@
   ],
   "completed_steps": [
     {"step": "step_1", "status": "completed", "timestamp": "2026-06-12T06:52:10Z", "summary": "Classified as monolith single-part Dart library (pure-Dart Oracle thin driver), ~16.5k LOC in lib/"},
-    {"step": "step_2", "status": "completed", "timestamp": "2026-06-12T06:52:10Z", "summary": "Existing docs found: README.md, CONTRIBUTING.md, CHANGELOG.md, LICENSE, CLAUDE.md, _bmad-output/planning-artifacts/architecture.md, _bmad-output/project-context.md"},
+    {"step": "step_2", "status": "completed", "timestamp": "2026-06-12T06:52:10Z", "summary": "Existing public docs found: README.md, CONTRIBUTING.md, CHANGELOG.md, LICENSE, CLAUDE.md"},
     {"step": "step_3", "status": "completed", "timestamp": "2026-06-12T06:52:10Z", "summary": "Tech stack: Dart 3.12+, pointycastle, logging, meta; no FFI, no package:crypto, no web"},
     {"step": "step_4", "status": "completed", "timestamp": "2026-06-12T06:52:10Z", "summary": "Deep scan of transport, protocol/codec, crypto/auth layers + public API surface via parallel explorers"},
     {"step": "step_5", "status": "completed", "timestamp": "2026-06-12T06:52:10Z", "summary": "Source tree annotated"},
@@ -45,5 +45,5 @@
     "development-guide.md",
     "index.md"
   ],
-  "resume_instructions": "Workflow complete. Re-run for full rescan or deep-dive into a specific module."
+  "resume_instructions": "Workflow complete. Re-run for a full rescan or a deep-dive into a specific module."
 }

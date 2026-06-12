@@ -74,7 +74,7 @@ class OracleResult {
   /// This is `null` for SELECT queries. It is also `null` — rather than `0` —
   /// when the statement ran against a **pre-12.2 Oracle server** that does not
   /// send the extended row-count field in its response: the absence of a count
-  /// is reported distinctly from a confirmed count of zero (AC8). Servers from
+  /// is reported distinctly from a confirmed count of zero. Servers from
   /// 12.2 onward (including all currently-tested 19c/21c/23ai targets) always
   /// return the count, so this nullable pre-12.2 case does not arise there.
   final int? rowsAffected;

@@ -535,7 +535,7 @@ void main() {
     });
   });
 
-  group('Speedy-key wire encoding (AC6)', () {
+  group('Speedy-key wire encoding', () {
     final mockSessionKey = Uint8List.fromList(utf8.encode('A' * 64));
     final mockProof = Uint8List.fromList(utf8.encode('B' * 64));
     final mockSpeedyKey = Uint8List.fromList(utf8.encode('C' * 160));
@@ -557,8 +557,8 @@ void main() {
     test(
         '0xB92 omits the speedy key and counts 6 pairs even if one is supplied',
         () {
-      // Decision (AC6): 0xB92 (verifierTypePbkdf2) is an internal key-derivation
-      // routing flag, NOT a wire verifier type. node-oracledb only emits the
+      // 0xB92 (verifierTypePbkdf2) is an internal key-derivation routing flag,
+      // NOT a wire verifier type. node-oracledb only emits the
       // speedy key for the 12c verifier (0x4815), so 0xB92 must omit it. A
       // speedyKey is deliberately supplied here to prove it is ignored.
       final request = AuthPhaseTwoRequest(
@@ -588,7 +588,7 @@ void main() {
     });
   });
 
-  group('AuthPhaseOneResponse TTC ERROR fail-loud (AC9)', () {
+  group('AuthPhaseOneResponse TTC ERROR fail-loud', () {
     test('decode raises OracleException carrying the parsed Oracle error code',
         () {
       final data = _buildPhaseOneError(errorCode: oraAccountLocked); // 28000
@@ -596,7 +596,7 @@ void main() {
         () => AuthPhaseOneResponse.decode(data),
         throwsA(isA<OracleException>()
             .having((e) => e.errorCode, 'errorCode', oraAccountLocked)),
-        reason: 'AC9: a TTC ERROR in AUTH_PHASE_ONE must fail loud, not return '
+        reason: 'a TTC ERROR in AUTH_PHASE_ONE must fail loud, not return '
             'empty session data',
       );
     });
@@ -622,7 +622,7 @@ void main() {
     });
   });
 
-  group('Verifier parameter fallbacks are length-safe (AC5)', () {
+  group('Verifier parameter fallbacks are length-safe', () {
     test('missing AUTH_VFR_DATA → 16-byte salt fallback', () {
       const response =
           AuthPhaseOneResponse(sessionData: {}, verifierType: 0x4815);

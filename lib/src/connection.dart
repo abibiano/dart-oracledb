@@ -69,7 +69,7 @@ class OracleConnection {
   final ConnectionInfo _connectionInfo;
   final StatementCache _cache;
 
-  /// Opt-in (Story 7.9 AC13): when true, `TIMESTAMP WITH TIME ZONE` columns
+  /// Opt-in: when true, `TIMESTAMP WITH TIME ZONE` columns
   /// decode to [OracleTimestampTz] (preserving the original offset) instead
   /// of a UTC [DateTime]. Connection-level because [execute]'s optional
   /// positional bind parameter rules out per-call named options.
@@ -77,7 +77,7 @@ class OracleConnection {
   bool _isClosed;
   bool _inTransaction = false;
 
-  /// Guards against overlapping [execute] calls on a single connection (AC1).
+  /// Guards against overlapping [execute] calls on a single connection.
   ///
   /// A connection multiplexes a single TTC byte stream over one socket. Two
   /// `execute()` calls in flight at once would interleave their request writes
@@ -92,7 +92,7 @@ class OracleConnection {
 
   /// Current number of cached statements.
   ///
-  /// Exposed for integration tests (Story 7.3 AC4) to assert that PL/SQL
+  /// Exposed for integration tests to assert that PL/SQL
   /// blocks are not stored in the statement cache. This getter is accessible
   /// on any `OracleConnection` reference; production callers must not depend
   /// on it — it exists solely to support test instrumentation.
@@ -100,13 +100,13 @@ class OracleConnection {
   int get debugCacheSize => _cache.size;
 
   /// Number of cursor ids currently queued for close (close-cursor piggyback
-  /// backlog). Exposed for Story 7.6 AC4 chunking tests; not a public API.
+  /// backlog). Exposed for chunking tests; not a public API.
   @visibleForTesting
   int get debugPendingCloseCount => _cache.pendingCloseCount;
 
   /// Number of full-parse EXECUTEs sent on this connection (cursorId == 0).
   ///
-  /// AC8 instrumentation: proves cursor reuse / parse skipping from integration
+  /// Instrumentation: proves cursor reuse / parse skipping from integration
   /// tests without privileged Oracle views. Not part of the public API.
   @visibleForTesting
   int get debugFullParseExecutes => _transport.debugFullParseExecutes;
@@ -126,8 +126,8 @@ class OracleConnection {
   /// Number of temporary-LOB locators queued for the free-temp piggyback on
   /// the next execute.
   ///
-  /// Instrumentation for the temp-LOB lifecycle integration tests (Story
-  /// 4.1): proves the queue drains to zero after the execute that follows a
+  /// Instrumentation for the temp-LOB lifecycle integration tests:
+  /// proves the queue drains to zero after the execute that follows a
   /// temp-LOB bind — including after a failed execute. Not part of the
   /// public API.
   @visibleForTesting
@@ -166,9 +166,9 @@ class OracleConnection {
 
   /// Returns [sql] unchanged when short, otherwise a length-bounded snippet
   /// suffixed with an ellipsis. Never substitutes bind values — only raw SQL
-  /// with placeholders is exposed, preserving bind privacy (AC5).
+  /// with placeholders is exposed, preserving bind privacy.
   ///
-  /// The cut is rune-aware (Story 7.9 AC2): when a supplementary-plane
+  /// The cut is rune-aware: when a supplementary-plane
   /// character (a UTF-16 surrogate pair) straddles the boundary, the cut
   /// backs off one code unit so the snippet never ends in a lone surrogate.
   static String _truncateSql(String sql) {
@@ -180,7 +180,7 @@ class OracleConnection {
     return '${sql.substring(0, end)}...';
   }
 
-  /// Test-only access to [_truncateSql] (Story 7.9 AC2). Not a public API.
+  /// Test-only access to [_truncateSql]. Not a public API.
   @visibleForTesting
   static String debugTruncateSql(String sql) => _truncateSql(sql);
 
@@ -229,7 +229,7 @@ class OracleConnection {
       dt.inferOraTypeForValue(value) ?? oc.oraTypeVarchar;
 
   /// Validates a requested statement cache size against the documented bounds
-  /// (AC7) before any network work, so a misconfiguration fails loudly at the
+  /// before any network work, so a misconfiguration fails loudly at the
   /// call site rather than after a connection is established. The same bound is
   /// re-enforced inside [StatementCache] so the test-only [forTesting]
   /// constructor cannot diverge.
@@ -244,7 +244,7 @@ class OracleConnection {
     }
   }
 
-  /// Builds the ordered bind signature that participates in the cache key (AC3).
+  /// Builds the ordered bind signature that participates in the cache key.
   ///
   /// Each slot contributes its wire type, direction, and any declared max size
   /// so the same SQL text run with a different bind shape resolves to a distinct
@@ -268,7 +268,7 @@ class OracleConnection {
   /// It checks both the local `_isClosed` flag and the live transport state
   /// (`_transport.isConnected`). The transport reports `false` as soon as a
   /// remote close/error has been observed or after a timed-out RPC poisoned it,
-  /// so an already-dead connection fails fast here (AC3) instead of stalling
+  /// so an already-dead connection fails fast here instead of stalling
   /// for a full RPC timeout while the socket layer waits for data that will
   /// never arrive. This is a cheap local check — it never sends network traffic
   /// (no ping), so it cannot itself hang.
@@ -323,7 +323,7 @@ class OracleConnection {
   /// print('Updated ${result.rowsAffected} rows');
   /// ```
   ///
-  /// ## Concurrency contract (AC1)
+  /// ## Concurrency contract
   ///
   /// A single [OracleConnection] is **not** safe for overlapping calls. The
   /// connection owns one TTC byte stream over one socket; two `execute()` calls
@@ -334,7 +334,7 @@ class OracleConnection {
   /// error). Always `await` each call before issuing the next, and use separate
   /// connections for concurrent work.
   ///
-  /// ## Statement classification and leading parentheses (Story 7.9 AC14)
+  /// ## Statement classification and leading parentheses
   ///
   /// The leading verb of [sql] decides how the statement is executed. A
   /// statement that opens with `(` — e.g. `(SELECT … )` as emitted by some
@@ -346,14 +346,14 @@ class OracleConnection {
   /// CTE terminal-verb resolution, q-quote handling).
   ///
   /// Throws [OracleException] if:
-  /// - Another `execute()` is already in progress on this connection (AC1)
+  /// - Another `execute()` is already in progress on this connection
   /// - Bind value count doesn't match placeholder count (ORA-01008)
   /// - Unsupported bind value type (ORA-06502)
   /// - Query execution fails
   Future<OracleResult> execute(String sql, [Object? bindValues]) async {
     _ensureOpen();
 
-    // AC1: reject overlapping execute() calls before any wire write. The flag
+    // Reject overlapping execute() calls before any wire write. The flag
     // is set after _ensureOpen so a closed-connection error still wins, and
     // cleared in the finally below so a thrown call does not wedge the
     // connection.
@@ -403,7 +403,7 @@ class OracleConnection {
         }).toList();
         // Track first-occurrence index per name for OUT bind lookup. Repeated
         // names (e.g. `:a + :a`) map to their first SQL position, mirroring
-        // Story 3.1 named-bind semantics.
+        // the named-bind semantics.
         outBindNameIndex = <String, int>{};
         for (var i = 0; i < bindNames.length; i++) {
           outBindNameIndex.putIfAbsent(bindNames[i], () => i);
@@ -470,7 +470,7 @@ class OracleConnection {
       }
     }
 
-    // Build the bind-signature-aware cache key (AC3). The exact SQL text is
+    // Build the bind-signature-aware cache key. The exact SQL text is
     // preserved verbatim; the signature (type + direction + declared max size
     // per slot) makes the same SQL with a different bind shape a distinct key
     // so a cursor parsed for a NUMBER bind is never reused for a VARCHAR2 bind
@@ -484,7 +484,7 @@ class OracleConnection {
     if (eligible) {
       cacheEntry = _cache.acquire(cacheKey);
       if (cacheEntry != null) {
-        // Stories 4.1/4.2: a cursor whose result shape contains a locator
+        // A cursor whose result shape contains a locator
         // LOB column (CLOB or BLOB) is never blind-re-executed. Without
         // fresh defines the server stops sending the LOB-prefetch metadata
         // (length + chunk size) on re-execute and the row stream misaligns.
@@ -508,7 +508,7 @@ class OracleConnection {
 
     // Drain cursor IDs queued from prior LRU evictions, errors, or DDL
     // invalidation, and flush at most one SDU-bounded chunk on this execute
-    // (AC4). The piggyback rides the execute in a single un-fragmented packet,
+    // The piggyback rides the execute in a single un-fragmented packet,
     // so an unbounded list could overflow the negotiated SDU. Any remainder is
     // requeued (deduplicated) and piggybacks on later executes — no standalone
     // close-cursor RPC is sent, and no ID is dropped.
@@ -555,7 +555,7 @@ class OracleConnection {
 
       // Update cache from a successful response.
       if (eligible && cacheEntry != null) {
-        // Re-executed a cached cursor. AC5: a successful re-execute often echoes
+        // Re-executed a cached cursor. A successful re-execute often echoes
         // cursorId == 0 in the end-of-call message while the original cursor
         // stays valid — node-oracledb (withData.js processErrorInfo) only
         // overwrites the cursor id when the server returns a non-zero one.
@@ -567,8 +567,7 @@ class OracleConnection {
         }
         if (response.columnMetadata.isNotEmpty) {
           // Server re-DESCRIBEd (e.g. shape changed): adopt fresh metadata so
-          // rows decode against the current shape, never the stale cached one
-          // (AC2).
+          // rows decode against the current shape, never the stale cached one.
           cacheEntry.columnMetadata = response.columnMetadata;
         }
         _cache.release(cacheEntry);
@@ -582,7 +581,7 @@ class OracleConnection {
         ));
       }
 
-      // AC2: a successful DDL can alter the result shape or invalidate
+      // A successful DDL can alter the result shape or invalidate
       // server-side cursors of ANY cached SELECT/DML on this connection. There
       // is no cheap way to map arbitrary SQL back to the schema objects it
       // touches, so conservatively drop the whole per-connection cache: the next
@@ -591,8 +590,8 @@ class OracleConnection {
       //
       // The trigger is "DDL-shaped": not a query, not PL/SQL, and not
       // cache-eligible. Queries are excluded so a non-cacheable but still
-      // read-only statement — notably `SELECT ... FOR UPDATE` (eligible == false
-      // by AC6) — does not wipe the cache. PL/SQL is excluded so ordinary
+      // read-only statement — notably `SELECT ... FOR UPDATE` (eligible ==
+      // false) — does not wipe the cache. PL/SQL is excluded so ordinary
       // procedure calls do not thrash it.
       //
       // ORDERING DEPENDENCY: the `!isQuery` guard is load-bearing. A
@@ -868,7 +867,7 @@ class OracleConnection {
   /// unbounded cache cannot exceed Oracle's `OPEN_CURSORS` limit usefully and
   /// would grow memory without practical bound.
   ///
-  /// With [preserveTimestampTimeZone] set (Story 7.9 AC13), `TIMESTAMP WITH
+  /// With [preserveTimestampTimeZone] set, `TIMESTAMP WITH
   /// TIME ZONE` columns decode to [OracleTimestampTz] — exposing both the
   /// absolute UTC instant and the original offset — instead of the default
   /// UTC [DateTime] (which applies the offset, then discards it). The flag

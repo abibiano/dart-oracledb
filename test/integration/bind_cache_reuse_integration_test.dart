@@ -1,4 +1,4 @@
-/// Integration tests for Story 7.7 AC9 — statement-cache bind reuse must not
+/// Integration tests for statement-cache bind reuse — it must not
 /// under-allocate when a cached cursor is reused with a longer non-null value.
 ///
 /// Must pass against both supported environments:
@@ -7,7 +7,7 @@
 ///   RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test/integration/bind_cache_reuse_integration_test.dart --no-color
 ///
 /// Background: `_maxSizeFor` returns 1 for a null-valued VARCHAR bind. The
-/// concern (AC9) is whether a statement cached on that first (null) execution
+/// concern is whether a statement cached on that first (null) execution
 /// then reused with a longer non-null string under-allocates the bind buffer.
 /// This driver re-sends full bind metadata — including the current inferred
 /// max size — on *every* execute (it never uses TNS_FUNC_REEXECUTE, which would
@@ -27,10 +27,9 @@ void main() {
     return;
   }
 
-  group('Statement-cache bind reuse — Story 7.7 AC9', () {
-    // AC3 (Story 7.8): nullable handle assigned only once connect()
-    // succeeds; tearDown cleans up null-safely. `conn` is the non-null
-    // alias used by test bodies.
+  group('Statement-cache bind reuse', () {
+    // Nullable handle assigned only once connect() succeeds; tearDown cleans
+    // up null-safely. `conn` is the non-null alias used by test bodies.
     OracleConnection? connHandle;
     late OracleConnection conn;
     final testTable = uniqueTableName('s77_bind');
@@ -50,8 +49,8 @@ void main() {
     tearDown(() async {
       final c = connHandle;
       connHandle = null;
-      // AC4 (Story 7.8): close() is guaranteed even if the DROP fails, and a
-      // close failure never masks the DROP error.
+      // close() is guaranteed even if the DROP fails, and a close failure
+      // never masks the DROP error.
       await cleanUpConnection(
         c,
         dropStatements: ['DROP TABLE $testTable PURGE'],
@@ -75,7 +74,8 @@ void main() {
       await conn.execute(sql, {'id': 2, 'v': longValue});
       await conn.commit();
 
-      // Reuse actually happened (otherwise the test would not exercise AC9).
+      // Reuse actually happened (otherwise the test would not exercise the
+      // cursor-reuse path).
       expect(conn.debugReuseExecutes, greaterThan(reuseBefore),
           reason:
               'second execute of identical SQL must reuse the cached cursor');

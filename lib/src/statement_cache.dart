@@ -4,7 +4,7 @@ import 'package:meta/meta.dart';
 
 import 'protocol/messages/execute_message.dart';
 
-/// Hard upper bound on the per-connection statement cache size (AC7).
+/// Hard upper bound on the per-connection statement cache size.
 ///
 /// A statement cache is fundamentally a pool of *open server cursors*: every
 /// cached entry pins one Oracle cursor for reuse. Oracle limits simultaneously
@@ -22,7 +22,7 @@ import 'protocol/messages/execute_message.dart';
 /// silently clamped, so a misconfiguration fails loudly at connect time.
 const int maxStatementCacheSize = 65535;
 
-/// One bind slot's contribution to a statement's cache identity (AC3).
+/// One bind slot's contribution to a statement's cache identity.
 ///
 /// Two executions of the *same* SQL text are only cursor-compatible when their
 /// binds agree on type, direction, and any declared max size that affects the
@@ -65,7 +65,7 @@ class BindSlotSignature {
       'BindSlotSignature(oraType: $oraType, dir: $dir, maxSize: $maxSize)';
 }
 
-/// Immutable composite cache identity: exact SQL text plus bind signature (AC3).
+/// Immutable composite cache identity: exact SQL text plus bind signature.
 ///
 /// The SQL text is preserved verbatim — no whitespace, comment, or case
 /// normalization (a cursor is parsed for the exact text Oracle saw). The bind
@@ -158,7 +158,7 @@ class StatementCache {
   ///
   /// [maxSize] = 0 disables caching; any positive value up to
   /// [maxStatementCacheSize] sets the capacity. Throws [ArgumentError] if
-  /// [maxSize] is negative or exceeds [maxStatementCacheSize] (AC7) — the bound
+  /// [maxSize] is negative or exceeds [maxStatementCacheSize] — the bound
   /// is enforced here so production ([OracleConnection.connect]) and test-only
   /// ([OracleConnection.forTesting]) constructors cannot diverge.
   StatementCache(int maxSize) : _maxSize = _checkSize(maxSize);
@@ -254,7 +254,7 @@ class StatementCache {
   }
 
   /// Invalidates every cached statement, queuing all reusable cursor ids for
-  /// close (AC2).
+  /// close.
   ///
   /// Called after a successful DDL statement: DDL can alter the result shape or
   /// invalidate server-side cursors of *any* cached SELECT/DML, and there is no
@@ -301,7 +301,7 @@ class StatementCache {
 
   /// Number of cursor ids currently queued for close, without draining them.
   ///
-  /// Used by the connection's close-cursor chunking (AC4) and its test seam to
+  /// Used by the connection's close-cursor chunking and its test seam to
   /// observe the piggyback backlog.
   int get pendingCloseCount => _cursorsToClose.length;
 

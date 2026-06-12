@@ -17,19 +17,19 @@ import 'test_helper.dart';
 ///    byte 11's high bit set. The driver must raise `OracleException`
 ///    (`oraUnsupportedType`, ORA-03115) rather than misreading the region id
 ///    as a numeric offset — on default AND `preserveTimestampTimeZone`
-///    connections (both share `_readTimestampWire`). Story 7.9 AC13 contract:
+///    connections (both share `_readTimestampWire`). Contract:
 ///    "the decoder raises rather than misreading the region id".
 ///
 /// 2. **Offset band edges + fractional-hour zones.** The `OracleTimestampTz`
 ///    bind-back path is exercised at the documented offset band edges
 ///    (`+14:00`, `-12:00`) and at fractional-hour zones (`+05:45` Nepal,
 ///    `-09:30` Marquesas) — beyond the `+05:30`/`-08:00`/`+00:00` cases the
-///    Story 7.9 suite already covers. Each is verified server-side via
+///    main TSTZ wrapper suite already covers. Each is verified server-side via
 ///    `TO_CHAR(ts,'TZH:TZM')` and by decode-equality on re-read. A NULL TSTZ
 ///    on a preserve connection must decode to `null`, not throw.
 ///
-/// 3. **Payload-length decode regression (spec-ci-fix-timestamp-decode-
-///    truncation).** Oracle truncates trailing zero bytes, so a plain
+/// 3. **Payload-length decode regression.** Oracle truncates trailing zero
+///    bytes, so a plain
 ///    `TIMESTAMP` with zero fractional seconds reaches the decoder as a
 ///    7-byte (DATE-shaped) payload, with fractional seconds as 11 bytes, and a
 ///    `TIMESTAMP WITH TIME ZONE` as 13 bytes. All three SELECT-column lengths
@@ -205,7 +205,7 @@ void main() {
 
     setUp(() async {
       // Default connection — TSTZ decodes to a UTC DateTime here (offset
-      // applied then discarded, Story 7.1 contract).
+      // applied then discarded, the default-connection contract).
       handle = await connectForTest();
       conn = handle!;
     });

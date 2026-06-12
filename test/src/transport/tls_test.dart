@@ -45,14 +45,14 @@ void main() {
     });
 
     test('disabled by default for backward compatibility', () {
-      // AC5: TLS disabled by default
+      // TLS disabled by default
       const config = TlsConfig();
       expect(config.enabled, isFalse,
           reason: 'TLS must be disabled by default for backward compatibility');
     });
 
     test('verifyCertificate true by default', () {
-      // AC2: Certificate validation by default
+      // Certificate validation by default
       const config = TlsConfig(enabled: true);
       expect(config.verifyCertificate, isTrue,
           reason: 'Certificate validation must be enabled by default');
