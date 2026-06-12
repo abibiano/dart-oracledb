@@ -631,16 +631,19 @@ _TimestampWire _readTimestampWire(ReadBuffer buffer) {
   final minute = buffer.readUint8() - 1;
   final second = buffer.readUint8() - 1;
 
-  // Oracle sends exactly 7 (DATE-shaped), 11 (with nanos), or 13 (with nanos
-  // + TZ) bytes. Any other payload length means the wire format drifted —
-  // throw rather than silently produce a corrupt DateTime.
+  // Tolerant payload-length handling, byte-for-byte parity with
+  // node-oracledb `parseOracleDate` (reference/.../buffer.js): read the 7 base
+  // date bytes always, read the 4 fractional-second bytes only when the total
+  // length is >= 11 (remaining >= 4), and read the 2 TZ bytes only when the
+  // total length is >= 13 (remaining >= 6). In-between lengths (8/9/10/12) are
+  // trailing-zero-compressed forms — the missing low-order bytes are zero — and
+  // any trailing bytes beyond what we consume are ignored. This cannot desync
+  // the wire stream: the decoder operates on a column-scoped slice produced by
+  // `readBytesWithLength`, whose length prefix already governs stream position.
+  // A payload shorter than 7 bytes is a genuine truncation and underflows on the
+  // base-byte reads above (BufferUnderflowException), preserving the completion
+  // probe's "need more packets" signal.
   final remaining = buffer.remaining;
-  if (remaining != 0 && remaining != 4 && remaining != 6) {
-    throw BufferException(
-      'Unexpected TIMESTAMP payload length: '
-      'expected 7, 11, or 13 bytes total, got ${7 + remaining}',
-    );
-  }
 
   var nanos = 0;
   if (remaining >= 4) {
@@ -652,7 +655,7 @@ _TimestampWire _readTimestampWire(ReadBuffer buffer) {
 
   int? tzHourOffset;
   int? tzMinuteOffset;
-  if (remaining == 6) {
+  if (remaining >= 6) {
     final byte11 = buffer.readUint8();
     final byte12 = buffer.readUint8();
     if ((byte11 & 0x80) != 0) {

@@ -425,12 +425,62 @@ void main() {
       expect(decoded.millisecond, equals(123));
     });
 
-    test('rejects malformed TIMESTAMP payload length', () {
-      // 9 bytes is not a valid Oracle TIMESTAMP wire length (must be 7/11/13).
-      final wire = Uint8List(9)..[0] = 120;
+    test('tolerates 8/9/10-byte payloads as zero fractional seconds', () {
+      // node-oracledb parseOracleDate parity: a total length < 11 carries no
+      // fractional-second field (trailing-zero-compressed form), so the extra
+      // 1-3 bytes are ignored and fseconds is 0. The driver must decode the
+      // date rather than reject the length.
+      final dt = DateTime(2024, 3, 15, 10, 30, 45);
+      final base = encodeDate(dt);
+      expect(base.length, equals(7));
+      for (final trailer in [
+        [0x12], // 8 bytes
+        [0x12, 0x34], // 9 bytes
+        [0x12, 0x34, 0x56], // 10 bytes
+      ]) {
+        final wire = Uint8List.fromList([...base, ...trailer]);
+        final decoded = decodeTimestamp(ReadBuffer(wire));
+        expect(decoded, equals(dt),
+            reason: 'length ${wire.length} must decode the date');
+        expect(decoded.millisecond, equals(0));
+        expect(decoded.microsecond, equals(0));
+      }
+    });
+
+    test('tolerates a 12-byte payload: fseconds read, trailing byte ignored',
+        () {
+      // Total length >= 11 ⇒ the 4 fractional-second bytes (offset 7-10) are
+      // read; the lone 12th byte is below the 13-byte TZ form and is ignored.
+      final dt = DateTime(2024, 3, 15, 10, 30, 45, 123);
+      final tsBytes = encodeTimestamp(dt);
+      expect(tsBytes.length, equals(11));
+      final wire = Uint8List.fromList([...tsBytes, 0x77]); // 12 bytes
+      final decoded = decodeTimestamp(ReadBuffer(wire));
+      expect(decoded, equals(dt));
+      expect(decoded.millisecond, equals(123));
+    });
+
+    test('decodeTimestampTz still rejects a 12-byte payload (no zone bytes)',
+        () {
+      // Tolerance applies to the plain TIMESTAMP path; a TSTZ payload missing
+      // its two zone bytes (never zero-truncated) remains a protocol error.
+      final tsBytes = encodeTimestamp(DateTime.utc(2024, 3, 15, 10, 30, 45));
+      final wire = Uint8List.fromList([...tsBytes, 0x77]); // 12 bytes
+      expect(
+        () => decodeTimestampTz(ReadBuffer(wire)),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+      );
+    });
+
+    test('a payload shorter than 7 bytes underflows (genuine truncation)', () {
+      // Below the DATE-shaped minimum the base-byte reads run out — this must
+      // surface as the underflow subtype so the completion probe keeps its
+      // "need more packets" semantics, NOT a tolerant decode.
+      final wire = Uint8List(5)..[0] = 120;
       expect(
         () => decodeTimestamp(ReadBuffer(wire)),
-        throwsA(isA<BufferException>()),
+        throwsA(isA<BufferUnderflowException>()),
       );
     });
 
