@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.3
+
+Protocol-robustness fixes plus a documentation refresh.
+
+### Bug Fixes
+- Malformed TTC streams now fail loudly instead of spinning the receive loop, surfacing protocol corruption as an error rather than a hang.
+- TIMESTAMP payloads of lengths other than 7/11/13 bytes are now tolerated, matching node-oracledb decode behavior.
+
+### Documentation
+- Add a Document Project reference set (project overview, architecture, API reference, development guide) under `docs/`.
+- Document the tablespace requirement for creating JSON columns.
+
 ## 0.9.2
 
 ### Documentation
