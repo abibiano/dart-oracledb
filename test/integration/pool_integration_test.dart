@@ -1,5 +1,5 @@
-/// Integration tests for Stories 5.1, 5.2, and 5.3 — `OraclePool` against a
-/// live Oracle server.
+/// Integration tests for Stories 5.1–5.4 — `OraclePool` against a live
+/// Oracle server.
 ///
 /// Must pass against both supported environments:
 ///
@@ -9,10 +9,11 @@
 /// Scope: pool creation, prewarm counts, pool-wide option threading, failure
 /// cleanup, close() of idle sessions (Story 5.1), acquire/release borrower
 /// semantics — idle reuse, rollback-on-release, on-demand growth, and
-/// `withConnection` cleanup (Story 5.2) — plus acquire wait timeouts, idle
+/// `withConnection` cleanup (Story 5.2) — acquire wait timeouts, idle
 /// cleanup down to minConnections, and close-time draining of checked-out
-/// sessions (Story 5.3). Session tagging is Story 5.4 and is NOT exercised
-/// here.
+/// sessions (Story 5.3) — plus session tagging: tag-driven session setup via
+/// `sessionCallback`, session-state reuse across release/reacquire, and
+/// state isolation between different tags (Story 5.4).
 @Tags(['integration'])
 library;
 
@@ -436,6 +437,231 @@ void main() {
       expect(pool.connectionsOpen, equals(0));
       expect(pool.connectionsIdle, equals(0));
       expect(pool.connectionsInUse, equals(0));
+    });
+  });
+
+  group('OraclePool session tagging against live Oracle (Story 5.4)', () {
+    // Tag values name the session state the callback applies; the time-zone
+    // literal is derived from the tag so the callback works for any zone.
+    const tagUtc = 'TZ=UTC';
+    const tagLisbon = 'TZ=Europe/Lisbon';
+
+    /// Applies the time zone named by [requestedTag] (`TZ=<zone>`) and
+    /// records it on the connection tag — the documented callback contract.
+    Future<void> timeZoneCallback(
+      OracleConnection conn,
+      String requestedTag,
+    ) async {
+      if (!requestedTag.startsWith('TZ=')) return;
+      final zone = requestedTag.substring('TZ='.length);
+      await conn.execute("ALTER SESSION SET TIME_ZONE = '$zone'");
+      conn.tag = requestedTag;
+    }
+
+    /// The session's current time zone, as the server reports it.
+    Future<String> sessionTimeZone(OracleConnection conn) async {
+      final result = await conn.execute('SELECT SESSIONTIMEZONE FROM DUAL');
+      return result.rows.single[0]! as String;
+    }
+
+    test('a requested tag drives session setup once and the state survives '
+        'release/reacquire with the same tag', () async {
+      var callbackRuns = 0;
+      final pool = await OraclePool.create(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        minConnections: 0,
+        maxConnections: 1,
+        timeout: connectTimeout,
+        sessionCallback: (conn, requestedTag) async {
+          callbackRuns++;
+          await timeZoneCallback(conn, requestedTag);
+        },
+      );
+      try {
+        final conn = await pool.acquire(tag: tagUtc);
+        expect(callbackRuns, equals(1));
+        expect(conn.tag, equals(tagUtc));
+        expect(await sessionTimeZone(conn), equals('UTC'));
+        await pool.release(conn);
+
+        // Reacquiring with the same tag must reuse the prepared session
+        // as-is: same physical connection, state still applied, callback
+        // not invoked again.
+        final again = await pool.acquire(tag: tagUtc);
+        expect(identical(again, conn), isTrue);
+        expect(
+          callbackRuns,
+          equals(1),
+          reason: 'the tag matched, so the pool must not re-run session setup',
+        );
+        expect(
+          await sessionTimeZone(again),
+          equals('UTC'),
+          reason: 'release must preserve the session state behind the tag',
+        );
+        await pool.release(again);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('two different tags get their own session state, repaired by the '
+        'callback when a session changes hands', () async {
+      final requestedTags = <String>[];
+      final pool = await OraclePool.create(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        minConnections: 0,
+        maxConnections: 1,
+        timeout: connectTimeout,
+        sessionCallback: (conn, requestedTag) async {
+          requestedTags.add(requestedTag);
+          await timeZoneCallback(conn, requestedTag);
+        },
+      );
+      try {
+        // maxConnections: 1 — both tags share one physical session, so the
+        // callback must repair the state on every tag change.
+        final utc = await pool.acquire(tag: tagUtc);
+        expect(await sessionTimeZone(utc), equals('UTC'));
+        await pool.release(utc);
+
+        final lisbon = await pool.acquire(tag: tagLisbon);
+        expect(identical(lisbon, utc), isTrue);
+        expect(lisbon.tag, equals(tagLisbon));
+        expect(
+          await sessionTimeZone(lisbon),
+          equals('Europe/Lisbon'),
+          reason: 'a request for tag B must never run with tag A state',
+        );
+        await pool.release(lisbon);
+
+        final utcAgain = await pool.acquire(tag: tagUtc);
+        expect(utcAgain.tag, equals(tagUtc));
+        expect(
+          await sessionTimeZone(utcAgain),
+          equals('UTC'),
+          reason: 'switching back must repair the state again, not reuse B',
+        );
+        await pool.release(utcAgain);
+
+        expect(requestedTags, equals([tagUtc, tagLisbon, tagUtc]));
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('with capacity for both tags, each tag keeps its own physical '
+        'session and exact-match reuse wins', () async {
+      var callbackRuns = 0;
+      final pool = await OraclePool.create(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        minConnections: 0,
+        maxConnections: 2,
+        timeout: connectTimeout,
+        sessionCallback: (conn, requestedTag) async {
+          callbackRuns++;
+          await timeZoneCallback(conn, requestedTag);
+        },
+      );
+      try {
+        // Prepare one session per tag, borrowed concurrently so the pool
+        // grows to two physical connections.
+        final utc = await pool.acquire(tag: tagUtc);
+        final lisbon = await pool.acquire(tag: tagLisbon);
+        expect(identical(utc, lisbon), isFalse);
+        expect(callbackRuns, equals(2));
+        await pool.release(utc);
+        await pool.release(lisbon);
+
+        // Each tag must come back on its own prepared session with no
+        // further callback runs and no state bleed between the two.
+        final utcAgain = await pool.acquire(tag: tagUtc);
+        final lisbonAgain = await pool.acquire(tag: tagLisbon);
+        expect(identical(utcAgain, utc), isTrue);
+        expect(identical(lisbonAgain, lisbon), isTrue);
+        expect(callbackRuns, equals(2));
+        expect(await sessionTimeZone(utcAgain), equals('UTC'));
+        expect(await sessionTimeZone(lisbonAgain), equals('Europe/Lisbon'));
+        await pool.release(utcAgain);
+        await pool.release(lisbonAgain);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('withConnection(tag:) prepares the session and releases it with '
+        'the tag preserved', () async {
+      final pool = await OraclePool.create(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        minConnections: 0,
+        maxConnections: 1,
+        timeout: connectTimeout,
+        sessionCallback: timeZoneCallback,
+      );
+      try {
+        OracleConnection? seen;
+        final zone = await pool.withConnection((conn) async {
+          seen = conn;
+          return sessionTimeZone(conn);
+        }, tag: tagUtc);
+        expect(zone, equals('UTC'));
+        expect(pool.connectionsIdle, equals(1));
+        expect(
+          seen!.tag,
+          equals(tagUtc),
+          reason: 'release must preserve the tag for the next borrower',
+        );
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a session callback failure destroys the candidate session and '
+        'the pool recovers with fresh capacity', () async {
+      var failNext = false;
+      final pool = await OraclePool.create(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        minConnections: 0,
+        maxConnections: 1,
+        timeout: connectTimeout,
+        sessionCallback: (conn, requestedTag) async {
+          if (failNext) {
+            failNext = false;
+            // A real failing setup statement, not a synthetic throw.
+            await conn.execute("ALTER SESSION SET TIME_ZONE = 'NO/SUCHZONE'");
+          }
+          await timeZoneCallback(conn, requestedTag);
+        },
+      );
+      try {
+        failNext = true;
+        await expectLater(
+          pool.acquire(tag: tagUtc),
+          throwsA(isA<OracleException>()),
+        );
+        expect(
+          pool.connectionsOpen,
+          equals(0),
+          reason: 'the candidate session must be destroyed, not recycled',
+        );
+
+        // The freed capacity must serve the next borrower normally.
+        final conn = await pool.acquire(tag: tagUtc);
+        expect(await sessionTimeZone(conn), equals('UTC'));
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
     });
   });
 }

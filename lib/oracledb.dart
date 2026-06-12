@@ -33,7 +33,7 @@ export 'src/protocol/constants.dart'
 export 'src/connection.dart' show OracleConnection;
 
 // Connection pooling
-export 'src/pool.dart' show OraclePool;
+export 'src/pool.dart' show OraclePool, PoolSessionCallback;
 
 // Query Results
 export 'src/result.dart' show OracleResult, OracleRow;

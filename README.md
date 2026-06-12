@@ -6,7 +6,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is in progress: `OraclePool.create()` builds a pool of prewarmed authenticated sessions, `acquire()`/`release()` borrow and recycle them (with automatic rollback of uncommitted work on release), `withConnection()` wraps the pair leak-safely, queued acquires can be bounded with `acquireTimeout`, surplus idle sessions shrink back to `minConnections` with `idleTimeout`, and `close(drainTimeout: ...)` waits for borrowed sessions on shutdown; session tagging is not yet available. Depend on `oracledb: ^0.9.3`; breaking changes before 1.0 will bump the minor version (0.10.0). 1.0.0 will follow once connection pooling lands.
+> **Pre-1.0 — stable-leaning API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is implemented: `OraclePool.create()` builds a pool of prewarmed authenticated sessions, `acquire()`/`release()` borrow and recycle them (with automatic rollback of uncommitted work on release), `withConnection()` wraps the pair leak-safely, queued acquires can be bounded with `acquireTimeout`, surplus idle sessions shrink back to `minConnections` with `idleTimeout`, `close(drainTimeout: ...)` waits for borrowed sessions on shutdown, and session tagging (`acquire(tag: ...)` with an optional `sessionCallback`) reuses session state such as NLS settings across borrowers. Depend on `oracledb: ^0.9.3`; breaking changes before 1.0 will bump the minor version (0.10.0).
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -162,7 +162,36 @@ Pool timeouts are opt-in and validated at create time:
 - `idleTimeout` closes surplus idle sessions (beyond `minConnections`) that sit unused longer than the configured duration; the pool never shrinks below `minConnections`, and retained sessions keep their statement cache warm. The default `Duration.zero` disables shrinking.
 - `close(drainTimeout: ...)` rejects new acquires immediately, then waits for checked-out sessions to be released (destroying each as it comes back) until the drain timeout expires. Omitting `drainTimeout` (or passing `Duration.zero`) closes without waiting — borrowed sessions are destroyed whenever they are eventually released. Repeated `close()` calls are idempotent and join a pending drain.
 
-Session tagging is not yet implemented (see roadmap).
+#### Session tagging
+
+Pooled sessions can carry a **tag** — a client-side label for session state (NLS settings, time zone, …) that user code or a pool callback has applied — so that state is reused instead of reset on every borrow. Request a tag with `acquire(tag: ...)` / `withConnection(tag: ...)` and let an optional pool-wide `sessionCallback` apply the state:
+
+```dart
+final pool = await OraclePool.create(
+  'localhost:1521/FREEPDB1',
+  user: 'testuser',
+  password: 'testpassword',
+  maxConnections: 10,
+  sessionCallback: (conn, requestedTag) async {
+    if (requestedTag == 'TZ=UTC') {
+      await conn.execute("ALTER SESSION SET TIME_ZONE = 'UTC'");
+      conn.tag = requestedTag; // the callback records the state it applied
+    }
+  },
+);
+
+final conn = await pool.acquire(tag: 'TZ=UTC'); // session arrives with UTC applied
+```
+
+How it behaves:
+
+- **Tags are client-side metadata.** `connection.tag` (default `''` = untagged) never applies database state by itself; it records state already applied. `null` and `''` requests both mean untagged.
+- **Selection order.** For a requested tag the pool prefers an exact-match idle session, then an untagged one, then opening a new connection. A session carrying a *different* tag is used only when `matchAnyTag: true` is passed or the `sessionCallback` can repair its state first — the pool never claims a tag it did not observe.
+- **The callback runs when needed.** It is invoked before a borrower receives a session that is brand new or whose tag differs from the requested one, and it must set `connection.tag` itself once the state matches. If it throws, the candidate session is destroyed and the acquire fails with that error.
+- **Tags survive release.** A borrower may update `conn.tag` before `release()`; the automatic rollback does not clear it, so the next matching acquire reuses the session (statement cache intact). Without a callback, a tagged request may still return an untagged session — check `conn.tag`, apply the state yourself, and set the tag.
+- **Queued waiters are tag-aware.** A released session goes to the oldest waiter that can accept it; incompatible waiters keep their place in the queue.
+
+Out of scope (by design, this is a pure-Dart thin driver): DRCP, heterogeneous credentials/proxy users, sharding keys, PL/SQL (server-side) session callbacks, pool reconfiguration, and Oracle thick-client tag-matching heuristics (tags are matched as exact strings, not parsed as property lists).
 
 ### Queries
 
@@ -477,7 +506,7 @@ This package implements a subset of the full Oracle driver feature set. Below is
 | Query execution & transactions                  | ✅ Done        |
 | PL/SQL execution (stored procedures, functions) | ✅ Done        |
 | Advanced data types (CLOB, BLOB, RAW, JSON)     | ✅ Done        |
-| Connection pooling                              | 🚧 In progress — pool creation, acquire/release/`withConnection`, acquire timeouts, idle cleanup, and close draining done; session tagging pending |
+| Connection pooling                              | ✅ Done        |
 
 ### Planned After 1.0
 

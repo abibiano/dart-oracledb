@@ -117,6 +117,42 @@ void main() {
     );
   }
 
+  group('OracleConnection.tag (Story 5.4)', () {
+    test('defaults to the empty string (untagged)', () {
+      final conn = _FakeConnection();
+      expect(conn.tag, equals(''));
+    });
+
+    test('stores, updates, and clears the assigned tag verbatim', () {
+      final conn = _FakeConnection();
+      conn.tag = 'USER_TZ=UTC';
+      expect(conn.tag, equals('USER_TZ=UTC'));
+      conn.tag = 'USER_TZ=Europe/Madrid';
+      expect(
+        conn.tag,
+        equals('USER_TZ=Europe/Madrid'),
+        reason: 'tags are stored exactly as strings, no canonicalization',
+      );
+      conn.tag = '';
+      expect(conn.tag, equals(''), reason: 'empty string clears the tag');
+    });
+
+    test('is purely client-side: setting it performs no rollback or '
+        'close', () {
+      final conn = _FakeConnection();
+      conn.tag = 'STATE=A';
+      expect(conn.rollbackCalls, equals(0));
+      expect(conn.closeCalls, equals(0));
+    });
+
+    test('survives rollback (pool release path must not clear it)', () async {
+      final conn = _FakeConnection();
+      conn.tag = 'STATE=A';
+      await conn.rollback();
+      expect(conn.tag, equals('STATE=A'));
+    });
+  });
+
   group('OraclePool.create validation', () {
     test('rejects negative minConnections', () {
       expect(
@@ -1754,6 +1790,761 @@ void main() {
       expect(pool.connectionsOpen, equals(0));
       for (final conn in created) {
         expect(conn.closeCalls, equals(1));
+      }
+    });
+  });
+
+  group('OraclePool session tagging (Story 5.4)', () {
+    /// Borrows a connection with [tag] requested, lets [mutate] adjust it
+    /// (e.g. assign a tag, as user code would after applying state), and
+    /// releases it back to the idle list.
+    Future<void> parkWithTag(OraclePool pool, String tag) async {
+      final conn = await pool.acquire();
+      conn.tag = tag;
+      await pool.release(conn);
+    }
+
+    test('acquire(tag:) reuses the exact-match idle session', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 3);
+      try {
+        // Park three idle sessions: untagged, A, B (B parked last = newest).
+        final untagged = await pool.acquire();
+        final a = await pool.acquire();
+        final b = await pool.acquire();
+        a.tag = 'A';
+        b.tag = 'B';
+        await pool.release(untagged);
+        await pool.release(a);
+        await pool.release(b);
+        expect(pool.connectionsIdle, equals(3));
+
+        final conn = await pool.acquire(tag: 'A');
+        expect(
+          identical(conn, a),
+          isTrue,
+          reason:
+              'an exact tag match must win over the newer B-tagged and '
+              'the untagged session',
+        );
+        expect(conn.tag, equals('A'));
+        expect(created, hasLength(3), reason: 'no new connection was needed');
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('acquire(tag:) falls back to an untagged idle session and never '
+        'auto-sets the tag', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 1);
+      try {
+        await parkWithTag(pool, '');
+        final conn = await pool.acquire(tag: 'WANTED');
+        expect(identical(conn, created.single), isTrue);
+        expect(
+          conn.tag,
+          equals(''),
+          reason:
+              'without a session callback the pool must not pretend the '
+              'untagged session carries the requested tag',
+        );
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('acquire(tag:) without callback or matchAnyTag never returns a '
+        'session with a different non-empty tag', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 2);
+      try {
+        await parkWithTag(pool, 'OTHER');
+        // The only idle session is wrong-tagged: the pool must open a new
+        // connection rather than silently hand over the OTHER session.
+        final conn = await pool.acquire(tag: 'WANTED');
+        expect(created, hasLength(2));
+        expect(identical(conn, created[0]), isFalse);
+        expect(conn.tag, equals(''));
+        expect(pool.connectionsIdle, equals(1));
+        expect(pool.connectionsInUse, equals(1));
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('plain acquire() never grabs a tagged session while an untagged '
+        'one is available', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 2);
+      try {
+        final untagged = await pool.acquire();
+        final tagged = await pool.acquire();
+        tagged.tag = 'A';
+        // Park untagged first, tagged last: a naive pop-last would return
+        // the tagged session.
+        await pool.release(untagged);
+        await pool.release(tagged);
+
+        final conn = await pool.acquire();
+        expect(identical(conn, untagged), isTrue);
+        expect(conn.tag, equals(''));
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('acquire(matchAnyTag: true) accepts a differently tagged session '
+        'and preserves its actual tag', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 1);
+      try {
+        await parkWithTag(pool, 'A');
+        final conn = await pool.acquire(tag: 'B', matchAnyTag: true);
+        expect(identical(conn, created.single), isTrue);
+        expect(
+          conn.tag,
+          equals('A'),
+          reason:
+              'matchAnyTag hands over the session as-is; the tag must '
+              'keep describing the actual session state',
+        );
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('borrower-updated tags survive release() and drive later '
+        'exact-match acquires', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 2);
+      try {
+        final conn = await pool.acquire();
+        conn.tag = 'SET_BY_BORROWER';
+        await pool.release(conn);
+        expect(
+          conn.tag,
+          equals('SET_BY_BORROWER'),
+          reason: 'release rollback must not clear the tag',
+        );
+        expect((conn as _FakeConnection).rollbackCalls, equals(1));
+
+        final again = await pool.acquire(tag: 'SET_BY_BORROWER');
+        expect(identical(again, conn), isTrue);
+        await pool.release(again);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('withConnection(tag:) passes the tag options through and still '
+        'releases on success and failure', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 2);
+      try {
+        await parkWithTag(pool, 'A');
+
+        String? seenTag;
+        await pool.withConnection((conn) async {
+          seenTag = conn.tag;
+        }, tag: 'A');
+        expect(seenTag, equals('A'));
+        expect(pool.connectionsIdle, equals(1));
+        expect(pool.connectionsInUse, equals(0));
+
+        final failure = StateError('callback failure');
+        await expectLater(
+          pool.withConnection<void>(
+            (_) async => throw failure,
+            tag: 'A',
+            matchAnyTag: true,
+          ),
+          throwsA(same(failure)),
+        );
+        expect(
+          pool.connectionsIdle,
+          equals(1),
+          reason: 'the session must be released after the callback error',
+        );
+        expect(pool.connectionsInUse, equals(0));
+      } finally {
+        await pool.close();
+      }
+    });
+  });
+
+  group('OraclePool sessionCallback (Story 5.4)', () {
+    test('runs for a brand-new physical connection with the requested tag '
+        'and can set connection.tag', () async {
+      final created = <_FakeConnection>[];
+      final calls = <(OracleConnection, String)>[];
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async {
+          final conn = _FakeConnection();
+          created.add(conn);
+          return conn;
+        },
+        maxConnections: 1,
+        sessionCallback: (conn, requestedTag) {
+          calls.add((conn, requestedTag));
+          if (requestedTag.isNotEmpty) conn.tag = requestedTag;
+        },
+      );
+      try {
+        final conn = await pool.acquire(tag: 'NEW_TAG');
+        expect(calls, hasLength(1));
+        expect(identical(calls.single.$1, conn), isTrue);
+        expect(calls.single.$2, equals('NEW_TAG'));
+        expect(conn.tag, equals('NEW_TAG'));
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('runs once for a prewarmed session even when the requested tag is '
+        'empty, then not again while tags keep matching', () async {
+      var calls = 0;
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async => _FakeConnection(),
+        minConnections: 1,
+        maxConnections: 1,
+        sessionCallback: (conn, requestedTag) {
+          calls++;
+        },
+      );
+      try {
+        final conn = await pool.acquire();
+        expect(
+          calls,
+          equals(1),
+          reason:
+              'a prewarmed session is new to borrowers: the callback must '
+              'run on its first acquire even for an untagged request',
+        );
+        await pool.release(conn);
+
+        final again = await pool.acquire();
+        expect(
+          calls,
+          equals(1),
+          reason:
+              'tag ("" requested, "" actual) matches and the session is no '
+              'longer new: the callback must not run again',
+        );
+        await pool.release(again);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('repairs a wrong-tagged idle session before returning it', () async {
+      final created = <_FakeConnection>[];
+      final requested = <String>[];
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async {
+          final conn = _FakeConnection();
+          created.add(conn);
+          return conn;
+        },
+        maxConnections: 1,
+        sessionCallback: (conn, requestedTag) {
+          requested.add(requestedTag);
+          conn.tag = requestedTag;
+        },
+      );
+      try {
+        final first = await pool.acquire(tag: 'A');
+        expect(first.tag, equals('A'));
+        await pool.release(first);
+
+        // maxConnections: 1 — the only session is A-tagged; a request for B
+        // must select it for callback repair, not dead-end.
+        final second = await pool.acquire(tag: 'B');
+        expect(identical(second, first), isTrue);
+        expect(requested, equals(['A', 'B']));
+        expect(second.tag, equals('B'));
+        await pool.release(second);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a callback failure destroys the candidate, frees capacity, and '
+        'fails the acquire with the callback error', () async {
+      final created = <_FakeConnection>[];
+      final failure = StateError('session setup failed');
+      var failNext = false;
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async {
+          final conn = _FakeConnection();
+          created.add(conn);
+          return conn;
+        },
+        minConnections: 1,
+        maxConnections: 1,
+        sessionCallback: (conn, requestedTag) {
+          if (failNext) throw failure;
+          conn.tag = requestedTag;
+        },
+      );
+      try {
+        failNext = true;
+        await expectLater(pool.acquire(tag: 'A'), throwsA(same(failure)));
+        expect(
+          created.single.closeCalls,
+          equals(1),
+          reason: 'the candidate must be destroyed, not parked or returned',
+        );
+        expect(pool.connectionsOpen, equals(0));
+        expect(pool.connectionsIdle, equals(0));
+        expect(pool.connectionsInUse, equals(0));
+
+        // The freed capacity must be usable again.
+        failNext = false;
+        final conn = await pool.acquire(tag: 'A');
+        expect(created, hasLength(2));
+        expect(conn.tag, equals('A'));
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a callback that leaves a different non-empty tag fails the '
+        'acquire loudly and destroys the session', () async {
+      final created = <_FakeConnection>[];
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async {
+          final conn = _FakeConnection();
+          created.add(conn);
+          return conn;
+        },
+        maxConnections: 1,
+        sessionCallback: (conn, requestedTag) {
+          conn.tag = 'WRONG';
+        },
+      );
+      try {
+        await expectLater(pool.acquire(tag: 'A'), throwsA(isA<StateError>()));
+        expect(
+          created.single.closeCalls,
+          equals(1),
+          reason:
+              'a session whose callback claims the wrong state must never '
+              'reach a borrower or the idle list',
+        );
+        expect(pool.connectionsOpen, equals(0));
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a callback that leaves the session untagged is honest and the '
+        'acquire succeeds', () async {
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async => _FakeConnection(),
+        maxConnections: 1,
+        sessionCallback: (conn, requestedTag) {
+          // Recognizes no tags: applies no state, sets no tag.
+        },
+      );
+      try {
+        final conn = await pool.acquire(tag: 'UNRECOGNIZED');
+        expect(
+          conn.tag,
+          equals(''),
+          reason:
+              'an untagged return is honest "state unknown" — only a '
+              'wrong non-empty tag must fail the acquire',
+        );
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a callback failure with queued waiters does not strand them '
+        'behind the freed capacity', () async {
+      final created = <_FakeConnection>[];
+      var failures = 0;
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async {
+          final conn = _FakeConnection();
+          created.add(conn);
+          return conn;
+        },
+        maxConnections: 1,
+        sessionCallback: (conn, requestedTag) {
+          if (requestedTag == 'POISON' && failures == 0) {
+            failures++;
+            throw StateError('session setup failed');
+          }
+          conn.tag = requestedTag;
+        },
+      );
+      try {
+        final holder = await pool.acquire(tag: 'A');
+        // Queue two waiters; the POISON one will fail during the release
+        // handoff fixup, and the freed capacity must then serve the other.
+        final poisoned = pool.acquire(tag: 'POISON');
+        final healthy = pool.acquire(tag: 'B');
+        await Future<void>.delayed(Duration.zero);
+
+        await pool.release(holder);
+        await expectLater(poisoned, throwsA(isA<StateError>()));
+        final conn = await healthy;
+        expect(conn.tag, equals('B'));
+        expect(pool.connectionsInUse, equals(1));
+        expect(pool.connectionsOpen, equals(1));
+        // The poisoned candidate must be physically destroyed, not silently
+        // dropped: connectionsOpen == 1 alone is satisfied by the replacement,
+        // so assert the socket was closed and exactly one replacement opened.
+        expect(
+          created.first.closeCalls,
+          equals(1),
+          reason: 'the poisoned candidate must be destroyed on fixup failure',
+        );
+        expect(
+          created,
+          hasLength(2),
+          reason: 'exactly one replacement connection serves waiter B',
+        );
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a waiter that times out during its session-callback fixup hands '
+        'the repaired session to the next compatible waiter', () async {
+      final created = <_FakeConnection>[];
+      final gate = Completer<void>();
+      var slowOnce = true;
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async {
+          final conn = _FakeConnection();
+          created.add(conn);
+          return conn;
+        },
+        maxConnections: 1,
+        acquireTimeout: const Duration(milliseconds: 60),
+        sessionCallback: (conn, requestedTag) async {
+          // Hold the first 'A' fixup open past the acquire timeout so the
+          // waiting acquire times out while the fixup is still in flight.
+          if (requestedTag == 'A' && slowOnce) {
+            slowOnce = false;
+            await gate.future;
+          }
+          conn.tag = requestedTag;
+        },
+      );
+      try {
+        final holder = await pool.acquire();
+
+        // Two waiters both want 'A'. The release hands the connection to the
+        // oldest (waiterA), whose fixup parks on the gate; waiterA then times
+        // out mid-fixup, and the repaired session must reach waiterB instead
+        // of leaking.
+        final waiterA = pool.acquire(tag: 'A');
+        final waiterB = pool.acquire(tag: 'A');
+        await Future<void>.delayed(Duration.zero);
+
+        // Do not await release: its fixup is blocked on the gate until after
+        // waiterA times out.
+        final released = pool.release(holder);
+
+        await expectLater(
+          waiterA,
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraConnectTimeout,
+            ),
+          ),
+        );
+
+        gate.complete();
+        await released;
+
+        final conn = await waiterB;
+        expect(
+          identical(conn, holder),
+          isTrue,
+          reason: 'the timed-out fixup must re-route the same session to B',
+        );
+        expect(conn.tag, equals('A'));
+        expect(pool.connectionsInUse, equals(1));
+        expect(pool.connectionsIdle, equals(0));
+        expect(
+          created,
+          hasLength(1),
+          reason: 'no replacement connection is opened; the session is reused',
+        );
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a waiter that times out during its session-callback fixup parks '
+        'the repaired session idle when no other waiter wants it', () async {
+      final created = <_FakeConnection>[];
+      final gate = Completer<void>();
+      var slowOnce = true;
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async {
+          final conn = _FakeConnection();
+          created.add(conn);
+          return conn;
+        },
+        maxConnections: 1,
+        acquireTimeout: const Duration(milliseconds: 60),
+        sessionCallback: (conn, requestedTag) async {
+          if (requestedTag == 'A' && slowOnce) {
+            slowOnce = false;
+            await gate.future;
+          }
+          conn.tag = requestedTag;
+        },
+      );
+      try {
+        final holder = await pool.acquire();
+        final waiterA = pool.acquire(tag: 'A');
+        await Future<void>.delayed(Duration.zero);
+
+        final released = pool.release(holder);
+
+        await expectLater(
+          waiterA,
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraConnectTimeout,
+            ),
+          ),
+        );
+
+        gate.complete();
+        await released;
+
+        // No waiter remains: the repaired session must be parked idle (with
+        // its callback-applied tag), neither in use nor leaked.
+        expect(pool.connectionsIdle, equals(1));
+        expect(pool.connectionsInUse, equals(0));
+        expect(created, hasLength(1));
+        expect(created.single.closeCalls, equals(0));
+        // The parked session keeps the tag the callback applied and is
+        // reusable by a matching acquire.
+        final conn = await pool.acquire(tag: 'A');
+        expect(identical(conn, holder), isTrue);
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+  });
+
+  group('OraclePool tag-aware waiters (Story 5.4)', () {
+    test('a released session serves the oldest compatible waiter and skips '
+        'incompatible ones without reordering them', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 1);
+      try {
+        final holder = await pool.acquire();
+        holder.tag = 'A';
+
+        // Oldest waiter wants B (incompatible with the A-tagged session:
+        // no callback, no matchAnyTag); the younger one wants A.
+        final wantsB = pool.acquire(tag: 'B');
+        final wantsA = pool.acquire(tag: 'A');
+        await Future<void>.delayed(Duration.zero);
+
+        await pool.release(holder);
+        final servedA = await wantsA;
+        expect(
+          identical(servedA, holder),
+          isTrue,
+          reason:
+              'the A-tagged session must bypass the incompatible B waiter '
+              'and serve the compatible one',
+        );
+
+        var bServed = false;
+        unawaited(wantsB.then((_) => bServed = true));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(
+          bServed,
+          isFalse,
+          reason: 'the incompatible waiter must stay queued',
+        );
+
+        // Clearing the tag makes the session untagged — compatible with B.
+        servedA.tag = '';
+        await pool.release(servedA);
+        final servedB = await wantsB;
+        expect(identical(servedB, holder), isTrue);
+        expect(servedB.tag, equals(''));
+        await pool.release(servedB);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('a matchAnyTag waiter accepts any released session', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 1);
+      try {
+        final holder = await pool.acquire();
+        holder.tag = 'A';
+        final waiting = pool.acquire(tag: 'B', matchAnyTag: true);
+        await Future<void>.delayed(Duration.zero);
+        await pool.release(holder);
+        final conn = await waiting;
+        expect(identical(conn, holder), isTrue);
+        expect(conn.tag, equals('A'));
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('with a session callback, a released wrong-tagged session is '
+        'repaired before completing the waiter', () async {
+      final created = <_FakeConnection>[];
+      final requested = <String>[];
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async {
+          final conn = _FakeConnection();
+          created.add(conn);
+          return conn;
+        },
+        maxConnections: 1,
+        sessionCallback: (conn, requestedTag) {
+          requested.add(requestedTag);
+          conn.tag = requestedTag;
+        },
+      );
+      try {
+        final holder = await pool.acquire(tag: 'A');
+        final waiting = pool.acquire(tag: 'B');
+        await Future<void>.delayed(Duration.zero);
+        await pool.release(holder);
+        final conn = await waiting;
+        expect(identical(conn, holder), isTrue);
+        expect(
+          conn.tag,
+          equals('B'),
+          reason:
+              'the callback must repair the session before the waiter '
+              'receives it',
+        );
+        expect(requested, equals(['A', 'B']));
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('an incompatible waiter still times out with ORA-12170 while '
+        'wrong-tagged sessions circulate', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        maxConnections: 1,
+        acquireTimeout: const Duration(milliseconds: 60),
+      );
+      try {
+        final holder = await pool.acquire();
+        holder.tag = 'A';
+        final waiting = pool.acquire(tag: 'B');
+        await Future<void>.delayed(Duration.zero);
+        // The release parks the A-tagged session; the B waiter cannot use
+        // it and must hit its acquire timeout.
+        await pool.release(holder);
+        expect(pool.connectionsIdle, equals(1));
+        await expectLater(
+          waiting,
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraConnectTimeout,
+            ),
+          ),
+        );
+        expect(pool.connectionsIdle, equals(1));
+        expect(pool.connectionsInUse, equals(0));
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('close() rejects tagged and untagged waiters alike with '
+        'pool-closed', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, maxConnections: 1);
+      final holder = await pool.acquire();
+      final tagged = pool.acquire(tag: 'A');
+      final any = pool.acquire(tag: 'B', matchAnyTag: true);
+      await Future<void>.delayed(Duration.zero);
+      final closedMatcher = throwsA(
+        isA<OracleException>().having(
+          (e) => e.errorCode,
+          'errorCode',
+          oraConnectionClosed,
+        ),
+      );
+      final rejections = Future.wait<void>([
+        expectLater(tagged, closedMatcher),
+        expectLater(any, closedMatcher),
+      ]);
+      await pool.close();
+      await rejections;
+      await pool.release(holder);
+    });
+
+    test('idle cleanup destroys tags only with the physical session and '
+        'leaves retained tags untouched', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(
+        created,
+        minConnections: 1,
+        maxConnections: 2,
+        idleTimeout: const Duration(milliseconds: 50),
+      );
+      try {
+        final keeper = await pool.acquire();
+        final surplus = await pool.acquire();
+        keeper.tag = 'KEEPER';
+        surplus.tag = 'SURPLUS';
+        // Park surplus first so it is the oldest idle entry — idle cleanup
+        // shrinks oldest-first down to minConnections.
+        await pool.release(surplus);
+        await pool.release(keeper);
+
+        await waitUntil(
+          () => pool.connectionsOpen == 1,
+          reason: 'idle cleanup must shrink the surplus session',
+        );
+        expect((surplus as _FakeConnection).closeCalls, equals(1));
+        expect(
+          keeper.tag,
+          equals('KEEPER'),
+          reason: 'cleanup must not clear tags on retained sessions',
+        );
+        final conn = await pool.acquire(tag: 'KEEPER');
+        expect(identical(conn, keeper), isTrue);
+        await pool.release(conn);
+      } finally {
+        await pool.close();
       }
     });
   });

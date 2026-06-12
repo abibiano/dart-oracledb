@@ -16,6 +16,22 @@ final _log = Logger('OraclePool');
 @visibleForTesting
 typedef PoolConnectionFactory = Future<OracleConnection> Function();
 
+/// Signature of the optional session callback accepted by
+/// [OraclePool.create].
+///
+/// The pool invokes the callback just before a borrower receives
+/// [connection], whenever the physical session has never been borrowed
+/// before or its [OracleConnection.tag] differs from [requestedTag] — the
+/// normalized tag the borrower asked for (never null; `''` means untagged).
+///
+/// The callback may run session-setup SQL such as `ALTER SESSION`, and is
+/// responsible for assigning `connection.tag` itself once the session state
+/// matches the request — the pool never sets tags on its own. If the
+/// callback throws, the candidate connection is destroyed (never recycled)
+/// and the acquire fails with that error.
+typedef PoolSessionCallback =
+    FutureOr<void> Function(OracleConnection connection, String requestedTag);
+
 /// A bounded pool of authenticated Oracle sessions.
 ///
 /// Use the static [create] factory to build a pool. Creation validates the
@@ -63,10 +79,37 @@ typedef PoolConnectionFactory = Future<OracleConnection> Function();
 /// shrinking), and `close(drainTimeout: ...)` waits for borrowed sessions
 /// to come back before completing.
 ///
+/// **Session tagging.** Borrowers can request sessions by tag —
+/// `acquire(tag: 'USER_TZ=UTC')` — so session state such as NLS or
+/// time-zone settings is reused instead of reset on every borrow. Tags are
+/// purely client-side metadata ([OracleConnection.tag]); the optional
+/// `sessionCallback` passed to [create] applies the actual session state
+/// and records it on the tag:
+///
+/// ```dart
+/// final pool = await OraclePool.create(
+///   'localhost:1521/FREEPDB1',
+///   user: 'system',
+///   password: 'oracle',
+///   sessionCallback: (conn, requestedTag) async {
+///     if (requestedTag == 'USER_TZ=UTC') {
+///       await conn.execute("ALTER SESSION SET TIME_ZONE = 'UTC'");
+///       conn.tag = requestedTag;
+///     }
+///   },
+/// );
+///
+/// final conn = await pool.acquire(tag: 'USER_TZ=UTC');
+/// ```
+///
+/// See [acquire] for the tag-selection rules and `matchAnyTag`.
+///
 /// **Scope note:** this class covers pool creation, state inspection,
 /// acquire/release borrower semantics, [withConnection], acquire wait
-/// timeouts, idle shrinking, and close-time draining of checked-out
-/// sessions. Connection (session) tagging is not yet implemented.
+/// timeouts, idle shrinking, close-time draining of checked-out sessions,
+/// and session tagging with a Dart session callback. DRCP, heterogeneous
+/// credentials, sharding keys, PL/SQL (server-side) session callbacks, and
+/// pool reconfiguration are out of scope.
 class OraclePool {
   OraclePool._(
     this._connectionFactory, {
@@ -74,6 +117,7 @@ class OraclePool {
     required this.maxConnections,
     required this.acquireTimeout,
     required this.idleTimeout,
+    required this._sessionCallback,
   });
 
   /// Number of physical connections opened eagerly at [create] time.
@@ -97,6 +141,20 @@ class OraclePool {
   /// Stored so [acquire] can grow the pool on demand up to [maxConnections]
   /// using the exact same configuration as prewarm.
   final PoolConnectionFactory _connectionFactory;
+
+  /// Optional pool-wide session callback, fixed at [create] time. Runs
+  /// before a borrower receives a session that is new to borrowers or whose
+  /// tag differs from the requested one; see [PoolSessionCallback].
+  final PoolSessionCallback? _sessionCallback;
+
+  /// Physical connections that have never been returned by an acquire.
+  /// Sessions enter when opened (prewarm, grow on demand, or waiter
+  /// provisioning) and leave after their first successful pre-borrow fixup,
+  /// so the session callback runs exactly once for brand-new sessions even
+  /// when the requested tag is empty. Only maintained when a
+  /// [_sessionCallback] is configured — nothing else consumes it.
+  /// Identity-keyed like [_inUse].
+  final Set<OracleConnection> _neverBorrowed = <OracleConnection>{};
 
   /// Idle (open, authenticated, not borrowed) physical connections.
   final List<OracleConnection> _idle = <OracleConnection>[];
@@ -197,6 +255,15 @@ class OraclePool {
   /// idle cleanup entirely; sessions then stay open until borrowed, found
   /// unhealthy, or the pool closes.
   ///
+  /// [sessionCallback] is an optional pool-wide hook that prepares session
+  /// state before a borrower receives a connection — it runs when the
+  /// physical session has never been borrowed before, or when the tag
+  /// requested by [acquire] differs from the session's current
+  /// [OracleConnection.tag]. It may run setup SQL (e.g. `ALTER SESSION`)
+  /// and must assign `connection.tag` itself once state matches the
+  /// request; see [PoolSessionCallback] and [acquire] for the full tagging
+  /// contract.
+  ///
   /// All configuration is validated before any network work:
   ///
   /// - `minConnections >= 0`
@@ -228,6 +295,7 @@ class OraclePool {
     TlsConfig? tls,
     int statementCacheSize = 30,
     bool preserveTimestampTimeZone = false,
+    PoolSessionCallback? sessionCallback,
   }) {
     _checkPoolSize(minConnections, maxConnections);
     if (timeout <= Duration.zero) {
@@ -240,6 +308,7 @@ class OraclePool {
       maxConnections: maxConnections,
       acquireTimeout: acquireTimeout,
       idleTimeout: idleTimeout,
+      sessionCallback: sessionCallback,
       connectionFactory: () => OracleConnection.connect(
         connectionString,
         user: user,
@@ -264,6 +333,7 @@ class OraclePool {
     int maxConnections = 4,
     Duration? acquireTimeout,
     Duration idleTimeout = Duration.zero,
+    PoolSessionCallback? sessionCallback,
   }) {
     _checkPoolSize(minConnections, maxConnections);
     _checkPoolTimeouts(acquireTimeout, idleTimeout);
@@ -272,6 +342,7 @@ class OraclePool {
       maxConnections: maxConnections,
       acquireTimeout: acquireTimeout,
       idleTimeout: idleTimeout,
+      sessionCallback: sessionCallback,
       connectionFactory: connectionFactory,
     );
   }
@@ -281,6 +352,7 @@ class OraclePool {
     required int maxConnections,
     required Duration? acquireTimeout,
     required Duration idleTimeout,
+    required PoolSessionCallback? sessionCallback,
     required PoolConnectionFactory connectionFactory,
   }) async {
     final pool = OraclePool._(
@@ -289,6 +361,7 @@ class OraclePool {
       maxConnections: maxConnections,
       acquireTimeout: acquireTimeout,
       idleTimeout: idleTimeout,
+      sessionCallback: sessionCallback,
     );
     await pool._prewarm();
     _log.info(
@@ -383,6 +456,7 @@ class OraclePool {
         await _closeIdleBestEffort();
         rethrow;
       }
+      if (_sessionCallback != null) _neverBorrowed.add(conn);
       _parkIdle(conn);
     }
   }
@@ -400,23 +474,37 @@ class OraclePool {
   ///
   /// Resolution order:
   ///
-  /// 1. **Idle reuse** — if an idle connection exists, it is returned
-  ///    immediately (most recently released first, keeping its statement
-  ///    cache warm).
+  /// 1. **Idle reuse** — a healthy idle connection compatible with the
+  ///    requested [tag] is returned (most recently released first within
+  ///    each compatibility category, keeping its statement cache warm).
   /// 2. **Grow on demand** — otherwise, if fewer than [maxConnections]
   ///    physical connections exist (counting opens already in flight), one
   ///    new connection is opened with the pool-wide options captured at
   ///    [create] time.
-  /// 3. **Wait** — otherwise the call waits in FIFO order until [release]
-  ///    hands it a healthy connection, the pool is closed, or (with a
+  /// 3. **Wait** — otherwise the call waits in FIFO order (among waiters a
+  ///    given released connection can satisfy) until [release] hands it a
+  ///    healthy compatible connection, the pool is closed, or (with a
   ///    configured [acquireTimeout]) the wait times out with an
   ///    [OracleException] carrying error code ORA-12170.
+  ///
+  /// **Session tagging.** [tag] names the session state the borrower wants;
+  /// `null` and `''` both mean untagged. For a non-empty tag the pool
+  /// prefers an idle session whose [OracleConnection.tag] matches exactly,
+  /// then an untagged session, then a new connection; a session carrying a
+  /// *different* non-empty tag is used only when [matchAnyTag] is `true` or
+  /// a `sessionCallback` (see [create]) can repair its state first. The
+  /// pool never claims a tag it did not observe: without a callback the
+  /// returned connection's `tag` may be `''` (untagged reuse or a fresh
+  /// session) instead of the requested one, in which case applying the
+  /// session state — and then setting `connection.tag` — is the borrower's
+  /// job. With [matchAnyTag] the returned `tag` may be any value; inspect
+  /// it to learn the actual state.
   ///
   /// Always pair with [release] in `try`/`finally` — or use [withConnection],
   /// which does so for you:
   ///
   /// ```dart
-  /// final conn = await pool.acquire();
+  /// final conn = await pool.acquire(tag: 'USER_TZ=UTC');
   /// try {
   ///   await conn.execute('SELECT 1 FROM DUAL');
   /// } finally {
@@ -425,29 +513,31 @@ class OraclePool {
   /// ```
   ///
   /// Throws [OracleException] with code ORA-03113 if the pool is closed (or
-  /// closes while this call is waiting or opening a new connection), and
+  /// closes while this call is waiting or opening a new connection),
   /// rethrows the [OracleConnection.connect] failure unchanged if a
-  /// grow-on-demand open fails.
-  Future<OracleConnection> acquire() async {
+  /// grow-on-demand open fails, and rethrows a `sessionCallback` failure
+  /// (the candidate session is destroyed) or its [StateError] contract
+  /// violation if the callback leaves a different non-empty tag than
+  /// requested without [matchAnyTag].
+  Future<OracleConnection> acquire({
+    String? tag,
+    bool matchAnyTag = false,
+  }) async {
     if (_isClosed) throw _poolClosedException();
+    final requestedTag = tag ?? '';
 
     // 1. Idle reuse. A connection can die while parked (server-side idle
-    // timeout, network drop): hand out only sessions that still look alive,
-    // destroying stale ones as they surface. Either way the connection
-    // leaves _idle, so its idle-age record goes with it and the cleanup
-    // timer is re-aimed at the remaining oldest idle session.
-    while (_idle.isNotEmpty) {
-      final conn = _idle.removeLast();
-      _idleSince.remove(conn);
-      if (conn.isHealthy) {
-        _inUse.add(conn);
-        _scheduleIdleCleanup();
-        return conn;
-      }
-      _log.fine('Discarding unhealthy idle connection during acquire');
-      await _destroyBestEffort(conn);
+    // timeout, network drop): hand out only sessions that still look alive;
+    // _takeCompatibleIdle destroys stale ones as they surface and re-aims
+    // the cleanup timer at the remaining oldest idle session. Without a
+    // session callback this path is fully synchronous, exactly like the
+    // pre-tagging pool.
+    final idle = _takeCompatibleIdle(requestedTag, matchAnyTag);
+    if (idle != null) {
+      _inUse.add(idle);
+      if (_sessionCallback == null) return idle;
+      return _finishBorrow(idle, requestedTag, matchAnyTag);
     }
-    _scheduleIdleCleanup();
 
     // 2. Grow on demand. _pendingOpens and _draining are bumped synchronously
     // before their awaits, so concurrent acquires (and in-flight releases) each
@@ -476,14 +566,19 @@ class OraclePool {
       // re-aim the idle-cleanup timer so it is eventually shrunk even if no
       // further park happens (the idle-reuse branch above schedules likewise).
       _scheduleIdleCleanup();
-      return conn;
+      if (_sessionCallback == null) return conn;
+      _neverBorrowed.add(conn);
+      return _finishBorrow(conn, requestedTag, matchAnyTag);
     }
 
     // 3. Exhausted: wait FIFO. release() transfers a connection directly to
-    // the oldest active waiter (already marked in-use), close() fails every
-    // pending waiter with a pool-closed error, and the optional
+    // the oldest compatible active waiter (already marked in-use), close()
+    // fails every pending waiter with a pool-closed error, and the optional
     // acquireTimeout bounds the wait below.
-    final waiter = _PoolWaiter();
+    final waiter = _PoolWaiter(
+      requestedTag: requestedTag,
+      matchAnyTag: matchAnyTag,
+    );
     final timeout = acquireTimeout;
     if (timeout != null) {
       waiter.timer = Timer(timeout, () {
@@ -501,6 +596,126 @@ class OraclePool {
     }
     _waiters.add(waiter);
     return waiter.completer.future;
+  }
+
+  /// Finds, removes, and returns a healthy idle connection compatible with
+  /// [requestedTag], or `null` when none qualifies. Unhealthy idle sessions
+  /// discovered while scanning are destroyed (fire-and-forget: they leave
+  /// the idle set and the open count synchronously, the socket close
+  /// completes on its own), and the idle-cleanup timer is re-aimed.
+  ///
+  /// Deliberately synchronous: [acquire] must reach its grow-or-wait
+  /// decision without a suspension point, so concurrent acquires, releases,
+  /// and close() observe the same state ordering as before tagging.
+  ///
+  /// Search order within the healthy idle set — newest-parked first inside
+  /// each category, so hot statement caches stay hot:
+  ///
+  /// 1. exact tag match (for `''` that means an untagged session);
+  /// 2. an untagged session, when a non-empty tag was requested;
+  /// 3. any other tag, but only when [matchAnyTag] is set or a configured
+  ///    session callback can repair the state (for a non-empty request)
+  ///    before the borrower sees the connection.
+  OracleConnection? _takeCompatibleIdle(String requestedTag, bool matchAnyTag) {
+    final unhealthy = <OracleConnection>[];
+    _idle.removeWhere((conn) {
+      if (conn.isHealthy) return false;
+      _idleSince.remove(conn);
+      unhealthy.add(conn);
+      return true;
+    });
+
+    OracleConnection? takeNewestWhere(bool Function(OracleConnection) test) {
+      for (var i = _idle.length - 1; i >= 0; i--) {
+        final conn = _idle[i];
+        if (!test(conn)) continue;
+        _idle.removeAt(i);
+        _idleSince.remove(conn);
+        return conn;
+      }
+      return null;
+    }
+
+    var conn = takeNewestWhere((c) => c.tag == requestedTag);
+    if (conn == null && requestedTag.isNotEmpty) {
+      conn = takeNewestWhere((c) => c.tag.isEmpty);
+    }
+    final repairable = _sessionCallback != null && requestedTag.isNotEmpty;
+    if (conn == null && (matchAnyTag || repairable)) {
+      conn = takeNewestWhere((_) => true);
+    }
+
+    for (final dead in unhealthy) {
+      _log.fine('Discarding unhealthy idle connection during acquire');
+      unawaited(_destroyBestEffort(dead));
+    }
+    _scheduleIdleCleanup();
+    return conn;
+  }
+
+  /// Runs the pre-borrow session fixup on [conn] — already counted in
+  /// [_inUse] — and returns it. On a fixup failure, or a pool close that
+  /// lands during the awaited callback, the connection is destroyed instead
+  /// of reaching the borrower, and freed capacity is offered to any queued
+  /// waiters.
+  Future<OracleConnection> _finishBorrow(
+    OracleConnection conn,
+    String requestedTag,
+    bool matchAnyTag,
+  ) async {
+    try {
+      await _prepareForBorrower(conn, requestedTag, matchAnyTag);
+    } catch (_) {
+      _inUse.remove(conn);
+      await _destroyBestEffort(conn);
+      _notifyDrainIfIdle();
+      unawaited(_provisionForWaiters());
+      rethrow;
+    }
+    if (_isClosed) {
+      // close() can land while the session callback is awaited; mirror the
+      // grow path and never hand out a session from a closed pool.
+      _inUse.remove(conn);
+      await _destroyBestEffort(conn);
+      _notifyDrainIfIdle();
+      throw _poolClosedException();
+    }
+    return conn;
+  }
+
+  /// Runs the configured session callback for [conn] when needed: the
+  /// session has never been borrowed before, or its tag differs from
+  /// [requestedTag]. After the callback, enforces the fail-loud tagging
+  /// contract: a request for a specific non-empty tag (no [matchAnyTag])
+  /// must end with that tag or with an honest `''` — a different non-empty
+  /// tag means the callback claimed wrong state, and the caller destroys
+  /// the session.
+  ///
+  /// With no callback configured this never mutates database state and
+  /// never sets [OracleConnection.tag].
+  Future<void> _prepareForBorrower(
+    OracleConnection conn,
+    String requestedTag,
+    bool matchAnyTag,
+  ) async {
+    // Unconditionally consume the new-to-borrowers mark: every failure path
+    // below destroys the connection, so it can never be borrowed again.
+    final isNew = _neverBorrowed.remove(conn);
+    final callback = _sessionCallback;
+    if (callback == null) return;
+    if (!isNew && conn.tag == requestedTag) return;
+    await callback(conn, requestedTag);
+    if (requestedTag.isNotEmpty &&
+        !matchAnyTag &&
+        conn.tag.isNotEmpty &&
+        conn.tag != requestedTag) {
+      throw StateError(
+        'sessionCallback left a connection tagged differently than the '
+        'requested tag; the session has been destroyed. The callback must '
+        'set connection.tag to the requested tag once the session state '
+        'matches, or leave the connection untagged.',
+      );
+    }
   }
 
   /// Returns a borrowed connection to the pool.
@@ -609,17 +824,72 @@ class OraclePool {
       return;
     }
 
-    final waiter = _takeNextActiveWaiter();
+    final waiter = _takeWaiterFor(connection);
     if (waiter != null) {
       // Direct handoff: the connection stays in-use and goes to the oldest
-      // active waiter, so a later acquire() cannot steal it out of _idle.
+      // compatible active waiter, so a later acquire() cannot steal it out
+      // of _idle. Incompatible waiters (wrong tag, no repair possible) keep
+      // their queue positions.
       _inUse.add(connection);
       _draining--;
-      waiter.complete(connection);
+      await _completeWaiter(waiter, connection);
       return;
     }
     _parkIdle(connection);
     _draining--;
+  }
+
+  /// Completes [waiter] with [conn] — already counted in [_inUse] — after
+  /// running the pre-borrow session fixup for the waiter's requested tag.
+  /// A fixup failure destroys the connection and fails the waiter; a pool
+  /// close or waiter timeout that lands during the awaited fixup is handled
+  /// without leaking the session or stranding other waiters.
+  Future<void> _completeWaiter(
+    _PoolWaiter waiter,
+    OracleConnection conn,
+  ) async {
+    if (_sessionCallback == null) {
+      // No fixup possible: complete synchronously, exactly like the
+      // pre-tagging direct handoff (_takeWaiterFor already verified the
+      // waiter accepts this connection's tag).
+      waiter.complete(conn);
+      return;
+    }
+    try {
+      await _prepareForBorrower(conn, waiter.requestedTag, waiter.matchAnyTag);
+    } catch (e, st) {
+      _inUse.remove(conn);
+      await _destroyBestEffort(conn);
+      _notifyDrainIfIdle();
+      waiter.completeError(e, st);
+      // The destroy freed capacity; offer it to the remaining waiters.
+      unawaited(_provisionForWaiters());
+      return;
+    }
+    if (_isClosed) {
+      // close() already rejected every queued waiter, but this one had left
+      // the queue before the fixup await — fail it the same way.
+      _inUse.remove(conn);
+      await _destroyBestEffort(conn);
+      _notifyDrainIfIdle();
+      waiter.completeError(_poolClosedException());
+      return;
+    }
+    if (!waiter.isActive) {
+      // The waiter timed out during the awaited fixup. The session is
+      // healthy and rolled back: pass it on to the next compatible waiter,
+      // or park it for future borrowers.
+      _inUse.remove(conn);
+      final next = _takeWaiterFor(conn);
+      if (next != null) {
+        _inUse.add(conn);
+        await _completeWaiter(next, conn);
+        return;
+      }
+      _parkIdle(conn);
+      return;
+    }
+    waiter.complete(conn);
   }
 
   /// Runs [callback] with a pooled connection, releasing it afterwards.
@@ -637,10 +907,15 @@ class OraclePool {
   /// Error contract: a [callback] error propagates to the caller; a release
   /// failure after a successful callback propagates; a release failure after
   /// a callback error is logged and the original callback error is rethrown.
+  ///
+  /// [tag] and [matchAnyTag] are passed through to [acquire]; see there for
+  /// the session-tagging contract.
   Future<T> withConnection<T>(
-    Future<T> Function(OracleConnection connection) callback,
-  ) async {
-    final conn = await acquire();
+    Future<T> Function(OracleConnection connection) callback, {
+    String? tag,
+    bool matchAnyTag = false,
+  }) async {
+    final conn = await acquire(tag: tag, matchAnyTag: matchAnyTag);
     final T result;
     try {
       result = await callback(conn);
@@ -690,6 +965,7 @@ class OraclePool {
         await _destroyBestEffort(conn);
         return;
       }
+      if (_sessionCallback != null) _neverBorrowed.add(conn);
       final waiter = _takeNextActiveWaiter();
       if (waiter == null) {
         // Every waiter was satisfied by a regular release — or timed out —
@@ -698,8 +974,11 @@ class OraclePool {
         _parkIdle(conn);
         return;
       }
+      // A fresh connection is untagged, so it is compatible with any
+      // waiter; the fixup inside completes the session state if a callback
+      // is configured.
       _inUse.add(conn);
-      waiter.complete(conn);
+      await _completeWaiter(waiter, conn);
     }
   }
 
@@ -800,6 +1079,24 @@ class OraclePool {
     return null;
   }
 
+  /// Takes the oldest active waiter that [conn] can satisfy — as-is, via
+  /// [_PoolWaiter.matchAnyTag], or via session-callback repair — leaving
+  /// incompatible waiters queued in their relative order. Returns null when
+  /// no queued waiter can accept [conn].
+  _PoolWaiter? _takeWaiterFor(OracleConnection conn) {
+    // Defensive: timed-out waiters leave the queue synchronously from their
+    // timer callback, so inactive entries should never be observed here.
+    _waiters.removeWhere((waiter) => !waiter.isActive);
+    final repairable = _sessionCallback != null;
+    for (final waiter in _waiters) {
+      if (waiter.accepts(conn, repairable: repairable)) {
+        _waiters.remove(waiter);
+        return waiter;
+      }
+    }
+    return null;
+  }
+
   /// Parks [conn] in the idle list, stamping its idle-since time and
   /// re-aiming the idle-cleanup timer.
   void _parkIdle(OracleConnection conn) {
@@ -870,6 +1167,7 @@ class OraclePool {
   /// (but logging) failures — destruction runs on cleanup paths where a
   /// close error must never mask the caller's primary error.
   Future<void> _destroyBestEffort(OracleConnection conn) async {
+    _neverBorrowed.remove(conn);
     try {
       await conn.close();
     } catch (e, st) {
@@ -894,7 +1192,25 @@ class OraclePool {
 /// timed out later, a timed-out waiter can never be handed a connection,
 /// and no path completes the same completer twice.
 class _PoolWaiter {
+  _PoolWaiter({required this.requestedTag, required this.matchAnyTag});
+
+  /// The normalized session tag this acquire asked for (`''` = untagged).
+  final String requestedTag;
+
+  /// Whether this acquire accepts a session carrying any tag.
+  final bool matchAnyTag;
+
   final Completer<OracleConnection> completer = Completer<OracleConnection>();
+
+  /// Whether [conn] can satisfy this waiter: an exact tag match, an
+  /// untagged session, an explicit [matchAnyTag], or — when the pool has a
+  /// session callback ([repairable]) and a specific tag was requested — a
+  /// wrong-tagged session the callback can repair before handoff.
+  bool accepts(OracleConnection conn, {required bool repairable}) =>
+      conn.tag == requestedTag ||
+      conn.tag.isEmpty ||
+      matchAnyTag ||
+      (repairable && requestedTag.isNotEmpty);
 
   /// Pending acquire-timeout timer; null when the pool has no
   /// acquireTimeout configured, or after any completion path cancelled it.

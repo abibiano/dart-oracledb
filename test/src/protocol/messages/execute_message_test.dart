@@ -37,8 +37,10 @@ void main() {
       expect(options & ttcExecOptionExecute, isNonZero);
       expect(options & ttcExecOptionFetch, isNonZero);
       expect(options & ttcExecOptionParse, isNonZero);
-      expect(options & ttcExecOptionNotPlSql,
-          equals(0)); // queries clear NOT_PLSQL
+      expect(
+        options & ttcExecOptionNotPlSql,
+        equals(0),
+      ); // queries clear NOT_PLSQL
     });
 
     test('DML sets NOT_PLSQL flag and clears FETCH bit', () {
@@ -54,27 +56,44 @@ void main() {
       expect(options & ttcExecOptionNotPlSql, isNonZero);
     });
 
-    test('PL/SQL with binds sets BIND+PLSQL_BIND, clears NOT_PLSQL and FETCH',
-        () {
-      final req = ExecuteRequest(
-        sql: 'BEGIN my_proc(:1, :2); END;',
-        isQuery: false,
-        isPlSql: true,
-        bindValues: [1, 'Alice'],
-      );
-      final bytes = req.toBytes();
-      final options = _readOptionsFromHeader(bytes);
-      expect(options & ttcExecOptionExecute, isNonZero,
-          reason: 'EXECUTE must always be set');
-      expect(options & ttcExecOptionBind, isNonZero,
-          reason: 'BIND must be set when bind values are present');
-      expect(options & ttcExecOptionPlSqlBind, isNonZero,
-          reason: 'PLSQL_BIND must be set for PL/SQL with binds');
-      expect(options & ttcExecOptionNotPlSql, equals(0),
-          reason: 'NOT_PLSQL must be cleared for PL/SQL blocks');
-      expect(options & ttcExecOptionFetch, equals(0),
-          reason: 'FETCH must not be set for PL/SQL');
-    });
+    test(
+      'PL/SQL with binds sets BIND+PLSQL_BIND, clears NOT_PLSQL and FETCH',
+      () {
+        final req = ExecuteRequest(
+          sql: 'BEGIN my_proc(:1, :2); END;',
+          isQuery: false,
+          isPlSql: true,
+          bindValues: [1, 'Alice'],
+        );
+        final bytes = req.toBytes();
+        final options = _readOptionsFromHeader(bytes);
+        expect(
+          options & ttcExecOptionExecute,
+          isNonZero,
+          reason: 'EXECUTE must always be set',
+        );
+        expect(
+          options & ttcExecOptionBind,
+          isNonZero,
+          reason: 'BIND must be set when bind values are present',
+        );
+        expect(
+          options & ttcExecOptionPlSqlBind,
+          isNonZero,
+          reason: 'PLSQL_BIND must be set for PL/SQL with binds',
+        );
+        expect(
+          options & ttcExecOptionNotPlSql,
+          equals(0),
+          reason: 'NOT_PLSQL must be cleared for PL/SQL blocks',
+        );
+        expect(
+          options & ttcExecOptionFetch,
+          equals(0),
+          reason: 'FETCH must not be set for PL/SQL',
+        );
+      },
+    );
 
     test('PL/SQL with no binds clears NOT_PLSQL and PLSQL_BIND', () {
       final req = ExecuteRequest(
@@ -85,16 +104,24 @@ void main() {
       final bytes = req.toBytes();
       final options = _readOptionsFromHeader(bytes);
       expect(options & ttcExecOptionExecute, isNonZero);
-      expect(options & ttcExecOptionNotPlSql, equals(0),
-          reason: 'NOT_PLSQL must be cleared even without binds');
-      expect(options & ttcExecOptionPlSqlBind, equals(0),
-          reason: 'PLSQL_BIND must not be set when there are no parameters');
-      expect(options & ttcExecOptionBind, equals(0),
-          reason: 'BIND must not be set when there are no parameters');
+      expect(
+        options & ttcExecOptionNotPlSql,
+        equals(0),
+        reason: 'NOT_PLSQL must be cleared even without binds',
+      );
+      expect(
+        options & ttcExecOptionPlSqlBind,
+        equals(0),
+        reason: 'PLSQL_BIND must not be set when there are no parameters',
+      );
+      expect(
+        options & ttcExecOptionBind,
+        equals(0),
+        reason: 'BIND must not be set when there are no parameters',
+      );
     });
 
-    test('DML NOT_PLSQL bit is unchanged after PL/SQL isPlSql=false default',
-        () {
+    test('DML NOT_PLSQL bit is unchanged after PL/SQL isPlSql=false default', () {
       // Regression: isPlSql defaults to false, so existing DML tests are intact.
       final req = ExecuteRequest(
         sql: 'DELETE FROM t WHERE id = :1',
@@ -103,9 +130,11 @@ void main() {
       );
       final bytes = req.toBytes();
       final options = _readOptionsFromHeader(bytes);
-      expect(options & ttcExecOptionNotPlSql, isNonZero,
-          reason:
-              'DML must still set NOT_PLSQL when isPlSql defaults to false');
+      expect(
+        options & ttcExecOptionNotPlSql,
+        isNonZero,
+        reason: 'DML must still set NOT_PLSQL when isPlSql defaults to false',
+      );
     });
 
     test('sets BIND flag when bind values are provided', () {
@@ -120,8 +149,11 @@ void main() {
     });
 
     test('passes a unique sequence number to the wire', () {
-      final r1 =
-          ExecuteRequest(sql: 'SELECT 1 FROM dual', isQuery: true, sequence: 7);
+      final r1 = ExecuteRequest(
+        sql: 'SELECT 1 FROM dual',
+        isQuery: true,
+        sequence: 7,
+      );
       expect(r1.toBytes()[2], equals(7));
     });
 
@@ -153,8 +185,11 @@ void main() {
       );
       final bytes = req.toBytes();
       final options = _readOptionsFromHeader(bytes);
-      expect(options & ttcExecOptionParse, equals(0),
-          reason: 'PARSE bit must be cleared when reusing a cached cursor');
+      expect(
+        options & ttcExecOptionParse,
+        equals(0),
+        reason: 'PARSE bit must be cleared when reusing a cached cursor',
+      );
       expect(options & ttcExecOptionExecute, isNonZero);
     });
 
@@ -201,7 +236,10 @@ void main() {
       ]);
 
       const col = ColumnMetadata(
-          name: 'VAL', oracleType: oraTypeVarchar, maxLength: 100);
+        name: 'VAL',
+        oracleType: oraTypeVarchar,
+        maxLength: 100,
+      );
       final r = decodeExecuteResponse(
         payload,
         isQuery: true,
@@ -228,15 +266,21 @@ void main() {
       ]);
 
       const stale = ColumnMetadata(
-          name: 'STALE', oracleType: oraTypeVarchar, maxLength: 10);
+        name: 'STALE',
+        oracleType: oraTypeVarchar,
+        maxLength: 10,
+      );
       final r = decodeExecuteResponse(
         describePayload,
         isQuery: true,
         expectedColumns: [stale],
       );
 
-      expect(r.columnMetadata.first.name, equals('FRESH'),
-          reason: 'DESCRIBE_INFO must override expectedColumns');
+      expect(
+        r.columnMetadata.first.name,
+        equals('FRESH'),
+        reason: 'DESCRIBE_INFO must override expectedColumns',
+      );
       expect(r.rows.first.first, equals('world'));
     });
   });
@@ -263,7 +307,10 @@ void main() {
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
       const col = ColumnMetadata(
-          name: 'VAL', oracleType: oraTypeVarchar, maxLength: 100);
+        name: 'VAL',
+        oracleType: oraTypeVarchar,
+        maxLength: 100,
+      );
       final r = decodeExecuteResponse(
         payload,
         isQuery: true,
@@ -282,7 +329,10 @@ void main() {
       ];
       final cols = <ColumnMetadata>[
         const ColumnMetadata(
-            name: 'VAL', oracleType: oraTypeVarchar, maxLength: 100),
+          name: 'VAL',
+          oracleType: oraTypeVarchar,
+          maxLength: 100,
+        ),
       ];
       final response = ExecuteResponse(
         isSuccess: true,
@@ -293,10 +343,16 @@ void main() {
       rows.add(<Object?>['b']);
       cols.clear();
 
-      expect(response.rows, hasLength(1),
-          reason: 'mutating the source list must not leak into the response');
-      expect(response.columnMetadata, hasLength(1),
-          reason: 'mutating the source list must not leak into the response');
+      expect(
+        response.rows,
+        hasLength(1),
+        reason: 'mutating the source list must not leak into the response',
+      );
+      expect(
+        response.columnMetadata,
+        hasLength(1),
+        reason: 'mutating the source list must not leak into the response',
+      );
     });
   });
 
@@ -326,7 +382,9 @@ void main() {
     test('Oracle error number is surfaced with message', () {
       final payload = _buildPayload([
         _errorMessage(
-            errorNum: 942, errorMessage: 'table or view does not exist'),
+          errorNum: 942,
+          errorMessage: 'table or view does not exist',
+        ),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
       final r = decodeExecuteResponse(payload, isQuery: false);
@@ -356,9 +414,13 @@ void main() {
       final r = decodeExecuteResponse(payload, isQuery: true);
       expect(r.isSuccess, isTrue);
       expect(r.cursorId, equals(7));
-      expect(r.moreRowsToFetch, isTrue,
-          reason: 'num=0 with an open cursor means the prefetch window was '
-              'filled — the transport must keep FETCHing');
+      expect(
+        r.moreRowsToFetch,
+        isTrue,
+        reason:
+            'num=0 with an open cursor means the prefetch window was '
+            'filled — the transport must keep FETCHing',
+      );
     });
 
     // A cached-cursor re-execute legitimately echoes cursorId == 0 while the
@@ -373,9 +435,13 @@ void main() {
       ]);
       final r = decodeExecuteResponse(payload, isQuery: true);
       expect(r.isSuccess, isTrue);
-      expect(r.moreRowsToFetch, isTrue,
-          reason: 'only ORA-01403 ends the fetch — a zero cursor echo on a '
-              're-executed cached statement must not truncate the drain');
+      expect(
+        r.moreRowsToFetch,
+        isTrue,
+        reason:
+            'only ORA-01403 ends the fetch — a zero cursor echo on a '
+            're-executed cached statement must not truncate the drain',
+      );
     });
 
     // The no-ERROR-message default branch: a successful query batch can end
@@ -400,9 +466,13 @@ void main() {
       );
       expect(r.isSuccess, isTrue);
       expect(r.rows.single, equals(['hello']));
-      expect(r.moreRowsToFetch, isTrue,
-          reason: 'a batch that ended without an end-of-fetch marker must '
-              'be reported as having more rows pending');
+      expect(
+        r.moreRowsToFetch,
+        isTrue,
+        reason:
+            'a batch that ended without an end-of-fetch marker must '
+            'be reported as having more rows pending',
+      );
     });
 
     test('ORA-01403 with open cursor still ends the fetch', () {
@@ -419,16 +489,20 @@ void main() {
     test('error response exposes SQL error offset from TTC ERROR', () {
       final payload = _buildPayload([
         _errorMessage(
-            errorNum: 942,
-            errorOffset: 14,
-            errorMessage: 'table or view does not exist'),
+          errorNum: 942,
+          errorOffset: 14,
+          errorMessage: 'table or view does not exist',
+        ),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
       final r = decodeExecuteResponse(payload, isQuery: false);
       expect(r.isSuccess, isFalse);
       expect(r.errorCode, equals(942));
-      expect(r.errorOffset, equals(14),
-          reason: 'SB4 error position must be preserved on the response');
+      expect(
+        r.errorOffset,
+        equals(14),
+        reason: 'SB4 error position must be preserved on the response',
+      );
     });
 
     test('successful response has null errorOffset', () {
@@ -446,36 +520,46 @@ void main() {
   // version actually sends. A fixture built for version V must decode without
   // buffer misalignment when decoded at version V.
   group('real UB8 test helper', () {
-    test('_ub8 emits identical bytes to WriteBuffer.writeUB8 per size class',
-        () {
-      const values = [
-        0,
-        1,
-        0xff,
-        0x100,
-        0xffff,
-        0x10000,
-        0xffffffff,
-        0x100000000, // 2^32 — first value requiring the 8-byte form
-        9007199254740993, // 2^53 + 1
-        0x7fffffffffffffff,
-      ];
-      for (final v in values) {
-        final wb = WriteBuffer();
-        wb.writeUB8(v);
-        expect(_ub8(v), equals(wb.toBytes()),
-            reason: 'helper and production writer must agree for $v');
-      }
-    });
+    test(
+      '_ub8 emits identical bytes to WriteBuffer.writeUB8 per size class',
+      () {
+        const values = [
+          0,
+          1,
+          0xff,
+          0x100,
+          0xffff,
+          0x10000,
+          0xffffffff,
+          0x100000000, // 2^32 — first value requiring the 8-byte form
+          9007199254740993, // 2^53 + 1
+          0x7fffffffffffffff,
+        ];
+        for (final v in values) {
+          final wb = WriteBuffer();
+          wb.writeUB8(v);
+          expect(
+            _ub8(v),
+            equals(wb.toBytes()),
+            reason: 'helper and production writer must agree for $v',
+          );
+        }
+      },
+    );
 
-    test('a >2^32 value round-trips through the helper and ReadBuffer.readUB8',
-        () {
-      const value = 0x1234567890; // > 0xFFFFFFFF
-      final bytes = _ub8(value);
-      expect(bytes.first, equals(8),
-          reason: 'values above 2^32 must use the 8-byte form');
-      expect(ReadBuffer(Uint8List.fromList(bytes)).readUB8(), equals(value));
-    });
+    test(
+      'a >2^32 value round-trips through the helper and ReadBuffer.readUB8',
+      () {
+        const value = 0x1234567890; // > 0xFFFFFFFF
+        final bytes = _ub8(value);
+        expect(
+          bytes.first,
+          equals(8),
+          reason: 'values above 2^32 must use the 8-byte form',
+        );
+        expect(ReadBuffer(Uint8List.fromList(bytes)).readUB8(), equals(value));
+      },
+    );
 
     test('a >2^32 extended row count decodes through the real ERROR path', () {
       // Proves the fixture and decodeExecuteResponse agree on the UB8 wire
@@ -507,8 +591,11 @@ void main() {
         _errorMessage(errorNum: 1403),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
-      const numberCol =
-          ColumnMetadata(name: 'N', oracleType: oraTypeNumber, maxLength: 0);
+      const numberCol = ColumnMetadata(
+        name: 'N',
+        oracleType: oraTypeNumber,
+        maxLength: 0,
+      );
       final r = decodeExecuteResponse(
         payload,
         isQuery: true,
@@ -516,8 +603,11 @@ void main() {
       );
       final row = r.rows.single;
       expect(row[0], equals(42));
-      expect(row[0], isA<int>(),
-          reason: 'bare integer-valued NUMBER keeps the int heuristic');
+      expect(
+        row[0],
+        isA<int>(),
+        reason: 'bare integer-valued NUMBER keeps the int heuristic',
+      );
       expect(row[1], isA<double>());
       expect(row[1] as double, closeTo(123.45, 1e-9));
       expect(row[2], equals(-5));
@@ -548,7 +638,10 @@ void main() {
           BindMetadata(oraType: oraTypeDate, maxSize: 7, dir: BindDir.output),
           BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
           BindMetadata(
-              oraType: oraTypeVarchar, maxSize: 100, dir: BindDir.inputOutput),
+            oraType: oraTypeVarchar,
+            maxSize: 100,
+            dir: BindDir.inputOutput,
+          ),
         ],
       );
       expect(r.outBindIndices, equals([0, 2]));
@@ -557,36 +650,40 @@ void main() {
       expect(r.outBindValues[1], equals('xyz'));
     });
 
-    test('multi-column DESCRIBE_INFO parses names, types, precision, scale',
-        () {
-      final payload = _buildPayload([
-        _describeInfo([
-          _columnInfo(name: 'NAME', oraType: oraTypeVarchar, maxSize: 50),
-          _columnInfo(
-            name: 'PRICE',
-            oraType: oraTypeNumber,
-            maxSize: 0,
-            precisionByte: 10,
-            scaleByte: 2,
-          ),
-          _columnInfo(name: 'CREATED', oraType: oraTypeDate, maxSize: 0),
-        ]),
-        _errorMessage(errorNum: 1403),
-        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-      ]);
-      final r = decodeExecuteResponse(payload, isQuery: true);
-      expect(r.columnMetadata, hasLength(3));
-      expect(r.columnMetadata.map((c) => c.name),
-          equals(['NAME', 'PRICE', 'CREATED']));
-      expect(r.columnMetadata[0].oracleType, equals(oraTypeVarchar));
-      expect(r.columnMetadata[0].maxLength, equals(50));
-      expect(r.columnMetadata[1].oracleType, equals(oraTypeNumber));
-      expect(r.columnMetadata[1].precision, equals(10));
-      expect(r.columnMetadata[1].scale, equals(2));
-      expect(r.columnMetadata[2].oracleType, equals(oraTypeDate));
-      expect(r.columnMetadata[2].precision, isNull);
-      expect(r.columnMetadata[2].scale, isNull);
-    });
+    test(
+      'multi-column DESCRIBE_INFO parses names, types, precision, scale',
+      () {
+        final payload = _buildPayload([
+          _describeInfo([
+            _columnInfo(name: 'NAME', oraType: oraTypeVarchar, maxSize: 50),
+            _columnInfo(
+              name: 'PRICE',
+              oraType: oraTypeNumber,
+              maxSize: 0,
+              precisionByte: 10,
+              scaleByte: 2,
+            ),
+            _columnInfo(name: 'CREATED', oraType: oraTypeDate, maxSize: 0),
+          ]),
+          _errorMessage(errorNum: 1403),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        final r = decodeExecuteResponse(payload, isQuery: true);
+        expect(r.columnMetadata, hasLength(3));
+        expect(
+          r.columnMetadata.map((c) => c.name),
+          equals(['NAME', 'PRICE', 'CREATED']),
+        );
+        expect(r.columnMetadata[0].oracleType, equals(oraTypeVarchar));
+        expect(r.columnMetadata[0].maxLength, equals(50));
+        expect(r.columnMetadata[1].oracleType, equals(oraTypeNumber));
+        expect(r.columnMetadata[1].precision, equals(10));
+        expect(r.columnMetadata[1].scale, equals(2));
+        expect(r.columnMetadata[2].oracleType, equals(oraTypeDate));
+        expect(r.columnMetadata[2].precision, isNull);
+        expect(r.columnMetadata[2].scale, isNull);
+      },
+    );
 
     test('chunked (0xFE) VARCHAR payload reassembles across chunks', () {
       // 300 bytes split into 200 + 100 chunks via the long-length indicator;
@@ -612,7 +709,10 @@ void main() {
         isQuery: true,
         expectedColumns: const [
           ColumnMetadata(
-              name: 'BIG', oracleType: oraTypeVarchar, maxLength: 4000),
+            name: 'BIG',
+            oracleType: oraTypeVarchar,
+            maxLength: 4000,
+          ),
         ],
       );
       final value = r.rows.single.single;
@@ -620,8 +720,7 @@ void main() {
       expect((value as String).length, equals(300));
     });
 
-    test('DML rowsAffected decodes single and large non-trivial counts',
-        () {
+    test('DML rowsAffected decodes single and large non-trivial counts', () {
       for (final count in [1, 100000]) {
         final payload = _buildPayload([
           _errorMessage(errorNum: 0, rowCount: count),
@@ -635,23 +734,23 @@ void main() {
 
   group('fixed-scale NUMBER decode', () {
     List<int> numberColumnPayload({required int scaleByte}) => _buildPayload([
-          _describeInfo([
-            _columnInfo(
-              name: 'N',
-              oraType: oraTypeNumber,
-              maxSize: 0,
-              precisionByte: 10,
-              scaleByte: scaleByte,
-            ),
-          ]),
-          _rowHeader(),
-          [
-            ttcMsgTypeRowData,
-            ..._bytesWithLength([0xC1, 43])
-          ], // 42
-          _errorMessage(errorNum: 1403),
-          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-        ]);
+      _describeInfo([
+        _columnInfo(
+          name: 'N',
+          oraType: oraTypeNumber,
+          maxSize: 0,
+          precisionByte: 10,
+          scaleByte: scaleByte,
+        ),
+      ]),
+      _rowHeader(),
+      [
+        ttcMsgTypeRowData,
+        ..._bytesWithLength([0xC1, 43]),
+      ], // 42
+      _errorMessage(errorNum: 1403),
+      [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+    ]);
 
     test('declared scale > 0 forces double for an integer-valued NUMBER', () {
       final r = decodeExecuteResponse(
@@ -660,9 +759,13 @@ void main() {
       );
       expect(r.columnMetadata.single.scale, equals(2));
       final value = r.rows.single.single;
-      expect(value, isA<double>(),
-          reason: 'NUMBER(10,2) must decode integer-valued 42 as 42.0 '
-              '(node-oracledb always-Number contract)');
+      expect(
+        value,
+        isA<double>(),
+        reason:
+            'NUMBER(10,2) must decode integer-valued 42 as 42.0 '
+            '(node-oracledb always-Number contract)',
+      );
       expect(value, equals(42.0));
     });
 
@@ -674,11 +777,17 @@ void main() {
         Uint8List.fromList(numberColumnPayload(scaleByte: 0x81)),
         isQuery: true,
       );
-      expect(r.columnMetadata.single.scale, isNull,
-          reason: '-127 is the no-scale sentinel, not a declared scale');
+      expect(
+        r.columnMetadata.single.scale,
+        isNull,
+        reason: '-127 is the no-scale sentinel, not a declared scale',
+      );
       final value = r.rows.single.single;
-      expect(value, isA<int>(),
-          reason: 'bare NUMBER keeps the int-vs-double heuristic');
+      expect(
+        value,
+        isA<int>(),
+        reason: 'bare NUMBER keeps the int-vs-double heuristic',
+      );
       expect(value, equals(42));
     });
 
@@ -700,20 +809,27 @@ void main() {
       final payload = _buildPayload([
         _describeInfo([
           _columnInfo(
-              name: 'C1',
-              oraType: oraTypeVarchar,
-              maxSize: 10,
-              ttcFieldVersion: version),
+            name: 'C1',
+            oraType: oraTypeVarchar,
+            maxSize: 10,
+            ttcFieldVersion: version,
+          ),
         ]),
         _errorMessage(errorNum: 1403, ttcFieldVersion: version),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
-      final r = decodeExecuteResponse(payload,
-          isQuery: true, ttcFieldVersion: version);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        ttcFieldVersion: version,
+      );
       expect(r.isSuccess, isTrue);
       expect(r.columnMetadata, hasLength(1));
-      expect(r.columnMetadata.single.name, equals('C1'),
-          reason: 'column name must survive decode at field version $version');
+      expect(
+        r.columnMetadata.single.name,
+        equals('C1'),
+        reason: 'column name must survive decode at field version $version',
+      );
       expect(r.columnMetadata.single.oracleType, equals(oraTypeVarchar));
     }
 
@@ -727,8 +843,7 @@ void main() {
       expectColumnDecodes(ttcCcapFieldVersion12_2); // 8
     });
 
-    test('pre-23.4 server sends no vector tail — decode stays aligned',
-        () {
+    test('pre-23.4 server sends no vector tail — decode stays aligned', () {
       // Version 23 has 12.2 + 23.1 + 23.1-ext3 fields but NOT the 23.4 vector
       // tail; reading the vector bytes here would misalign the buffer.
       expectColumnDecodes(23);
@@ -743,36 +858,47 @@ void main() {
   // integers; their payloads must be skipped exactly before the direction
   // bytes are read.
   group('IO_VECTOR fast-fetch / rowid skip', () {
-    test('non-zero fast-fetch and rowid payloads are skipped before directions',
-        () {
-      // One OUT NUMBER bind. Inject a 3-byte fast-fetch payload and a 2-byte
-      // rowid payload via UB2 length prefixes. If the decoder mis-reads those
-      // lengths (e.g. as fixed 2-byte raw) or fails to skip the payloads, the
-      // single direction byte and the ROW_DATA value will misalign and the OUT
-      // bind will not decode to 5.
-      final payload = _buildPayload([
-        _ioVector([16],
-            fastFetch: const [0xAA, 0xBB, 0xCC], rowid: const [0x01, 0x02]),
-        [
-          ttcMsgTypeRowData,
-          ..._bytesWithLength(_oracleNumberFiveBytes()),
-          ..._ub4(0), // SB4 actualNumBytes trailer
-        ],
-        _errorMessage(errorNum: 0),
-        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-      ]);
-      final r = decodeExecuteResponse(
-        payload,
-        isQuery: false,
-        bindMetadata: const [
-          BindMetadata(
-              oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
-        ],
-      );
-      expect(r.outBindIndices, equals([0]));
-      expect(r.outBindValues, equals([5]),
-          reason: 'fast-fetch and rowid payloads must be skipped exactly');
-    });
+    test(
+      'non-zero fast-fetch and rowid payloads are skipped before directions',
+      () {
+        // One OUT NUMBER bind. Inject a 3-byte fast-fetch payload and a 2-byte
+        // rowid payload via UB2 length prefixes. If the decoder mis-reads those
+        // lengths (e.g. as fixed 2-byte raw) or fails to skip the payloads, the
+        // single direction byte and the ROW_DATA value will misalign and the OUT
+        // bind will not decode to 5.
+        final payload = _buildPayload([
+          _ioVector(
+            [16],
+            fastFetch: const [0xAA, 0xBB, 0xCC],
+            rowid: const [0x01, 0x02],
+          ),
+          [
+            ttcMsgTypeRowData,
+            ..._bytesWithLength(_oracleNumberFiveBytes()),
+            ..._ub4(0), // SB4 actualNumBytes trailer
+          ],
+          _errorMessage(errorNum: 0),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        final r = decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(
+              oraType: oraTypeNumber,
+              maxSize: 22,
+              dir: BindDir.output,
+            ),
+          ],
+        );
+        expect(r.outBindIndices, equals([0]));
+        expect(
+          r.outBindValues,
+          equals([5]),
+          reason: 'fast-fetch and rowid payloads must be skipped exactly',
+        );
+      },
+    );
   });
 
   // LONG / LONG RAW are not yet supported. Decoding one must surface a clear
@@ -780,37 +906,47 @@ void main() {
   // heuristic.
   group('LONG / LONG RAW unsupported', () {
     Uint8List longColumnResponse(int oraType) => _buildPayload([
-          _describeInfo([
-            _columnInfo(name: 'BODY', oraType: oraType, maxSize: 0),
-          ]),
-          _rowHeader(),
-          [ttcMsgTypeRowData, ..._bytesWithLength('payload'.codeUnits)],
-          _errorMessage(errorNum: 1403),
-          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-        ]);
+      _describeInfo([_columnInfo(name: 'BODY', oraType: oraType, maxSize: 0)]),
+      _rowHeader(),
+      [ttcMsgTypeRowData, ..._bytesWithLength('payload'.codeUnits)],
+      _errorMessage(errorNum: 1403),
+      [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+    ]);
 
     test('LONG column decode raises an unsupported-type OracleException', () {
       expect(
-        () => decodeExecuteResponse(longColumnResponse(oraTypeLong),
-            isQuery: true),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-            .having((e) => e.message, 'message', contains('LONG'))),
+        () => decodeExecuteResponse(
+          longColumnResponse(oraTypeLong),
+          isQuery: true,
+        ),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+              .having((e) => e.message, 'message', contains('LONG')),
+        ),
       );
     });
 
-    test('LONG RAW column decode raises an unsupported-type OracleException',
-        () {
-      expect(
-        () => decodeExecuteResponse(longColumnResponse(oraTypeLongRaw),
-            isQuery: true),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
-      );
-    });
+    test(
+      'LONG RAW column decode raises an unsupported-type OracleException',
+      () {
+        expect(
+          () => decodeExecuteResponse(
+            longColumnResponse(oraTypeLongRaw),
+            isQuery: true,
+          ),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraUnsupportedType,
+            ),
+          ),
+        );
+      },
+    );
 
-    test('ttcStreamIsComplete still reaches the terminal past a LONG column',
-        () {
+    test('ttcStreamIsComplete still reaches the terminal past a LONG column', () {
       // The completion probe must NOT throw on an unsupported type — it decodes
       // leniently so it can locate the terminal STATUS. (The real decode pass
       // raises the error, asserted above.)
@@ -827,21 +963,33 @@ void main() {
         _errorMessage(errorNum: 0, ttcFieldVersion: 7),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
-      final r =
-          decodeExecuteResponse(payload, isQuery: false, ttcFieldVersion: 7);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        ttcFieldVersion: 7,
+      );
       expect(r.isSuccess, isTrue);
-      expect(r.rowsAffected, isNull,
-          reason: 'absent pre-12.2 row count must be null, not 0');
+      expect(
+        r.rowsAffected,
+        isNull,
+        reason: 'absent pre-12.2 row count must be null, not 0',
+      );
     });
 
     test('12.2 DML success still returns the decoded UB8 row count', () {
       final payload = _buildPayload([
         _errorMessage(
-            errorNum: 0, rowCount: 5, ttcFieldVersion: ttcCcapFieldVersion12_2),
+          errorNum: 0,
+          rowCount: 5,
+          ttcFieldVersion: ttcCcapFieldVersion12_2,
+        ),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
-      final r = decodeExecuteResponse(payload,
-          isQuery: false, ttcFieldVersion: ttcCcapFieldVersion12_2);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        ttcFieldVersion: ttcCcapFieldVersion12_2,
+      );
       expect(r.rowsAffected, equals(5));
     });
   });
@@ -890,8 +1038,13 @@ void main() {
             ),
           ],
         ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(6502))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(6502),
+          ),
+        ),
       );
     });
 
@@ -917,11 +1070,17 @@ void main() {
       // Scan for ROW_DATA marker (7). The value byte right after the marker
       // for a NULL/OUT bind must be 0.
       final rowDataIdx = bytes.indexOf(ttcMsgTypeRowData);
-      expect(rowDataIdx, greaterThan(0),
-          reason: 'ROW_DATA segment must be present for binds');
+      expect(
+        rowDataIdx,
+        greaterThan(0),
+        reason: 'ROW_DATA segment must be present for binds',
+      );
       // Byte after ROW_DATA marker is the length indicator for the first bind.
-      expect(bytes[rowDataIdx + 1], equals(0),
-          reason: 'OUT bind must serialize as null-indicator (length 0)');
+      expect(
+        bytes[rowDataIdx + 1],
+        equals(0),
+        reason: 'OUT bind must serialize as null-indicator (length 0)',
+      );
     });
   });
 
@@ -947,7 +1106,10 @@ void main() {
         isQuery: false,
         bindMetadata: const [
           BindMetadata(
-              oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+            oraType: oraTypeNumber,
+            maxSize: 22,
+            dir: BindDir.output,
+          ),
           BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
         ],
       );
@@ -961,11 +1123,7 @@ void main() {
     test('IO_VECTOR + ROW_DATA decodes a VARCHAR OUT bind', () {
       final payload = _buildPayload([
         _ioVector([16]),
-        [
-          ttcMsgTypeRowData,
-          ..._bytesWithLength('hello'.codeUnits),
-          ..._ub4(0),
-        ],
+        [ttcMsgTypeRowData, ..._bytesWithLength('hello'.codeUnits), ..._ub4(0)],
         _errorMessage(errorNum: 0),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
@@ -974,7 +1132,10 @@ void main() {
         isQuery: false,
         bindMetadata: const [
           BindMetadata(
-              oraType: oraTypeVarchar, maxSize: 100, dir: BindDir.output),
+            oraType: oraTypeVarchar,
+            maxSize: 100,
+            dir: BindDir.output,
+          ),
         ],
       );
       expect(r.outBindValues, equals(['hello']));
@@ -996,7 +1157,10 @@ void main() {
         isQuery: false,
         bindMetadata: const [
           BindMetadata(
-              oraType: oraTypeVarchar, maxSize: 100, dir: BindDir.output),
+            oraType: oraTypeVarchar,
+            maxSize: 100,
+            dir: BindDir.output,
+          ),
         ],
       );
       expect(r.outBindValues, equals([null]));
@@ -1026,9 +1190,13 @@ void main() {
       final rowDataIdx = bytes.indexOf(ttcMsgTypeRowData);
       expect(rowDataIdx, greaterThan(0));
       // Byte after marker is length=2, then the Oracle base-100 NUMBER bytes.
-      expect(bytes[rowDataIdx + 1], equals(2),
-          reason: 'IN OUT bind must serialize the input value, not a NULL '
-              'indicator');
+      expect(
+        bytes[rowDataIdx + 1],
+        equals(2),
+        reason:
+            'IN OUT bind must serialize the input value, not a NULL '
+            'indicator',
+      );
       expect(bytes[rowDataIdx + 2], equals(0xC1));
       expect(bytes[rowDataIdx + 3], equals(0x06));
     });
@@ -1057,8 +1225,7 @@ void main() {
       expect(bytes[rowDataIdx + 1], equals(0));
     });
 
-    test('IN OUT in non-PL/SQL statement throws OracleException',
-        () {
+    test('IN OUT in non-PL/SQL statement throws OracleException', () {
       expect(
         () => ExecuteRequest(
           sql: 'SELECT :v FROM dual',
@@ -1071,13 +1238,17 @@ void main() {
             ),
           ],
         ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(6502))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(6502),
+          ),
+        ),
       );
     });
 
-    test('IO_VECTOR with mixed OUT (16) and IN OUT (48) directions',
-        () {
+    test('IO_VECTOR with mixed OUT (16) and IN OUT (48) directions', () {
       // Server reports directions [OUT, IN, IN OUT] for three binds.
       // Both OUT and IN OUT must show up in outBindIndices, in SQL order,
       // and values are decoded in returned order.
@@ -1100,16 +1271,26 @@ void main() {
         isQuery: false,
         bindMetadata: const [
           BindMetadata(
-              oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+            oraType: oraTypeNumber,
+            maxSize: 22,
+            dir: BindDir.output,
+          ),
           BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
           BindMetadata(
-              oraType: oraTypeNumber, maxSize: 22, dir: BindDir.inputOutput),
+            oraType: oraTypeNumber,
+            maxSize: 22,
+            dir: BindDir.inputOutput,
+          ),
         ],
       );
       expect(r.isSuccess, isTrue);
-      expect(r.outBindIndices, equals([0, 2]),
-          reason: 'Both OUT (16) and IN OUT (48) directions surface as '
-              'outputs in SQL order');
+      expect(
+        r.outBindIndices,
+        equals([0, 2]),
+        reason:
+            'Both OUT (16) and IN OUT (48) directions surface as '
+            'outputs in SQL order',
+      );
       expect(r.outBindValues, equals([5, 6]));
     });
 
@@ -1129,7 +1310,10 @@ void main() {
         isQuery: false,
         bindMetadata: const [
           BindMetadata(
-              oraType: oraTypeVarchar, maxSize: 100, dir: BindDir.inputOutput),
+            oraType: oraTypeVarchar,
+            maxSize: 100,
+            dir: BindDir.inputOutput,
+          ),
         ],
       );
       expect(r.outBindIndices, equals([0]));
@@ -1176,8 +1360,13 @@ void main() {
             BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
           ],
         ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(oraProtocolError),
+          ),
+        ),
       );
     });
 
@@ -1198,10 +1387,15 @@ void main() {
             BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
           ],
         ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
-            .having(
-                (e) => e.message, 'message', contains('client declared IN'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+              .having(
+                (e) => e.message,
+                'message',
+                contains('client declared IN'),
+              ),
+        ),
       );
     });
 
@@ -1217,13 +1411,21 @@ void main() {
           isQuery: false,
           bindMetadata: const [
             BindMetadata(
-                oraType: oraTypeNumber, maxSize: 22, dir: BindDir.inputOutput),
+              oraType: oraTypeNumber,
+              maxSize: 22,
+              dir: BindDir.inputOutput,
+            ),
           ],
         ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
-            .having((e) => e.message, 'message',
-                contains('client declared inputOutput'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+              .having(
+                (e) => e.message,
+                'message',
+                contains('client declared inputOutput'),
+              ),
+        ),
       );
     });
 
@@ -1239,18 +1441,25 @@ void main() {
           isQuery: false,
           bindMetadata: const [
             BindMetadata(
-                oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+              oraType: oraTypeNumber,
+              maxSize: 22,
+              dir: BindDir.output,
+            ),
           ],
         ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
-            .having((e) => e.message, 'message',
-                contains('client declared output'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+              .having(
+                (e) => e.message,
+                'message',
+                contains('client declared output'),
+              ),
+        ),
       );
     });
 
-    test(
-        'all-null OUT-bind decode does not re-enable decoding on '
+    test('all-null OUT-bind decode does not re-enable decoding on '
         'subsequent ROW_DATA-style state transitions', () {
       // The double-decode guard used to use `outBindValues.isEmpty`. It now
       // uses an explicit `outBindsDecoded` flag, so the first decode is the
@@ -1308,9 +1517,11 @@ void main() {
       ]);
       expect(
         () => decodeExecuteResponse(payload, isQuery: false),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
-            .having((e) => e.message, 'message', contains('implausible'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+              .having((e) => e.message, 'message', contains('implausible')),
+        ),
       );
     });
 
@@ -1331,13 +1542,21 @@ void main() {
           isQuery: false,
           bindMetadata: const [
             BindMetadata(
-                oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+              oraType: oraTypeNumber,
+              maxSize: 22,
+              dir: BindDir.output,
+            ),
           ],
         ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
-            .having((e) => e.message, 'message',
-                contains('client declared output'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+              .having(
+                (e) => e.message,
+                'message',
+                contains('client declared output'),
+              ),
+        ),
       );
     });
 
@@ -1353,13 +1572,21 @@ void main() {
           isQuery: false,
           bindMetadata: const [
             BindMetadata(
-                oraType: oraTypeNumber, maxSize: 22, dir: BindDir.inputOutput),
+              oraType: oraTypeNumber,
+              maxSize: 22,
+              dir: BindDir.inputOutput,
+            ),
           ],
         ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
-            .having((e) => e.message, 'message',
-                contains('client declared inputOutput'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+              .having(
+                (e) => e.message,
+                'message',
+                contains('client declared inputOutput'),
+              ),
+        ),
       );
     });
 
@@ -1388,7 +1615,10 @@ void main() {
         isQuery: false,
         bindMetadata: const [
           BindMetadata(
-              oraType: oraTypeVarchar, maxSize: 100, dir: BindDir.output),
+            oraType: oraTypeVarchar,
+            maxSize: 100,
+            dir: BindDir.output,
+          ),
         ],
       );
       expect(r.outBindIndices, equals([0, 1]));
@@ -1440,11 +1670,18 @@ void main() {
       );
       expect(r.rows, hasLength(3));
       expect(r.rows[0], equals(['aa', 'b1']));
-      expect(r.rows[1], equals(['aa', 'b2']),
-          reason: 'duplicate bit copies column 0 from the previous row');
-      expect(r.rows[2], equals(['cc', 'b3']),
-          reason: 'the vector must be cleared after row 2 — row 3 ships '
-              'both columns on the wire');
+      expect(
+        r.rows[1],
+        equals(['aa', 'b2']),
+        reason: 'duplicate bit copies column 0 from the previous row',
+      );
+      expect(
+        r.rows[2],
+        equals(['cc', 'b3']),
+        reason:
+            'the vector must be cleared after row 2 — row 3 ships '
+            'both columns on the wire',
+      );
     });
 
     test('cross-round duplicate copies from previousRoundLastRow', () {
@@ -1464,8 +1701,11 @@ void main() {
         expectedColumns: cols,
         previousRoundLastRow: const <Object?>['prev0', 'prev1'],
       );
-      expect(r.rows.single, equals(['prev0', 'x1']),
-          reason: 'column 0 must be copied from the previous round\'s row');
+      expect(
+        r.rows.single,
+        equals(['prev0', 'x1']),
+        reason: 'column 0 must be copied from the previous round\'s row',
+      );
     });
 
     test('cross-round duplicate with no prior row anywhere is a protocol '
@@ -1483,10 +1723,13 @@ void main() {
           isQuery: true,
           expectedColumns: cols,
         ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
-            .having((e) => e.message, 'message', contains('Duplicate'))),
-        reason: 'silently decoding a duplicate column from the wire would '
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+              .having((e) => e.message, 'message', contains('Duplicate')),
+        ),
+        reason:
+            'silently decoding a duplicate column from the wire would '
             'shear every later column — must fail loud instead',
       );
     });
@@ -1510,17 +1753,22 @@ void main() {
           expectedColumns: cols,
           previousRoundLastRow: const <Object?>['prev0'],
         ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
-            .having((e) => e.message, 'message',
-                contains('prior-row length mismatch'))),
-        reason: 'a RangeError escaping the decoder would lose all protocol '
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(oraProtocolError))
+              .having(
+                (e) => e.message,
+                'message',
+                contains('prior-row length mismatch'),
+              ),
+        ),
+        reason:
+            'a RangeError escaping the decoder would lose all protocol '
             'context — fail loud with an OracleException instead',
       );
     });
 
-    test('completion probe stays byte-accurate past a first-row duplicate',
-        () {
+    test('completion probe stays byte-accurate past a first-row duplicate', () {
       // ttcStreamIsComplete never receives a previous-round row; it must
       // skip the duplicate column WITHOUT consuming bytes and still locate
       // the terminal STATUS.
@@ -1551,9 +1799,15 @@ void main() {
       final r = ExecuteResponse(isSuccess: true);
       expect(() => r.rows.add(<Object?>[]), throwsUnsupportedError);
       expect(
-          () => r.columnMetadata.add(const ColumnMetadata(
-              name: 'X', oracleType: oraTypeVarchar, maxLength: 1)),
-          throwsUnsupportedError);
+        () => r.columnMetadata.add(
+          const ColumnMetadata(
+            name: 'X',
+            oracleType: oraTypeVarchar,
+            maxLength: 1,
+          ),
+        ),
+        throwsUnsupportedError,
+      );
       expect(() => r.outBindValues.add(null), throwsUnsupportedError);
       expect(() => r.outBindIndices.add(0), throwsUnsupportedError);
     });
@@ -1564,20 +1818,18 @@ void main() {
   // length-prefixed bytes.
   group('CLOB locator decode', () {
     final clobColumn = [
-      _columnInfo(
-          name: 'DOC', oraType: oraTypeClob, maxSize: 4000, csfrm: 1),
+      _columnInfo(name: 'DOC', oraType: oraTypeClob, maxSize: 4000, csfrm: 1),
     ];
     final locatorBytes = List<int>.generate(40, (i) => 0xA0 + (i % 16));
 
     List<int> clobValue({int length = 11, int chunkSize = 8060}) => [
-          ..._ub4(40), // locator length (> 0 ⇒ non-null)
-          ..._ub8(length), // LOB length in chars
-          ..._ub4(chunkSize), // chunk size
-          ..._bytesWithLength(locatorBytes),
-        ];
+      ..._ub4(40), // locator length (> 0 ⇒ non-null)
+      ..._ub8(length), // LOB length in chars
+      ..._ub4(chunkSize), // chunk size
+      ..._bytesWithLength(locatorBytes),
+    ];
 
-    test('CLOB column decodes to a LobLocator, not null and not a String',
-        () {
+    test('CLOB column decodes to a LobLocator, not null and not a String', () {
       final payload = _buildPayload([
         _describeInfo(clobColumn),
         _rowHeader(),
@@ -1695,8 +1947,7 @@ void main() {
         payload,
         isQuery: false,
         bindMetadata: const [
-          BindMetadata(
-              oraType: oraTypeBlob, maxSize: 100, dir: BindDir.output),
+          BindMetadata(oraType: oraTypeBlob, maxSize: 100, dir: BindDir.output),
         ],
       );
       expect(r.outBindIndices, equals([0]));
@@ -1723,9 +1974,11 @@ void main() {
       ]);
       expect(
         () => decodeExecuteResponse(payload, isQuery: true),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-            .having((e) => e.message, 'message', contains('BFILE'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+              .having((e) => e.message, 'message', contains('BFILE')),
+        ),
       );
       // The lenient completion probe consumes the identical BFILE bytes and
       // still finds the terminal STATUS message.
@@ -1735,8 +1988,7 @@ void main() {
     test('NCLOB column (csfrm NCHAR) fails loud in the strict pass', () {
       final payload = _buildPayload([
         _describeInfo([
-          _columnInfo(
-              name: 'N', oraType: oraTypeClob, maxSize: 4000, csfrm: 2),
+          _columnInfo(name: 'N', oraType: oraTypeClob, maxSize: 4000, csfrm: 2),
         ]),
         _rowHeader(),
         [ttcMsgTypeRowData, ...clobValue()],
@@ -1745,13 +1997,14 @@ void main() {
       ]);
       expect(
         () => decodeExecuteResponse(payload, isQuery: true),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-            .having((e) => e.message, 'message', contains('NCLOB'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+              .having((e) => e.message, 'message', contains('NCLOB')),
+        ),
       );
       expect(ttcStreamIsComplete(payload), isTrue);
     });
-
   });
 
   // JSON (type 119) decode: the wire shape is the LOB-prefetch form with the
@@ -1779,7 +2032,9 @@ void main() {
         'ok': true,
         'missing': null,
         'tags': <Object?>['a', 'b'],
-        'nested': <String, Object?>{'deep': <Object?>[1, null]},
+        'nested': <String, Object?>{
+          'deep': <Object?>[1, null],
+        },
       };
       final payload = _buildPayload([
         _describeInfo([
@@ -1833,44 +2088,50 @@ void main() {
       expect(ttcStreamIsComplete(payload), isTrue);
     });
 
-    test('unsupported OSON scalar node still fails loud in the strict pass',
-        () {
-      // Scalar OSON document whose node is BINARY_DOUBLE (0x36) — outside
-      // the supported standard-JSON scope.
-      final badOson = [
-        0xff, 0x4a, 0x5a, 0x01, // magic + version
-        0x00, 0x12, // flags: INLINE_LEAF | IS_SCALAR
-        0x00, 0x09, // tree segment size
-        0x36, 1, 2, 3, 4, 5, 6, 7, 8, // BINARY_DOUBLE node
-      ];
-      final payload = _buildPayload([
-        _describeInfo([
-          _columnInfo(name: 'DOC', oraType: oraTypeJson, maxSize: 0),
-        ]),
-        _rowHeader(),
-        [
-          ttcMsgTypeRowData,
-          ..._ub4(40),
-          ..._ub8(badOson.length),
-          ..._ub4(8132),
-          ..._bytesWithLength(badOson),
-          ..._bytesWithLength(List.filled(40, 0xAB)),
-        ],
-        _errorMessage(errorNum: 1403),
-        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-      ]);
-      expect(
-        () => decodeExecuteResponse(payload, isQuery: true),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-            .having((e) => e.message, 'message', contains('BINARY_DOUBLE'))),
-      );
-      // The lenient probe consumes the bytes without decoding the document.
-      expect(ttcStreamIsComplete(payload), isTrue);
-    });
+    test(
+      'unsupported OSON scalar node still fails loud in the strict pass',
+      () {
+        // Scalar OSON document whose node is BINARY_DOUBLE (0x36) — outside
+        // the supported standard-JSON scope.
+        final badOson = [
+          0xff, 0x4a, 0x5a, 0x01, // magic + version
+          0x00, 0x12, // flags: INLINE_LEAF | IS_SCALAR
+          0x00, 0x09, // tree segment size
+          0x36, 1, 2, 3, 4, 5, 6, 7, 8, // BINARY_DOUBLE node
+        ];
+        final payload = _buildPayload([
+          _describeInfo([
+            _columnInfo(name: 'DOC', oraType: oraTypeJson, maxSize: 0),
+          ]),
+          _rowHeader(),
+          [
+            ttcMsgTypeRowData,
+            ..._ub4(40),
+            ..._ub8(badOson.length),
+            ..._ub4(8132),
+            ..._bytesWithLength(badOson),
+            ..._bytesWithLength(List.filled(40, 0xAB)),
+          ],
+          _errorMessage(errorNum: 1403),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        expect(
+          () => decodeExecuteResponse(payload, isQuery: true),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+                .having((e) => e.message, 'message', contains('BINARY_DOUBLE')),
+          ),
+        );
+        // The lenient probe consumes the bytes without decoding the document.
+        expect(ttcStreamIsComplete(payload), isTrue);
+      },
+    );
 
     test('JSON OUT bind decodes through outBinds', () {
-      final doc = <String, Object?>{'result': <Object?>[1, 2, 3]};
+      final doc = <String, Object?>{
+        'result': <Object?>[1, 2, 3],
+      };
       final payload = _buildPayload([
         _ioVector([16]),
         [
@@ -1886,7 +2147,10 @@ void main() {
         isQuery: false,
         bindMetadata: const [
           BindMetadata(
-              oraType: oraTypeJson, maxSize: 4000, dir: BindDir.output),
+            oraType: oraTypeJson,
+            maxSize: 4000,
+            dir: BindDir.output,
+          ),
         ],
       );
       expect(r.outBindIndices, equals([0]));
@@ -1905,75 +2169,92 @@ void main() {
         isQuery: false,
         bindMetadata: const [
           BindMetadata(
-              oraType: oraTypeJson, maxSize: 4000, dir: BindDir.output),
+            oraType: oraTypeJson,
+            maxSize: 4000,
+            dir: BindDir.output,
+          ),
         ],
       );
       expect(r.outBindValues.single, isNull);
     });
 
-    test('JSON OUT bind enforces maxSize against returned OSON byte length',
-        () {
-      final doc = <String, Object?>{'big': 'x' * 100};
-      final osonLength = encodeOson(doc).length;
-      final payload = _buildPayload([
-        _ioVector([16]),
-        [ttcMsgTypeRowData, ...jsonValue(doc), ..._ub4(0)],
-        _errorMessage(errorNum: 0),
-        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-      ]);
-      expect(
-        () => decodeExecuteResponse(
-          payload,
-          isQuery: false,
-          bindMetadata: [
-            BindMetadata(
+    test(
+      'JSON OUT bind enforces maxSize against returned OSON byte length',
+      () {
+        final doc = <String, Object?>{'big': 'x' * 100};
+        final osonLength = encodeOson(doc).length;
+        final payload = _buildPayload([
+          _ioVector([16]),
+          [ttcMsgTypeRowData, ...jsonValue(doc), ..._ub4(0)],
+          _errorMessage(errorNum: 0),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        expect(
+          () => decodeExecuteResponse(
+            payload,
+            isQuery: false,
+            bindMetadata: [
+              BindMetadata(
                 oraType: oraTypeJson,
                 maxSize: osonLength - 1, // one byte too small — fail loud
-                dir: BindDir.output),
-          ],
-        ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.message, 'message', contains('maxSize'))),
-      );
-    });
+                dir: BindDir.output,
+              ),
+            ],
+          ),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              contains('maxSize'),
+            ),
+          ),
+        );
+      },
+    );
   });
 
   group('JSON bind encode', () {
-    test('JSON bind metadata: type 119, prefetch flag, 32MB sizes, csfrm 0',
-        () {
-      final req = ExecuteRequest(
-        sql: 'BEGIN p(:1); END;',
-        isQuery: false,
-        isPlSql: true,
-        bindValues: [
-          BindVariable(
+    test(
+      'JSON bind metadata: type 119, prefetch flag, 32MB sizes, csfrm 0',
+      () {
+        final req = ExecuteRequest(
+          sql: 'BEGIN p(:1); END;',
+          isQuery: false,
+          isPlSql: true,
+          bindValues: [
+            BindVariable(
               value: null,
               oraType: oraTypeJson,
               maxSize: 4000,
-              dir: BindDir.output),
-        ],
-      );
-      final bytes = req.toBytes();
-      // Reference parity (node-oracledb writeColumnMetadata, DB_TYPE_JSON):
-      // contFlag = TNS_LOB_PREFETCH_FLAG and maxSize = lobPrefetchLength =
-      // TNS_JSON_MAX_LENGTH (32 MB) regardless of the user's maxSize, which
-      // only guards the materialized value client-side. No charset (csfrm 0)
-      // and NO locator buffer size — JSON is not a locator bind.
-      final expectedMetadata = [
-        oraTypeJson, ttcBindUseIndicators, 0, 0,
-        4, 0x02, 0x00, 0x00, 0x00, // UB4 maxSize = 33554432 (32 MB)
-        0, // UB4 max num elements
-        4, 0x02, 0x00, 0x00, 0x00, // UB4 contFlag = TNS_LOB_PREFETCH_FLAG
-        0, // UB4 OID
-        0, // UB2 version
-        0, // UB2 charset = 0 (no charset form)
-        0, // csfrm = 0
-        4, 0x02, 0x00, 0x00, 0x00, // UB4 lob prefetch length = 32 MB
-        0, // UB4 oaccolid
-      ];
-      expect(_indexOfSub(bytes, expectedMetadata), greaterThanOrEqualTo(0),
-          reason: 'JSON bind metadata block not found in encoded request');
-    });
+              dir: BindDir.output,
+            ),
+          ],
+        );
+        final bytes = req.toBytes();
+        // Reference parity (node-oracledb writeColumnMetadata, DB_TYPE_JSON):
+        // contFlag = TNS_LOB_PREFETCH_FLAG and maxSize = lobPrefetchLength =
+        // TNS_JSON_MAX_LENGTH (32 MB) regardless of the user's maxSize, which
+        // only guards the materialized value client-side. No charset (csfrm 0)
+        // and NO locator buffer size — JSON is not a locator bind.
+        final expectedMetadata = [
+          oraTypeJson, ttcBindUseIndicators, 0, 0,
+          4, 0x02, 0x00, 0x00, 0x00, // UB4 maxSize = 33554432 (32 MB)
+          0, // UB4 max num elements
+          4, 0x02, 0x00, 0x00, 0x00, // UB4 contFlag = TNS_LOB_PREFETCH_FLAG
+          0, // UB4 OID
+          0, // UB2 version
+          0, // UB2 charset = 0 (no charset form)
+          0, // csfrm = 0
+          4, 0x02, 0x00, 0x00, 0x00, // UB4 lob prefetch length = 32 MB
+          0, // UB4 oaccolid
+        ];
+        expect(
+          _indexOfSub(bytes, expectedMetadata),
+          greaterThanOrEqualTo(0),
+          reason: 'JSON bind metadata block not found in encoded request',
+        );
+      },
+    );
 
     test('JSON bind value writes QLocator + length-prefixed OSON bytes', () {
       final doc = <String, Object?>{'a': 1};
@@ -1996,12 +2277,14 @@ void main() {
         ...List.filled(22, 0), // unused trailer fields
         ..._bytesWithLength(oson),
       ];
-      expect(_indexOfSub(bytes, expectedValue), greaterThanOrEqualTo(0),
-          reason: 'JSON QLocator + OSON value bytes not found');
+      expect(
+        _indexOfSub(bytes, expectedValue),
+        greaterThanOrEqualTo(0),
+        reason: 'JSON QLocator + OSON value bytes not found',
+      );
     });
 
-    test('JSON bind QLocator payload length is big-endian across all 8 bytes',
-        () {
+    test('JSON bind QLocator payload length is big-endian across all 8 bytes', () {
       // The small-doc fixtures above keep the high 7 length bytes zero, so they
       // cannot tell a big-endian writer from a little-endian one for the
       // multi-byte case. Force OSON > 255 bytes (a long string member) so the
@@ -2009,8 +2292,11 @@ void main() {
       // explicitly — a byte-swapped writer would now fail.
       final doc = <String, Object?>{'s': 'x' * 400};
       final oson = encodeOson(doc);
-      expect(oson.length, greaterThan(255),
-          reason: 'fixture must exercise the multi-byte length field');
+      expect(
+        oson.length,
+        greaterThan(255),
+        reason: 'fixture must exercise the multi-byte length field',
+      );
       final req = ExecuteRequest(
         sql: 'INSERT INTO t VALUES (:1)',
         isQuery: false,
@@ -2020,59 +2306,84 @@ void main() {
       final lengthField = _u64be(oson.length);
       // The high bytes are zero but byte 6 (second-least-significant) is now
       // non-zero, so order matters: confirm the exact BE field is present.
-      expect(lengthField[6], isNot(0),
-          reason: 'length must span >1 byte to test endianness');
+      expect(
+        lengthField[6],
+        isNot(0),
+        reason: 'length must span >1 byte to test endianness',
+      );
       // Assert only the 40-byte QLocator (which carries the payload-length
       // field); the trailing OSON bytes use chunked length prefixing above 255
       // bytes and are covered by the round-trip tests, not this endianness pin.
       final expectedLocator = [
-        1, 40,
+        1,
         40,
-        0x00, 0x26, 0x00, 0x04, 0x61, 0x08, 0x00, 0x00, 0x00, 0x01,
+        40,
+        0x00,
+        0x26,
+        0x00,
+        0x04,
+        0x61,
+        0x08,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
         ...lengthField,
         ...List.filled(22, 0),
       ];
-      expect(_indexOfSub(bytes, expectedLocator), greaterThanOrEqualTo(0),
-          reason: 'big-endian UInt64BE payload length not found for >255-byte '
-              'OSON');
+      expect(
+        _indexOfSub(bytes, expectedLocator),
+        greaterThanOrEqualTo(0),
+        reason:
+            'big-endian UInt64BE payload length not found for >255-byte '
+            'OSON',
+      );
     });
 
-    test('JSON null bind writes an OSON null payload, not a null indicator',
-        () {
-      final req = ExecuteRequest(
-        sql: 'BEGIN p(:1); END;',
-        isQuery: false,
-        isPlSql: true,
-        bindValues: [
-          BindVariable(
+    test(
+      'JSON null bind writes an OSON null payload, not a null indicator',
+      () {
+        final req = ExecuteRequest(
+          sql: 'BEGIN p(:1); END;',
+          isQuery: false,
+          isPlSql: true,
+          bindValues: [
+            BindVariable(
               value: null,
               oraType: oraTypeJson,
               maxSize: 4000,
-              dir: BindDir.inputOutput),
-        ],
-      );
-      final bytes = req.toBytes();
-      // node-oracledb excludes JSON from the null-indicator shortcut: a null
-      // JSON bind ships writeOson(null) — QLocator + OSON scalar null.
-      final osonNull = encodeOson(null);
-      final expectedTail = [
-        1, 40, // UB4 QLocator length — present even for null
-        40,
-        0x00, 0x26, 0x00, 0x04, 0x61, 0x08, 0x00, 0x00, 0x00, 0x01,
-        ..._u64be(osonNull.length), // UInt64BE payload length (full 8-byte BE)
-        ...List.filled(22, 0),
-        ..._bytesWithLength(osonNull),
-      ];
-      expect(_indexOfSub(bytes, expectedTail), greaterThanOrEqualTo(0),
-          reason: 'null JSON bind must ship an OSON null payload');
-    });
+              dir: BindDir.inputOutput,
+            ),
+          ],
+        );
+        final bytes = req.toBytes();
+        // node-oracledb excludes JSON from the null-indicator shortcut: a null
+        // JSON bind ships writeOson(null) — QLocator + OSON scalar null.
+        final osonNull = encodeOson(null);
+        final expectedTail = [
+          1, 40, // UB4 QLocator length — present even for null
+          40,
+          0x00, 0x26, 0x00, 0x04, 0x61, 0x08, 0x00, 0x00, 0x00, 0x01,
+          ..._u64be(
+            osonNull.length,
+          ), // UInt64BE payload length (full 8-byte BE)
+          ...List.filled(22, 0),
+          ..._bytesWithLength(osonNull),
+        ];
+        expect(
+          _indexOfSub(bytes, expectedTail),
+          greaterThanOrEqualTo(0),
+          reason: 'null JSON bind must ship an OSON null payload',
+        );
+      },
+    );
 
-    test('Map and List bind values infer oraTypeJson; Uint8List stays RAW',
-        () {
-      expect(BindVariable(value: <String, Object?>{'a': 1}).oraType,
-          equals(oraTypeJson));
+    test('Map and List bind values infer oraTypeJson; Uint8List stays RAW', () {
       expect(
-          BindVariable(value: <Object?>[1, 2]).oraType, equals(oraTypeJson));
+        BindVariable(value: <String, Object?>{'a': 1}).oraType,
+        equals(oraTypeJson),
+      );
+      expect(BindVariable(value: <Object?>[1, 2]).oraType, equals(oraTypeJson));
       // Regression traps: bytes stay RAW, strings stay VARCHAR.
       expect(BindVariable(value: Uint8List(3)).oraType, equals(oraTypeRaw));
       expect(BindVariable(value: '{"a":1}').oraType, equals(oraTypeVarchar));
@@ -2108,50 +2419,60 @@ void main() {
       final jsonIdx = _indexOfSub(bytes, [..._bytesWithLength(oson)]);
       final shortIdx = _indexOfSub(bytes, [3, 0x61, 0x62, 0x63]);
       expect(jsonIdx, greaterThanOrEqualTo(0));
-      expect(shortIdx, greaterThan(jsonIdx),
-          reason: 'JSON (bind :1) must be written before abc (bind :2) — '
-              'in bind order, not deferred');
+      expect(
+        shortIdx,
+        greaterThan(jsonIdx),
+        reason:
+            'JSON (bind :1) must be written before abc (bind :2) — '
+            'in bind order, not deferred',
+      );
     });
   });
 
   // CLOB bind encode: locator-sized metadata with the LOB prefetch
   // cont-flag, locator value writes, and SQL long-data ordering.
   group('CLOB bind encode', () {
-    test('CLOB bind metadata: type 112, prefetch flag, locator buffer size',
-        () {
-      final req = ExecuteRequest(
-        sql: 'BEGIN p(:1); END;',
-        isQuery: false,
-        isPlSql: true,
-        bindValues: [
-          BindVariable(
+    test(
+      'CLOB bind metadata: type 112, prefetch flag, locator buffer size',
+      () {
+        final req = ExecuteRequest(
+          sql: 'BEGIN p(:1); END;',
+          isQuery: false,
+          isPlSql: true,
+          bindValues: [
+            BindVariable(
               value: null,
               oraType: oraTypeClob,
               maxSize: 100000,
-              dir: BindDir.output),
-        ],
-      );
-      final bytes = req.toBytes();
-      // Expected metadata block: oraType(112), flags(1), precision(0),
-      // scale(0), UB4 maxSize=112 (locator buffer, NOT the user's 100000),
-      // UB4 maxNumElements=0, UB4 contFlag=0x2000000, UB4 OID=0,
-      // UB2 version=0, UB2 charset=873, csfrm=1, UB4 lobPrefetch=0,
-      // UB4 oaccolid=0.
-      final expectedMetadata = [
-        oraTypeClob, ttcBindUseIndicators, 0, 0,
-        1, 112, // UB4 maxSize = 112
-        0, // UB4 max num elements
-        4, 0x02, 0x00, 0x00, 0x00, // UB4 contFlag = TNS_LOB_PREFETCH_FLAG
-        0, // UB4 OID
-        0, // UB2 version
-        2, 0x03, 0x69, // UB2 charset = 873
-        1, // csfrm implicit
-        0, // UB4 lob prefetch length
-        0, // UB4 oaccolid
-      ];
-      expect(_indexOfSub(bytes, expectedMetadata), greaterThanOrEqualTo(0),
-          reason: 'CLOB bind metadata block not found in encoded request');
-    });
+              dir: BindDir.output,
+            ),
+          ],
+        );
+        final bytes = req.toBytes();
+        // Expected metadata block: oraType(112), flags(1), precision(0),
+        // scale(0), UB4 maxSize=112 (locator buffer, NOT the user's 100000),
+        // UB4 maxNumElements=0, UB4 contFlag=0x2000000, UB4 OID=0,
+        // UB2 version=0, UB2 charset=873, csfrm=1, UB4 lobPrefetch=0,
+        // UB4 oaccolid=0.
+        final expectedMetadata = [
+          oraTypeClob, ttcBindUseIndicators, 0, 0,
+          1, 112, // UB4 maxSize = 112
+          0, // UB4 max num elements
+          4, 0x02, 0x00, 0x00, 0x00, // UB4 contFlag = TNS_LOB_PREFETCH_FLAG
+          0, // UB4 OID
+          0, // UB2 version
+          2, 0x03, 0x69, // UB2 charset = 873
+          1, // csfrm implicit
+          0, // UB4 lob prefetch length
+          0, // UB4 oaccolid
+        ];
+        expect(
+          _indexOfSub(bytes, expectedMetadata),
+          greaterThanOrEqualTo(0),
+          reason: 'CLOB bind metadata block not found in encoded request',
+        );
+      },
+    );
 
     test('CLOB bind value writes UB4 locator length + locator bytes', () {
       final locator = Uint8List.fromList(List.filled(40, 0xCD));
@@ -2162,10 +2483,11 @@ void main() {
         bindValues: [
           BindVariable(
             value: LobLocator(
-                locator: locator,
-                oracleType: oraTypeClob,
-                length: 3,
-                chunkSize: 0),
+              locator: locator,
+              oracleType: oraTypeClob,
+              length: 3,
+              chunkSize: 0,
+            ),
             oraType: oraTypeClob,
             dir: BindDir.input,
           ),
@@ -2176,32 +2498,39 @@ void main() {
         1, 40, // UB4 locator length
         40, ...locator, // bytes-with-length locator
       ];
-      expect(_indexOfSub(bytes, expectedValue), greaterThanOrEqualTo(0),
-          reason: 'locator bind value bytes not found in encoded request');
+      expect(
+        _indexOfSub(bytes, expectedValue),
+        greaterThanOrEqualTo(0),
+        reason: 'locator bind value bytes not found in encoded request',
+      );
     });
 
-    test('a raw String under a CLOB bind type fails loud (internal guard)',
-        () {
+    test('a raw String under a CLOB bind type fails loud (internal guard)', () {
       final req = ExecuteRequest(
         sql: 'BEGIN p(:1); END;',
         isQuery: false,
         isPlSql: true,
         bindValues: [
           BindVariable(
-              value: 'not converted',
-              oraType: oraTypeClob,
-              dir: BindDir.input),
+            value: 'not converted',
+            oraType: oraTypeClob,
+            dir: BindDir.input,
+          ),
         ],
       );
       expect(
         req.toBytes,
-        throwsA(isA<OracleException>().having(
-            (e) => e.message, 'message', contains('LOB locator'))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('LOB locator'),
+          ),
+        ),
       );
     });
 
-    test('SQL DML writes >32767-byte string values after all other binds',
-        () {
+    test('SQL DML writes >32767-byte string values after all other binds', () {
       final long = 'X' * 40000;
       final req = ExecuteRequest(
         sql: 'INSERT INTO t VALUES (:1, :2)',
@@ -2212,15 +2541,24 @@ void main() {
       // Deferred ordering: even though the long string is bind :1, its bytes
       // are written last — the message ends with the chunked-encoding
       // terminator (UB4 0) right after the 'X' run, not with 'abc'.
-      expect(bytes.last, equals(0),
-          reason: 'message must end with the long chunk terminator');
-      expect(bytes[bytes.length - 2], equals(0x58),
-          reason: 'the long X-run must be the final value written');
+      expect(
+        bytes.last,
+        equals(0),
+        reason: 'message must end with the long chunk terminator',
+      );
+      expect(
+        bytes[bytes.length - 2],
+        equals(0x58),
+        reason: 'the long X-run must be the final value written',
+      );
       final shortIdx = _indexOfSub(bytes, [3, 0x61, 0x62, 0x63]);
       final chunkIdx = _indexOfSub(bytes, [0xFE, 2, 0x9C, 0x40]);
       expect(shortIdx, greaterThanOrEqualTo(0));
-      expect(chunkIdx, greaterThan(shortIdx),
-          reason: 'long value must be written after the short value');
+      expect(
+        chunkIdx,
+        greaterThan(shortIdx),
+        reason: 'long value must be written after the short value',
+      );
     });
 
     test('PL/SQL keeps bind-order value writes (no long-data deferral)', () {
@@ -2234,49 +2572,57 @@ void main() {
       final bytes = req.toBytes();
       // In-place ordering: the message ends with the 'abc' value bytes.
       expect(
-          bytes.sublist(bytes.length - 4), equals([3, 0x61, 0x62, 0x63]),
-          reason: 'PL/SQL writes values in bind order — abc is last');
+        bytes.sublist(bytes.length - 4),
+        equals([3, 0x61, 0x62, 0x63]),
+        reason: 'PL/SQL writes values in bind order — abc is last',
+      );
     });
   });
 
   // BLOB bind encode: locator-sized metadata with the LOB prefetch
   // cont-flag, no character set form, and locator value writes.
   group('BLOB bind encode', () {
-    test('BLOB bind metadata: type 113, prefetch flag, locator buffer size',
-        () {
-      final req = ExecuteRequest(
-        sql: 'BEGIN p(:1); END;',
-        isQuery: false,
-        isPlSql: true,
-        bindValues: [
-          BindVariable(
+    test(
+      'BLOB bind metadata: type 113, prefetch flag, locator buffer size',
+      () {
+        final req = ExecuteRequest(
+          sql: 'BEGIN p(:1); END;',
+          isQuery: false,
+          isPlSql: true,
+          bindValues: [
+            BindVariable(
               value: null,
               oraType: oraTypeBlob,
               maxSize: 100000,
-              dir: BindDir.output),
-        ],
-      );
-      final bytes = req.toBytes();
-      // Expected metadata block: oraType(113), flags(1), precision(0),
-      // scale(0), UB4 maxSize=112 (locator buffer, NOT the user's 100000),
-      // UB4 maxNumElements=0, UB4 contFlag=0x2000000, UB4 OID=0,
-      // UB2 version=0, UB2 charset=0 (BLOB has no charset), csfrm=0,
-      // UB4 lobPrefetch=0, UB4 oaccolid=0.
-      final expectedMetadata = [
-        oraTypeBlob, ttcBindUseIndicators, 0, 0,
-        1, 112, // UB4 maxSize = 112
-        0, // UB4 max num elements
-        4, 0x02, 0x00, 0x00, 0x00, // UB4 contFlag = TNS_LOB_PREFETCH_FLAG
-        0, // UB4 OID
-        0, // UB2 version
-        0, // UB2 charset = 0 (binary)
-        0, // csfrm = 0 (no character set form)
-        0, // UB4 lob prefetch length
-        0, // UB4 oaccolid
-      ];
-      expect(_indexOfSub(bytes, expectedMetadata), greaterThanOrEqualTo(0),
-          reason: 'BLOB bind metadata block not found in encoded request');
-    });
+              dir: BindDir.output,
+            ),
+          ],
+        );
+        final bytes = req.toBytes();
+        // Expected metadata block: oraType(113), flags(1), precision(0),
+        // scale(0), UB4 maxSize=112 (locator buffer, NOT the user's 100000),
+        // UB4 maxNumElements=0, UB4 contFlag=0x2000000, UB4 OID=0,
+        // UB2 version=0, UB2 charset=0 (BLOB has no charset), csfrm=0,
+        // UB4 lobPrefetch=0, UB4 oaccolid=0.
+        final expectedMetadata = [
+          oraTypeBlob, ttcBindUseIndicators, 0, 0,
+          1, 112, // UB4 maxSize = 112
+          0, // UB4 max num elements
+          4, 0x02, 0x00, 0x00, 0x00, // UB4 contFlag = TNS_LOB_PREFETCH_FLAG
+          0, // UB4 OID
+          0, // UB2 version
+          0, // UB2 charset = 0 (binary)
+          0, // csfrm = 0 (no character set form)
+          0, // UB4 lob prefetch length
+          0, // UB4 oaccolid
+        ];
+        expect(
+          _indexOfSub(bytes, expectedMetadata),
+          greaterThanOrEqualTo(0),
+          reason: 'BLOB bind metadata block not found in encoded request',
+        );
+      },
+    );
 
     test('BLOB bind value writes UB4 locator length + locator bytes', () {
       final locator = Uint8List.fromList(List.filled(40, 0xB7));
@@ -2287,10 +2633,11 @@ void main() {
         bindValues: [
           BindVariable(
             value: LobLocator(
-                locator: locator,
-                oracleType: oraTypeBlob,
-                length: 5,
-                chunkSize: 0),
+              locator: locator,
+              oracleType: oraTypeBlob,
+              length: 5,
+              chunkSize: 0,
+            ),
             oraType: oraTypeBlob,
             dir: BindDir.input,
           ),
@@ -2301,8 +2648,11 @@ void main() {
         1, 40, // UB4 locator length
         40, ...locator, // bytes-with-length locator
       ];
-      expect(_indexOfSub(bytes, expectedValue), greaterThanOrEqualTo(0),
-          reason: 'locator bind value bytes not found in encoded request');
+      expect(
+        _indexOfSub(bytes, expectedValue),
+        greaterThanOrEqualTo(0),
+        reason: 'locator bind value bytes not found in encoded request',
+      );
     });
 
     test('raw Uint8List reaching the BLOB encoder is an internal error', () {
@@ -2312,23 +2662,35 @@ void main() {
         isPlSql: true,
         bindValues: [
           BindVariable(
-              value: Uint8List.fromList([1, 2, 3]),
-              oraType: oraTypeBlob,
-              dir: BindDir.input),
+            value: Uint8List.fromList([1, 2, 3]),
+            oraType: oraTypeBlob,
+            dir: BindDir.input,
+          ),
         ],
       );
       expect(
         req.toBytes,
-        throwsA(isA<OracleException>().having(
-            (e) => e.message, 'message', contains('LOB locator'))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('LOB locator'),
+          ),
+        ),
       );
     });
 
     test('BLOB define block carries the prefetch flag and locator size', () {
       const blobCol = ColumnMetadata(
-          name: 'B', oracleType: oraTypeBlob, maxLength: 4000);
+        name: 'B',
+        oracleType: oraTypeBlob,
+        maxLength: 4000,
+      );
       const numberCol = ColumnMetadata(
-          name: 'ID', oracleType: oraTypeNumber, maxLength: 0);
+        name: 'ID',
+        oracleType: oraTypeNumber,
+        maxLength: 0,
+      );
       final req = ExecuteRequest(
         sql: 'SELECT id, b FROM t',
         isQuery: true,
@@ -2351,8 +2713,11 @@ void main() {
         0, // prefetch length
         0, // oaccolid
       ];
-      expect(_indexOfSub(bytes, blobDefine), greaterThanOrEqualTo(0),
-          reason: 'BLOB define block not found in encoded request');
+      expect(
+        _indexOfSub(bytes, blobDefine),
+        greaterThanOrEqualTo(0),
+        reason: 'BLOB define block not found in encoded request',
+      );
     });
   });
 
@@ -2370,10 +2735,7 @@ void main() {
       final bytes = [0x00, 0xDE, 0xAD, 0xFF, 0x00];
       final payload = _buildPayload([
         _rowHeader(),
-        [
-          ttcMsgTypeRowData,
-          ..._bytesWithLength(bytes),
-        ],
+        [ttcMsgTypeRowData, ..._bytesWithLength(bytes)],
         _errorMessage(errorNum: 1403),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
@@ -2415,9 +2777,10 @@ void main() {
         isQuery: false,
         bindValues: [
           BindVariable(
-              value: Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]),
-              oraType: oraTypeRaw,
-              dir: BindDir.input),
+            value: Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]),
+            oraType: oraTypeRaw,
+            dir: BindDir.input,
+          ),
         ],
       );
       final bytes = req.toBytes();
@@ -2438,8 +2801,11 @@ void main() {
         0, // UB4 lob prefetch length
         0, // UB4 oaccolid
       ];
-      expect(_indexOfSub(bytes, expectedMetadata), greaterThanOrEqualTo(0),
-          reason: 'RAW bind metadata block not found in encoded request');
+      expect(
+        _indexOfSub(bytes, expectedMetadata),
+        greaterThanOrEqualTo(0),
+        reason: 'RAW bind metadata block not found in encoded request',
+      );
     });
 
     test('RAW bind value encodes as length-prefixed bytes (no locator)', () {
@@ -2448,20 +2814,27 @@ void main() {
         isQuery: false,
         bindValues: [
           BindVariable(
-              value: Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]),
-              oraType: oraTypeRaw,
-              dir: BindDir.input),
+            value: Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]),
+            oraType: oraTypeRaw,
+            dir: BindDir.input,
+          ),
         ],
       );
       final bytes = req.toBytes();
       final expectedValue = [4, 0xDE, 0xAD, 0xBE, 0xEF];
-      expect(_indexOfSub(bytes, expectedValue), greaterThanOrEqualTo(0),
-          reason: 'length-prefixed RAW value bytes not found in request');
+      expect(
+        _indexOfSub(bytes, expectedValue),
+        greaterThanOrEqualTo(0),
+        reason: 'length-prefixed RAW value bytes not found in request',
+      );
     });
 
     test('RAW define block uses column maxLength, no LOB locator size', () {
       const rawCol = ColumnMetadata(
-          name: 'R', oracleType: oraTypeRaw, maxLength: 16);
+        name: 'R',
+        oracleType: oraTypeRaw,
+        maxLength: 16,
+      );
       final req = ExecuteRequest(
         sql: 'SELECT r FROM t',
         isQuery: true,
@@ -2483,8 +2856,11 @@ void main() {
         0, // prefetch length
         0, // oaccolid
       ];
-      expect(_indexOfSub(bytes, rawDefine), greaterThanOrEqualTo(0),
-          reason: 'RAW define block not found in encoded request');
+      expect(
+        _indexOfSub(bytes, rawDefine),
+        greaterThanOrEqualTo(0),
+        reason: 'RAW define block not found in encoded request',
+      );
       // Negative assertion: a locator-style define for this column — same
       // metadata prefix but the 112-byte LOB locator allocation as the
       // buffer size — must be absent anywhere in the request.
@@ -2492,17 +2868,24 @@ void main() {
         oraTypeRaw, ttcBindUseIndicators, 0, 0,
         1, 112, // UB4 buffer size = LOB locator allocation
       ];
-      expect(_indexOfSub(bytes, locatorStyleDefine), equals(-1),
-          reason: 'RAW define must never use the 112-byte LOB locator '
-              'buffer size');
+      expect(
+        _indexOfSub(bytes, locatorStyleDefine),
+        equals(-1),
+        reason:
+            'RAW define must never use the 112-byte LOB locator '
+            'buffer size',
+      );
       // A regression could also retype the column to BLOB outright, so the
       // BLOB-typed locator define must be absent too.
       final blobLocatorDefine = [
         oraTypeBlob, ttcBindUseIndicators, 0, 0,
         1, 112, // UB4 buffer size = LOB locator allocation
       ];
-      expect(_indexOfSub(bytes, blobLocatorDefine), equals(-1),
-          reason: 'RAW column must never be defined as a BLOB locator');
+      expect(
+        _indexOfSub(bytes, blobLocatorDefine),
+        equals(-1),
+        reason: 'RAW column must never be defined as a BLOB locator',
+      );
     });
 
     test('RAW OUT bind decodes through outBindValues as Uint8List', () {
@@ -2536,7 +2919,11 @@ void main() {
       final payload = _buildPayload([
         _describeInfo([
           _columnInfo(
-              name: 'R', oraType: oraTypeRaw, maxSize: 16, sizeField: 99),
+            name: 'R',
+            oraType: oraTypeRaw,
+            maxSize: 16,
+            sizeField: 99,
+          ),
         ]),
         _errorMessage(errorNum: 1403),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
@@ -2544,8 +2931,11 @@ void main() {
       final r = decodeExecuteResponse(payload, isQuery: true);
       final col = r.columnMetadata.single;
       expect(col.oracleType, equals(oraTypeRaw));
-      expect(col.maxLength, equals(16),
-          reason: 'RAW maxLength must come from maxSize, not size');
+      expect(
+        col.maxLength,
+        equals(16),
+        reason: 'RAW maxLength must come from maxSize, not size',
+      );
     });
   });
 
@@ -2553,9 +2943,16 @@ void main() {
   // cursors, mirroring node-oracledb `_handleDefines`).
   group('define-mode ExecuteRequest', () {
     const clobCol = ColumnMetadata(
-        name: 'DOC', oracleType: oraTypeClob, maxLength: 4000, csfrm: 1);
+      name: 'DOC',
+      oracleType: oraTypeClob,
+      maxLength: 4000,
+      csfrm: 1,
+    );
     const numberCol = ColumnMetadata(
-        name: 'ID', oracleType: oraTypeNumber, maxLength: 0);
+      name: 'ID',
+      oracleType: oraTypeNumber,
+      maxLength: 0,
+    );
 
     test('sets DEFINE and clears EXECUTE/FETCH/PARSE', () {
       final req = ExecuteRequest(
@@ -2566,17 +2963,25 @@ void main() {
       );
       final options = _readOptionsFromHeader(req.toBytes());
       expect(options & ttcExecOptionDefine, isNonZero);
-      expect(options & ttcExecOptionExecute, equals(0),
-          reason: 'DEFINE replaces EXECUTE');
-      expect(options & ttcExecOptionFetch, equals(0),
-          reason: 'rows come from later FETCH RPCs');
-      expect(options & ttcExecOptionParse, equals(0),
-          reason: 'the cursor is already open');
+      expect(
+        options & ttcExecOptionExecute,
+        equals(0),
+        reason: 'DEFINE replaces EXECUTE',
+      );
+      expect(
+        options & ttcExecOptionFetch,
+        equals(0),
+        reason: 'rows come from later FETCH RPCs',
+      );
+      expect(
+        options & ttcExecOptionParse,
+        equals(0),
+        reason: 'the cursor is already open',
+      );
       expect(options & ttcExecOptionNotPlSql, isNonZero);
     });
 
-    test('writes one define block per column with the CLOB prefetch flag',
-        () {
+    test('writes one define block per column with the CLOB prefetch flag', () {
       final req = ExecuteRequest(
         sql: 'SELECT id, doc FROM t',
         isQuery: true,
@@ -2588,8 +2993,20 @@ void main() {
       // UB4 contFlag=0, OID 0, version 0, charset 0, csfrm 0, prefetch 0,
       // oaccolid 0.
       final numberDefine = [
-        oraTypeNumber, ttcBindUseIndicators, 0, 0, 1, 22, 0, 0, 0, 0, 0, 0,
-        0, 0,
+        oraTypeNumber,
+        ttcBindUseIndicators,
+        0,
+        0,
+        1,
+        22,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
       ];
       // CLOB define: type 112, locator buffer size 112, LOB prefetch
       // cont-flag, charset 873, csfrm 1.
@@ -2608,8 +3025,11 @@ void main() {
       final numberIdx = _indexOfSub(bytes, numberDefine);
       final clobIdx = _indexOfSub(bytes, clobDefine);
       expect(numberIdx, greaterThanOrEqualTo(0));
-      expect(clobIdx, greaterThan(numberIdx),
-          reason: 'defines are written in column order');
+      expect(
+        clobIdx,
+        greaterThan(numberIdx),
+        reason: 'defines are written in column order',
+      );
     });
   });
 
@@ -2622,14 +3042,14 @@ void main() {
     // PARAMETER body with empty kv/registration sections — the exact shape
     // every live capture showed on both servers.
     List<int> parameterBody() => [
-          ttcMsgTypeParameter,
-          ..._ub2(2), // numParams
-          ..._ub4(0x123456), // param 1
-          ..._ub4(0), // param 2
-          ..._ub2(0), // transaction length
-          ..._ub2(0), // numKv = 0
-          ..._ub2(0), // registration length = 0
-        ];
+      ttcMsgTypeParameter,
+      ..._ub2(2), // numParams
+      ..._ub4(0x123456), // param 1
+      ..._ub4(0), // param 2
+      ..._ub2(0), // transaction length
+      ..._ub2(0), // numKv = 0
+      ..._ub2(0), // registration length = 0
+    ];
 
     test('PARAMETER with empty sections directly followed by ERROR '
         '(shape shared by DDL and 21c PL/SQL CLOB OUT responses)', () {
@@ -2640,56 +3060,68 @@ void main() {
       ]);
       final r = decodeExecuteResponse(payload, isQuery: false);
       expect(r.isSuccess, isTrue);
-      expect(r.rowsAffected, equals(1),
-          reason: 'decode must consume both empty sections and reach the '
-              'terminal ERROR/STATUS messages');
+      expect(
+        r.rowsAffected,
+        equals(1),
+        reason:
+            'decode must consume both empty sections and reach the '
+            'terminal ERROR/STATUS messages',
+      );
     });
 
-    test('PARAMETER with kv pairs and a registration blob drains correctly',
-        () {
-      final key = 'SESSION_SCHEMA'.codeUnits;
-      final value = 'APP_USER'.codeUnits;
-      final registration = List<int>.filled(5, 0xAB);
-      final paramMsg = <int>[
-        ttcMsgTypeParameter,
-        ..._ub2(2), // numParams
-        ..._ub4(0x123456), // param 1
-        ..._ub4(0), // param 2
-        ..._ub2(0), // transaction length
-        ..._ub2(2), // numKv = 2
-        // kv pair 1: key + value + keyword num
-        ..._ub2(key.length),
-        ..._bytesWithLength(key),
-        ..._ub2(value.length),
-        ..._bytesWithLength(value),
-        ..._ub2(168), // keyword num (skipped, not consumed semantically)
-        // kv pair 2: zero-length key and value (no payload bytes follow)
-        ..._ub2(0), // key length = 0
-        ..._ub2(0), // value length = 0
-        ..._ub2(0), // keyword num
-        ..._ub2(registration.length), // registration length
-        ...registration,
-      ];
-      final payload = _buildPayload([
-        paramMsg,
-        _errorMessage(errorNum: 0, rowCount: 4),
-        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-      ]);
-      final r = decodeExecuteResponse(payload, isQuery: false);
-      expect(r.isSuccess, isTrue);
-      expect(r.rowsAffected, equals(4),
-          reason: 'decode must drain the kv triples and registration blob '
-              'and reach the terminal ERROR/STATUS messages');
-      // Exhaustive truncation sweep: every cut inside the PARAMETER body
-      // (mid-key, mid-value, mid-keyword, mid-registration) must make the
-      // probe report incomplete ("need more packets") instead of throwing,
-      // now that the kv/registration reads are unconditional.
-      for (var cut = 1; cut <= paramMsg.length; cut++) {
-        expect(ttcStreamIsComplete(Uint8List.sublistView(payload, 0, cut)),
+    test(
+      'PARAMETER with kv pairs and a registration blob drains correctly',
+      () {
+        final key = 'SESSION_SCHEMA'.codeUnits;
+        final value = 'APP_USER'.codeUnits;
+        final registration = List<int>.filled(5, 0xAB);
+        final paramMsg = <int>[
+          ttcMsgTypeParameter,
+          ..._ub2(2), // numParams
+          ..._ub4(0x123456), // param 1
+          ..._ub4(0), // param 2
+          ..._ub2(0), // transaction length
+          ..._ub2(2), // numKv = 2
+          // kv pair 1: key + value + keyword num
+          ..._ub2(key.length),
+          ..._bytesWithLength(key),
+          ..._ub2(value.length),
+          ..._bytesWithLength(value),
+          ..._ub2(168), // keyword num (skipped, not consumed semantically)
+          // kv pair 2: zero-length key and value (no payload bytes follow)
+          ..._ub2(0), // key length = 0
+          ..._ub2(0), // value length = 0
+          ..._ub2(0), // keyword num
+          ..._ub2(registration.length), // registration length
+          ...registration,
+        ];
+        final payload = _buildPayload([
+          paramMsg,
+          _errorMessage(errorNum: 0, rowCount: 4),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        final r = decodeExecuteResponse(payload, isQuery: false);
+        expect(r.isSuccess, isTrue);
+        expect(
+          r.rowsAffected,
+          equals(4),
+          reason:
+              'decode must drain the kv triples and registration blob '
+              'and reach the terminal ERROR/STATUS messages',
+        );
+        // Exhaustive truncation sweep: every cut inside the PARAMETER body
+        // (mid-key, mid-value, mid-keyword, mid-registration) must make the
+        // probe report incomplete ("need more packets") instead of throwing,
+        // now that the kv/registration reads are unconditional.
+        for (var cut = 1; cut <= paramMsg.length; cut++) {
+          expect(
+            ttcStreamIsComplete(Uint8List.sublistView(payload, 0, cut)),
             isFalse,
-            reason: 'probe must report incomplete at cut=$cut');
-      }
-    });
+            reason: 'probe must report incomplete at cut=$cut',
+          );
+        }
+      },
+    );
 
     test('completion probe consumes CLOB OUT binds byte-accurately', () {
       // The pre-23.4 completion probe walks OUT binds with bindMetadata:
@@ -2723,13 +3155,21 @@ void main() {
       // Pin the cut location so the test fails loudly if a helper encoding
       // ever changes width: the dropped byte is the registration UB2 size
       // (0x00) and the byte after it starts the terminal ERROR message.
-      expect(payload[cutAt], equals(0),
-          reason: 'cut must drop the registration-section UB2 size byte');
-      expect(payload[cutAt + 1], equals(ttcMsgTypeError),
-          reason: 'the byte after the cut must start the ERROR message');
       expect(
-        ttcStreamIsComplete(Uint8List.sublistView(payload, 0, cutAt),
-            bindMetadata: bindMetadata),
+        payload[cutAt],
+        equals(0),
+        reason: 'cut must drop the registration-section UB2 size byte',
+      );
+      expect(
+        payload[cutAt + 1],
+        equals(ttcMsgTypeError),
+        reason: 'the byte after the cut must start the ERROR message',
+      );
+      expect(
+        ttcStreamIsComplete(
+          Uint8List.sublistView(payload, 0, cutAt),
+          bindMetadata: bindMetadata,
+        ),
         isFalse,
       );
     });
@@ -2744,42 +3184,57 @@ void main() {
       // PARAMETER body whose numKv UB2 position carries [malformedNumKv]
       // followed by enough bytes that the failure cannot be an underflow.
       Uint8List malformedAtNumKv(List<int> malformedNumKv) => _buildPayload([
-            [
-              ttcMsgTypeParameter,
-              ..._ub2(2), // numParams
-              ..._ub4(0x123456), // param 1
-              ..._ub4(0), // param 2
-              ..._ub2(0), // transaction length
-              ...malformedNumKv, // numKv UB2 position — malformed encoding
-              0xAA, 0xBB, 0xCC, 0xDD, // bytes present: NOT an underflow
-            ],
-            _errorMessage(errorNum: 0, rowCount: 1),
-            [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-          ]);
+        [
+          ttcMsgTypeParameter,
+          ..._ub2(2), // numParams
+          ..._ub4(0x123456), // param 1
+          ..._ub4(0), // param 2
+          ..._ub2(0), // transaction length
+          ...malformedNumKv, // numKv UB2 position — malformed encoding
+          0xAA, 0xBB, 0xCC, 0xDD, // bytes present: NOT an underflow
+        ],
+        _errorMessage(errorNum: 0, rowCount: 1),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
 
-      final protocolError = isA<OracleException>()
-          .having((e) => e.errorCode, 'errorCode', oraProtocolError);
+      final protocolError = isA<OracleException>().having(
+        (e) => e.errorCode,
+        'errorCode',
+        oraProtocolError,
+      );
 
       test('"integer too large" (UB2 size byte 4 > maxSize 2) throws', () {
         final payload = malformedAtNumKv([0x04]);
         // The cause-message pin proves the escalation fired at the intended
         // malformation, not some other (possibly underflow-adjacent) point.
         expect(
-            () => ttcStreamIsComplete(payload),
-            throwsA(isA<OracleException>()
+          () => ttcStreamIsComplete(payload),
+          throwsA(
+            isA<OracleException>()
                 .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-                .having((e) => e.cause.toString(), 'cause',
-                    contains('Integer too large'))));
+                .having(
+                  (e) => e.cause.toString(),
+                  'cause',
+                  contains('Integer too large'),
+                ),
+          ),
+        );
       });
 
       test('sign-bit size byte (0x80) at an unsigned position throws', () {
         final payload = malformedAtNumKv([0x80]);
         expect(
-            () => ttcStreamIsComplete(payload),
-            throwsA(isA<OracleException>()
+          () => ttcStreamIsComplete(payload),
+          throwsA(
+            isA<OracleException>()
                 .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-                .having((e) => e.cause.toString(), 'cause',
-                    contains('negative integer'))));
+                .having(
+                  (e) => e.cause.toString(),
+                  'cause',
+                  contains('negative integer'),
+                ),
+          ),
+        );
       });
 
       test('probe never throws on decodable-shape values the strict decoder '
@@ -2795,8 +3250,21 @@ void main() {
           [
             ttcMsgTypeRowData,
             // 13-byte TSTZ slice with the region-id flag (byte 11 bit 0x80).
-            ..._bytesWithLength(
-                const [120, 121, 6, 12, 11, 31, 31, 0, 0, 0, 0, 0x80, 0x01]),
+            ..._bytesWithLength(const [
+              120,
+              121,
+              6,
+              12,
+              11,
+              31,
+              31,
+              0,
+              0,
+              0,
+              0,
+              0x80,
+              0x01,
+            ]),
             // 7-byte BCE DATE slice (century byte 99 < 100).
             ..._bytesWithLength(const [99, 150, 6, 12, 1, 1, 1]),
           ],
@@ -2805,19 +3273,34 @@ void main() {
         ]);
         const cols = [
           ColumnMetadata(
-              name: 'TS', oracleType: oraTypeTimestampTz, maxLength: 13),
+            name: 'TS',
+            oracleType: oraTypeTimestampTz,
+            maxLength: 13,
+          ),
           ColumnMetadata(name: 'D', oracleType: oraTypeDate, maxLength: 7),
         ];
-        expect(ttcStreamIsComplete(payload, expectedColumns: cols), isTrue,
-            reason: 'the probe must consume the slices and locate the '
-                'terminal messages without value-decoding them');
+        expect(
+          ttcStreamIsComplete(payload, expectedColumns: cols),
+          isTrue,
+          reason:
+              'the probe must consume the slices and locate the '
+              'terminal messages without value-decoding them',
+        );
         // The strict pass still rejects the values loudly — a per-query
         // error, with no transport poisoning involved.
         expect(
-          () => decodeExecuteResponse(payload,
-              isQuery: true, expectedColumns: cols),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)),
+          () => decodeExecuteResponse(
+            payload,
+            isQuery: true,
+            expectedColumns: cols,
+          ),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraUnsupportedType,
+            ),
+          ),
         );
       });
 
@@ -2825,28 +3308,166 @@ void main() {
         final payload = malformedAtNumKv([0x04]);
         expect(
           () => ttcStreamIsComplete(payload),
-          throwsA(isA<OracleException>()
-              .having((e) => e.cause, 'cause', isA<BufferException>())
-              .having((e) => e.message, 'message',
-                  contains('Malformed TTC stream'))),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.cause, 'cause', isA<BufferException>())
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('Malformed TTC stream'),
+                ),
+          ),
         );
       });
 
-      test('real decoder wrap on the same malformed payloads is unchanged',
-          () {
+      test('real decoder wrap on the same malformed payloads is unchanged', () {
         // decodeExecuteResponse catches the parent BufferException and wraps
         // it as oraProtocolError — the subtype split must not change that.
         expect(
-          () => decodeExecuteResponse(malformedAtNumKv([0x04]),
-              isQuery: false),
+          () => decodeExecuteResponse(malformedAtNumKv([0x04]), isQuery: false),
           throwsA(protocolError),
         );
         expect(
-          () => decodeExecuteResponse(malformedAtNumKv([0x80]),
-              isQuery: false),
+          () => decodeExecuteResponse(malformedAtNumKv([0x80]), isQuery: false),
           throwsA(protocolError),
         );
       });
+    });
+  });
+
+  group('processServerSidePiggybackBody', () {
+    // Opcodes and wire shapes mirror node-oracledb processServerSidePiggyBack
+    // (thin/protocol/messages/base.js). Every fixture ends with a 0xEE
+    // sentinel: reading it back after the call proves the decoder consumed
+    // exactly the piggyback body — no more, no less.
+    const sentinel = 0xEE;
+
+    void expectFullyConsumed(List<int> body) {
+      final buf = ReadBuffer(Uint8List.fromList([...body, sentinel]));
+      processServerSidePiggybackBody(buf);
+      expect(buf.readUint8(), equals(sentinel));
+    }
+
+    test('QUERY_CACHE_INVALIDATION (1) and TRACE_EVENT (3) carry no body', () {
+      expectFullyConsumed([0x01]);
+      expectFullyConsumed([0x03]);
+    });
+
+    test('OS_PID_MTS (2) skips its DTY bytes', () {
+      expectFullyConsumed([
+        0x02,
+        ..._ub2(4), // number of DTY bytes
+        0x00, // length of DTYs (raw UB1)
+        0x10, 0x20, 0x30, 0x40, // DTY bytes
+      ]);
+    });
+
+    test('SESS_RET (4) drains key/value elements and session ids', () {
+      expectFullyConsumed([
+        0x04,
+        ..._ub2(0), // number of DTYs
+        0x00, // length of DTYs (raw UB1)
+        ..._ub2(1), // one key/value element
+        0x00, // length (raw UB1)
+        ..._ub2(1), 1, 0x6B, // key: UB2 length, then length-prefixed bytes
+        ..._ub2(1), 1, 0x76, // value
+        ..._ub2(0), // flags
+        ..._ub4(0), // session flags
+        ..._ub4(0), // session id
+        ..._ub2(0), // serial number
+      ]);
+    });
+
+    test('SYNC (5) — sent after ALTER SESSION — drains its key/value '
+        'elements and flags', () {
+      expectFullyConsumed([
+        0x05,
+        ..._ub2(0), // number of DTYs
+        0x00, // length of DTYs (raw UB1)
+        ..._ub4(2), // two key/value elements
+        0x00, // length (raw UB1)
+        // element 1: key 'a', value 0xAB, keyword 168 (CURRENT_SCHEMA)
+        ..._ub2(1), 1, 0x61,
+        ..._ub2(1), 1, 0xAB,
+        ..._ub2(168),
+        // element 2: empty key, empty value, keyword 0
+        ..._ub2(0), ..._ub2(0), ..._ub2(0),
+        ..._ub4(0), // overall flags
+      ]);
+    });
+
+    test('SESS_RET (4) and SYNC (5) handle the zero-element boundary with '
+        'their distinct length-byte placement', () {
+      // The two messages are deliberately asymmetric (mirrors node-oracledb):
+      // SESS_RET reads its post-count length UB1 only inside `num_elements > 0`,
+      // while SYNC reads it unconditionally. Pin both so a future edit that
+      // collapses them into one shape desyncs a test rather than the wire.
+      expectFullyConsumed([
+        0x04,
+        ..._ub2(0), // number of DTYs
+        0x00, // length of DTYs (raw UB1)
+        ..._ub2(0), // zero elements: the length UB1 below is NOT present
+        ..._ub4(0), // session flags
+        ..._ub4(0), // session id
+        ..._ub2(0), // serial number
+      ]);
+      expectFullyConsumed([
+        0x05,
+        ..._ub2(0), // number of DTYs
+        0x00, // length of DTYs (raw UB1)
+        ..._ub4(0), // zero elements
+        0x00, // length (raw UB1) — read unconditionally, unlike SESS_RET
+        ..._ub4(0), // overall flags
+      ]);
+    });
+
+    test('LTXID (7) drains its logical transaction id', () {
+      expectFullyConsumed([
+        0x07,
+        ..._ub4(3), // ltxid byte count
+        3, 0x01, 0x02, 0x03, // length-prefixed ltxid bytes
+      ]);
+      expectFullyConsumed([0x07, ..._ub4(0)]); // empty ltxid: no bytes follow
+    });
+
+    test('AC_REPLAY_CONTEXT (8) drains flags, error code, queue, and '
+        'context', () {
+      expectFullyConsumed([
+        0x08,
+        ..._ub2(0), // number of DTYs
+        0x00, // length of DTYs (raw UB1)
+        ..._ub4(0), // flags
+        ..._ub4(0), // error code
+        0x00, // queue (raw UB1)
+        ..._ub4(2), // replay context byte count
+        2, 0xCA, 0xFE, // length-prefixed context bytes
+      ]);
+    });
+
+    test('EXT_SYNC (9) and SESS_SIGNATURE (10) drain their fixed fields', () {
+      expectFullyConsumed([0x09, ..._ub2(0), 0x00]);
+      expectFullyConsumed([
+        0x0A,
+        ..._ub2(0), // number of DTYs
+        0x00, // length of DTY (raw UB1)
+        0, // signature flags (UB8, zero-length encoding)
+        0, // client signature
+        0, // server signature
+      ]);
+    });
+
+    test('an unassigned opcode fails loudly with a protocol error', () {
+      final buf = ReadBuffer(Uint8List.fromList([0x06]));
+      expect(
+        () => processServerSidePiggybackBody(buf),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraProtocolError,
+          ),
+        ),
+      );
     });
   });
 }
@@ -2873,8 +3494,11 @@ int _indexOfSub(List<int> haystack, List<int> needle) {
 /// [fastFetch] and [rowid] inject non-zero variable-length (UB2) payloads so a
 /// test can prove `_processIoVector` skips exactly those bytes before reading
 /// the direction bytes. Both default to empty (UB2 length 0).
-List<int> _ioVector(List<int> directions,
-    {List<int> fastFetch = const [], List<int> rowid = const []}) {
+List<int> _ioVector(
+  List<int> directions, {
+  List<int> fastFetch = const [],
+  List<int> rowid = const [],
+}) {
   return [
     ttcMsgTypeIoVector,
     0, // flag
@@ -3020,21 +3644,15 @@ Uint8List _buildPayload(List<List<int>> messages) {
 /// two `writeUint32BE` words (high word always 0) — see
 /// `_writeOsonValue` in execute_message.dart.
 List<int> _u64be(int v) => [
-      0, 0, 0, 0, // high word
-      (v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff, // low word
-    ];
+  0, 0, 0, 0, // high word
+  (v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff, // low word
+];
 
 List<int> _ub4(int v) {
   if (v == 0) return [0];
   if (v <= 0xff) return [1, v];
   if (v <= 0xffff) return [2, (v >> 8) & 0xff, v & 0xff];
-  return [
-    4,
-    (v >> 24) & 0xff,
-    (v >> 16) & 0xff,
-    (v >> 8) & 0xff,
-    v & 0xff,
-  ];
+  return [4, (v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
 }
 
 List<int> _ub2(int v) {
@@ -3052,13 +3670,7 @@ List<int> _ub8(int v) {
   if (v <= 0xff) return [1, v];
   if (v <= 0xffff) return [2, (v >> 8) & 0xff, v & 0xff];
   if (v <= 0xffffffff) {
-    return [
-      4,
-      (v >> 24) & 0xff,
-      (v >> 16) & 0xff,
-      (v >> 8) & 0xff,
-      v & 0xff,
-    ];
+    return [4, (v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
   }
   return [
     8,

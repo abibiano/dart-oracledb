@@ -82,7 +82,8 @@ class BindVariable {
     if (oraType == null) {
       throw OracleException(
         errorCode: oraBindTypeError,
-        message: 'Unsupported bind value type: ${value.runtimeType}. '
+        message:
+            'Unsupported bind value type: ${value.runtimeType}. '
             'Supported types: String, int, double, DateTime, '
             'OracleTimestampTz, Uint8List, Map, List, null',
       );
@@ -110,13 +111,16 @@ class ExecuteRequest extends Message {
     this.ttcFieldVersion = 24,
     this.defineColumns,
     super.sequence = 1,
-  })  : assert(!(isQuery && isPlSql),
-            'a statement cannot be both query and PL/SQL'),
-        assert(
-            defineColumns == null ||
-                (isQuery && cursorId != 0 && bindValues == null),
-            'define mode requires an open query cursor and carries no binds'),
-        super(messageType: ttcMsgTypeFunction) {
+  }) : assert(
+         !(isQuery && isPlSql),
+         'a statement cannot be both query and PL/SQL',
+       ),
+       assert(
+         defineColumns == null ||
+             (isQuery && cursorId != 0 && bindValues == null),
+         'define mode requires an open query cursor and carries no binds',
+       ),
+       super(messageType: ttcMsgTypeFunction) {
     // OUT and IN OUT binds are only meaningful in PL/SQL. Refuse mid-build
     // rather than emit malformed bytes that would surface as a confusing
     // server error.
@@ -185,7 +189,8 @@ class ExecuteRequest extends Message {
     if (bindNames != null && bindNames!.length != numParams) {
       throw OracleException(
         errorCode: oraBindMismatch,
-        message: 'Internal: bindNames.length (${bindNames!.length}) != '
+        message:
+            'Internal: bindNames.length (${bindNames!.length}) != '
             'bindValues.length ($numParams)',
       );
     }
@@ -380,11 +385,13 @@ class ExecuteRequest extends Message {
       // LOB and JSON binds request prefetch metadata — node-oracledb
       // writeColumnMetadata sets TNS_LOB_PREFETCH_FLAG for every LOB-typed
       // bind and for DB_TYPE_JSON (whose document then travels inline).
-      buffer.writeUB4(oraType == oraTypeClob ||
-              oraType == oraTypeBlob ||
-              oraType == oraTypeJson
-          ? tnsLobPrefetchFlag
-          : 0);
+      buffer.writeUB4(
+        oraType == oraTypeClob ||
+                oraType == oraTypeBlob ||
+                oraType == oraTypeJson
+            ? tnsLobPrefetchFlag
+            : 0,
+      );
       buffer.writeUB4(0); // OID
       buffer.writeUB2(0); // version
       buffer.writeUB2(csfrm != 0 ? ttcCharsetUtf8 : 0);
@@ -404,8 +411,9 @@ class ExecuteRequest extends Message {
   /// keeps sending length + chunk size with every locator on FETCH rounds.
   void _writeDefineMetadata(WriteBuffer buffer, List<ColumnMetadata> columns) {
     for (final col in columns) {
-      final oraType =
-          col.oracleType == oraTypeVarchar2 ? oraTypeVarchar : col.oracleType;
+      final oraType = col.oracleType == oraTypeVarchar2
+          ? oraTypeVarchar
+          : col.oracleType;
       buffer.writeUint8(oraType);
       buffer.writeUint8(ttcBindUseIndicators);
       // Precision and scale are always written as zero — the server
@@ -414,11 +422,13 @@ class ExecuteRequest extends Message {
       buffer.writeUint8(0);
       buffer.writeUB4(_defineBufferSize(col));
       buffer.writeUB4(0); // max num elements (not array)
-      buffer.writeUB4(oraType == oraTypeClob ||
-              oraType == oraTypeBlob ||
-              oraType == oraTypeJson
-          ? tnsLobPrefetchFlag
-          : 0);
+      buffer.writeUB4(
+        oraType == oraTypeClob ||
+                oraType == oraTypeBlob ||
+                oraType == oraTypeJson
+            ? tnsLobPrefetchFlag
+            : 0,
+      );
       buffer.writeUB4(0); // OID
       buffer.writeUB2(0); // version
       buffer.writeUB2(col.csfrm != 0 ? ttcCharsetUtf8 : 0);
@@ -481,7 +491,8 @@ class ExecuteRequest extends Message {
       case oraTypeVarchar:
       case oraTypeString:
         buffer.writeBytesWithLength(
-            Uint8List.fromList(utf8.encode(value as String)));
+          Uint8List.fromList(utf8.encode(value as String)),
+        );
         return;
       case oraTypeRaw:
         buffer.writeBytesWithLength(value as Uint8List);
@@ -503,9 +514,11 @@ class ExecuteRequest extends Message {
           buffer.writeBytesWithLength(dt.encodeTimestampTz(value));
           return;
         }
-        buffer.writeBytesWithLength(dt.encodeTimestampTz(OracleTimestampTz(
-            (value as DateTime).toUtc(),
-            offsetMinutes: 0)));
+        buffer.writeBytesWithLength(
+          dt.encodeTimestampTz(
+            OracleTimestampTz((value as DateTime).toUtc(), offsetMinutes: 0),
+          ),
+        );
         return;
       case oraTypeClob:
       case oraTypeBlob:
@@ -521,7 +534,8 @@ class ExecuteRequest extends Message {
         }
         throw OracleException(
           errorCode: oraBindTypeError,
-          message: 'Internal: ${oraType == oraTypeBlob ? 'BLOB' : 'CLOB'} '
+          message:
+              'Internal: ${oraType == oraTypeBlob ? 'BLOB' : 'CLOB'} '
               'bind value must be converted to a LOB locator before '
               'encoding (got ${value.runtimeType})',
         );
@@ -542,7 +556,8 @@ class ExecuteRequest extends Message {
       ..writeUint16BE(38) // internal length
       ..writeUint16BE(tnsLobQLocatorVersion)
       ..writeUint8(
-          tnsLobLocFlagsValueBased | tnsLobLocFlagsBlob | tnsLobLocFlagsAbstract)
+        tnsLobLocFlagsValueBased | tnsLobLocFlagsBlob | tnsLobLocFlagsAbstract,
+      )
       ..writeUint8(tnsLobLocFlagsInit)
       ..writeUint16BE(0) // additional flags
       ..writeUint16BE(1) // byt1
@@ -708,11 +723,7 @@ class BindMetadata {
   /// silently defaulting to [BindDir.input] for an OUT/IN OUT bind would
   /// produce a spurious "client declared IN" protocol error at decode time.
   /// All call sites must pass the actual direction explicitly.
-  const BindMetadata({
-    required this.oraType,
-    required this.dir,
-    this.maxSize,
-  });
+  const BindMetadata({required this.oraType, required this.dir, this.maxSize});
 
   /// Oracle wire-protocol type indicator.
   final int oraType;
@@ -750,18 +761,18 @@ class ExecuteResponse {
     this.errorCode,
     this.errorMessage,
     this.errorOffset,
-  })  : columnMetadata = columnMetadata.isEmpty
-            ? const <ColumnMetadata>[]
-            : List<ColumnMetadata>.unmodifiable(columnMetadata),
-        rows = rows.isEmpty
-            ? const <List<Object?>>[]
-            : List<List<Object?>>.unmodifiable(rows),
-        outBindValues = outBindValues.isEmpty
-            ? const <Object?>[]
-            : List<Object?>.unmodifiable(outBindValues),
-        outBindIndices = outBindIndices.isEmpty
-            ? const <int>[]
-            : List<int>.unmodifiable(outBindIndices);
+  }) : columnMetadata = columnMetadata.isEmpty
+           ? const <ColumnMetadata>[]
+           : List<ColumnMetadata>.unmodifiable(columnMetadata),
+       rows = rows.isEmpty
+           ? const <List<Object?>>[]
+           : List<List<Object?>>.unmodifiable(rows),
+       outBindValues = outBindValues.isEmpty
+           ? const <Object?>[]
+           : List<Object?>.unmodifiable(outBindValues),
+       outBindIndices = outBindIndices.isEmpty
+           ? const <int>[]
+           : List<int>.unmodifiable(outBindIndices);
 
   /// Whether the call succeeded (no Oracle error).
   final bool isSuccess;
@@ -815,17 +826,20 @@ class ExecuteResponse {
 /// decoded values; the actual response is decoded again by the caller via
 /// [decodeExecuteResponse] once all bytes have arrived. The double pass is
 /// cheap because typical responses fit in a single 8 KB SDU.
-bool ttcStreamIsComplete(Uint8List data,
-    {int ttcFieldVersion = 24,
-    bool endOfRequestSupport = true,
-    List<ColumnMetadata>? expectedColumns,
-    List<BindMetadata>? bindMetadata}) {
+bool ttcStreamIsComplete(
+  Uint8List data, {
+  int ttcFieldVersion = 24,
+  bool endOfRequestSupport = true,
+  List<ColumnMetadata>? expectedColumns,
+  List<BindMetadata>? bindMetadata,
+}) {
   final buffer = ReadBuffer(data);
   final state = _DecodeState(
     isQuery: false,
     ttcFieldVersion: ttcFieldVersion,
-    columns:
-        expectedColumns != null ? List.of(expectedColumns) : <ColumnMetadata>[],
+    columns: expectedColumns != null
+        ? List.of(expectedColumns)
+        : <ColumnMetadata>[],
     bindMetadata: bindMetadata ?? const [],
     endOfRequestSupport: endOfRequestSupport,
     // The probe only needs to locate the terminal message; decode unsupported
@@ -848,7 +862,8 @@ bool ttcStreamIsComplete(Uint8List data,
     // never repair it, so fail loud instead of spinning the receive loop.
     throw OracleException(
       errorCode: oraProtocolError,
-      message: 'Malformed TTC stream detected by the completion probe: '
+      message:
+          'Malformed TTC stream detected by the completion probe: '
           '${e.message}',
       cause: e,
     );
@@ -866,20 +881,23 @@ bool ttcStreamIsComplete(Uint8List data,
 /// the previous response. node-oracledb persists `statement.lastRowIndex`
 /// across rounds (withData.js:250); this decoder is stateless per response,
 /// so the transport threads the prior row in instead.
-ExecuteResponse decodeExecuteResponse(Uint8List data,
-    {required bool isQuery,
-    int ttcFieldVersion = 24,
-    bool endOfRequestSupport = true,
-    List<ColumnMetadata>? expectedColumns,
-    List<BindMetadata>? bindMetadata,
-    bool preserveTimestampTimeZone = false,
-    List<Object?>? previousRoundLastRow}) {
+ExecuteResponse decodeExecuteResponse(
+  Uint8List data, {
+  required bool isQuery,
+  int ttcFieldVersion = 24,
+  bool endOfRequestSupport = true,
+  List<ColumnMetadata>? expectedColumns,
+  List<BindMetadata>? bindMetadata,
+  bool preserveTimestampTimeZone = false,
+  List<Object?>? previousRoundLastRow,
+}) {
   final buffer = ReadBuffer(data);
   final state = _DecodeState(
     isQuery: isQuery,
     ttcFieldVersion: ttcFieldVersion,
-    columns:
-        expectedColumns != null ? List.of(expectedColumns) : <ColumnMetadata>[],
+    columns: expectedColumns != null
+        ? List.of(expectedColumns)
+        : <ColumnMetadata>[],
     bindMetadata: bindMetadata ?? const [],
     endOfRequestSupport: endOfRequestSupport,
     preserveTimestampTimeZone: preserveTimestampTimeZone,
@@ -927,15 +945,16 @@ ExecuteResponse decodeExecuteResponse(Uint8List data,
 }
 
 class _DecodeState {
-  _DecodeState(
-      {required this.isQuery,
-      required this.columns,
-      this.bindMetadata = const [],
-      this.ttcFieldVersion = 24,
-      this.endOfRequestSupport = true,
-      this.strictTypes = true,
-      this.preserveTimestampTimeZone = false,
-      this.previousRoundLastRow});
+  _DecodeState({
+    required this.isQuery,
+    required this.columns,
+    this.bindMetadata = const [],
+    this.ttcFieldVersion = 24,
+    this.endOfRequestSupport = true,
+    this.strictTypes = true,
+    this.preserveTimestampTimeZone = false,
+    this.previousRoundLastRow,
+  });
 
   final bool isQuery;
   final int ttcFieldVersion;
@@ -1173,10 +1192,13 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
           continue;
         }
         final meta = s.bindMetadata[bindIdx];
-        final value = _decodeValueByOraType(buf, meta.oraType,
-            strict: s.strictTypes,
-            preserveTimestampTimeZone: s.preserveTimestampTimeZone,
-            outMaxSize: meta.maxSize);
+        final value = _decodeValueByOraType(
+          buf,
+          meta.oraType,
+          strict: s.strictTypes,
+          preserveTimestampTimeZone: s.preserveTimestampTimeZone,
+          outMaxSize: meta.maxSize,
+        );
         // After the value bytes, an OUT bind carries an SB4 "actual num bytes"
         // trailer (matches node-oracledb processColumnData !inFetch path).
         buf.skipSB4();
@@ -1194,15 +1216,15 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
       // The duplicate source is the immediately preceding row: the last row
       // of this response, or — for the first row of a continuation FETCH —
       // the last row the transport accumulated in the previous round.
-      final priorRow =
-          s.rows.isNotEmpty ? s.rows.last : s.previousRoundLastRow;
+      final priorRow = s.rows.isNotEmpty ? s.rows.last : s.previousRoundLastRow;
       if (priorRow != null && priorRow.length <= i) {
         // The prior row is shorter than the duplicate column index. Reading
         // priorRow[i] would throw a RangeError deep in the decoder; fail
         // loud with a protocol error instead.
         throw OracleException(
           errorCode: oraProtocolError,
-          message: 'Duplicate-column bit set for column $i but the prior row '
+          message:
+              'Duplicate-column bit set for column $i but the prior row '
               'only has ${priorRow.length} column(s) — duplicate-column '
               'prior-row length mismatch (stream misaligned or wrong '
               'previous-round row supplied)',
@@ -1218,7 +1240,8 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
         if (s.strictTypes) {
           throw OracleException(
             errorCode: oraProtocolError,
-            message: 'Duplicate-column bit set for column $i but no prior '
+            message:
+                'Duplicate-column bit set for column $i but no prior '
                 'row is available (first row of the result set) — stream '
                 'misaligned or previous-round row not supplied',
           );
@@ -1229,9 +1252,14 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
       row.add(priorRow[i]);
       continue;
     }
-    row.add(_decodeColumnValue(buf, col,
+    row.add(
+      _decodeColumnValue(
+        buf,
+        col,
         strict: s.strictTypes,
-        preserveTimestampTimeZone: s.preserveTimestampTimeZone));
+        preserveTimestampTimeZone: s.preserveTimestampTimeZone,
+      ),
+    );
   }
   s.rows.add(row);
   // A bit vector describes exactly ONE row: clear it after every decoded row
@@ -1261,12 +1289,15 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
 /// the OUT-bind decode path. Used by JSON (type 119) to enforce the declared
 /// OSON byte bound on returned documents; CLOB/BLOB enforce theirs later in
 /// the transport's materialize step, and other types are bounded server-side.
-Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
-    {required bool strict,
-    int? scale,
-    bool preserveTimestampTimeZone = false,
-    int csfrm = 0,
-    int? outMaxSize}) {
+Object? _decodeValueByOraType(
+  ReadBuffer buf,
+  int oraType, {
+  required bool strict,
+  int? scale,
+  bool preserveTimestampTimeZone = false,
+  int csfrm = 0,
+  int? outMaxSize,
+}) {
   switch (oraType) {
     case oraTypeLong:
     case oraTypeLongRaw:
@@ -1280,7 +1311,8 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       if (strict) {
         throw OracleException(
           errorCode: oraUnsupportedType,
-          message: 'LONG and LONG RAW columns are not supported yet (Oracle '
+          message:
+              'LONG and LONG RAW columns are not supported yet (Oracle '
               'type $oraType). Support is planned (LOB/LONG '
               'streaming); until then these columns cannot be fetched.',
         );
@@ -1349,14 +1381,16 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       if (strict && oraType == oraTypeBfile) {
         throw OracleException(
           errorCode: oraUnsupportedType,
-          message: 'BFILE columns are not supported yet (Oracle type '
+          message:
+              'BFILE columns are not supported yet (Oracle type '
               '$oraType). Stories 4.1/4.2 implement CLOB and BLOB only.',
         );
       }
       if (strict && csfrm == ttcCsfrmNChar) {
         throw OracleException(
           errorCode: oraUnsupportedType,
-          message: 'NCLOB columns are not supported yet (Oracle type '
+          message:
+              'NCLOB columns are not supported yet (Oracle type '
               '$oraType, NCHAR charset form). Stories 4.1/4.2 implement '
               'CLOB and BLOB only.',
         );
@@ -1398,7 +1432,8 @@ Object? _decodeValueByOraType(ReadBuffer buf, int oraType,
       if (outMaxSize != null && osonBytes.length > outMaxSize) {
         throw OracleException(
           errorCode: oraBindTypeError,
-          message: 'JSON OUT bind returned ${osonBytes.length} OSON bytes '
+          message:
+              'JSON OUT bind returned ${osonBytes.length} OSON bytes '
               'but OracleBind maxSize is $outMaxSize — increase maxSize to '
               'at least the largest document the block can return',
         );
@@ -1418,13 +1453,19 @@ bool _isDuplicate(Uint8List? bitVector, int colIndex) {
   return (bitVector[byteNum] & (1 << bitNum)) == 0;
 }
 
-Object? _decodeColumnValue(ReadBuffer buf, ColumnMetadata col,
-        {required bool strict, bool preserveTimestampTimeZone = false}) =>
-    _decodeValueByOraType(buf, col.oracleType,
-        strict: strict,
-        scale: col.scale,
-        preserveTimestampTimeZone: preserveTimestampTimeZone,
-        csfrm: col.csfrm);
+Object? _decodeColumnValue(
+  ReadBuffer buf,
+  ColumnMetadata col, {
+  required bool strict,
+  bool preserveTimestampTimeZone = false,
+}) => _decodeValueByOraType(
+  buf,
+  col.oracleType,
+  strict: strict,
+  scale: col.scale,
+  preserveTimestampTimeZone: preserveTimestampTimeZone,
+  csfrm: col.csfrm,
+);
 
 void _processBitVector(ReadBuffer buf, _DecodeState s) {
   final numColsSent = buf.readUB2();
@@ -1490,7 +1531,8 @@ void _processIoVector(ReadBuffer buf, _DecodeState s) {
         dir != tnsBindDirInputOutput) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'IO_VECTOR reports an unknown bind direction byte at bind '
+        message:
+            'IO_VECTOR reports an unknown bind direction byte at bind '
             'index $i: $dir (expected 16, 32, or 48)',
       );
     }
@@ -1511,21 +1553,24 @@ void _processIoVector(ReadBuffer buf, _DecodeState s) {
       if (clientDir == BindDir.input && !serverIsIn) {
         throw OracleException(
           errorCode: oraProtocolError,
-          message: 'IO_VECTOR bind direction mismatch at index $i: '
+          message:
+              'IO_VECTOR bind direction mismatch at index $i: '
               'client declared IN but server reported $serverName ($dir)',
         );
       }
       if (clientDir == BindDir.output && !serverIsOut) {
         throw OracleException(
           errorCode: oraProtocolError,
-          message: 'IO_VECTOR bind direction mismatch at index $i: '
+          message:
+              'IO_VECTOR bind direction mismatch at index $i: '
               'client declared output but server reported $serverName ($dir)',
         );
       }
       if (clientDir == BindDir.inputOutput && dir != tnsBindDirInputOutput) {
         throw OracleException(
           errorCode: oraProtocolError,
-          message: 'IO_VECTOR bind direction mismatch at index $i: '
+          message:
+              'IO_VECTOR bind direction mismatch at index $i: '
               'client declared inputOutput but server reported $serverName ($dir)',
         );
       }
@@ -1571,8 +1616,10 @@ class TtcErrorInfo {
 /// byte) and returns the decoded fields. Pure byte walk — response-level
 /// semantics (ORA-01403 end-of-fetch, rowsAffected, terminal-on-pre-23.4)
 /// stay with the callers.
-TtcErrorInfo decodeTtcErrorBody(ReadBuffer buf,
-    {required int ttcFieldVersion}) {
+TtcErrorInfo decodeTtcErrorBody(
+  ReadBuffer buf, {
+  required int ttcFieldVersion,
+}) {
   buf.readUB4(); // end of call status
   buf.skipUB2(); // end-to-end seq num
   buf.skipUB4(); // current row number
@@ -1743,21 +1790,74 @@ void _processReturnParameter(ReadBuffer buf) {
 
 /// Consumes the body of a server-side piggyback message. Shared with the
 /// LOB operation decoder (`lob_op_message.dart`).
+///
+/// Opcode numbering and wire shapes mirror node-oracledb's
+/// `processServerSidePiggyBack` (`thin/protocol/messages/base.js`) and its
+/// `TNS_SERVER_PIGGYBACK_*` constants. This driver carries no DRCP, edition,
+/// or sessionless-transaction state, so every payload is drained and
+/// discarded; what matters is consuming exactly the right number of bytes.
 void processServerSidePiggybackBody(ReadBuffer buf) {
   final opcode = buf.readUint8();
-  // Best-effort scan: try to consume well-known opcodes; unknowns terminate.
   switch (opcode) {
-    case 4: // LTXID
-      final n = buf.readUB4();
-      if (n > 0) buf.readBytesWithLength();
+    case 1: // QUERY_CACHE_INVALIDATION
+    case 3: // TRACE_EVENT
       return;
-    case 6: // QUERY_CACHE_INVALIDATION
-    case 7: // TRACE_EVENT
-      return;
-    case 8: // OS_PID_MTS
+    case 2: // OS_PID_MTS
       final numDtys = buf.readUB2();
       buf.skipUB1();
       buf.skip(numDtys);
+      return;
+    case 4: // SESS_RET (DRCP session state on return)
+      buf.skipUB2();
+      buf.skipUB1();
+      final numElements = buf.readUB2();
+      if (numElements > 0) {
+        buf.skipUB1();
+        for (var i = 0; i < numElements; i++) {
+          if (buf.readUB2() > 0) buf.skipBytesChunked(); // key
+          if (buf.readUB2() > 0) buf.skipBytesChunked(); // value
+          buf.skipUB2(); // flags
+        }
+      }
+      buf.skipUB4(); // session flags (DRCP session-changed: not supported)
+      buf.skipUB4(); // session id
+      buf.skipUB2(); // serial number
+      return;
+    case 5: // SYNC (session state change, e.g. after ALTER SESSION)
+      buf.skipUB2(); // number of DTYs
+      buf.skipUB1(); // length of DTYs
+      final numElements = buf.readUB4();
+      buf.skipUB1(); // length
+      for (var i = 0; i < numElements; i++) {
+        if (buf.readUB2() > 0) buf.skipBytesChunked(); // key
+        if (buf.readUB2() > 0) buf.skipBytesChunked(); // value
+        buf.skipUB2(); // keyword number (schema/edition/...: not tracked)
+      }
+      buf.skipUB4(); // overall flags
+      return;
+    case 7: // LTXID
+      final n = buf.readUB4();
+      if (n > 0) buf.readBytesWithLength();
+      return;
+    case 8: // AC_REPLAY_CONTEXT
+      buf.skipUB2(); // number of DTYs
+      buf.skipUB1(); // length of DTYs
+      buf.skipUB4(); // flags
+      buf.skipUB4(); // error code
+      buf.skipUB1(); // queue
+      final numBytes = buf.readUB4();
+      if (numBytes > 0) buf.skipBytesChunked(); // replay context
+      return;
+    case 9: // EXT_SYNC
+      buf.skipUB2();
+      buf.skipUB1();
+      return;
+    case 10: // SESS_SIGNATURE
+      buf.skipUB2(); // number of DTYs
+      buf.skipUB1(); // length of DTY
+      buf.skipUB8(); // signature flags
+      buf.skipUB8(); // client signature
+      buf.skipUB8(); // server signature
       return;
     default:
       throw OracleException(

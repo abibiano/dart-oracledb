@@ -168,6 +168,23 @@ class OracleConnection {
   /// use [ping()] instead.
   bool get isHealthy => isConnected;
 
+  /// The session tag describing the session state currently applied to this
+  /// connection (for example `'USER_TZ=UTC'` after an
+  /// `ALTER SESSION SET TIME_ZONE`).
+  ///
+  /// Tags are purely client-side metadata: setting a tag does **not** apply
+  /// any database state by itself. It records state that user code or an
+  /// `OraclePool` session callback has already applied with its own SQL, so
+  /// a pool can later reuse the session for a request with the same tag
+  /// instead of resetting state on every borrow.
+  ///
+  /// Defaults to the empty string (untagged); assigning the empty string
+  /// clears the tag. The value is stored verbatim — no parsing or
+  /// canonicalization of multi-property tags. Tags survive [execute],
+  /// [commit], [rollback], [ping], and a normal pool release; they disappear
+  /// only with the physical connection.
+  String tag = '';
+
   /// Bounded SQL snippet length included in query-failure messages.
   ///
   /// Mirrors node-oracledb's pragmatic single-line cap: long enough to spot
