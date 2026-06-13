@@ -801,9 +801,12 @@ class OraclePool {
     _draining++;
 
     if (connection.isExecuting) {
-      // Rollback (or any TTC traffic) on a busy connection would interleave
-      // with the in-flight execute and corrupt the stream. Destroy it and
-      // fail loudly: this is a caller bug, not a recoverable state.
+      // A wire round trip (an execute, or a result-set open/fetch) is still in
+      // flight. Rollback or any other TTC traffic would interleave with it and
+      // corrupt the stream — this is a genuine mid-RPC race, not a recoverable
+      // state — so destroy the connection and fail loudly. (An open-but-idle
+      // result set, where no round trip is in flight, is handled below: it is
+      // closeable and the session stays reusable.)
       _draining--;
       await _destroyBestEffort(connection);
       _notifyDrainIfIdle();
@@ -834,6 +837,21 @@ class OraclePool {
       _notifyDrainIfIdle();
       unawaited(_provisionForWaiters());
       return;
+    }
+
+    if (connection.hasOpenResultSet) {
+      // The borrower returned the connection without closing an OracleResultSet
+      // it left open (no round trip in flight — that case was caught above).
+      // This is a closeable resource, not a destructive race: close it so the
+      // server cursor is queued for the existing close-cursor piggyback and the
+      // in-flight slot is cleared, then recycle the session normally. Closing
+      // issues no wire traffic, so the rollback below cannot interleave with an
+      // active cursor stream.
+      _log.warning(
+        'Connection released with an open OracleResultSet; closing it and '
+        'reclaiming the session. Always close() result sets before release.',
+      );
+      await connection.forceCloseOpenResultSet();
     }
 
     try {

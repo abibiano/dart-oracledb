@@ -7,6 +7,7 @@ import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/messages/auth_message.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
+import 'package:oracledb/src/protocol/result_set_cursor.dart';
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
@@ -439,14 +440,15 @@ void main() {
       });
     });
 
-    // The fetch-drain iteration cap must surface an honestly incomplete
+    // The eager fetch-drain iteration cap must surface an honestly incomplete
     // result (moreRowsToFetch == true), never spin forever or silently
-    // truncate. A fake server answers every EXECUTE/FETCH with a bare STATUS
-    // success payload (no ERROR message), which for a query decodes to
-    // "success, more rows pending" — without the cap the drain loop would
-    // spin unbounded. Driven via the test-only debugMaxFetchIterations seam.
+    // truncate. sendExecute now returns only the FIRST batch; the shared cursor
+    // engine (ResultSetCursor) drives the FETCH drain and applies the cap. A
+    // fake server answers every EXECUTE/FETCH with a bare STATUS success
+    // payload (no ERROR message), which for a query decodes to "success, more
+    // rows pending" — without the cap the drain would spin unbounded.
     group('fetch-drain iteration cap (moreRowsToFetch backstop)', () {
-      test('hitting the lowered cap returns success with moreRowsToFetch true',
+      test('the shared cursor engine drain honors the eager fetch cap',
           () async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         var requestsSeen = 0;
@@ -474,29 +476,48 @@ void main() {
           }, onError: (_) {});
         });
 
-        final transport = Transport()..debugMaxFetchIterations = 3;
+        final transport = Transport();
         await transport.connect('127.0.0.1', server.port,
             timeout: const Duration(seconds: 2));
 
-        // cursorId != 0 simulates a cached-cursor re-execute so the drain
-        // gate's effective-cursor-id fallback engages and the FETCH loop runs.
-        final response = await transport.sendExecute(
+        // cursorId != 0 simulates a cached-cursor re-execute so sendExecute's
+        // effective-cursor-id fallback engages (the server echoes cursorId 0).
+        // sendExecute returns ONLY the first batch — no FETCH yet.
+        final first = await transport.sendExecute(
           'SELECT x FROM t',
           isQuery: true,
           cursorId: 5,
           timeout: const Duration(seconds: 5),
         );
+        expect(first.isSuccess, isTrue);
+        expect(first.moreRowsToFetch, isTrue);
+        expect(first.cursorId, equals(5),
+            reason: 'sendExecute normalizes to the effective cursor id when '
+                'more rows remain so the engine can continue fetching');
+        expect(requestsSeen, equals(1),
+            reason: 'sendExecute issues exactly one EXECUTE and does not drain');
 
-        expect(response.isSuccess, isTrue);
-        expect(response.moreRowsToFetch, isTrue,
-            reason: 'hitting the fetch-iteration cap must report the result '
-                'as incomplete (moreRowsToFetch true → moreRowsAvailable at '
-                'the connection level), not as fully drained');
-        expect(response.cursorId, equals(5),
-            reason: 'the rebuilt response must carry the effective cursor id');
+        // The shared engine drains the rest, bounded by the cap; hitting it
+        // reports the result honestly incomplete rather than truncating.
+        final cursor = ResultSetCursor(
+          transport: transport,
+          cursorId: first.cursorId,
+          columns: first.columnMetadata,
+          firstBatch: first.rows,
+          serverHasMoreRows: first.moreRowsToFetch,
+          prefetchRows: 50,
+          preserveTimestampTimeZone: false,
+          materializePerBatch: false,
+        );
+        final drained = await cursor.drainRemaining(maxFetchIterations: 3);
+        expect(cursor.incompleteDrain, isTrue,
+            reason: 'reaching the cap with rows still pending marks the drain '
+                'incomplete (→ moreRowsAvailable at the connection level)');
+        expect(drained, isEmpty,
+            reason: 'the fake server returns only zero-row batches');
         expect(requestsSeen, greaterThanOrEqualTo(2),
-            reason: 'the drain loop must have issued at least one FETCH '
-                'after the initial EXECUTE before tripping the cap');
+            reason: 'the engine must have issued at least one FETCH after the '
+                'initial EXECUTE before tripping the cap');
 
         await transport.disconnect();
         await server.close();

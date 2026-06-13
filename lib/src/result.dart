@@ -4,6 +4,8 @@
 /// handling SELECT query results and DML operation outcomes.
 library;
 
+import 'package:meta/meta.dart';
+
 import 'oracle_bind.dart';
 import 'protocol/messages/execute_message.dart';
 
@@ -199,4 +201,33 @@ class OracleRow {
     }
     return map;
   }
+}
+
+/// Package-internal helper that builds [OracleRow] instances from raw decoded
+/// value lists.
+///
+/// `OracleResultSet` streams rows out of the cursor engine one batch at a time
+/// and needs to wrap each raw value list in an [OracleRow] without re-deriving
+/// the case-insensitive column-name map per row (and without duplicating the
+/// private row/name-map plumbing that [OracleResult] owns). The builder
+/// computes the name map once from the column metadata and reuses it for every
+/// row, exactly as the eager [OracleResult] factory does. Not exported.
+@internal
+class OracleRowBuilder {
+  /// Creates a builder for rows shaped by [columnMetadata], precomputing the
+  /// shared case-insensitive name → index map once.
+  OracleRowBuilder(List<ColumnMetadata> columnMetadata)
+      : _columnMetadata = columnMetadata,
+        _nameToIndex = OracleResult._buildNameMap(columnMetadata);
+
+  final List<ColumnMetadata> _columnMetadata;
+  final Map<String, int> _nameToIndex;
+
+  /// Wraps a single raw decoded value list in an [OracleRow], sharing the
+  /// precomputed column metadata and name map.
+  OracleRow build(List<dynamic> data) => OracleRow._(
+        data: data,
+        columnMetadata: _columnMetadata,
+        nameToIndex: _nameToIndex,
+      );
 }

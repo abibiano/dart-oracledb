@@ -39,11 +39,30 @@ class _FakeConnection extends OracleConnection {
   /// it reports an execute in progress.
   bool executing = false;
 
+  /// Scripted open-result-set state: the pool must CLOSE a connection released
+  /// with an open-but-idle result set (not destroy it) and keep it reusable.
+  bool leakedResultSet = false;
+
+  /// Number of times the pool asked this connection to close a leaked result
+  /// set on release.
+  int forceCloseResultSetCalls = 0;
+
   @override
   bool get isHealthy => healthy && closeCalls == 0;
 
   @override
   bool get isExecuting => executing;
+
+  @override
+  bool get hasOpenResultSet => leakedResultSet;
+
+  @override
+  Future<void> forceCloseOpenResultSet() async {
+    forceCloseResultSetCalls++;
+    // Closing the result set clears the open-but-idle state, just as the real
+    // OracleResultSet.close() does.
+    leakedResultSet = false;
+  }
 
   @override
   Future<void> rollback({
@@ -830,6 +849,61 @@ void main() {
           );
           expect(pool.connectionsIdle, equals(1));
           expect(identical(pool.debugIdleConnections.single, conn), isTrue);
+        } finally {
+          await pool.close();
+        }
+      },
+    );
+
+    test(
+      'closes a leaked open result set and recycles the session (AC9)',
+      () async {
+        final created = <_FakeConnection>[];
+        final pool = await createFakePool(created, minConnections: 1);
+        try {
+          final conn = await pool.acquire() as _FakeConnection;
+          // Borrower returned the connection without closing its result set,
+          // but no round trip is in flight (isExecuting stays false).
+          conn.leakedResultSet = true;
+
+          await pool.release(conn);
+
+          expect(conn.forceCloseResultSetCalls, equals(1),
+              reason: 'the pool must close the leaked result set on release');
+          expect(conn.rollbackCalls, equals(1),
+              reason: 'the session is rolled back and recycled, not destroyed');
+          expect(conn.closeCalls, equals(0),
+              reason: 'a closeable leaked result set must not destroy the '
+                  'physical session');
+          expect(pool.connectionsIdle, equals(1));
+          expect(identical(pool.debugIdleConnections.single, conn), isTrue,
+              reason: 'the reclaimed session stays reusable');
+        } finally {
+          await pool.close();
+        }
+      },
+    );
+
+    test(
+      'destroys a connection released mid-RPC even with an open result set',
+      () async {
+        // A genuine mid-RPC race (isExecuting true) must still destroy the
+        // session and throw, regardless of an open result set.
+        final created = <_FakeConnection>[];
+        final pool = await createFakePool(created, minConnections: 1);
+        try {
+          final conn = await pool.acquire() as _FakeConnection;
+          conn.executing = true; // a fetch/execute round trip is in flight
+          conn.leakedResultSet = true;
+
+          await expectLater(pool.release(conn), throwsA(isA<OracleException>()));
+
+          expect(conn.forceCloseResultSetCalls, equals(0),
+              reason: 'a mid-RPC race is never treated as a closeable result '
+                  'set');
+          expect(conn.closeCalls, equals(1),
+              reason: 'the racing session is destroyed');
+          expect(pool.connectionsInUse, equals(0));
         } finally {
           await pool.close();
         }

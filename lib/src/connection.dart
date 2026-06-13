@@ -12,7 +12,9 @@ import 'protocol/bind_parser.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/data_types.dart' as dt;
 import 'protocol/messages/execute_message.dart';
+import 'protocol/result_set_cursor.dart';
 import 'result.dart';
+import 'result_set.dart';
 import 'sql_classifier.dart';
 import 'statement_cache.dart';
 import 'transport/connect_string.dart';
@@ -78,15 +80,27 @@ class OracleConnection {
   bool _isClosed;
   bool _inTransaction = false;
 
-  /// Guards against overlapping [execute] calls on a single connection.
+  /// Guards against overlapping TTC round trips on a single connection.
   ///
   /// A connection multiplexes a single TTC byte stream over one socket. Two
-  /// `execute()` calls in flight at once would interleave their request writes
-  /// and read each other's responses, corrupting cursor ids, the close-cursor
+  /// operations in flight at once would interleave their request writes and
+  /// read each other's responses, corrupting cursor ids, the close-cursor
   /// piggyback queue, and the sequence counter. This driver therefore does NOT
   /// serialize overlapping calls — it rejects the second one fast. Callers that
-  /// need concurrency must use separate connections (e.g. a future pool).
+  /// need concurrency must use separate connections (e.g. a pool).
+  ///
+  /// This flag is `true` only while a wire round trip is actually in progress:
+  /// the whole of an eager [execute], and each [OracleResultSet] open/fetch
+  /// round trip. Between `OracleResultSet` row pulls the flag is `false` while
+  /// [_openResultSet] stays non-null — that distinction lets the pool tell a
+  /// genuine mid-RPC race (destroy the connection) apart from an open-but-idle
+  /// result set left behind by a borrower (close it and reclaim the session).
   bool _executeInProgress = false;
+
+  /// The currently open [OracleResultSet], if one is holding this connection's
+  /// cursor open between row pulls. `null` when no result set is open. A
+  /// connection owns at most one open result set at a time (single TTC stream).
+  OracleResultSet? _openResultSet;
 
   /// The configured statement cache size for this connection.
   int get statementCacheSize => _cache.maxSize;
@@ -150,15 +164,26 @@ class OracleConnection {
   int get debugDescribeRetries => _describeRetries;
   int _describeRetries = 0;
 
-  /// Whether an [execute] call is currently in flight on this connection.
+  /// Whether a TTC round trip is currently in flight on this connection — an
+  /// eager [execute], or an [OracleResultSet] open/fetch round trip.
   ///
   /// Package-internal quiescence seam for the connection pool: `release()`
-  /// must never issue a rollback while an execute is still using the TTC
-  /// stream, so it checks this flag and discards busy connections instead.
-  /// Not part of the public API — production callers outside this package
-  /// must not depend on it.
+  /// must never issue a rollback while a wire round trip is still using the
+  /// TTC stream, so it checks this flag and destroys such connections instead
+  /// (a genuine mid-RPC race). Not part of the public API — production callers
+  /// outside this package must not depend on it.
   @internal
   bool get isExecuting => _executeInProgress;
+
+  /// Whether an [OracleResultSet] is currently holding this connection's
+  /// cursor open (between row pulls, so [isExecuting] is `false`).
+  ///
+  /// Package-internal seam for the connection pool: a connection released with
+  /// an open-but-idle result set is recoverable — the pool closes the result
+  /// set (queuing the cursor for the existing close-cursor piggyback) and
+  /// reclaims the session — whereas a mid-RPC race ([isExecuting]) is not.
+  @internal
+  bool get hasOpenResultSet => _openResultSet != null;
 
   /// Whether the connection is currently open and usable.
   ///
@@ -396,20 +421,12 @@ class OracleConnection {
   Future<OracleResult> execute(String sql, [Object? bindValues]) async {
     _ensureOpen();
 
-    // Reject overlapping execute() calls before any wire write. The flag
-    // is set after _ensureOpen so a closed-connection error still wins, and
-    // cleared in the finally below so a thrown call does not wedge the
-    // connection.
-    if (_executeInProgress) {
-      throw const OracleException(
-        errorCode: oraProtocolError,
-        message:
-            'Concurrent execute() on a single OracleConnection is not '
-            'supported: another statement is still in progress. Await the '
-            'previous execute() before starting another, or use a separate '
-            'connection for concurrent work.',
-      );
-    }
+    // Reject overlapping operations before any wire write. The flag is set
+    // after _ensureOpen so a closed-connection error still wins, and cleared in
+    // the finally below so a thrown call does not wedge the connection. An open
+    // OracleResultSet also owns the stream, so a concurrent execute() while one
+    // is open is rejected the same way.
+    _rejectConcurrentOperation();
     _executeInProgress = true;
     try {
       return await _executeGuarded(sql, bindValues);
@@ -418,12 +435,315 @@ class OracleConnection {
     }
   }
 
+  /// Throws the concurrent-operation [OracleException] when this connection is
+  /// already running a wire round trip or holding an [OracleResultSet] open.
+  ///
+  /// Fail-fast, never queue: a single connection multiplexes one TTC stream, so
+  /// a second operation cannot safely interleave. The message keeps the word
+  /// "Concurrent execute" for continuity with existing callers/tests while also
+  /// naming the open-result-set case.
+  void _rejectConcurrentOperation() {
+    if (_executeInProgress || _openResultSet != null) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'Concurrent execute() on a single OracleConnection is not '
+            'supported: another statement or an open OracleResultSet is still '
+            'in progress on this connection. Await the previous execute() (or '
+            'close the OracleResultSet) before starting another, or use a '
+            'separate connection for concurrent work.',
+      );
+    }
+  }
+
+  /// Default prefetch / FETCH batch size (matches node-oracledb). Both the
+  /// initial EXECUTE prefetch and every continuation FETCH the cursor engine
+  /// drives request this many rows.
+  static const int _defaultPrefetchRows = 50;
+
   Future<OracleResult> _executeGuarded(String sql, Object? bindValues) async {
     _log.fine(
       'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
     );
 
-    // Validate and prepare bind values
+    final stmt = _prepareStatement(sql, bindValues);
+
+    // Open the cursor: full parse / cached-cursor reuse, describe-mismatch
+    // retry, and close-cursor piggyback flushing all happen here and yield the
+    // FIRST batch. The cache entry (if any) is still held (inUse) on return.
+    final open = await _openCursor(sql, stmt);
+    StatementCacheEntry? cacheEntry = open.cacheEntry;
+
+    try {
+      // Drain the rest of the cursor through the shared lazy engine (same code
+      // path OracleResultSet uses), bounded by the eager-materialization safety
+      // cap, then materialize all locators in one result-wide pass. Locators
+      // stay raw until here so a value aliased into several rows is read once.
+      var response = open.response;
+      final effectiveCursorId = response.cursorId;
+      if (stmt.isQuery &&
+          response.moreRowsToFetch &&
+          effectiveCursorId != 0) {
+        final cursor = ResultSetCursor(
+          transport: _transport,
+          cursorId: effectiveCursorId,
+          columns: response.columnMetadata,
+          firstBatch: response.rows,
+          serverHasMoreRows: true,
+          prefetchRows: _defaultPrefetchRows,
+          preserveTimestampTimeZone: _preserveTimestampTimeZone,
+          materializePerBatch: false,
+        );
+        final drained = await cursor.drainRemaining(
+            maxFetchIterations: _transport.maxFetchIterations);
+        final failure = cursor.fetchFailure;
+        if (failure != null) {
+          response = ExecuteResponse(
+            isSuccess: false,
+            cursorId: effectiveCursorId,
+            columnMetadata: response.columnMetadata,
+            rows: drained,
+            rowsAffected: failure.rowsAffected,
+            moreRowsToFetch: failure.moreRowsToFetch,
+            errorCode: failure.errorCode,
+            errorMessage: failure.errorMessage,
+            errorOffset: failure.errorOffset,
+          );
+        } else {
+          response = ExecuteResponse(
+            isSuccess: true,
+            cursorId: effectiveCursorId,
+            columnMetadata: response.columnMetadata,
+            rows: drained,
+            outBindValues: response.outBindValues,
+            outBindIndices: response.outBindIndices,
+            rowsAffected: response.rowsAffected,
+            // A drain stopped early by the safety cap reports the result as
+            // honestly incomplete (moreRowsAvailable) rather than truncated.
+            moreRowsToFetch: cursor.incompleteDrain,
+          );
+        }
+      }
+
+      // A FETCH error during the drain is handled exactly like an EXECUTE
+      // error: invalidate the cached cursor and surface a clear failure with a
+      // bounded SQL snippet (never bind values).
+      if (!response.isSuccess) {
+        if (cacheEntry != null) {
+          _cache.invalidate(stmt.cacheKey);
+          cacheEntry = null;
+        }
+        final serverMessage = response.errorMessage ?? 'Query execution failed';
+        throw OracleException(
+          errorCode: response.errorCode ?? oraProtocolError,
+          message: '$serverMessage [SQL: ${_truncateSql(sql)}]',
+          sql: sql,
+          offset: response.errorOffset,
+        );
+      }
+
+      // Materialize CLOB/BLOB locators over the fully-drained result so a
+      // locator aliased into several rows is read exactly once.
+      response = await _transport.materializeLobs(response,
+          bindMetadata: stmt.bindMetadata);
+
+      // Update the cache from the successful response.
+      if (stmt.eligible && cacheEntry != null) {
+        // Re-executed a cached cursor. A successful re-execute often echoes
+        // cursorId == 0 while the original cursor stays valid — only overwrite
+        // on a non-zero id (node-oracledb withData.js processErrorInfo).
+        if (response.cursorId != 0) {
+          cacheEntry.cursorId = response.cursorId;
+        }
+        if (response.columnMetadata.isNotEmpty) {
+          // Server re-DESCRIBEd: adopt fresh metadata so rows decode against
+          // the current shape, never the stale cached one.
+          cacheEntry.columnMetadata = response.columnMetadata;
+        }
+        _cache.release(cacheEntry);
+        cacheEntry = null;
+      } else if (stmt.eligible && response.cursorId != 0) {
+        // First execution (or post-retry full parse): store the fresh cursor.
+        _cache.store(
+          StatementCacheEntry(
+            key: stmt.cacheKey,
+            cursorId: response.cursorId,
+            columnMetadata: response.columnMetadata,
+          ),
+        );
+      }
+
+      // A successful DDL can alter the result shape or invalidate server-side
+      // cursors of ANY cached SELECT/DML on this connection, so conservatively
+      // drop the whole per-connection cache. The trigger is "DDL-shaped": not a
+      // query, not PL/SQL, and not cache-eligible.
+      //
+      // ORDERING DEPENDENCY: the `!isQuery` guard is load-bearing. A
+      // `SELECT ... FOR UPDATE` satisfies both `!eligible` and `!isPlSql` but
+      // must NOT invalidate the cache. Removing or reordering `!isQuery` here
+      // would silently allow FOR UPDATE to wipe all cached cursors.
+      if (!stmt.eligible && !stmt.isPlSql && !stmt.isQuery) {
+        _cache.invalidateAll();
+      }
+
+      return OracleResult(
+        columnMetadata: response.columnMetadata,
+        rowData: response.rows,
+        rowsAffected: stmt.isPlSql ? null : response.rowsAffected,
+        outBinds: _buildOutBinds(
+          response: response,
+          bindNames: stmt.bindNames,
+          outBindNameIndex: stmt.outBindNameIndex,
+        ),
+        moreRowsAvailable: response.moreRowsToFetch,
+      );
+    } catch (e) {
+      // A drain / materialize failure leaves a held cached cursor in an unknown
+      // state; invalidate it (queues its id for close) so the next call
+      // reparses rather than reusing a possibly-corrupt cursor.
+      if (cacheEntry != null) {
+        _cache.invalidate(stmt.cacheKey);
+      }
+      if (e is OracleException) rethrow;
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'Query execution failed',
+        cause: e,
+      );
+    }
+  }
+
+  /// Opens (or reuses) a server cursor for [stmt] and returns its FIRST batch
+  /// plus the cache entry still held (inUse) for it.
+  ///
+  /// Shared by eager [execute] and the lazy [openResultSet] seam so both use
+  /// one open path: full parse / cached-cursor reuse, the transparent
+  /// describe-mismatch retry (ORA-01007 / ORA-00932), and close-cursor
+  /// piggyback chunking are all handled here. Returns only on a successful
+  /// response; an unrecoverable server error throws [OracleException]. The
+  /// caller owns the returned cache entry and must release/store it (eager) or
+  /// hold it for the result set's lifetime (lazy).
+  Future<_CursorOpen> _openCursor(String sql, _PreparedStatement stmt) async {
+    // Try to acquire a cached cursor.
+    StatementCacheEntry? cacheEntry;
+    int cursorId = 0;
+    List<ColumnMetadata>? expectedColumns;
+    if (stmt.eligible) {
+      cacheEntry = _cache.acquire(stmt.cacheKey);
+      if (cacheEntry != null) {
+        // A cursor whose result shape contains a locator LOB column (CLOB or
+        // BLOB) is never blind-re-executed: without fresh defines the server
+        // stops sending the LOB-prefetch metadata and the row stream misaligns.
+        // Close the old cursor (via the piggyback on this same execute) and
+        // re-parse to re-establish the prefetch shape.
+        final hasLobColumn = cacheEntry.columnMetadata.any(
+          (c) =>
+              c.oracleType == oc.oraTypeClob || c.oracleType == oc.oraTypeBlob,
+        );
+        if (hasLobColumn && cacheEntry.cursorId != 0) {
+          _cache.requeueCursorsToClose([cacheEntry.cursorId]);
+          cacheEntry.cursorId = 0;
+        }
+        cursorId = cacheEntry.cursorId;
+        if (cursorId != 0 && cacheEntry.columnMetadata.isNotEmpty) {
+          expectedColumns = cacheEntry.columnMetadata;
+        }
+      }
+    }
+
+    var describeRetryUsed = false;
+    while (true) {
+      // Drain cursor IDs queued from prior LRU evictions, errors, or DDL
+      // invalidation, and flush at most one SDU-bounded chunk on this execute.
+      // Any remainder is requeued (deduplicated) and piggybacks on later
+      // executes — no standalone close-cursor RPC, no ID dropped.
+      final drained = _cache.drainCursorsToClose();
+      final chunkLimit = _transport.closeCursorChunkLimit;
+      final List<int> cursorsToClose;
+      if (drained.length <= chunkLimit) {
+        cursorsToClose = drained;
+      } else {
+        cursorsToClose = drained.sublist(0, chunkLimit);
+        _cache.requeueCursorsToClose(drained.sublist(chunkLimit));
+      }
+
+      try {
+        final response = await _transport.sendExecute(
+          sql,
+          isQuery: stmt.isQuery,
+          isPlSql: stmt.isPlSql,
+          bindValues: stmt.bindList,
+          bindNames: stmt.bindNames,
+          bindMetadata: stmt.bindMetadata,
+          prefetchRows: _defaultPrefetchRows,
+          cursorId: cursorId,
+          expectedColumns: expectedColumns,
+          cursorsToClose: cursorsToClose,
+          preserveTimestampTimeZone: _preserveTimestampTimeZone,
+        );
+
+        if (!response.isSuccess) {
+          final code = response.errorCode;
+          // Describe-mismatch on a cached re-execute is recoverable; anything
+          // else (or a second occurrence) propagates. invalidate() queues the
+          // dead cursor for close, so the retry's drain piggybacks it exactly
+          // as node-oracledb's clearCursor does.
+          final canRetry = !describeRetryUsed &&
+              stmt.isQuery &&
+              (code == oc.oraVarNotInSelectList ||
+                  code == oc.oraDataTypeNotSupported);
+          if (cacheEntry != null) {
+            _cache.invalidate(stmt.cacheKey);
+            cacheEntry = null;
+          }
+          if (canRetry) {
+            describeRetryUsed = true;
+            _describeRetries++;
+            cursorId = 0; // force a full parse + re-DESCRIBE on the re-execute
+            expectedColumns = null;
+            _log.fine(
+              'Cached cursor describe mismatch (server error $code) on '
+              '"${_truncateSql(sql)}"; re-executing once with a full parse',
+            );
+            continue;
+          }
+          final serverMessage =
+              response.errorMessage ?? 'Query execution failed';
+          throw OracleException(
+            errorCode: code ?? oraProtocolError,
+            // Append a bounded SQL snippet so the message satisfies FR42
+            // without ever exposing bind values — only raw SQL + placeholders.
+            message: '$serverMessage [SQL: ${_truncateSql(sql)}]',
+            sql: sql,
+            offset: response.errorOffset,
+          );
+        }
+
+        return _CursorOpen(response: response, cacheEntry: cacheEntry);
+      } catch (e) {
+        if (cacheEntry != null) {
+          _cache.invalidate(stmt.cacheKey);
+        }
+        // sendExecute may have thrown before the close-cursor piggyback hit the
+        // wire. Put the drained IDs back so the next call (or close()) retries.
+        if (cursorsToClose.isNotEmpty) {
+          _cache.requeueCursorsToClose(cursorsToClose);
+        }
+        if (e is OracleException) rethrow;
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message: 'Query execution failed',
+          cause: e,
+        );
+      }
+    }
+  }
+
+  /// Parses and validates [bindValues], classifies [sql], and builds the
+  /// bind-signature-aware cache key — the side-effect-free prelude shared by
+  /// eager [execute] and the [openResultSet] seam.
+  _PreparedStatement _prepareStatement(String sql, Object? bindValues) {
+    // Validate and prepare bind values.
     List<dynamic>? bindList;
     List<String>? bindNames;
     // Maps each bind position (in SQL order) → the user-supplied name, when
@@ -525,196 +845,198 @@ class OracleConnection {
     // (which would cause ORA-01007 / stale metadata / silent coercion).
     final cacheKey = StatementCacheKey(sql, _bindSignature(bindMetadata));
 
-    // Try to acquire a cached cursor.
-    StatementCacheEntry? cacheEntry;
-    int cursorId = 0;
-    List<ColumnMetadata>? expectedColumns;
-    if (eligible) {
-      cacheEntry = _cache.acquire(cacheKey);
-      if (cacheEntry != null) {
-        // A cursor whose result shape contains a locator
-        // LOB column (CLOB or BLOB) is never blind-re-executed. Without
-        // fresh defines the server stops sending the LOB-prefetch metadata
-        // (length + chunk size) on re-execute and the row stream misaligns.
-        // node-oracledb solves this by abandoning the plain re-execute path
-        // for LOB queries too (it sends an extra DEFINE message and
-        // disables row prefetch); this driver's equivalent safeguard is to
-        // close the old cursor (via the close-cursor piggyback on this same
-        // execute) and re-parse, which re-establishes the prefetch shape.
-        final hasLobColumn = cacheEntry.columnMetadata.any(
-          (c) =>
-              c.oracleType == oc.oraTypeClob || c.oracleType == oc.oraTypeBlob,
-        );
-        if (hasLobColumn && cacheEntry.cursorId != 0) {
-          _cache.requeueCursorsToClose([cacheEntry.cursorId]);
-          cacheEntry.cursorId = 0;
-        }
-        cursorId = cacheEntry.cursorId;
-        if (cursorId != 0 && cacheEntry.columnMetadata.isNotEmpty) {
-          expectedColumns = cacheEntry.columnMetadata;
-        }
-      }
+    return _PreparedStatement(
+      bindList: bindList,
+      bindNames: bindNames,
+      outBindNameIndex: outBindNameIndex,
+      bindMetadata: bindMetadata,
+      isQuery: isQuery,
+      isPlSql: isPlSql,
+      eligible: eligible,
+      cacheKey: cacheKey,
+    );
+  }
+
+  /// Opens a SELECT as a cursor-backed [OracleResultSet] for incremental,
+  /// non-materializing row consumption.
+  ///
+  /// This is a package-internal seam introduced by Story 8.1: it exposes the
+  /// `OracleResultSet` type and the real lazy fetch engine without yet adding
+  /// the user-facing acquisition API. Marked [visibleForTesting] so the
+  /// driver's own unit and integration tests can exercise it.
+  ///
+  /// TODO(story-8.3): replace this seam with the public option-style
+  /// acquisition (`execute(..., resultSet: true)`) once the Dart API shape is
+  /// settled. Story 8.2 layers `queryStream()` / `executeStream()` on top of
+  /// the same engine.
+  ///
+  /// The connection owns at most one open result set (single TTC stream); a
+  /// concurrent [execute] or [openResultSet] while one is open fails fast with
+  /// the concurrent-operation [OracleException]. Throws [OracleException] when
+  /// [sql] is not a query — DML / PL/SQL must use [execute].
+  @visibleForTesting
+  Future<OracleResultSet> openResultSet(String sql, [Object? bindValues]) async {
+    _ensureOpen();
+    _rejectConcurrentOperation();
+    _executeInProgress = true;
+    final OracleResultSet rs;
+    try {
+      rs = await _openResultSetGuarded(sql, bindValues);
+    } finally {
+      // The open round trip is complete; the cursor is now idle between pulls.
+      _executeInProgress = false;
+    }
+    _openResultSet = rs;
+    return rs;
+  }
+
+  Future<OracleResultSet> _openResultSetGuarded(
+      String sql, Object? bindValues) async {
+    _log.fine(
+      'Opening result set: '
+      '${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
+    );
+    final stmt = _prepareStatement(sql, bindValues);
+    if (!stmt.isQuery) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'OracleResultSet is only supported for queries (SELECT). Use '
+            'execute() for DML or PL/SQL statements.',
+      );
     }
 
-    // A cached SELECT cursor whose result shape changed under it (e.g. a
-    // column dropped/retyped by cross-session DDL — common on recycled pooled
-    // sessions) reports ORA-01007 / ORA-00932 on re-execute. node-oracledb
-    // (withData.js processErrorInfo + protocol.js _processMessage) recovers
-    // transparently: clear the dead cursor and re-execute the statement ONCE
-    // as a full parse. Bounded to a single retry, queries only — a genuine
-    // type error therefore still surfaces after exactly one re-attempt, and
-    // integrity/constraint violations carry other codes so never match.
-    var describeRetryUsed = false;
-    while (true) {
-      // Drain cursor IDs queued from prior LRU evictions, errors, or DDL
-      // invalidation, and flush at most one SDU-bounded chunk on this execute.
-      // The piggyback rides the execute in a single un-fragmented packet,
-      // so an unbounded list could overflow the negotiated SDU. Any remainder
-      // is requeued (deduplicated) and piggybacks on later executes — no
-      // standalone close-cursor RPC is sent, and no ID is dropped.
-      final drained = _cache.drainCursorsToClose();
-      final chunkLimit = _transport.closeCursorChunkLimit;
-      final List<int> cursorsToClose;
-      if (drained.length <= chunkLimit) {
-        cursorsToClose = drained;
+    final open = await _openCursor(sql, stmt);
+    final acquiredEntry = open.cacheEntry;
+    ExecuteResponse firstResponse = open.response;
+    StatementCacheEntry? heldEntry;
+    try {
+      // Materialize the first batch's locators now (the streaming path
+      // materializes each batch as it is fetched).
+      firstResponse = await _transport.materializeLobs(firstResponse,
+          bindMetadata: stmt.bindMetadata);
+
+      // Cache disposition: keep the entry inUse for the result set's lifetime;
+      // OracleResultSet.close() releases it through the same path execute uses.
+      if (stmt.eligible && acquiredEntry != null) {
+        if (firstResponse.cursorId != 0) {
+          acquiredEntry.cursorId = firstResponse.cursorId;
+        }
+        if (firstResponse.columnMetadata.isNotEmpty) {
+          acquiredEntry.columnMetadata = firstResponse.columnMetadata;
+        }
+        heldEntry = acquiredEntry; // stays inUse until close()
+      } else if (stmt.eligible && firstResponse.cursorId != 0) {
+        // First execution (or post-retry full parse): store the fresh cursor as
+        // in-use so a concurrent acquire sees it busy and close() releases it.
+        heldEntry = StatementCacheEntry(
+          key: stmt.cacheKey,
+          cursorId: firstResponse.cursorId,
+          columnMetadata: firstResponse.columnMetadata,
+        )..inUse = true;
+        _cache.store(heldEntry);
+      }
+    } catch (e) {
+      if (acquiredEntry != null) {
+        _cache.invalidate(stmt.cacheKey);
+      }
+      if (e is OracleException) rethrow;
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'Opening result set failed',
+        cause: e,
+      );
+    }
+
+    final effectiveCursorId = firstResponse.cursorId;
+    final cursor = ResultSetCursor(
+      transport: _transport,
+      cursorId: effectiveCursorId,
+      columns: firstResponse.columnMetadata,
+      firstBatch: firstResponse.rows,
+      serverHasMoreRows: firstResponse.moreRowsToFetch,
+      prefetchRows: _defaultPrefetchRows,
+      preserveTimestampTimeZone: _preserveTimestampTimeZone,
+      materializePerBatch: true,
+    );
+    return OracleResultSet.fromCursor(
+      connection: this,
+      cursor: cursor,
+      cacheEntry: heldEntry,
+      cursorId: effectiveCursorId,
+    );
+  }
+
+  /// Brackets one [OracleResultSet] fetch/open round trip with the connection's
+  /// in-flight guard so a concurrent [execute] is rejected and the pool can see
+  /// a genuine mid-RPC race. Package-internal seam for `result_set.dart`.
+  @internal
+  Future<T> runResultSetFetch<T>(Future<T> Function() body) async {
+    _ensureOpen();
+    if (_executeInProgress) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'Concurrent operation on a single OracleConnection is not '
+            'supported: a result-set fetch is already in progress. Await the '
+            'previous getRow()/getRows() before starting another.',
+      );
+    }
+    _executeInProgress = true;
+    try {
+      return await body();
+    } finally {
+      _executeInProgress = false;
+    }
+  }
+
+  /// Releases the resources an [OracleResultSet] held when it closes: the cached
+  /// cursor (returned to the cache or queued for close) or — for a non-cached
+  /// cursor — the bare cursor id queued for the existing close-cursor piggyback.
+  /// Clears [_openResultSet] when [rs] is the open one. Issues no wire traffic
+  /// (the cursor close rides the next execute), so it is safe during pool
+  /// release. Package-internal seam for `result_set.dart`.
+  ///
+  /// When [failed] is true the result set hit a terminal FETCH or
+  /// materialization error mid-stream: the server cursor's state is unknown, so
+  /// a cached entry is invalidated (dropped and queued for close) rather than
+  /// returned to the cache as reusable — mirroring the eager [execute] FETCH-
+  /// error path. Otherwise the next execute of the same SQL would blind-re-
+  /// execute a corrupt cursor.
+  @internal
+  void releaseResultSet(
+    OracleResultSet rs, {
+    required StatementCacheEntry? cacheEntry,
+    required int cursorId,
+    bool failed = false,
+  }) {
+    if (cacheEntry != null) {
+      if (failed) {
+        _cache.invalidate(cacheEntry.key);
       } else {
-        cursorsToClose = drained.sublist(0, chunkLimit);
-        _cache.requeueCursorsToClose(drained.sublist(chunkLimit));
+        // Returns the cursor to the cache, or queues its id for close if the
+        // entry was evicted while the result set was open (returnToCache false).
+        _cache.release(cacheEntry);
       }
-
-      try {
-        final response = await _transport.sendExecute(
-          sql,
-          isQuery: isQuery,
-          isPlSql: isPlSql,
-          bindValues: bindList,
-          bindNames: bindNames,
-          bindMetadata: bindMetadata,
-          cursorId: cursorId,
-          expectedColumns: expectedColumns,
-          cursorsToClose: cursorsToClose,
-          preserveTimestampTimeZone: _preserveTimestampTimeZone,
-        );
-
-        if (!response.isSuccess) {
-          final code = response.errorCode;
-          // Describe-mismatch on a cached re-execute is recoverable; anything
-          // else (or a second occurrence) propagates. invalidate() below
-          // queues the dead cursor for close, so the retry's drain piggybacks
-          // it exactly as node-oracledb's clearCursor does.
-          final canRetry =
-              !describeRetryUsed &&
-              isQuery &&
-              (code == oc.oraVarNotInSelectList ||
-                  code == oc.oraDataTypeNotSupported);
-          if (cacheEntry != null) {
-            _cache.invalidate(cacheKey);
-            cacheEntry = null;
-          }
-          if (canRetry) {
-            describeRetryUsed = true;
-            _describeRetries++;
-            cursorId = 0; // force a full parse + re-DESCRIBE on the re-execute
-            expectedColumns = null;
-            _log.fine(
-              'Cached cursor describe mismatch (server error $code) on '
-              '"${_truncateSql(sql)}"; re-executing once with a full parse',
-            );
-            continue;
-          }
-          final serverMessage =
-              response.errorMessage ?? 'Query execution failed';
-          throw OracleException(
-            errorCode: code ?? oraProtocolError,
-            // Append a bounded SQL snippet so the message satisfies FR42
-            // ("clear error messages when queries fail") without ever exposing
-            // bind values — only the raw SQL with placeholders is included.
-            message: '$serverMessage [SQL: ${_truncateSql(sql)}]',
-            sql: sql,
-            offset: response.errorOffset,
-          );
-        }
-
-        // Update cache from a successful response.
-        if (eligible && cacheEntry != null) {
-          // Re-executed a cached cursor. A successful re-execute often echoes
-          // cursorId == 0 in the end-of-call message while the original cursor
-          // stays valid — node-oracledb (withData.js processErrorInfo) only
-          // overwrites the cursor id when the server returns a non-zero one.
-          // Mirror that: preserve the cached cursor on cursorId == 0 rather
-          // than invalidating a still-usable cursor; only an actual error
-          // (handled above) invalidates.
-          if (response.cursorId != 0) {
-            cacheEntry.cursorId = response.cursorId;
-          }
-          if (response.columnMetadata.isNotEmpty) {
-            // Server re-DESCRIBEd (e.g. shape changed): adopt fresh metadata so
-            // rows decode against the current shape, never the stale cached one.
-            cacheEntry.columnMetadata = response.columnMetadata;
-          }
-          _cache.release(cacheEntry);
-          cacheEntry = null;
-        } else if (eligible && response.cursorId != 0) {
-          // First execution (or post-retry full parse): store the freshly
-          // parsed cursor.
-          _cache.store(
-            StatementCacheEntry(
-              key: cacheKey,
-              cursorId: response.cursorId,
-              columnMetadata: response.columnMetadata,
-            ),
-          );
-        }
-
-        // A successful DDL can alter the result shape or invalidate
-        // server-side cursors of ANY cached SELECT/DML on this connection.
-        // There is no cheap way to map arbitrary SQL back to the schema objects
-        // it touches, so conservatively drop the whole per-connection cache:
-        // the next execution of each statement reparses and re-DESCRIBEs
-        // against the new shape rather than decoding rows with stale metadata.
-        //
-        // The trigger is "DDL-shaped": not a query, not PL/SQL, and not
-        // cache-eligible. Queries are excluded so a non-cacheable but still
-        // read-only statement — notably `SELECT ... FOR UPDATE` (eligible ==
-        // false) — does not wipe the cache. PL/SQL is excluded so ordinary
-        // procedure calls do not thrash it.
-        //
-        // ORDERING DEPENDENCY: the `!isQuery` guard is load-bearing. A
-        // `SELECT ... FOR UPDATE` satisfies both `!eligible` and `!isPlSql` but
-        // must NOT invalidate the cache. Removing or reordering `!isQuery` here
-        // would silently allow FOR UPDATE to wipe all cached cursors.
-        if (!eligible && !isPlSql && !isQuery) {
-          _cache.invalidateAll();
-        }
-
-        return OracleResult(
-          columnMetadata: response.columnMetadata,
-          rowData: response.rows,
-          rowsAffected: isPlSql ? null : response.rowsAffected,
-          outBinds: _buildOutBinds(
-            response: response,
-            bindNames: bindNames,
-            outBindNameIndex: outBindNameIndex,
-          ),
-          moreRowsAvailable: response.moreRowsToFetch,
-        );
-      } catch (e) {
-        if (cacheEntry != null) {
-          _cache.invalidate(cacheKey);
-        }
-        // sendExecute may have thrown before the close-cursor piggyback hit the
-        // wire. Put the drained IDs back so the next call (or close()) retries.
-        if (cursorsToClose.isNotEmpty) {
-          _cache.requeueCursorsToClose(cursorsToClose);
-        }
-        if (e is OracleException) rethrow;
-        throw OracleException(
-          errorCode: oraProtocolError,
-          message: 'Query execution failed',
-          cause: e,
-        );
-      }
+    } else if (cursorId != 0) {
+      // Non-cached cursor: queue its id for the close-cursor piggyback. (A
+      // non-cached cursor is never reused, so a failed one needs no special
+      // handling — queuing it for close is already correct.)
+      _cache.requeueCursorsToClose([cursorId]);
     }
+    if (identical(_openResultSet, rs)) {
+      _openResultSet = null;
+    }
+  }
+
+  /// Closes the open [OracleResultSet], if any, reclaiming the cursor so the
+  /// connection stays reusable. Package-internal seam for the connection pool's
+  /// leaked-result-set cleanup on release.
+  @internal
+  Future<void> forceCloseOpenResultSet() async {
+    final rs = _openResultSet;
+    if (rs == null) return;
+    await rs.close();
   }
 
   /// The database server hostname.
@@ -1139,6 +1461,12 @@ class OracleConnection {
     _log.info('Closing connection');
     _isClosed = true;
 
+    // Drop any open result set's cursor reference. Its server cursor is reaped
+    // at session teardown along with the cached cursors below; a later
+    // OracleResultSet.close() then no-ops (getRow/getRows already fail via the
+    // closed-connection guard).
+    _openResultSet = null;
+
     // Clear cache state locally; per node-oracledb reference, cached cursors
     // are only ever closed via piggyback on a subsequent execute. On close
     // there is no next execute, so the server reaps them at session teardown.
@@ -1147,4 +1475,38 @@ class OracleConnection {
     await _transport.disconnect();
     _log.fine('Connection closed successfully');
   }
+}
+
+/// Side-effect-free result of [OracleConnection._prepareStatement]: the parsed
+/// binds, the statement classification, and the cache key shared by eager
+/// [OracleConnection.execute] and the [OracleConnection.openResultSet] seam.
+class _PreparedStatement {
+  _PreparedStatement({
+    required this.bindList,
+    required this.bindNames,
+    required this.outBindNameIndex,
+    required this.bindMetadata,
+    required this.isQuery,
+    required this.isPlSql,
+    required this.eligible,
+    required this.cacheKey,
+  });
+
+  final List<dynamic>? bindList;
+  final List<String>? bindNames;
+  final Map<String, int>? outBindNameIndex;
+  final List<BindMetadata>? bindMetadata;
+  final bool isQuery;
+  final bool isPlSql;
+  final bool eligible;
+  final StatementCacheKey cacheKey;
+}
+
+/// Result of [OracleConnection._openCursor]: the successful first-batch response
+/// and the cache entry still held (inUse) for the opened cursor, if any.
+class _CursorOpen {
+  _CursorOpen({required this.response, required this.cacheEntry});
+
+  final ExecuteResponse response;
+  final StatementCacheEntry? cacheEntry;
 }

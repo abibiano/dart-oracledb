@@ -378,9 +378,19 @@ class Transport {
   static const int _tnsDataFlagsEof = 0x0040;
   static const int _tnsDataFlagsEndOfRequest = 0x2000;
 
-  // Safety cap: prevent infinite FETCH loops when moreRowsToFetch stays true.
+  // Safety cap: prevent unbounded FETCH loops when moreRowsToFetch stays true.
+  // Applied only to EAGER materialization (OracleConnection.execute drains the
+  // cursor engine bounded by this many FETCH rounds). Lazy OracleResultSet
+  // consumption is deliberately uncapped — the caller controls how far it
+  // fetches, so a huge result set cannot loop forever inside a single call.
   static const int _defaultMaxFetchIterations = 1000;
   int _maxFetchIterations = _defaultMaxFetchIterations;
+
+  /// The eager-materialization FETCH-round safety cap. Read by
+  /// `OracleConnection.execute` when draining the shared cursor engine; not a
+  /// public API.
+  @internal
+  int get maxFetchIterations => _maxFetchIterations;
 
   /// Test-only seam to lower the fetch-drain iteration cap so the
   /// incomplete-result path (`moreRowsToFetch == true` after hitting the cap)
@@ -565,13 +575,19 @@ class Transport {
       preserveTimestampTimeZone: preserveTimestampTimeZone,
     );
 
-    // If this is a SELECT with more rows pending, drain them via FETCH calls
-    // until EOF. The server may echo cursorId == 0 on a cached-cursor
-    // re-execute while the original cursor stays open, so the drain falls
-    // back to the request's own cursor id. ExecuteResponse is immutable
-    // so rows accumulate in a local list and a single final
-    // response is built after the loop — on both the success and the
-    // fetch-failure paths.
+    // sendExecute returns only the FIRST batch. The FETCH drain loop (and its
+    // safety cap) now lives in the lazy cursor engine
+    // (lib/src/protocol/result_set_cursor.dart) so eager execute() and
+    // OracleResultSet share one fetch path. Row-LOB and OUT-bind locators are
+    // NOT materialized here: the caller materializes via [materializeLobs] so
+    // eager execute() can accumulate raw locator rows across batches and
+    // materialize once (result-wide dedup), while OracleResultSet materializes
+    // per batch as rows are consumed.
+    //
+    // The server may echo cursorId == 0 on a cached-cursor re-execute while the
+    // original cursor stays open, so the usable fetch cursor falls back to the
+    // request's own id. The returned response carries that effective id when
+    // more rows remain, so the caller's fetch loop can continue.
     final effectiveCursorId =
         response.cursorId != 0 ? response.cursorId : cursorId;
     if (isQuery &&
@@ -583,16 +599,13 @@ class Transport {
       final fetchColumns = response.columnMetadata.isNotEmpty
           ? response.columnMetadata
           : expectedColumns;
-      var allRows = List<List<Object?>>.of(response.rows);
-      var moreRowsToFetch = true;
-      // For locator-LOB (CLOB/BLOB) and native JSON
-      // queries the server defers row delivery — the first execute returns
-      // DESCRIBE only (zero rows). A DEFINE call (defines carrying the
-      // LOB-prefetch cont-flag) re-executes the cursor and returns the first
-      // row batch in the prefetch shape; subsequent FETCH rounds keep that
-      // shape. Without it, FETCH rounds ship bare locators / bare JSON
-      // values (no length/chunk prefix) that cannot be decoded — validated
-      // live on 23ai: a JSON FETCH round without defines
+      // For locator-LOB (CLOB/BLOB) and native JSON queries the server defers
+      // row delivery — the first execute returns DESCRIBE only (zero rows). A
+      // DEFINE call (defines carrying the LOB-prefetch cont-flag) re-executes
+      // the cursor and returns the first row batch in the prefetch shape;
+      // subsequent FETCH rounds keep that shape. Without it, FETCH rounds ship
+      // bare locators / bare JSON values (no length/chunk prefix) that cannot
+      // be decoded — validated live on 23ai: a JSON FETCH round without defines
       // misaligns the stream. Mirrors node-oracledb `_handleDefines` and its
       // `requiresDefine = true` for CLOB/BLOB/JSON query columns.
       if (fetchColumns != null &&
@@ -603,56 +616,28 @@ class Transport {
               c.oracleType == oraTypeJson)) {
         final defineResponse = await _sendLobDefines(
             sql, effectiveCursorId, fetchColumns, prefetchRows, timeout);
-        allRows = List<List<Object?>>.of(defineResponse.rows);
-        moreRowsToFetch = defineResponse.moreRowsToFetch;
-      }
-      var fetchCount = 0;
-      while (moreRowsToFetch) {
-        if (++fetchCount > _maxFetchIterations) {
-          // Backstop against an unbounded drain. Leave moreRowsToFetch as-is
-          // (true) so the returned response is honestly reported as
-          // incomplete rather than indistinguishable from a fully-drained
-          // result set (which would silently truncate rows).
-          _log.warning('Reached max fetch iterations ($_maxFetchIterations); '
-              'stopping with rows still pending — result is incomplete');
-          break;
-        }
-        final fetched = await _sendFetch(
-            effectiveCursorId, prefetchRows, timeout,
-            expectedColumns: fetchColumns,
-            preserveTimestampTimeZone: preserveTimestampTimeZone,
-            // Duplicate-column dedup across FETCH rounds: the first row of
-            // the next round may reference the last row of this one.
-            previousRoundLastRow: allRows.isNotEmpty ? allRows.last : null);
-        allRows.addAll(fetched.rows);
-        moreRowsToFetch = fetched.moreRowsToFetch;
-        if (!fetched.isSuccess) {
-          return ExecuteResponse(
-            isSuccess: false,
-            cursorId: effectiveCursorId,
-            columnMetadata: response.columnMetadata,
-            rows: allRows,
-            rowsAffected: fetched.rowsAffected,
-            moreRowsToFetch: fetched.moreRowsToFetch,
-            errorCode: fetched.errorCode,
-            errorMessage: fetched.errorMessage,
-            errorOffset: fetched.errorOffset,
-          );
-        }
-      }
-      return _materializeLobValues(
-        ExecuteResponse(
+        return ExecuteResponse(
           isSuccess: true,
           cursorId: effectiveCursorId,
           columnMetadata: response.columnMetadata,
-          rows: allRows,
+          rows: defineResponse.rows,
           outBindValues: response.outBindValues,
           outBindIndices: response.outBindIndices,
           rowsAffected: response.rowsAffected,
-          moreRowsToFetch: moreRowsToFetch,
-        ),
-        bindMetadata: bindMetadata,
-        timeout: timeout,
+          moreRowsToFetch: defineResponse.moreRowsToFetch,
+        );
+      }
+      // Normalize the cursor id to [effectiveCursorId] so the caller's fetch
+      // loop can continue even when the server echoed 0.
+      return ExecuteResponse(
+        isSuccess: true,
+        cursorId: effectiveCursorId,
+        columnMetadata: response.columnMetadata,
+        rows: response.rows,
+        outBindValues: response.outBindValues,
+        outBindIndices: response.outBindIndices,
+        rowsAffected: response.rowsAffected,
+        moreRowsToFetch: response.moreRowsToFetch,
       );
     }
 
@@ -661,12 +646,62 @@ class Transport {
         effectiveCursorId == 0 &&
         response.moreRowsToFetch) {
       // The server signalled more rows pending, but neither the response nor
-      // the request carries a usable cursor id, so the drain loop cannot run.
+      // the request carries a usable cursor id, so the fetch loop cannot run.
       _log.warning('Server reports more rows pending but no usable cursor id '
           'is available to continue fetching; result is reported incomplete '
           '(moreRowsToFetch=true)');
     }
 
+    // Single-batch / non-query / no-usable-cursor: return the first response
+    // unchanged (raw, not materialized). The caller materializes via
+    // [materializeLobs].
+    return response;
+  }
+
+  /// Fetches one more batch of rows from an open server cursor and returns the
+  /// decoded response (raw — locators are NOT materialized; the caller uses
+  /// [materializeLobs]).
+  ///
+  /// This is the single-batch FETCH primitive the lazy cursor engine
+  /// (`ResultSetCursor`) drives for both eager `execute()` drains and
+  /// `OracleResultSet` row consumption, so the two share one fetch path.
+  /// [previousRoundLastRow] supplies the duplicate-column dedup source for the
+  /// first row of this round (Oracle may encode it as a copy of the prior
+  /// round's last row).
+  @internal
+  Future<ExecuteResponse> fetchRows(
+    int cursorId,
+    int numRows, {
+    List<ColumnMetadata>? columns,
+    Duration? timeout = const Duration(minutes: 2),
+    bool preserveTimestampTimeZone = false,
+    List<Object?>? previousRoundLastRow,
+  }) {
+    return _sendFetch(
+      cursorId,
+      numRows,
+      timeout,
+      expectedColumns: columns,
+      preserveTimestampTimeZone: preserveTimestampTimeZone,
+      previousRoundLastRow: previousRoundLastRow,
+    );
+  }
+
+  /// Materializes any CLOB/BLOB locators in [response]'s rows and OUT binds
+  /// into Strings / byte buffers via TTC LOB READ round trips, returning a new
+  /// response with the materialized values (or the same response when there is
+  /// nothing to read).
+  ///
+  /// Exposed so the connection layer can materialize a fully-drained eager
+  /// result in one pass (result-wide locator dedup) and `ResultSetCursor` can
+  /// materialize per batch as rows are consumed. Sends no traffic for a
+  /// locator-free or unsuccessful response.
+  @internal
+  Future<ExecuteResponse> materializeLobs(
+    ExecuteResponse response, {
+    List<BindMetadata>? bindMetadata,
+    Duration? timeout = const Duration(minutes: 2),
+  }) {
     return _materializeLobValues(response,
         bindMetadata: bindMetadata, timeout: timeout);
   }
