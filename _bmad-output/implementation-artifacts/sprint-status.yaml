@@ -1,5 +1,5 @@
 # generated: 2025-12-16
-# last_updated: 2026-06-13
+# last_updated: 2026-06-16
 # project: dart-oracledb
 # project_key: NOKEY
 # tracking_system: file-system
@@ -36,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-06-13  # Story 8.1 code review complete → done (2 High error-path patches applied + regression tests; dual-env re-validated: 23ai 334/7, 21c 335/6; unit 1143/12; analyze clean); Epic 8 active
+last_updated: 2026-06-16  # Story 8.3 → ready-for-dev (public execute(..., options: OracleExecuteOptions(resultSet: true)) context created)
 project: dart-oracledb
 project_key: NOKEY
 tracking_system: file-system
@@ -165,8 +165,8 @@ development_status:
   # Epic 8: Streaming & Incremental Result Consumption [architecture review required]
   epic-8: in-progress
   8-1-oracle-result-set: done  # 2026-06-13 — code review complete (3-layer adversarial). 2 patches applied (streaming FETCH-error cache invalidation; terminal state on mid-stream LOB materialize throw — both High, error-path correctness) + 2 regression tests; 1 deferred (cross-batch duplicate-column sentinel test); 12 dismissed. Dual-env re-validated after patches: 23ai 334/7, 21c 335/6; unit 1143/12; dart analyze clean.
-  8-2-query-stream-execute-stream: backlog
-  8-3-execute-result-set-option: backlog
+  8-2-query-stream-execute-stream: done  # 2026-06-16 — code review complete. executeStream()/queryStream() Stream<OracleRow> layer over the 8.1 ResultSet engine (one prefetchRows param + two methods in connection.dart). dart analyze clean; 10 new unit tests pass; integration 23ai 340/7, 21c 341/6 (+6 streaming tests each). Pre-existing env-only connect-timeout unit failure documented in DAR (not a regression).
+  8-3-execute-result-set-option: ready-for-dev
   8-4-stream-cancellation-connection-reuse: backlog
   8-5-statement-cache-safety-dual-env: backlog
   epic-8-retrospective: optional

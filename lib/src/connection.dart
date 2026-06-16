@@ -890,8 +890,93 @@ class OracleConnection {
     return rs;
   }
 
+  /// Executes a SELECT and returns its rows as a `Stream<OracleRow>` for
+  /// incremental, row-by-row consumption in an idiomatic `await for` loop —
+  /// large result sets are never materialized in memory all at once.
+  ///
+  /// ```dart
+  /// await for (final row in connection.executeStream('SELECT * FROM big')) {
+  ///   process(row);
+  /// }
+  /// ```
+  ///
+  /// Rows arrive in result order across as many FETCH rounds as the cursor
+  /// needs; there is no 1,000-iteration safety cap (that bound applies only to
+  /// eager [execute]). [fetchSize] (default 50, matching the eager prefetch)
+  /// sets both the server prefetch size and the per-pull batch granularity:
+  /// the stream fetches [fetchSize] rows at a time, so a larger value trades
+  /// memory for fewer round trips.
+  ///
+  /// The stream is single-subscription and the underlying server cursor is
+  /// owned by the connection: the work only starts when a subscriber listens,
+  /// and at most one stream (or [execute]) may run on a connection at a time —
+  /// a concurrent operation fails fast with the concurrent-operation
+  /// [OracleException]. The cursor is closed and the connection released when
+  /// the stream completes, when the subscription is cancelled, or when a FETCH
+  /// error terminates it, so the connection is always reusable afterwards.
+  ///
+  /// Throws [OracleException] when [sql] is not a query — DML / PL/SQL must use
+  /// [execute].
+  Stream<OracleRow> executeStream(
+    String sql, [
+    Object? bindValues,
+    int fetchSize = _defaultPrefetchRows,
+  ]) async* {
+    if (fetchSize <= 0) {
+      throw ArgumentError.value(fetchSize, 'fetchSize', 'must be positive');
+    }
+    // The guards run when a subscriber listens (the generator starts here), not
+    // when executeStream() is called: the connection is not committed to the
+    // stream until someone actually consumes it.
+    _ensureOpen();
+    _rejectConcurrentOperation();
+    _executeInProgress = true;
+    final OracleResultSet rs;
+    try {
+      rs = await _openResultSetGuarded(sql, bindValues, prefetchRows: fetchSize);
+    } finally {
+      // The open round trip is complete; the cursor is now idle between pulls.
+      _executeInProgress = false;
+    }
+    _openResultSet = rs;
+    try {
+      while (true) {
+        // Bounded pull (never null): each round yields at most [fetchSize] rows
+        // for back-pressure friendliness, fetching from the server only as the
+        // local buffer drains. runResultSetFetch (inside getRows) brackets each
+        // round with the in-flight guard.
+        final rows = await rs.getRows(fetchSize);
+        if (rows.isEmpty) break;
+        for (final row in rows) {
+          yield row;
+        }
+      }
+    } finally {
+      // Runs on natural completion, on subscription cancel, and on a FETCH
+      // error: close() releases the connection's slot via releaseResultSet()
+      // (which clears _openResultSet and, on _cursor.hasFailed, invalidates the
+      // cursor) — no extra cleanup needed here.
+      await rs.close();
+    }
+  }
+
+  /// node-oracledb-parity alias for [executeStream]: executes a SELECT and
+  /// returns its rows as a `Stream<OracleRow>` for incremental consumption.
+  ///
+  /// Identical in behaviour and semantics to [executeStream] (same [fetchSize]
+  /// default, same guards, same cleanup) — provided so code ported from
+  /// node-oracledb's `connection.queryStream()` reads naturally. See
+  /// [executeStream] for the full contract.
+  Stream<OracleRow> queryStream(
+    String sql, [
+    Object? bindValues,
+    int fetchSize = _defaultPrefetchRows,
+  ]) =>
+      executeStream(sql, bindValues, fetchSize);
+
   Future<OracleResultSet> _openResultSetGuarded(
-      String sql, Object? bindValues) async {
+      String sql, Object? bindValues,
+      {int? prefetchRows}) async {
     _log.fine(
       'Opening result set: '
       '${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
@@ -955,7 +1040,7 @@ class OracleConnection {
       columns: firstResponse.columnMetadata,
       firstBatch: firstResponse.rows,
       serverHasMoreRows: firstResponse.moreRowsToFetch,
-      prefetchRows: _defaultPrefetchRows,
+      prefetchRows: prefetchRows ?? _defaultPrefetchRows,
       preserveTimestampTimeZone: _preserveTimestampTimeZone,
       materializePerBatch: true,
     );

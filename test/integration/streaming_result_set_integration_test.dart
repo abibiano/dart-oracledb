@@ -263,4 +263,124 @@ void main() {
       }
     });
   });
+
+  group('queryStream() / executeStream() row delivery',
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    OracleConnection? connectionHandle;
+    late OracleConnection connection;
+
+    // CONNECT BY LEVEL yields 1..N in order, table-free and deterministic. 120
+    // rows exceed the default prefetch (50) so the stream spans multiple FETCH
+    // rounds on the wire.
+    const rowCount = 120;
+    const multiBatchSql =
+        'SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= $rowCount';
+    final expectedRows = [for (var i = 1; i <= rowCount; i++) i];
+
+    setUp(() async {
+      connectionHandle = await connectForTest();
+      connection = connectionHandle!;
+    });
+
+    tearDown(() async {
+      final c = connectionHandle;
+      connectionHandle = null;
+      await cleanUpConnection(c);
+    });
+
+    test('queryStream() delivers every row of a multi-batch result in order',
+        () async {
+      final received = <int>[];
+      await for (final row in connection.queryStream(multiBatchSql)) {
+        received.add(row['N'] as int);
+      }
+      expect(received, equals(expectedRows),
+          reason: 'all $rowCount rows arrive exactly once, in result order');
+      // The connection is reusable after the stream completes (slot released).
+      final reuse = await connection.execute('SELECT 1 AS v FROM dual');
+      expect(reuse.rows.single['V'], equals(1));
+    });
+
+    test('executeStream() delivers identically to queryStream() (alias)',
+        () async {
+      final received = <int>[];
+      await for (final row in connection.executeStream(multiBatchSql)) {
+        received.add(row['N'] as int);
+      }
+      expect(received, equals(expectedRows),
+          reason: 'the alias behaves identically to queryStream()');
+    });
+
+    test('early cancel after a few rows frees the connection for reuse',
+        () async {
+      final received = <int>[];
+      await for (final row in connection.queryStream(multiBatchSql)) {
+        received.add(row['N'] as int);
+        if (received.length == 5) break; // cancel before draining the rest
+      }
+      expect(received, equals([1, 2, 3, 4, 5]));
+      // The abandoned cursor was queued for close in the generator finally;
+      // the connection accepts a new statement immediately.
+      final reuse = await connection.execute('SELECT 42 AS answer FROM dual');
+      expect(reuse.rows.single['ANSWER'], equals(42));
+    });
+
+    test('custom fetchSize=10 spans many FETCH rounds and delivers every row',
+        () async {
+      // The initial EXECUTE prefetch (default 50) returns the first 50 rows,
+      // then continuation FETCHes of fetchSize=10 deliver the remaining 70 —
+      // multiple FETCH rounds. All $rowCount rows must arrive in order.
+      final received = <int>[];
+      await for (final row in connection.executeStream(multiBatchSql, null, 10)) {
+        received.add(row['N'] as int);
+      }
+      expect(received, equals(expectedRows));
+    });
+
+    test('custom fetchSize=10 over a 25-row result delivers every row',
+        () async {
+      // Matches the story task: a small result with a non-default fetchSize.
+      // (FETCH-granularity == fetchSize is asserted at the wire level in the
+      // unit suite; here we confirm correctness end-to-end.)
+      final received = <int>[];
+      await for (final row in connection.queryStream(
+          'SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 25', null, 10)) {
+        received.add(row['N'] as int);
+      }
+      expect(received, equals([for (var i = 1; i <= 25; i++) i]));
+    });
+  });
+
+  group('executeStream() query-only guard',
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    OracleConnection? connectionHandle;
+    late OracleConnection connection;
+    final table = uniqueTableName('rs_stream_dml');
+
+    setUp(() async {
+      connectionHandle = await connectForTest();
+      connection = connectionHandle!;
+      await connection.execute('CREATE TABLE $table (id NUMBER)');
+      await connection.commit();
+    });
+
+    tearDown(() async {
+      final c = connectionHandle;
+      connectionHandle = null;
+      await cleanUpConnection(c, dropStatements: ['DROP TABLE $table']);
+    });
+
+    test('executeStream() on DML SQL throws and leaves the connection usable',
+        () async {
+      await expectLater(
+        connection.executeStream('INSERT INTO $table (id) VALUES (1)').toList(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('only supported'))),
+      );
+      // The query-only guard is client-side: no row was inserted, and the
+      // connection accepts statements normally afterwards.
+      final count = await connection.execute('SELECT COUNT(*) AS c FROM $table');
+      expect(count.rows.single['C'], equals(0));
+    });
+  });
 }

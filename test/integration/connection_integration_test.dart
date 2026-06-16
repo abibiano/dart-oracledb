@@ -94,6 +94,32 @@ void main() {
       );
     });
 
+    test(
+        'connect() times out with oraConnectTimeout when the timeout is '
+        'shorter than the connect', () async {
+      // Deterministic connect-timeout coverage that does NOT rely on a
+      // blackholed IP: point at the real, reachable test host but give the
+      // TCP connect a timeout it cannot possibly beat. Even on loopback — and
+      // especially under emulated 21c — a connect takes far longer than 1µs,
+      // so the timeout fires first and connect() maps it to oraConnectTimeout.
+      // Mirrors node-oracledb timeout_parameters.js test 1.7.
+      await expectLater(
+        OracleConnection.connect(
+          testConnectString,
+          user: testUser,
+          password: testPassword,
+          timeout: const Duration(microseconds: 1),
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraConnectTimeout,
+          ),
+        ),
+      );
+    });
+
     // Connection Lifecycle Management Tests
 
     test('ping returns true for active connection', () async {

@@ -5,6 +5,18 @@ See **Deferred from: code review of story-8.1** below. All earlier Epic 5
 follow-ups were closed for the 1.0.0 release on 2026-06-12 — see **Resolved:
 Release 1.0 closeout** below.
 
+## Deferred from: code review of 8-2-query-stream-execute-stream (2026-06-16)
+
+- **Pre-existing: `_openResultSetGuarded` partial-open can orphan a wire cursor** — if `materializeLobs` throws after `_openCursor` succeeds, the wire cursor is open but never tracked in `_openResultSet`; no cleanup fires. Pre-existing in the ResultSet engine (Story 8.1). [lib/src/connection.dart]
+- **Pool `forceCloseOpenResultSet()` surfaces internal error to stream subscriber** — pool reclaiming a connection while its stream is mid-flight causes `OracleException("OracleResultSet is closed")` to propagate to the subscriber; fix belongs in pool.dart / ResultSet API. [lib/src/pool.dart]
+- **Concurrent-operation message says "Concurrent execute()" but fires for `executeStream()`/`queryStream()` too** — misleading error message for stream callers; message text is pre-existing. [lib/src/connection.dart]
+- **`openResultSet()` test seam cannot control prefetch granularity** — always calls `_openResultSetGuarded(sql, bindValues)` without `prefetchRows`; maintenance divergence from `executeStream`. `openResultSet()` is `@visibleForTesting`. [lib/src/connection.dart]
+- **No `fetchSize=1` boundary test** — degenerate case (every row is a separate FETCH round) not exercised in unit or integration suite. [test/src/result_set_stream_test.dart]
+
+## Deferred from: code review of spec-connect-timeout-test-robust (2026-06-16)
+
+- **Pre-existing: `_mapSocketError` ignores `SocketException.osError`** — it matches only on the lower-cased `e.message` string, so an OS-level `EHOSTUNREACH`/`ENETUNREACH` ("No route to host" / "Network is unreachable", common for non-routable/firewalled addresses on corporate networks, VPNs, and CI) does not match `'connection refused'`/`'timed out'` and falls through to the generic `oraNetworkError` (12150) rather than a specific `oraHostUnreachable`. Surfaced by the connect-timeout test review (the unit test was broadened to also accept 12150/12514 to absorb this). The deterministic, code-level fix is to also consult `e.osError?.errorCode` for `EHOSTUNREACH`/`ENETUNREACH`. Out of scope for a test-only change; relatedly, the `on TimeoutException` branch in `OracleSocket.connect` is effectively dead because `dart:io`'s `Socket.connect(timeout:)` throws a `SocketException` ("…timed out…"), not a `TimeoutException`. [lib/src/transport/socket.dart `_mapSocketError`, `connect`]
+
 ## Deferred from: code review of story-8.1 (2026-06-13)
 
 - **Streaming duplicate-column cross-batch sentinel — unproven by a targeted test** (from: code review of story-8.1). On the `OracleResultSet` streaming path, `ResultSetCursor._previousRoundLastRow` carries a *materialized* value (LOB → String/bytes) — not a raw locator — into the next FETCH's duplicate-column optimization (`previousRoundLastRow:`). The dev documented this as equivalent to copying the raw locator, and the CLOB-across-batch-boundary integration test passes, but no test specifically forces a duplicate LOB/column value at a batch boundary on the streaming path. Low likelihood (Oracle rarely encodes a LOB column as a duplicate-of-previous-row), but the materialized-vs-raw equivalence is currently an unproven assumption. Add a targeted streaming test. [lib/src/protocol/result_set_cursor.dart:185-218]
