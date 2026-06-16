@@ -1,0 +1,123 @@
+# BMM Workflow Status - dart-oracledb
+# Tracks progress through BMad Method phases (Analysis, Planning, Solutioning)
+# Implementation phase tracked separately in sprint-status.yaml
+
+# STATUS KEY:
+# - required/recommended/optional/conditional: Not yet started
+# - {file-path}: Completed (file created)
+# - skipped: Optional workflow that was skipped
+
+generated: "2025-12-14"
+project: "dart-oracledb"
+project_type: "library"
+selected_track: "bmad-method"
+field_type: "greenfield"
+workflow_path: "method-greenfield.yaml"
+
+workflow_status:
+  # Phase 0: Discovery (Optional)
+  phase_0_discovery:
+    - id: "brainstorm-project"
+      name: "Brainstorm Project"
+      agent: "analyst"
+      command: "/bmad:bmm:workflows:brainstorm-project"
+      status: "completed"
+      selected: true
+      completed_date: "2025-12-14"
+      outputs:
+        - "docs/analysis/brainstorming-session-2025-12-14.md"
+        - "docs/dart-oracledb-porting-checklist.md"
+
+    - id: "research"
+      name: "Research"
+      agent: "analyst"
+      command: "/bmad:bmm:workflows:research"
+      status: "optional"
+      selected: false
+
+    - id: "product-brief"
+      name: "Product Brief"
+      agent: "analyst"
+      command: "/bmad:bmm:workflows:create-product-brief"
+      status: "completed"
+      selected: true
+      completed_date: "2025-12-14"
+      outputs:
+        - "docs/analysis/product-brief-dart-oracledb-2025-12-14.md"
+
+  # Phase 1: Planning
+  phase_1_planning:
+    - id: "prd"
+      name: "Product Requirements Document"
+      agent: "pm"
+      command: "/bmad:bmm:workflows:create-prd"
+      status: "completed"
+      selected: true
+      completed_date: "2025-12-14"
+      outputs:
+        - "docs/prd.md"
+
+    - id: "create-ux-design"
+      name: "UX Design"
+      agent: "ux-designer"
+      command: "/bmad:bmm:workflows:create-ux-design"
+      status: "conditional"
+      condition: "if_has_ui"
+
+  # Phase 2: Solutioning
+  phase_2_solutioning:
+    - id: "create-architecture"
+      name: "System Architecture"
+      agent: "architect"
+      command: "/bmad:bmm:workflows:create-architecture"
+      status: "completed"
+      selected: true
+      completed_date: "2025-12-15"
+      outputs:
+        - "docs/architecture.md"
+        - "docs/project_context.md"
+
+    - id: "create-epics-and-stories"
+      name: "Epics & Stories"
+      agent: "pm"
+      command: "/bmad:bmm:workflows:create-epics-stories"
+      status: "completed"
+      selected: true
+      completed_date: "2025-12-15"
+      outputs:
+        - "docs/epics.md"
+
+    - id: "test-design"
+      name: "Test Design"
+      agent: "tea"
+      command: "/bmad:bmm:workflows:testarch-test-design"
+      status: "completed"
+      selected: true
+      completed_date: "2025-12-15"
+      outputs:
+        - "docs/test-design-system.md"
+
+    - id: "validate-architecture"
+      name: "Validate Architecture"
+      agent: "architect"
+      command: "/bmad:bmm:workflows:check-implementation-readiness"
+      status: "optional"
+
+    - id: "implementation-readiness"
+      name: "Implementation Readiness Check"
+      agent: "architect"
+      command: "/bmad:bmm:workflows:check-implementation-readiness"
+      status: "completed"
+      selected: true
+      completed_date: "2025-12-15"
+      outputs:
+        - "docs/implementation-readiness-report-2025-12-15.md"
+
+  # Phase 3: Implementation
+  phase_3_implementation:
+    - id: "sprint-planning"
+      name: "Sprint Planning"
+      agent: "sm"
+      command: "/bmad:bmm:workflows:sprint-planning"
+      status: "required"
+      note: "Creates sprint-status.yaml for implementation tracking"

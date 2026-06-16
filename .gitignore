@@ -226,7 +226,6 @@ node_modules/
 # Development tooling (local only — not relevant to package consumers)
 # =============================================================================
 _bmad/
-_bmad-output/
 .claude/
 .agents/
 
