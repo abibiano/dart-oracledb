@@ -24,6 +24,52 @@ import 'transport/transport.dart';
 
 final _log = Logger('OracleConnection');
 
+/// Per-call options for [OracleConnection.execute].
+///
+/// Pass as the third (optional positional) argument to [execute]:
+/// ```dart
+/// final result = await connection.execute(
+///   'SELECT * FROM employees WHERE dept = :1',
+///   [10],
+///   OracleExecuteOptions(resultSet: true, fetchSize: 100),
+/// );
+/// final rs = result.resultSet!;
+/// try {
+///   print(rs.columnNames); // metadata before first fetch
+///   for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
+///     process(row);
+///   }
+/// } finally {
+///   await rs.close();
+/// }
+/// ```
+///
+/// All fields are optional. Omitting [options] (or passing `null`) is
+/// identical to `const OracleExecuteOptions()` — the default eager path.
+class OracleExecuteOptions {
+  const OracleExecuteOptions({
+    this.resultSet = false,
+    this.fetchSize,
+  });
+
+  /// When `true`, [OracleConnection.execute] returns a lazy
+  /// [OracleResultSet] in [OracleResult.resultSet] instead of materializing
+  /// all rows eagerly into [OracleResult.rows].
+  ///
+  /// Only valid for SELECT queries; passing `true` for DML or PL/SQL throws
+  /// [OracleException] with the same message as [OracleConnection.openResultSet].
+  final bool resultSet;
+
+  /// Continuation FETCH batch size for the [OracleResultSet] returned when
+  /// [resultSet] is `true`.
+  ///
+  /// Controls how many rows are requested per continuation FETCH round trip.
+  /// The initial EXECUTE prefetch remains the driver default (50), separate
+  /// from this value. Defaults to 50 when `null`. A value `<= 0` throws
+  /// [ArgumentError] before any wire round trip.
+  final int? fetchSize;
+}
+
 /// A connection to an Oracle database.
 ///
 /// Use the static [connect] factory to create connections:
@@ -391,6 +437,28 @@ class OracleConnection {
   /// print('Updated ${result.rowsAffected} rows');
   /// ```
   ///
+  /// ## Lazy ResultSet mode
+  ///
+  /// Pass `OracleExecuteOptions(resultSet: true)` as the third argument to skip
+  /// the eager drain and receive a cursor-backed [OracleResultSet] instead:
+  /// ```dart
+  /// final result = await connection.execute(
+  ///   'SELECT * FROM big_table',
+  ///   null,
+  ///   OracleExecuteOptions(resultSet: true),
+  /// );
+  /// final rs = result.resultSet!;
+  /// try {
+  ///   for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
+  ///     process(row);
+  ///   }
+  /// } finally {
+  ///   await rs.close();
+  /// }
+  /// ```
+  /// In this mode [OracleResult.rows] is empty and column metadata is available
+  /// immediately on both [OracleResult] and [OracleResult.resultSet].
+  ///
   /// ## Concurrency contract
   ///
   /// A single [OracleConnection] is **not** safe for overlapping calls. The
@@ -418,15 +486,43 @@ class OracleConnection {
   /// - Bind value count doesn't match placeholder count (ORA-01008)
   /// - Unsupported bind value type (ORA-06502)
   /// - Query execution fails
-  Future<OracleResult> execute(String sql, [Object? bindValues]) async {
+  Future<OracleResult> execute(
+    String sql, [
+    Object? bindValues,
+    OracleExecuteOptions? options,
+  ]) async {
     _ensureOpen();
-
-    // Reject overlapping operations before any wire write. The flag is set
-    // after _ensureOpen so a closed-connection error still wins, and cleared in
-    // the finally below so a thrown call does not wedge the connection. An open
-    // OracleResultSet also owns the stream, so a concurrent execute() while one
-    // is open is rejected the same way.
     _rejectConcurrentOperation();
+
+    if (options?.resultSet == true) {
+      final effectiveFetchSize = options!.fetchSize ?? _defaultPrefetchRows;
+      if (effectiveFetchSize <= 0 || effectiveFetchSize > _maxFetchSize) {
+        throw ArgumentError.value(
+          effectiveFetchSize,
+          'options.fetchSize',
+          'must be positive and fit in a UB4 (1..0xFFFFFFFF)',
+        );
+      }
+      _executeInProgress = true;
+      final OracleResultSet rs;
+      try {
+        rs = await _openResultSetGuarded(sql, bindValues,
+            prefetchRows: effectiveFetchSize);
+      } finally {
+        _executeInProgress = false;
+      }
+      _openResultSet = rs;
+      return OracleResult(
+        columnMetadata: rs.columns,
+        rowData: const [],
+        resultSet: rs,
+      );
+    }
+
+    // Default eager path: reject overlapping operations before any wire write.
+    // The flag is set after _ensureOpen so a closed-connection error still
+    // wins, and cleared in the finally below so a thrown call does not wedge
+    // the connection.
     _executeInProgress = true;
     try {
       return await _executeGuarded(sql, bindValues);
@@ -460,6 +556,12 @@ class OracleConnection {
   /// initial EXECUTE prefetch and every continuation FETCH the cursor engine
   /// drives request this many rows.
   static const int _defaultPrefetchRows = 50;
+
+  /// Largest `fetchSize` the result-set / stream paths accept. The wire FETCH
+  /// row count is encoded as a UB4; a larger value would be silently truncated
+  /// by `writeUB4` (e.g. `0x1_0000_0000` → `0`, yielding a 0-row FETCH that
+  /// stalls the result set), so it is rejected up front rather than mis-encoded.
+  static const int _maxFetchSize = 0xFFFFFFFF;
 
   Future<OracleResult> _executeGuarded(String sql, Object? bindValues) async {
     _log.fine(
@@ -860,15 +962,10 @@ class OracleConnection {
   /// Opens a SELECT as a cursor-backed [OracleResultSet] for incremental,
   /// non-materializing row consumption.
   ///
-  /// This is a package-internal seam introduced by Story 8.1: it exposes the
-  /// `OracleResultSet` type and the real lazy fetch engine without yet adding
-  /// the user-facing acquisition API. Marked [visibleForTesting] so the
-  /// driver's own unit and integration tests can exercise it.
-  ///
-  /// TODO(story-8.3): replace this seam with the public option-style
-  /// acquisition (`execute(..., resultSet: true)`) once the Dart API shape is
-  /// settled. Story 8.2 layers `queryStream()` / `executeStream()` on top of
-  /// the same engine.
+  /// Thin delegate to the shared [_openResultSetGuarded] open path. Kept
+  /// [visibleForTesting] so unit and integration tests can acquire a result
+  /// set directly without the [OracleResult] wrapper. User-facing code should
+  /// use `execute(sql, binds, OracleExecuteOptions(resultSet: true))` instead.
   ///
   /// The connection owns at most one open result set (single TTC stream); a
   /// concurrent [execute] or [openResultSet] while one is open fails fast with
@@ -922,8 +1019,12 @@ class OracleConnection {
     Object? bindValues,
     int fetchSize = _defaultPrefetchRows,
   ]) async* {
-    if (fetchSize <= 0) {
-      throw ArgumentError.value(fetchSize, 'fetchSize', 'must be positive');
+    if (fetchSize <= 0 || fetchSize > _maxFetchSize) {
+      throw ArgumentError.value(
+        fetchSize,
+        'fetchSize',
+        'must be positive and fit in a UB4 (1..0xFFFFFFFF)',
+      );
     }
     // The guards run when a subscriber listens (the generator starts here), not
     // when executeStream() is called: the connection is not committed to the

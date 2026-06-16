@@ -8,6 +8,7 @@ import 'package:meta/meta.dart';
 
 import 'oracle_bind.dart';
 import 'protocol/messages/execute_message.dart';
+import 'result_set.dart';
 
 /// The result of executing a SQL query.
 ///
@@ -42,6 +43,7 @@ class OracleResult {
     int? rowsAffected,
     OracleOutBinds? outBinds,
     bool moreRowsAvailable = false,
+    OracleResultSet? resultSet,
   }) {
     final nameToIndex = _buildNameMap(columnMetadata);
     final rows = rowData
@@ -57,15 +59,17 @@ class OracleResult {
       rowsAffected: rowsAffected,
       outBinds: outBinds ?? const OracleOutBinds.empty(),
       moreRowsAvailable: moreRowsAvailable,
+      resultSet: resultSet,
     );
   }
 
-  const OracleResult._({
+  OracleResult._({
     required this._columnMetadata,
     required this._rows,
     required this.outBinds,
     this.rowsAffected,
     this.moreRowsAvailable = false,
+    this.resultSet,
   });
 
   final List<ColumnMetadata> _columnMetadata;
@@ -92,6 +96,14 @@ class OracleResult {
   /// result.outBinds[0];       // positional
   /// ```
   final OracleOutBinds outBinds;
+
+  /// The cursor-backed [OracleResultSet] for incremental row consumption.
+  ///
+  /// Non-null only when [OracleConnection.execute] was called with
+  /// `OracleExecuteOptions(resultSet: true)`. In that case [rows] is empty and
+  /// all row data is accessed through this result set. Always `null` on the
+  /// default eager path.
+  final OracleResultSet? resultSet;
 
   /// Whether the driver stopped fetching while the server still had rows
   /// pending.

@@ -344,6 +344,288 @@ void main() {
     });
   });
 
+  group('execute() with const OracleExecuteOptions(resultSet: true)', () {
+    test('returns OracleResult with non-null resultSet and empty rows',
+        () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1], [2]], more: false, columns: [_col('N')]),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final result = await conn.execute(
+        'SELECT n FROM t',
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+
+      expect(result.resultSet, isNotNull,
+          reason: 'resultSet: true must populate result.resultSet');
+      expect(result.rows, isEmpty,
+          reason: 'eager rows are intentionally empty in resultSet mode');
+      expect(result.columns, isNotEmpty,
+          reason: 'column metadata is available before any row fetch');
+      await result.resultSet!.close();
+    });
+
+    test('metadata is available on OracleResult and resultSet before fetch',
+        () async {
+      final cols = [_col('N'), _col('V')];
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1, 2]], more: false, columns: cols),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final result = await conn.execute(
+        'SELECT n, v FROM t',
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+      final rs = result.resultSet!;
+      try {
+        expect(result.columnNames, equals(['N', 'V']),
+            reason: 'OracleResult.columnNames populated before first fetch');
+        expect(rs.columnNames, equals(['N', 'V']),
+            reason: 'resultSet.columnNames matches OracleResult.columnNames');
+        expect(result.columns.length, equals(rs.columns.length));
+      } finally {
+        await rs.close();
+      }
+    });
+
+    test('rows are consumable across multiple FETCH batches', () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1], [2]], more: true, columns: [_col('N')]),
+        fetchBatches: [
+          _batch([[3], [4]], more: false),
+        ],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final result = await conn.execute(
+        'SELECT n FROM t',
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+      final rs = result.resultSet!;
+      try {
+        final rows = await rs.getRows();
+        expect(rows.map((r) => r['N']), equals([1, 2, 3, 4]),
+            reason: 'all batches are delivered in result order');
+      } finally {
+        await rs.close();
+      }
+    });
+
+    test('fetchSize threads to continuation FETCH granularity; EXECUTE stays 50',
+        () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1], [2]], more: true, columns: [_col('N')]),
+        fetchBatches: [
+          _batch([[3], [4]], more: false),
+        ],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final result = await conn.execute(
+        'SELECT n FROM t',
+        null,
+        const OracleExecuteOptions(resultSet: true, fetchSize: 2),
+      );
+      final rs = result.resultSet!;
+      try {
+        await rs.getRows(2);
+        await rs.getRows(2);
+      } finally {
+        await rs.close();
+      }
+
+      expect(t.lastExecutePrefetch, equals(50),
+          reason: 'initial EXECUTE prefetch stays at 50 regardless of fetchSize');
+      expect(t.fetchNumRows, equals([2]),
+          reason: 'continuation FETCH requests exactly fetchSize rows');
+    });
+
+    test('omitting fetchSize defaults continuation FETCHes to 50', () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1]], more: true, columns: [_col('N')]),
+        fetchBatches: [_batch([[2]], more: false)],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final result = await conn.execute(
+        'SELECT n FROM t',
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+      final rs = result.resultSet!;
+      try {
+        await rs.getRows();
+      } finally {
+        await rs.close();
+      }
+
+      expect(t.fetchNumRows, equals([50]),
+          reason: 'null fetchSize defaults to _defaultPrefetchRows (50)');
+    });
+
+    test('fetchSize <= 0 throws ArgumentError before any wire round trip',
+        () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1]], more: false, columns: [_col('N')]),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      expect(
+        () => conn.execute(
+          'SELECT n FROM t',
+          null,
+          const OracleExecuteOptions(resultSet: true, fetchSize: 0),
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(t.sendExecuteCalls, equals(0),
+          reason: 'ArgumentError fires before any wire round trip');
+    });
+
+    test('fetchSize above UB4 max throws ArgumentError before any wire round '
+        'trip (no silent truncation)', () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1]], more: false, columns: [_col('N')]),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      // 0x1_0000_0000 (2^32) does not fit a UB4 and would be truncated to a
+      // 0-row FETCH on the wire; reject it up front instead.
+      expect(
+        () => conn.execute(
+          'SELECT n FROM t',
+          null,
+          const OracleExecuteOptions(resultSet: true, fetchSize: 0x100000000),
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(t.sendExecuteCalls, equals(0),
+          reason: 'ArgumentError fires before any wire round trip');
+    });
+
+    test('eager execute() is unchanged when options is omitted', () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[10], [20]], more: false, columns: [_col('N')]),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final result = await conn.execute('SELECT n FROM t');
+
+      expect(result.resultSet, isNull,
+          reason: 'resultSet is null on the default eager path');
+      expect(result.rows.map((r) => r['N']), equals([10, 20]));
+      expect(result.moreRowsAvailable, isFalse);
+    });
+
+    test('OracleResult fields stay coherent: rowsAffected null, outBinds empty',
+        () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1]], more: false, columns: [_col('N')]),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final result = await conn.execute(
+        'SELECT n FROM t',
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+
+      expect(result.rowsAffected, isNull,
+          reason: 'rowsAffected is null for lazy SELECT — no drain was attempted');
+      expect(result.outBinds.isEmpty, isTrue);
+      expect(result.moreRowsAvailable, isFalse,
+          reason: 'no eager drain was attempted');
+      await result.resultSet!.close();
+    });
+
+    test('query-only guard fires for DML with resultSet: true', () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: ExecuteResponse(isSuccess: true, rowsAffected: 1),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      await expectLater(
+        conn.execute(
+          'INSERT INTO t VALUES (1)',
+          null,
+          const OracleExecuteOptions(resultSet: true),
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+            .having(
+                (e) => e.message, 'message', contains('only supported'))),
+      );
+      expect(t.sendExecuteCalls, equals(0),
+          reason: 'query-only guard fires before any wire round trip');
+      expect(conn.hasOpenResultSet, isFalse);
+      expect(conn.isExecuting, isFalse,
+          reason: '_executeInProgress was reset by the open finally');
+      // Connection remains reusable.
+      await conn.execute('SELECT 1 FROM dual');
+    });
+
+    test('concurrent-operation guard fires while result set is open', () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1], [2]], more: true, cursorId: 7,
+            columns: [_col('N')]),
+        fetchBatches: [_batch([[3]], more: false)],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final result = await conn.execute(
+        'SELECT n FROM t FOR UPDATE',
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+      final rs = result.resultSet!;
+      try {
+        await expectLater(
+          conn.execute('SELECT 1 FROM dual'),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('Concurrent'))),
+        );
+        expect(t.sendExecuteCalls, equals(1),
+            reason: 'only the first execute reached the wire');
+      } finally {
+        await rs.close();
+      }
+      // After close the connection accepts new statements.
+      await conn.execute('SELECT 7 FROM dual');
+    });
+
+    test('early close frees the connection for immediate reuse', () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1], [2], [3]], more: true, cursorId: 9,
+            columns: [_col('N')]),
+        fetchBatches: [_batch([[4]], more: false)],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final result = await conn.execute(
+        'SELECT n FROM t FOR UPDATE',
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+      final rs = result.resultSet!;
+      expect(await rs.getRow(), isNotNull,
+          reason: 'consume one row to confirm the cursor is live');
+      await rs.close();
+
+      expect(conn.hasOpenResultSet, isFalse,
+          reason: 'close() released the connection slot');
+      expect(conn.debugPendingCloseCount, equals(1),
+          reason: 'the abandoned cursor was queued for close-cursor piggyback');
+      // The connection immediately accepts the next statement.
+      await conn.execute('SELECT 1 FROM dual');
+    });
+  });
+
   group('queryStream()', () {
     test('delegates to executeStream() with identical row delivery', () async {
       final t = _FakeResultSetTransport(

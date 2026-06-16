@@ -351,6 +351,154 @@ void main() {
     });
   });
 
+  group('execute() with OracleExecuteOptions(resultSet: true) — public API',
+      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
+    OracleConnection? connectionHandle;
+    late OracleConnection connection;
+
+    const rowCount = 120;
+    const multiBatchSql =
+        'SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= $rowCount';
+
+    setUp(() async {
+      connectionHandle = await connectForTest();
+      connection = connectionHandle!;
+    });
+
+    tearDown(() async {
+      final c = connectionHandle;
+      connectionHandle = null;
+      await cleanUpConnection(c);
+    });
+
+    test('column metadata is available on OracleResult before any row fetch',
+        () async {
+      final result = await connection.execute(
+        "SELECT LEVEL AS n, 'x' AS label FROM dual CONNECT BY LEVEL <= 120",
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+      final rs = result.resultSet!;
+      try {
+        expect(result.columnNames, equals(['N', 'LABEL']),
+            reason: 'OracleResult.columnNames populated immediately');
+        expect(rs.columnNames, equals(['N', 'LABEL']),
+            reason: 'resultSet.columnNames matches OracleResult.columnNames');
+        expect(result.rows, isEmpty,
+            reason: 'no eager rows on the lazy path');
+        expect(result.rowsAffected, isNull);
+        expect(result.moreRowsAvailable, isFalse);
+        expect(rs.isClosed, isFalse);
+      } finally {
+        await rs.close();
+      }
+    });
+
+    test('multi-batch consumption via getRow() delivers every row in order',
+        () async {
+      final result = await connection.execute(
+        multiBatchSql,
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+      final rs = result.resultSet!;
+      try {
+        final values = <int>[];
+        for (var row = await rs.getRow();
+            row != null;
+            row = await rs.getRow()) {
+          values.add(row['N'] as int);
+        }
+        expect(values, equals([for (var i = 1; i <= rowCount; i++) i]),
+            reason: 'every batch delivered exactly once in result order');
+      } finally {
+        await rs.close();
+      }
+    });
+
+    test('multi-batch consumption via getRows(n) delivers every row in order',
+        () async {
+      final result = await connection.execute(
+        multiBatchSql,
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+      final rs = result.resultSet!;
+      try {
+        final first = await rs.getRows(50);
+        final second = await rs.getRows(50);
+        final third = await rs.getRows(50);
+        final fourth = await rs.getRows(50);
+
+        expect(first.length, equals(50));
+        expect(second.length, equals(50));
+        expect(third.length, equals(20));
+        expect(fourth, isEmpty);
+        final all = [...first, ...second, ...third].map((r) => r['N'] as int).toList();
+        expect(all, equals([for (var i = 1; i <= rowCount; i++) i]));
+      } finally {
+        await rs.close();
+      }
+    });
+
+    test('early close of resultSet frees the connection for immediate reuse',
+        () async {
+      final result = await connection.execute(
+        multiBatchSql,
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+      final rs = result.resultSet!;
+      final firstRow = await rs.getRow();
+      expect(firstRow!['N'], equals(1));
+      await rs.close();
+      expect(rs.isClosed, isTrue);
+
+      // Connection immediately usable.
+      final reuse = await connection.execute('SELECT 42 AS answer FROM dual');
+      expect(reuse.rows.single['ANSWER'], equals(42));
+    });
+
+    test('custom fetchSize=10 delivers every row across many FETCH rounds',
+        () async {
+      final result = await connection.execute(
+        multiBatchSql,
+        null,
+        const OracleExecuteOptions(resultSet: true, fetchSize: 10),
+      );
+      final rs = result.resultSet!;
+      try {
+        final values = <int>[];
+        for (var row = await rs.getRow();
+            row != null;
+            row = await rs.getRow()) {
+          values.add(row['N'] as int);
+        }
+        expect(values, equals([for (var i = 1; i <= rowCount; i++) i]),
+            reason: 'fetchSize=10 requires many FETCH rounds but delivers all rows');
+      } finally {
+        await rs.close();
+      }
+    });
+
+    test('query-only guard fires for DML with resultSet: true', () async {
+      // The guard is client-side — no database needed — but a real connection
+      // confirms no wire traffic is attempted and the connection stays open.
+      await expectLater(
+        connection.execute(
+          'INSERT INTO sys.dual VALUES (1)',
+          null,
+          const OracleExecuteOptions(resultSet: true),
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('only supported'))),
+      );
+      // Connection is still usable after the guard fires.
+      final result = await connection.execute('SELECT 1 AS v FROM dual');
+      expect(result.rows.single['V'], equals(1));
+    });
+  });
+
   group('executeStream() query-only guard',
       skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
     OracleConnection? connectionHandle;

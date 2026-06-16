@@ -30,7 +30,7 @@ export 'src/protocol/constants.dart'
         oraDataTypeNotSupported;
 
 // Connection API
-export 'src/connection.dart' show OracleConnection;
+export 'src/connection.dart' show OracleConnection, OracleExecuteOptions;
 
 // Connection pooling
 export 'src/pool.dart' show OraclePool, PoolSessionCallback;

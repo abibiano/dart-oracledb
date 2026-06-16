@@ -2,16 +2,16 @@
 baseline_commit: 463e987
 ---
 
-# Story 8.3: `execute(..., options: OracleExecuteOptions(resultSet: true))`
+# Story 8.3: `execute(sql, binds, OracleExecuteOptions(resultSet: true))`
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
 ## Story
 
 As a Dart database application developer,
-I want `OracleConnection.execute()` to accept `options: OracleExecuteOptions(resultSet: true)` and return an `OracleResult` whose `resultSet` exposes the existing cursor-backed lazy engine,
+I want `OracleConnection.execute()` to accept an `OracleExecuteOptions` as an optional 3rd positional argument (e.g. `OracleExecuteOptions(resultSet: true)`) and return an `OracleResult` whose `resultSet` exposes the existing cursor-backed lazy engine,
 so that I can use the familiar `execute()` API shape to inspect metadata and consume large query results incrementally without materializing every row in memory.
 
 ## Acceptance Criteria
@@ -19,7 +19,8 @@ so that I can use the familiar `execute()` API shape to inspect metadata and con
 1. **Public options surface without breaking `execute()` typing**
    **Given** the driver is imported
    **When** a caller executes:
-   `await connection.execute('SELECT ...', bindValues, options: const OracleExecuteOptions(resultSet: true))`
+   `await connection.execute('SELECT ...', bindValues, const OracleExecuteOptions(resultSet: true))`
+   (the `OracleExecuteOptions` is the optional 3rd **positional** argument — node-oracledb passes `options` positionally too; see Dev Notes)
    **Then** `execute()` still returns `Future<OracleResult>`
    **And** `OracleExecuteOptions` is a public exported type
    **And** the returned `OracleResult.resultSet` is non-null and typed `OracleResultSet`
@@ -34,7 +35,7 @@ so that I can use the familiar `execute()` API shape to inspect metadata and con
 
 3. **Query-only guard for `resultSet: true`**
    **Given** a SQL statement classified as DML or PL/SQL
-   **When** `execute(..., options: const OracleExecuteOptions(resultSet: true))` is called
+   **When** `execute(..., const OracleExecuteOptions(resultSet: true))` is called
    **Then** it throws `OracleException` with `errorCode: oraProtocolError`
    **And** the message matches the existing `openResultSet()` guard:
    `'OracleResultSet is only supported for queries (SELECT). Use execute() for DML or PL/SQL statements.'`
@@ -99,40 +100,57 @@ so that I can use the familiar `execute()` API shape to inspect metadata and con
 
 ## Tasks / Subtasks
 
-- [ ] Add the public execute-options and result surface (AC: 1, 8, 9)
-  - [ ] Introduce `OracleExecuteOptions` as a public type, exported from `lib/oracledb.dart`.
-  - [ ] Give it a minimal, explicit shape for this story: `resultSet` (bool, default `false`) and `fetchSize` (nullable positive int, default behavior = 50 when `resultSet` is true).
-  - [ ] Add nullable `OracleResult.resultSet` and thread it through the `OracleResult` factory/constructor without changing eager-call typing.
-  - [ ] Preserve `OracleResult.rows` as a non-null unmodifiable list; for result-set mode it is intentionally empty.
+- [x] Add the public execute-options and result surface (AC: 1, 8, 9)
+  - [x] Introduce `OracleExecuteOptions` as a public type, exported from `lib/oracledb.dart`.
+  - [x] Give it a minimal, explicit shape for this story: `resultSet` (bool, default `false`) and `fetchSize` (nullable positive int, default behavior = 50 when `resultSet` is true).
+  - [x] Add nullable `OracleResult.resultSet` and thread it through the `OracleResult` factory/constructor without changing eager-call typing.
+  - [x] Preserve `OracleResult.rows` as a non-null unmodifiable list; for result-set mode it is intentionally empty.
 
-- [ ] Route `execute()` onto the existing lazy ResultSet path when requested (AC: 2-7)
-  - [ ] Extend `OracleConnection.execute()` to accept a named `options:` parameter without breaking existing positional bind call sites.
-  - [ ] Validate `fetchSize` early (`ArgumentError` on `<= 0`).
-  - [ ] When `options.resultSet` is `true`, skip the eager drain/materialize branch and reuse `_openResultSetGuarded()` to obtain an `OracleResultSet`.
-  - [ ] Keep the existing eager `_executeGuarded()` path unchanged for the default case.
-  - [ ] Ensure the returned `OracleResult` carries metadata plus `resultSet`, while `rows` stays empty.
-  - [ ] Preserve the current concurrent-operation guard, `_executeInProgress` transitions, and `_openResultSet` ownership semantics.
+- [x] Route `execute()` onto the existing lazy ResultSet path when requested (AC: 2-7)
+  - [x] Extend `OracleConnection.execute()` to accept a named `options:` parameter without breaking existing positional bind call sites.
+  - [x] Validate `fetchSize` early (`ArgumentError` on `<= 0`).
+  - [x] When `options.resultSet` is `true`, skip the eager drain/materialize branch and reuse `_openResultSetGuarded()` to obtain an `OracleResultSet`.
+  - [x] Keep the existing eager `_executeGuarded()` path unchanged for the default case.
+  - [x] Ensure the returned `OracleResult` carries metadata plus `resultSet`, while `rows` stays empty.
+  - [x] Preserve the current concurrent-operation guard, `_executeInProgress` transitions, and `_openResultSet` ownership semantics.
 
-- [ ] Keep the internal seam but stop relying on it as the user-facing API (AC: 4, 9)
-  - [ ] Refactor `openResultSet()` to delegate through the same shared option/open helper instead of carrying unique logic.
-  - [ ] Remove the Story 8.1 TODO that says public acquisition still needs to be decided.
-  - [ ] Keep `openResultSet()` available for deterministic tests if that remains the lowest-friction seam.
+- [x] Keep the internal seam but stop relying on it as the user-facing API (AC: 4, 9)
+  - [x] Refactor `openResultSet()` to delegate through the same shared option/open helper instead of carrying unique logic.
+  - [x] Remove the Story 8.1 TODO that says public acquisition still needs to be decided.
+  - [x] Keep `openResultSet()` available for deterministic tests if that remains the lowest-friction seam.
 
-- [ ] Add focused unit coverage for the new public execute path (AC: 1-10)
-  - [ ] Add or extend unit tests to prove `execute(..., options: resultSet)` returns `OracleResult` with `resultSet != null` and `rows.isEmpty`.
-  - [ ] Assert metadata is available on both `OracleResult` and `OracleResult.resultSet` before row fetch.
-  - [ ] Assert `fetchSize` threads to continuation FETCH granularity while the initial EXECUTE prefetch remains 50.
-  - [ ] Assert `fetchSize <= 0` throws `ArgumentError`.
-  - [ ] Assert eager `execute()` behavior is unchanged when `options` is omitted.
-  - [ ] Assert query-only guard and concurrent-operation guard still fire with the same messages.
+- [x] Add focused unit coverage for the new public execute path (AC: 1-10)
+  - [x] Add or extend unit tests to prove `execute(..., options: resultSet)` returns `OracleResult` with `resultSet != null` and `rows.isEmpty`.
+  - [x] Assert metadata is available on both `OracleResult` and `OracleResult.resultSet` before row fetch.
+  - [x] Assert `fetchSize` threads to continuation FETCH granularity while the initial EXECUTE prefetch remains 50.
+  - [x] Assert `fetchSize <= 0` throws `ArgumentError`.
+  - [x] Assert eager `execute()` behavior is unchanged when `options` is omitted.
+  - [x] Assert query-only guard and concurrent-operation guard still fire with the same messages.
 
-- [ ] Add integration coverage for the public execute option (AC: 10)
-  - [ ] Extend `test/integration/streaming_result_set_integration_test.dart` with public `execute(..., options: ...)` scenarios instead of introducing a separate duplicate suite.
-  - [ ] Test metadata-before-fetch on the returned `OracleResult.resultSet`.
-  - [ ] Test multi-batch consumption via `result.resultSet!.getRow()` / `getRows(n)`.
-  - [ ] Test early close followed by successful reuse of the same connection.
-  - [ ] Test custom `fetchSize`.
-  - [ ] Re-run Oracle 23ai and Oracle 21c streaming/result-set suites after the change.
+- [x] Add integration coverage for the public execute option (AC: 10)
+  - [x] Extend `test/integration/streaming_result_set_integration_test.dart` with public `execute(..., options: ...)` scenarios instead of introducing a separate duplicate suite.
+  - [x] Test metadata-before-fetch on the returned `OracleResult.resultSet`.
+  - [x] Test multi-batch consumption via `result.resultSet!.getRow()` / `getRows(n)`.
+  - [x] Test early close followed by successful reuse of the same connection.
+  - [x] Test custom `fetchSize`.
+  - [x] Re-run Oracle 23ai and Oracle 21c streaming/result-set suites after the change.
+
+### Review Findings (Code Review, 2026-06-16)
+
+Adversarial 3-layer review (Blind Hunter + Edge Case Hunter + Acceptance Auditor) of `463e987..worktree` (lib/ + test/). Independently re-verified: `dart analyze lib/ test/` clean; unit suite 1164 pass / 12 skip / 0 fail; AC1–AC10 functional behavior all confirmed (8 PASS, 2 PARTIAL). 10 findings dismissed as noise/false-positive/by-design.
+
+**Decision-needed:**
+
+- [x] [Review][Decision] AC1/AC3 call shape: `options:` named parameter shipped as a 3rd optional **positional** parameter — Dart cannot mix optional-positional binds with a named `options:`, so `execute(String sql, [Object? bindValues, OracleExecuteOptions? options])` shipped. **RESOLVED 2026-06-16 (Option 1 — accept + reconcile):** the positional 3rd-arg shape is the reference-faithful one — node-oracledb's `execute(sql, a2, a3)` takes `options` as positional arg #3 (`reference/node-oracledb/lib/connection.js:992-1024`); a named `options:` would have diverged from the reference *and* broken every existing positional `execute(sql, binds)` call site (AC2). Story title, User Story, AC1, and AC3 reconciled to the positional shape. Doc-only; no code change. [lib/src/connection.dart:489-492]
+
+**Patch:**
+
+- [x] [Review][Patch] `fetchSize` has no upper bound — a value `> 0xFFFFFFFF` passes the `<= 0` guard, is threaded as `prefetchRows`/`numRows`, and is silently truncated by `writeUB4` (`2^32` encodes as `0` → a 0-row FETCH that breaks the result set/stream with no diagnostic). **FIXED 2026-06-16:** added `_maxFetchSize = 0xFFFFFFFF` constant; both the `execute()` result-set guard and the `executeStream()`/`queryStream()` guard now reject `<= 0 || > _maxFetchSize` with `ArgumentError` before any wire round trip; new regression test added (`fetchSize above UB4 max throws ArgumentError ...`). `dart analyze` clean; unit suite 1165 pass / 0 fail. [lib/src/connection.dart:499, lib/src/connection.dart:1018]
+
+**Deferred:**
+
+- [x] [Review][Defer] First-batch LOB materialization failure on a non-cached cursor leaks the server cursor — deferred, pre-existing. `_openResultSetGuarded` existed at baseline `463e987` (Story 8.1) and the eager `_executeGuarded` catch shares the gap; when `materializeLobs` throws and `acquiredEntry == null`, the live `firstResponse.cursorId` is never queued for close. Story 8.3 newly *exposes* it via public `execute(resultSet: true)`. **Already tracked** in `deferred-work.md` under "code review of 8-2-query-stream-execute-stream". [lib/src/connection.dart:1115-1125]
+- [x] [Review][Defer] Review range `463e987..worktree` co-mingles Story 8.2's `executeStream`/`queryStream` (already reviewed; status `done`) and an unrelated, already-decided connect-timeout test hardening; the story File List omits the connect-timeout files (`test/src/connection_test.dart`, `test/integration/connection_integration_test.dart`). Diff-hygiene only — no 8.3 code defect. Sub-note: `executeStream`'s `fetchSize <= 0` `ArgumentError` is deferred to listen-time because the body is `async*` (idiomatic for a lazy stream; out of 8.3 scope). [test/src/connection_test.dart, test/integration/connection_integration_test.dart]
 
 ## Dev Notes
 
@@ -313,16 +331,33 @@ From Story 8.1 (`_bmad-output/implementation-artifacts/8-1-oracle-result-set.md`
 
 ### Agent Model Used
 
-TBD during implementation.
+claude-sonnet-4-6 (2026-06-16)
 
 ### Debug Log References
 
 - Create-story context build completed 2026-06-16.
+- Implementation completed 2026-06-16 in single session.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- **Implementation approach**: Added `OracleExecuteOptions` class directly to `connection.dart` (no new file needed — it's conceptually tied to `execute()`). Dart's restriction that a function cannot have both optional positional AND named parameters was resolved by making `options` the 3rd optional positional parameter: `execute(String sql, [Object? bindValues, OracleExecuteOptions? options])`. This preserves all existing call sites unchanged.
+- **Circular import**: `result.dart` now imports `result_set.dart` (for `OracleResultSet? resultSet` field) while `result_set.dart` already imports `result.dart`. Dart allows this; the same pattern already existed between `connection.dart` ↔ `result_set.dart`. Analyzer remains clean.
+- **`openResultSet()` refactor**: The Story 8.1 TODO was removed; the method's docstring was updated to reflect its current role as a thin `@visibleForTesting` delegate. It already delegated entirely to `_openResultSetGuarded()` so no logic change was required — only the comment.
+- **`OracleResult._()` constructor**: Removed `const` modifier (cannot hold a non-const `OracleResultSet` instance). Factory and all existing eager call sites are unaffected.
+- **10 unit tests added** to `test/src/result_set_stream_test.dart`: covers resultSet non-null / rows empty, metadata parity, multi-batch via getRows(), fetchSize granularity (EXECUTE stays 50, FETCH uses fetchSize), default 50, fetchSize<=0 ArgumentError, unchanged eager path, query-only guard, concurrent-operation guard, early close + reuse, rowsAffected null / outBinds empty.
+- **6 integration tests added** to `test/integration/streaming_result_set_integration_test.dart`: metadata-before-fetch, getRow() multi-batch, getRows(n) multi-batch, early close + reuse, fetchSize=10, query-only guard.
+- **Dual-env validation**: 347+7skip (23ai) and 348+6skip (21c) — zero regressions across the full integration suite.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/8-3-execute-result-set-option.md`
+- `lib/src/connection.dart`
+- `lib/src/result.dart`
+- `lib/oracledb.dart`
+- `test/src/result_set_stream_test.dart`
+- `test/integration/streaming_result_set_integration_test.dart`
+
+## Change Log
+
+- 2026-06-16: Story 8.3 implementation complete — `OracleExecuteOptions` class added to `connection.dart`; `execute()` extended with 3rd optional positional `OracleExecuteOptions? options`; `OracleResult.resultSet` nullable field added; `OracleExecuteOptions` exported from `lib/oracledb.dart`; Story 8.1 `openResultSet()` TODO removed; 10 unit tests + 6 integration tests added; all 1164 unit tests + 347/348 integration tests pass on Oracle 23ai and 21c.

@@ -5,6 +5,11 @@ See **Deferred from: code review of story-8.1** below. All earlier Epic 5
 follow-ups were closed for the 1.0.0 release on 2026-06-12 — see **Resolved:
 Release 1.0 closeout** below.
 
+## Deferred from: code review of 8-3-execute-result-set-option (2026-06-16)
+
+- **Pre-existing (already tracked): first-batch LOB-materialize failure orphans a non-cached cursor** — Story 8.3's public `execute(resultSet: true)` newly *exposes* the partial-open cursor leak in `_openResultSetGuarded`: when `materializeLobs` throws and `acquiredEntry == null`, the live `firstResponse.cursorId` is never queued for close. Same root cause already recorded below under "code review of 8-2-query-stream-execute-stream" (and shared by the eager `_executeGuarded` catch). No duplicate item — see that entry. [lib/src/connection.dart:1115-1125]
+- **Diff-hygiene: 8.3 review range co-mingles prior-story and unrelated changes** — the story's `baseline_commit: 463e987` range bundles Story 8.2's `executeStream`/`queryStream` (already reviewed; status `done`) and an already-decided connect-timeout test hardening; the 8.3 File List omits the connect-timeout files (`test/src/connection_test.dart`, `test/integration/connection_integration_test.dart`). Process note for future stories: give each story its own commit so review ranges are clean. No code defect. [process]
+
 ## Deferred from: code review of 8-2-query-stream-execute-stream (2026-06-16)
 
 - **Pre-existing: `_openResultSetGuarded` partial-open can orphan a wire cursor** — if `materializeLobs` throws after `_openCursor` succeeds, the wire cursor is open but never tracked in `_openResultSet`; no cleanup fires. Pre-existing in the ResultSet engine (Story 8.1). [lib/src/connection.dart]
