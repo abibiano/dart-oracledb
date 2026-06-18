@@ -24,13 +24,19 @@ import 'statement_cache.dart';
 
 /// A cursor-backed result set for incremental row consumption.
 ///
-/// Obtain one through the driver (the public acquisition API arrives with
-/// Story 8.3; Story 8.1 exposes the type plus an internal/test open seam) and
-/// always [close] it when done — closing queues the server cursor for cleanup
-/// and releases the connection so the next statement can run:
+/// Obtain one through the public acquisition path —
+/// `execute(sql, binds, OracleExecuteOptions(resultSet: true))`, which returns
+/// it in [OracleResult.resultSet] — and always [close] it when done. Closing
+/// queues the server cursor for cleanup and releases the connection so the next
+/// statement can run:
 ///
 /// ```dart
-/// final rs = ...; // opened for a SELECT
+/// final result = await connection.execute(
+///   'SELECT * FROM big_table',
+///   null,
+///   OracleExecuteOptions(resultSet: true),
+/// );
+/// final rs = result.resultSet!;
 /// try {
 ///   print(rs.columnNames); // metadata available before the first row
 ///   for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {

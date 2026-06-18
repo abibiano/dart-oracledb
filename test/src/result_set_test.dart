@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:oracledb/oracledb.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/transport/transport.dart';
@@ -17,6 +19,7 @@ class _FakeResultSetTransport extends Transport {
     required this.firstBatch,
     this.fetchBatches = const [],
     this.materializeThrowOnCall,
+    this.fetchGate,
   });
 
   /// The first-batch response returned by [sendExecute].
@@ -30,6 +33,13 @@ class _FakeResultSetTransport extends Transport {
   /// (call 1 is the first-batch materialize done at open), simulating a LOB-read
   /// failure mid-stream. All other calls pass the response through unchanged.
   final int? materializeThrowOnCall;
+
+  /// When set, the FIRST [fetchRows] round suspends on this gate before
+  /// returning, letting a test hold a `getRow()`/`getRows()` pull in flight
+  /// (with `_executeInProgress` true) and prove an overlapping second pull is
+  /// rejected. The gate is consumed (cleared) on first use, so later fetches
+  /// proceed without suspending.
+  Completer<void>? fetchGate;
 
   int sendExecuteCalls = 0;
   int fetchCalls = 0;
@@ -80,6 +90,11 @@ class _FakeResultSetTransport extends Transport {
   }) async {
     fetchCalls++;
     lastFetchCursorId = cursorId;
+    final gate = fetchGate;
+    if (gate != null) {
+      fetchGate = null; // gate only the first fetch round
+      await gate.future;
+    }
     final index = fetchCalls - 1;
     if (index < fetchBatches.length) return fetchBatches[index];
     return ExecuteResponse(isSuccess: true, moreRowsToFetch: false);
@@ -492,6 +507,62 @@ void main() {
             .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
       );
       await rs.close();
+    });
+
+    test(
+        'an overlapping getRows() while a getRows() fetch is in flight is '
+        'rejected, and the cursor stays usable afterward (AC7)', () async {
+      // firstBatch yields one buffered row with more pending; the FETCH for the
+      // remainder is gated so the first pull suspends mid-fetch with
+      // _executeInProgress true. A second pull started in that window must be
+      // rejected through runResultSetFetch() without touching the cursor.
+      final gate = Completer<void>();
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([
+          [1],
+        ], more: true, cursorId: 7, columns: [_col('N')]),
+        fetchBatches: [
+          _batch([
+            [2],
+            [3],
+          ], more: false),
+        ],
+        fetchGate: gate,
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+      final rs = await conn.openResultSet('SELECT n FROM t FOR UPDATE');
+
+      // Start the first pull but do NOT await it: it drains the buffered row
+      // then suspends inside the gated FETCH, holding the in-flight slot.
+      final firstPull = rs.getRows(3);
+      await Future<void>.delayed(Duration.zero); // let it reach the gated fetch
+      expect(conn.isExecuting, isTrue,
+          reason: 'the first pull owns the in-flight slot while fetching');
+
+      // The overlapping second pull is rejected fast through runResultSetFetch.
+      await expectLater(
+        rs.getRow(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+            .having((e) => e.message, 'message', contains('already in progress'))),
+      );
+      expect(t.fetchCalls, equals(1),
+          reason: 'the rejected pull issues no second FETCH round trip');
+
+      // Release the gate; the first pull completes normally with all rows.
+      gate.complete();
+      final rows = await firstPull;
+      expect(rows.map((r) => r['N']), equals([1, 2, 3]),
+          reason: 'the rejected overlap did not corrupt the cursor');
+      expect(conn.isExecuting, isFalse,
+          reason: 'the slot is released once the first pull resolves');
+
+      // The cursor is still usable: a follow-up pull drains the (now empty) tail
+      // and close() releases the connection cleanly.
+      expect(await rs.getRows(), isEmpty);
+      await rs.close();
+      expect(conn.hasOpenResultSet, isFalse);
+      await conn.execute('SELECT 1 FROM dual');
     });
 
     test('forceCloseOpenResultSet closes a leaked result set and clears state',

@@ -65,8 +65,9 @@ class OracleExecuteOptions {
   ///
   /// Controls how many rows are requested per continuation FETCH round trip.
   /// The initial EXECUTE prefetch remains the driver default (50), separate
-  /// from this value. Defaults to 50 when `null`. A value `<= 0` throws
-  /// [ArgumentError] before any wire round trip.
+  /// from this value. Defaults to 50 when `null`. A value outside the UB4 wire
+  /// range (`<= 0` or `> 0xFFFFFFFF`) throws [ArgumentError] before any wire
+  /// round trip.
   final int? fetchSize;
 }
 
@@ -999,10 +1000,11 @@ class OracleConnection {
   ///
   /// Rows arrive in result order across as many FETCH rounds as the cursor
   /// needs; there is no 1,000-iteration safety cap (that bound applies only to
-  /// eager [execute]). [fetchSize] (default 50, matching the eager prefetch)
-  /// sets both the server prefetch size and the per-pull batch granularity:
-  /// the stream fetches [fetchSize] rows at a time, so a larger value trades
-  /// memory for fewer round trips.
+  /// eager [execute]). [fetchSize] (default 50) sets the continuation FETCH
+  /// batch granularity: once the initial batch drains, the stream pulls
+  /// [fetchSize] rows per FETCH round trip, so a larger value trades memory for
+  /// fewer round trips. The initial EXECUTE prefetch stays at the driver
+  /// default (50) and is independent of [fetchSize].
   ///
   /// The stream is single-subscription and the underlying server cursor is
   /// owned by the connection: the work only starts when a subscriber listens,

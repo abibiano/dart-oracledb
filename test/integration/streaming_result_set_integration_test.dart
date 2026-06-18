@@ -1,6 +1,8 @@
 @Tags(['integration'])
 library;
 
+import 'dart:async';
+
 import 'package:oracledb/oracledb.dart';
 import 'package:test/test.dart';
 
@@ -262,6 +264,42 @@ void main() {
         await pool.close();
       }
     });
+
+    test(
+        'releasing a connection with an open public execute(resultSet: true) '
+        'result set reclaims it (AC8)', () async {
+      // AC8 requires the pool leak guard to cover the public acquisition path
+      // (execute(..., OracleExecuteOptions(resultSet: true))), not only the
+      // internal openResultSet() seam exercised by the test above.
+      final pool = await OraclePool.create(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        minConnections: 1,
+        maxConnections: 1,
+      );
+      try {
+        final conn = await pool.acquire();
+        final result = await conn.execute(
+          'SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 120',
+          null,
+          const OracleExecuteOptions(resultSet: true),
+        );
+        final rs = result.resultSet!;
+        await rs.getRow(); // leave rows pending on the server cursor
+        // Release WITHOUT closing the result set — the pool must force-close it
+        // and recycle the session, not destroy it.
+        await pool.release(conn);
+
+        // The same physical session is handed back and is immediately usable.
+        final reused = await pool.acquire();
+        final check = await reused.execute('SELECT 7 AS v FROM dual');
+        expect(check.rows.single['V'], equals(7));
+        await pool.release(reused);
+      } finally {
+        await pool.close();
+      }
+    });
   });
 
   group('queryStream() / executeStream() row delivery',
@@ -321,6 +359,33 @@ void main() {
       expect(received, equals([1, 2, 3, 4, 5]));
       // The abandoned cursor was queued for close in the generator finally;
       // the connection accepts a new statement immediately.
+      final reuse = await connection.execute('SELECT 42 AS answer FROM dual');
+      expect(reuse.rows.single['ANSWER'], equals(42));
+    });
+
+    test('explicit StreamSubscription.cancel() frees the connection for reuse',
+        () async {
+      // Same cleanup contract as the await-for break case, but cancellation is
+      // driven through StreamSubscription.cancel() against a real server cursor.
+      final received = <int>[];
+      final cancelled = Completer<void>();
+      late final StreamSubscription<OracleRow> sub;
+      sub = connection.queryStream(multiBatchSql).listen((row) {
+        received.add(row['N'] as int);
+        if (received.length == 5) {
+          // cancel() resolves after the generator's finally (close()) runs, so
+          // completing on it signals the cursor cleanup finished.
+          sub.cancel().then((_) {
+            if (!cancelled.isCompleted) cancelled.complete();
+          });
+        }
+      });
+      await cancelled.future;
+
+      expect(received, equals([1, 2, 3, 4, 5]),
+          reason: 'delivery stops at the cancellation point');
+      // The abandoned cursor was queued for close in the generator finally; the
+      // connection accepts a new statement immediately.
       final reuse = await connection.execute('SELECT 42 AS answer FROM dual');
       expect(reuse.rows.single['ANSWER'], equals(42));
     });

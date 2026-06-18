@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:oracledb/oracledb.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/transport/transport.dart';
@@ -246,6 +248,51 @@ void main() {
       expect(conn.debugPendingCloseCount, equals(1),
           reason: 'the abandoned cursor was queued for close');
       // A subsequent statement on the same connection succeeds.
+      await conn.execute('SELECT 1 FROM dual');
+    });
+
+    test('explicit StreamSubscription.cancel() closes the result set',
+        () async {
+      // Same shape as the await-for break case, but cancellation is driven
+      // through StreamSubscription.cancel() rather than breaking the loop. Both
+      // must run the generator's finally → close() exactly once.
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([
+          [1],
+          [2],
+        ], more: true, cursorId: 7, columns: [_col('N')]),
+        fetchBatches: [
+          _batch([
+            [3],
+            [4],
+          ], more: false),
+        ],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final received = <int>[];
+      final cancelled = Completer<void>();
+      late final StreamSubscription<OracleRow> sub;
+      sub = conn.executeStream('SELECT n FROM t FOR UPDATE', null, 2).listen(
+        (row) {
+          received.add(row['N'] as int);
+          // Explicitly cancel after the first row. cancel() resolves only after
+          // the generator's finally (close()) has run, so its completion is a
+          // reliable signal that cleanup finished.
+          sub.cancel().then((_) {
+            if (!cancelled.isCompleted) cancelled.complete();
+          });
+        },
+      );
+      await cancelled.future;
+
+      expect(received, equals([1]),
+          reason: 'cancellation stops delivery after the first row');
+      expect(conn.hasOpenResultSet, isFalse,
+          reason: 'explicit cancel() ran the generator finally → close()');
+      expect(conn.debugPendingCloseCount, equals(1),
+          reason: 'the abandoned cursor was queued for close exactly once');
+      // The connection is immediately reusable after explicit cancellation.
       await conn.execute('SELECT 1 FROM dual');
     });
 
@@ -597,6 +644,66 @@ void main() {
       }
       // After close the connection accepts new statements.
       await conn.execute('SELECT 7 FROM dual');
+    });
+
+    test(
+        'every public entry point is rejected while a result set is open, and '
+        'none attempts a wire round trip (AC6)', () async {
+      // Open a lazy result set via the public execute(resultSet: true) path and
+      // leave it open. Each public entry point that starts a new operation must
+      // fail fast with the concurrent-operation error and never reach the wire.
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1], [2]], more: true, cursorId: 7,
+            columns: [_col('N')]),
+        fetchBatches: [_batch([[3]], more: false)],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final result = await conn.execute(
+        'SELECT n FROM t FOR UPDATE',
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+      final rs = result.resultSet!;
+      expect(t.sendExecuteCalls, equals(1),
+          reason: 'only the opening execute reached the wire');
+      expect(t.fetchCalls, equals(0),
+          reason: 'the first batch is buffered; no FETCH issued yet');
+
+      final concurrent = throwsA(isA<OracleException>()
+          .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+          .having((e) => e.message, 'message', contains('Concurrent')));
+      try {
+        // 1. eager execute()
+        await expectLater(conn.execute('SELECT 1 FROM dual'), concurrent);
+        // 2. execute(resultSet: true)
+        await expectLater(
+          conn.execute('SELECT 1 FROM dual', null,
+              const OracleExecuteOptions(resultSet: true)),
+          concurrent,
+        );
+        // 3. executeStream() (guard runs when the generator is listened to)
+        await expectLater(
+            conn.executeStream('SELECT 1 FROM dual').toList(), concurrent);
+        // 4. queryStream()
+        await expectLater(
+            conn.queryStream('SELECT 1 FROM dual').toList(), concurrent);
+        // 5. openResultSet()
+        await expectLater(
+            conn.openResultSet('SELECT 1 FROM dual'), concurrent);
+
+        expect(t.sendExecuteCalls, equals(1),
+            reason: 'no rejected entry point attempted an EXECUTE round trip');
+        expect(t.fetchCalls, equals(0),
+            reason: 'no rejected entry point attempted a FETCH round trip');
+      } finally {
+        await rs.close();
+      }
+
+      // After close, both the eager and lazy entry points work again.
+      await conn.execute('SELECT 1 FROM dual');
+      final rs2 = await conn.openResultSet('SELECT n FROM t2 FOR UPDATE');
+      await rs2.close();
     });
 
     test('early close frees the connection for immediate reuse', () async {
