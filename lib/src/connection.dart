@@ -1114,9 +1114,28 @@ class OracleConnection {
           acquiredEntry.columnMetadata = firstResponse.columnMetadata;
         }
         heldEntry = acquiredEntry; // stays inUse until close()
-      } else if (stmt.eligible && firstResponse.cursorId != 0) {
+      } else if (stmt.eligible &&
+          _cache.isEnabled &&
+          firstResponse.cursorId != 0) {
         // First execution (or post-retry full parse): store the fresh cursor as
         // in-use so a concurrent acquire sees it busy and close() releases it.
+        //
+        // AC2 reachability note: LRU eviction of heldEntry while this result
+        // set is open cannot occur on a single connection — every entry point
+        // (openResultSet, executeStream, execute+resultSet:true) calls
+        // _rejectConcurrentOperation() before reaching here, which prevents
+        // any concurrent _cache.store() call that could trigger eviction. The
+        // AC2 eviction-while-in-use invariant is therefore proven at the
+        // StatementCache unit level rather than the connection level.
+        //
+        // The `_cache.isEnabled` guard is load-bearing: when caching is disabled
+        // (statementCacheSize == 0) `store()` is a no-op, so a heldEntry created
+        // here would be a phantom — never actually in the cache — yet
+        // `releaseResultSet()` would still route close() through
+        // `_cache.release()`, which drops the cursor WITHOUT queuing it for the
+        // close-cursor piggyback. Leaving heldEntry null instead sends the bare
+        // cursor id down the non-cached close path, so a disabled cache still
+        // reaps the server cursor (AC8), exactly like a non-cacheable cursor.
         heldEntry = StatementCacheEntry(
           key: stmt.cacheKey,
           cursorId: firstResponse.cursorId,

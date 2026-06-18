@@ -270,6 +270,61 @@ void main() {
       });
     });
 
+    // AC2: an entry that is in-use — held open by a live lazy OracleResultSet —
+    // must never have its server cursor closed out from under its owner by an
+    // LRU eviction. The cursor close is deferred until the owner releases it.
+    group('in-use LRU eviction safety (AC2)', () {
+      test('evicting an in-use entry defers its close and clears returnToCache',
+          () {
+        final cache = StatementCache(1);
+        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 10));
+        final held = cache.acquire(_k('A'))!; // A is now in-use
+        expect(held.inUse, isTrue);
+        expect(held.returnToCache, isTrue);
+
+        // Storing B exceeds maxSize (1) and evicts A — but A is in-use, so its
+        // cursor must NOT be queued for close yet.
+        cache.store(StatementCacheEntry(key: _k('B'), cursorId: 20));
+        expect(held.returnToCache, isFalse,
+            reason: 'an evicted in-use entry is marked not-to-cache');
+        expect(cache.drainCursorsToClose(), isEmpty,
+            reason: 'the in-use cursor is not queued until its owner releases');
+        expect(cache.acquire(_k('A')), isNull,
+            reason: 'the evicted entry is no longer acquireable');
+
+        // When the owner finally releases, the cursor is queued exactly once.
+        cache.release(held);
+        expect(held.inUse, isFalse);
+        expect(cache.drainCursorsToClose(), equals([10]),
+            reason: 'release queues the deferred cursor id exactly once');
+      });
+
+      test('a not-in-use entry evicted by the same store is queued immediately',
+          () {
+        final cache = StatementCache(1);
+        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 10));
+        final held = cache.acquire(_k('A'))!;
+        cache.release(held); // A back in cache, no longer in use
+
+        cache.store(StatementCacheEntry(key: _k('B'), cursorId: 20)); // evicts A
+        expect(cache.drainCursorsToClose(), equals([10]),
+            reason: 'a not-in-use evicted cursor is queued immediately');
+      });
+
+      test('release of an in-use-evicted entry never double-queues its cursor',
+          () {
+        final cache = StatementCache(1);
+        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 10));
+        final held = cache.acquire(_k('A'))!;
+        cache.store(StatementCacheEntry(key: _k('B'), cursorId: 20)); // evicts A
+        cache.release(held);
+
+        expect(cache.drainCursorsToClose(), equals([10]));
+        expect(cache.drainCursorsToClose(), isEmpty,
+            reason: 'the deferred cursor id is queued exactly once');
+      });
+    });
+
     group('invalidate', () {
       test('removes entry and queues cursor id for close', () {
         final cache = StatementCache(10);
@@ -325,6 +380,17 @@ void main() {
 
         cache.release(held); // returnToCache was cleared → queue now
         expect(cache.drainCursorsToClose(), contains(5));
+      });
+
+      test('no stale in-use entry remains acquireable after invalidateAll', () {
+        // AC6: invalidateAll drops in-use entries from the map immediately, so a
+        // later acquire of the same key can never resurrect a stale cursor.
+        final cache = StatementCache(10);
+        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 5));
+        cache.acquire(_k('A')); // mark in-use
+        cache.invalidateAll();
+        expect(cache.acquire(_k('A')), isNull,
+            reason: 'an invalidated in-use entry is no longer acquireable');
       });
     });
 
