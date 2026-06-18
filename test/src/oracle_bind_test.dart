@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 
 import 'package:oracledb/oracledb.dart';
+import 'package:oracledb/src/protocol/constants.dart' show oraTypeCursor;
 
 void main() {
   group('OracleBind exports — public surface', () {
@@ -634,6 +635,47 @@ void main() {
       expect(out['v'], equals('firstOnly'));
       // Case-insensitive lookup applies the same way.
       expect(out['V'], equals('firstOnly'));
+    });
+  });
+
+  group('OracleDbType.cursor (SYS_REFCURSOR OUT bind) validation', () {
+    test('cursor OUT bind constructs without maxSize (not required)', () {
+      final b = OracleBind.out(type: OracleDbType.cursor);
+      expect(b.type, equals(OracleDbType.cursor));
+      expect(b.maxSize, isNull, reason: 'cursor OUT does not require maxSize');
+      expect(b.value, isNull, reason: 'a cursor OUT bind carries no input');
+      expect(b.direction.toString().contains('output'), isTrue);
+    });
+
+    test('cursor OUT bind maps to Oracle TTC wire type 102', () {
+      final b = OracleBind.out(type: OracleDbType.cursor);
+      expect(b.oracleTypeCode, equals(oraTypeCursor));
+      expect(oraTypeCursor, equals(102),
+          reason: 'AC1: OracleDbType.cursor maps to TTC data type 102');
+    });
+
+    test('a passed maxSize on a cursor OUT bind is accepted and ignored', () {
+      // maxSize is meaningless for a cursor (the server allocates the cursor),
+      // but supplying one must not throw — it is simply not used on the wire.
+      final b = OracleBind.out(type: OracleDbType.cursor, maxSize: 4000);
+      expect(b.type, equals(OracleDbType.cursor));
+      expect(b.oracleTypeCode, equals(oraTypeCursor));
+    });
+
+    test('cursor IN OUT bind is unsupported and fails loud (null value)', () {
+      expect(
+        () => OracleBind.inOut(value: null, type: OracleDbType.cursor),
+        throwsA(isA<OracleException>().having(
+            (e) => e.message, 'message', contains('not supported'))),
+      );
+    });
+
+    test('cursor IN OUT bind is unsupported and fails loud (non-null value)',
+        () {
+      expect(
+        () => OracleBind.inOut(value: 'anything', type: OracleDbType.cursor),
+        throwsA(isA<OracleException>()),
+      );
     });
   });
 }

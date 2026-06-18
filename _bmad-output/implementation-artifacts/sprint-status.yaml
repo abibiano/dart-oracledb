@@ -36,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-06-18  # Epic 8 retrospective -> done
+last_updated: 2026-06-18  # Story 9.1 code review complete
 project: dart-oracledb
 project_key: NOKEY
 tracking_system: file-system
@@ -172,8 +172,8 @@ development_status:
   epic-8-retrospective: done  # 2026-06-18 - Retrospective complete. See epic-8-retro-2026-06-18.md
 
   # Epic 9: REF CURSOR & Implicit Results [depends on Epic 8]
-  epic-9: backlog
-  9-1-ref-cursor-out-bind: backlog
+  epic-9: in-progress
+  9-1-ref-cursor-out-bind: done
   9-2-nested-cursors: backlog
   9-3-implicit-result-sets: backlog
   9-4-dual-env-integration-tests: backlog

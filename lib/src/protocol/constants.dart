@@ -171,6 +171,10 @@ const int oraTypeLongRaw = 24;
 /// CHAR data type (fixed-length character).
 const int oraTypeChar = 96;
 
+/// REF CURSOR / SYS_REFCURSOR data type. Returned as a lazy [OracleResultSet]
+/// for OUT binds. Buffer-size factor = 4 (node-oracledb DB_TYPE_CURSOR).
+const int oraTypeCursor = 102;
+
 /// UROWID data type.
 const int oraTypeURowid = 104;
 

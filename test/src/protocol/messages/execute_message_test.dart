@@ -2939,6 +2939,245 @@ void main() {
     });
   });
 
+  group('cursor (SYS_REFCURSOR) bind encode', () {
+    test('cursor OUT bind metadata uses buffer size 4, no charset/prefetch', () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: null,
+            oraType: oraTypeCursor,
+            dir: BindDir.output,
+          ),
+        ],
+      );
+      final bytes = req.toBytes();
+      // Reference parity (node-oracledb writeColumnMetadata, DB_TYPE_CURSOR):
+      // bufferSizeFactor = 4, no charset form, no LOB/JSON prefetch cont-flag,
+      // no lob prefetch length. Output direction is carried by the IO_VECTOR
+      // round trip, not the metadata block.
+      final expectedMetadata = [
+        oraTypeCursor, ttcBindUseIndicators, 0, 0,
+        ..._ub4(4), // UB4 maxSize = 4 (bufferSizeFactor)
+        ..._ub4(0), // UB4 max num elements
+        ..._ub4(0), // UB4 contFlag = 0 (NO LOB/JSON prefetch flag)
+        ..._ub4(0), // UB4 OID
+        ..._ub2(0), // UB2 version
+        ..._ub2(0), // UB2 charset = 0 (no charset form)
+        0, // csfrm = 0
+        ..._ub4(0), // UB4 lob prefetch length = 0
+        ..._ub4(0), // UB4 oaccolid (>= 12.2)
+      ];
+      expect(
+        _indexOfSub(bytes, expectedMetadata),
+        greaterThanOrEqualTo(0),
+        reason: 'cursor bind metadata block not found in encoded request',
+      );
+    });
+
+    test('cursor OUT bind value writes the ref-cursor placeholder [1, 0]', () {
+      // node-oracledb writeBindParamsColumn (cursor branch, cursorId == 0):
+      // writeUInt8(1) then writeUInt8(0). Crucially NOT a zero-length null
+      // indicator — the cursor escapes the generic null/string/LOB/JSON paths.
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: null,
+            oraType: oraTypeCursor,
+            dir: BindDir.output,
+          ),
+        ],
+      );
+      final bytes = req.toBytes();
+      // The single bind value follows the ROW_DATA marker: [marker, 1, 0].
+      expect(
+        _indexOfSub(bytes, [ttcMsgTypeRowData, 1, 0]),
+        greaterThanOrEqualTo(0),
+        reason: 'cursor OUT placeholder (1, 0) not found after ROW_DATA marker',
+      );
+      // A generic null OUT bind would write [marker, 0]; prove that did NOT
+      // happen (the byte after the marker is 1, not 0).
+      final markerIdx = _indexOfSub(bytes, [ttcMsgTypeRowData, 1, 0]);
+      expect(
+        bytes[markerIdx + 1],
+        equals(1),
+        reason: 'cursor must not be encoded as a zero-length null indicator',
+      );
+    });
+  });
+
+  group('cursor (SYS_REFCURSOR) OUT bind decode', () {
+    test('valid cursor descriptor decodes into a DecodedCursorResult', () {
+      final payload = _buildPayload([
+        _ioVector([16]), // one OUT bind (direction OUT)
+        [
+          ttcMsgTypeRowData,
+          ..._cursorOutBindValue([
+            _columnInfo(name: 'ID', oraType: oraTypeNumber, maxSize: 0),
+            _columnInfo(name: 'NAME', oraType: oraTypeVarchar, maxSize: 50),
+          ], 42),
+          ..._ub4(0), // SB4 actualNumBytes trailer
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindIndices, equals([0]));
+      expect(r.outBindValues, hasLength(1));
+      final decoded = r.outBindValues.single;
+      expect(decoded, isA<DecodedCursorResult>());
+      final cursor = decoded! as DecodedCursorResult;
+      expect(cursor.cursorId, equals(42));
+      expect(cursor.columns.map((c) => c.name), equals(['ID', 'NAME']));
+      expect(cursor.columns[0].oracleType, equals(oraTypeNumber));
+      expect(cursor.columns[1].oracleType, equals(oraTypeVarchar));
+      expect(cursor.columns[1].maxLength, equals(50));
+      // The cursor is NOT eager-materialized into rows.
+      expect(r.rows, isEmpty);
+    });
+
+    test('cursor id 0 fails loud (invalid server cursor)', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          ..._cursorOutBindValue(
+            [_columnInfo(name: 'ID', oraType: oraTypeNumber, maxSize: 0)],
+            0, // invalid cursor id
+          ),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
+          ],
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('cursor id = 0'),
+          ),
+        ),
+      );
+    });
+
+    test('zero-column cursor descriptor fails loud as malformed', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [ttcMsgTypeRowData, ..._cursorOutBindValue(const [], 42), ..._ub4(0)],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
+          ],
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('zero columns'),
+          ),
+        ),
+      );
+      expect(
+        ttcStreamIsComplete(
+          payload,
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
+          ],
+        ),
+        isTrue,
+        reason: 'the completion probe consumes malformed descriptors leniently',
+      );
+    });
+
+    test('unsupported embedded cursor column type fails during OUT decode', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          ..._cursorOutBindValue([
+            _columnInfo(name: 'L', oraType: oraTypeLong, maxSize: 4000),
+          ], 42),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
+          ],
+        ),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+              .having((e) => e.message, 'message', contains('column type 8')),
+        ),
+      );
+      expect(
+        ttcStreamIsComplete(
+          payload,
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
+          ],
+        ),
+        isTrue,
+        reason: 'unsupported metadata fails only in the strict decode pass',
+      );
+    });
+
+    test(
+      'a NULL cursor slot (length 0) decodes to null without a describe',
+      () {
+        final payload = _buildPayload([
+          _ioVector([16]),
+          [
+            ttcMsgTypeRowData,
+            0, // numBytes = 0 → SQL NULL / empty cursor slot
+            ..._ub4(0), // SB4 actualNumBytes trailer
+          ],
+          _errorMessage(errorNum: 0),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        final r = decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
+          ],
+        );
+        expect(r.outBindValues, equals([null]));
+      },
+    );
+  });
+
   // Define-mode ExecuteRequest (the DEFINE call sent for open CLOB query
   // cursors, mirroring node-oracledb `_handleDefines`).
   group('define-mode ExecuteRequest', () {
@@ -3557,6 +3796,39 @@ List<int> _describeInfo(List<List<int>> columns) {
   out.addAll(_ub4(0)); // dcbmxpr
   out.addAll(_ub4(0)); // tailBytes = 0
   return out;
+}
+
+/// Builds the embedded cursor-describe block carried inside a REF CURSOR OUT
+/// bind value. Identical to a DESCRIBE_INFO body but WITHOUT the leading
+/// version-bytes preamble — node-oracledb's `createCursorFromDescribe` calls
+/// `processDescribeInfo` directly, skipping the preamble the message dispatcher
+/// would otherwise consume.
+List<int> _embeddedCursorDescribe(List<List<int>> columns) {
+  final out = <int>[];
+  out.addAll(_ub4(0)); // max row size
+  out.addAll(_ub4(columns.length)); // numCols
+  if (columns.isNotEmpty) out.add(0); // extra byte present when numCols > 0
+  for (final col in columns) {
+    out.addAll(col);
+  }
+  out.addAll(_ub4(0)); // dateBytes = 0 (no current-date field)
+  out.addAll(_ub4(0)); // dcbflag
+  out.addAll(_ub4(0)); // dcbmdbz
+  out.addAll(_ub4(0)); // dcbmnpr
+  out.addAll(_ub4(0)); // dcbmxpr
+  out.addAll(_ub4(0)); // tailBytes = 0
+  return out;
+}
+
+/// Builds a REF CURSOR OUT bind value: a non-null length byte, the embedded
+/// cursor describe block, then the UB2 server cursor id (matches node-oracledb
+/// processColumnData TNS_DATA_TYPE_CURSOR branch).
+List<int> _cursorOutBindValue(List<List<int>> columns, int cursorId) {
+  return [
+    1, // numBytes length byte (non-null, non-0xFF)
+    ..._embeddedCursorDescribe(columns),
+    ..._ub2(cursorId), // UB2 cursor id
+  ];
 }
 
 /// Builds a single column-info entry for DESCRIBE_INFO.

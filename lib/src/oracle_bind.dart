@@ -106,6 +106,17 @@ enum OracleDbType {
   /// `String`, and nested maps/lists. Values travel as OSON (Oracle's binary
   /// JSON) under wire type 119.
   json,
+
+  /// Oracle `SYS_REFCURSOR` (returned as an [OracleResultSet] in
+  /// [OracleResult.outBinds]).
+  ///
+  /// Only valid as an OUT-only bind in a PL/SQL block. `maxSize` is not
+  /// required and is ignored. `IN OUT` cursor binds are not supported for
+  /// this story — use `OracleBind.out(type: OracleDbType.cursor)`.
+  ///
+  /// The returned [OracleResultSet] must be closed when no longer needed to
+  /// release the server cursor and make the connection reusable.
+  cursor,
 }
 
 /// Specification for an OUT or IN OUT bind variable.
@@ -150,11 +161,22 @@ class OracleBind {
   /// For [OracleDbType.varchar] and [OracleDbType.raw], [maxSize] is required
   /// and must be large enough to hold the largest value the procedure may
   /// return — undersized buffers surface a server-side ORA-06502 error.
+  ///
+  /// [OracleDbType.cursor] IN OUT binds are not supported; use
+  /// [OracleBind.out] with `type: OracleDbType.cursor` instead.
   OracleBind.inOut({
     required this.value,
     required this.type,
     this.maxSize,
   }) : direction = BindDir.inputOutput {
+    if (type == OracleDbType.cursor) {
+      throw const OracleException(
+        errorCode: oraBindTypeError,
+        message: 'OracleBind.inOut(type: cursor) is not supported; '
+            'use OracleBind.out(type: OracleDbType.cursor) to receive a '
+            'SYS_REFCURSOR OUT parameter',
+      );
+    }
     _validate(type, maxSize, value);
   }
 
@@ -239,6 +261,15 @@ class OracleBind {
         // and invalid nested members (DateTime, Uint8List, Set, non-finite
         // doubles, non-String keys, arbitrary objects) at the call site.
         assertValidJsonBindValue(value, 'value');
+      case OracleDbType.cursor:
+        // Cursor OUT binds cannot carry an input value; the server allocates
+        // the cursor. Reaching here means an inOut constructor bypassed the
+        // earlier guard, which is an internal invariant violation.
+        throw OracleException(
+          errorCode: oraBindTypeError,
+          message: 'OracleBind(type: cursor) cannot have an input value '
+              '(got ${value.runtimeType}); cursor binds are OUT-only',
+        );
     }
   }
 
@@ -283,6 +314,8 @@ class OracleBind {
         return oc.oraTypeBlob;
       case OracleDbType.json:
         return oc.oraTypeJson;
+      case OracleDbType.cursor:
+        return oc.oraTypeCursor;
     }
   }
 }

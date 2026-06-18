@@ -479,6 +479,15 @@ class ExecuteRequest extends Message {
       _writeOsonValue(buffer, value);
       return;
     }
+    if (oraType == oraTypeCursor) {
+      // Cursor OUT placeholder: length byte = 1, cursor-id byte = 0.
+      // node-oracledb writeBindParamsColumn (cursor branch): when cursor id
+      // is 0 (new OUT slot), writes writeUInt8(1) then writeUInt8(0).
+      // Never written as a null-length byte — cursor escapes the null check.
+      buffer.writeUint8(1);
+      buffer.writeUint8(0);
+      return;
+    }
     if (value == null) {
       // NULL signaled by a zero-length indicator byte.
       buffer.writeUint8(0);
@@ -600,6 +609,10 @@ class ExecuteRequest extends Message {
       // writeColumnMetadata); the user's OracleBind maxSize only guards the
       // returned document client-side and never reaches the wire.
       return tnsJsonMaxLength;
+    }
+    if (wireType == oraTypeCursor) {
+      // node-oracledb DB_TYPE_CURSOR bufferSizeFactor = 4.
+      return 4;
     }
     if (bind.maxSize != null) return bind.maxSize!;
     final v = bind.value;
@@ -733,6 +746,23 @@ class BindMetadata {
 
   /// Requested direction (IN or OUT) as declared by the client.
   final BindDir dir;
+}
+
+/// Intermediate result of decoding a `SYS_REFCURSOR` OUT bind value.
+///
+/// Carries the embedded cursor describe metadata and server cursor id decoded
+/// from the ROW_DATA payload. [OracleConnection._executeGuarded] converts this
+/// into an [OracleResultSet] backed by the existing [ResultSetCursor] engine.
+/// Package-internal: never exposed in the public API.
+class DecodedCursorResult {
+  /// Creates a decoded cursor result.
+  const DecodedCursorResult({required this.columns, required this.cursorId});
+
+  /// Column metadata decoded from the embedded cursor descriptor.
+  final List<ColumnMetadata> columns;
+
+  /// Server cursor id for subsequent FETCH round trips.
+  final int cursorId;
 }
 
 /// Result of an EXECUTE / FETCH response cycle.
@@ -1198,6 +1228,7 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
           strict: s.strictTypes,
           preserveTimestampTimeZone: s.preserveTimestampTimeZone,
           outMaxSize: meta.maxSize,
+          ttcFieldVersion: s.ttcFieldVersion,
         );
         // After the value bytes, an OUT bind carries an SB4 "actual num bytes"
         // trailer (matches node-oracledb processColumnData !inFetch path).
@@ -1297,6 +1328,7 @@ Object? _decodeValueByOraType(
   bool preserveTimestampTimeZone = false,
   int csfrm = 0,
   int? outMaxSize,
+  int ttcFieldVersion = 24,
 }) {
   switch (oraType) {
     case oraTypeLong:
@@ -1439,9 +1471,120 @@ Object? _decodeValueByOraType(
         );
       }
       return decodeOson(Uint8List.fromList(osonBytes));
+    case oraTypeCursor:
+      // Cursor OUT bind wire shape (node-oracledb processColumnData cursor
+      // branch): one UInt8 length byte (0 or 0xFF = SQL NULL / empty slot),
+      // then an embedded cursor-describe block (same fields as DESCRIBE_INFO
+      // but without the leading version-bytes preamble), then UB2 cursor id.
+      final numBytes = buf.readUint8();
+      if (numBytes == 0 || numBytes == ttcNullLengthIndicator) return null;
+      final columns = _readEmbeddedCursorDescribe(
+        buf,
+        ttcFieldVersion,
+        strict: strict,
+      );
+      final cursorId = buf.readUB2();
+      if (cursorId == 0) {
+        // Cursor id = 0 is an invalid cursor for any non-IN bind direction.
+        // Fail loud instead of returning null or an unusable result set —
+        // the PL/SQL block likely did not open the cursor, which is a
+        // programming error that should surface immediately.
+        if (!strict) return null; // completion probe: consume, skip loud error
+        throw const OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'SYS_REFCURSOR OUT bind returned an invalid server cursor '
+              '(cursor id = 0); the PL/SQL block may not have opened the cursor',
+        );
+      }
+      if (!strict) {
+        return null; // completion probe: bytes consumed, value unused
+      }
+      return DecodedCursorResult(columns: columns, cursorId: cursorId);
     default:
       buf.readBytesWithLength();
       return null;
+  }
+}
+
+/// Reads an embedded cursor-describe block: same structure as a DESCRIBE_INFO
+/// TTC message body, but without the leading version-bytes chunk consumed by
+/// the message dispatcher. Used by the cursor OUT bind decoder to extract the
+/// column metadata embedded inline in the ROW_DATA payload.
+///
+/// Wire layout (node-oracledb `processDescribeInfo` called from
+/// `createCursorFromDescribe`, which skips the version preamble):
+/// - UB4: max row size (skip)
+/// - UB4: num columns
+/// - If num columns > 0: 1 skip byte
+/// - For each column: `_processColumnInfo()`
+/// - UB4: date-bytes length; if > 0, chunked bytes (current date)
+/// - UB4: dcbflag, UB4: dcbmdbz, UB4: dcbmnpr, UB4: dcbmxpr
+/// - UB4: tail-bytes length; if > 0, chunked bytes
+List<ColumnMetadata> _readEmbeddedCursorDescribe(
+  ReadBuffer buf,
+  int ttcFieldVersion, {
+  required bool strict,
+}) {
+  buf.skipUB4(); // max row size
+  final numCols = buf.readUB4();
+  if (strict && numCols == 0) {
+    throw const OracleException(
+      errorCode: oraProtocolError,
+      message:
+          'Malformed SYS_REFCURSOR descriptor: embedded describe has zero '
+          'columns',
+    );
+  }
+  if (numCols > 0) {
+    buf.skipUB1();
+  }
+  final columns = <ColumnMetadata>[];
+  for (var i = 0; i < numCols; i++) {
+    final column = _processColumnInfo(buf, ttcFieldVersion);
+    if (strict && !_isSupportedRefCursorColumn(column)) {
+      throw OracleException(
+        errorCode: oraUnsupportedType,
+        message:
+            'Unsupported SYS_REFCURSOR column type ${column.oracleType} '
+            'for column "${column.name}"',
+      );
+    }
+    columns.add(column);
+  }
+  final dateBytes = buf.readUB4();
+  if (dateBytes > 0) buf.readBytesWithLength(); // current date (chunked)
+  buf.skipUB4(); // dcbflag
+  buf.skipUB4(); // dcbmdbz
+  buf.skipUB4(); // dcbmnpr
+  buf.skipUB4(); // dcbmxpr
+  final tailBytes = buf.readUB4();
+  if (tailBytes > 0) buf.readBytesWithLength(); // tail (chunked)
+  return columns;
+}
+
+bool _isSupportedRefCursorColumn(ColumnMetadata col) {
+  switch (col.oracleType) {
+    case oraTypeVarchar:
+    case oraTypeVarchar2:
+    case oraTypeString:
+    case oraTypeChar:
+    case oraTypeRaw:
+    case oraTypeNumber:
+    case oraTypeInteger:
+    case oraTypeFloat:
+    case oraTypeVarnum:
+    case oraTypeDate:
+    case oraTypeTimestamp:
+    case oraTypeTimestampLtz:
+    case oraTypeTimestampTz:
+    case oraTypeBlob:
+    case oraTypeJson:
+      return true;
+    case oraTypeClob:
+      return col.csfrm != ttcCsfrmNChar;
+    default:
+      return false;
   }
 }
 

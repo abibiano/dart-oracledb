@@ -47,10 +47,7 @@ final _log = Logger('OracleConnection');
 /// All fields are optional. Omitting [options] (or passing `null`) is
 /// identical to `const OracleExecuteOptions()` — the default eager path.
 class OracleExecuteOptions {
-  const OracleExecuteOptions({
-    this.resultSet = false,
-    this.fetchSize,
-  });
+  const OracleExecuteOptions({this.resultSet = false, this.fetchSize});
 
   /// When `true`, [OracleConnection.execute] returns a lazy
   /// [OracleResultSet] in [OracleResult.resultSet] instead of materializing
@@ -292,20 +289,23 @@ class OracleConnection {
   @visibleForTesting
   static String debugTruncateSql(String sql) => _truncateSql(sql);
 
-  /// Builds an [OracleOutBinds] from the decoded execute response.
+  /// Builds an [OracleOutBinds] from the decoded OUT bind [values] and their
+  /// [outBindIndices].
   ///
   /// For named binds, OUT values are mapped by their first-occurrence name in
   /// SQL order; for positional or no binds, they are indexed by their original
-  /// position in the SQL.
+  /// position in the SQL. [values] is passed explicitly (not read from the
+  /// response) so the REF CURSOR wrapping step can substitute a decoded cursor
+  /// descriptor with its live [OracleResultSet] before the binds are exposed.
   static OracleOutBinds _buildOutBinds({
-    required ExecuteResponse response,
+    required List<int> outBindIndices,
+    required List<Object?> values,
     required List<String>? bindNames,
     required Map<String, int>? outBindNameIndex,
   }) {
-    if (response.outBindIndices.isEmpty) {
+    if (outBindIndices.isEmpty) {
       return const OracleOutBinds.empty();
     }
-    final values = response.outBindValues;
     if (outBindNameIndex == null) {
       return OracleOutBinds(values: values);
     }
@@ -317,14 +317,80 @@ class OracleConnection {
       indexToName[idx] = name;
     });
     final names = <String, int>{};
-    for (var i = 0; i < response.outBindIndices.length; i++) {
-      final bindIdx = response.outBindIndices[i];
+    for (var i = 0; i < outBindIndices.length; i++) {
+      final bindIdx = outBindIndices[i];
       final name = indexToName[bindIdx];
       if (name != null) {
         names[name] = i;
       }
     }
     return OracleOutBinds(values: values, names: names);
+  }
+
+  /// Wraps a decoded `SYS_REFCURSOR` OUT bind ([DecodedCursorResult]) into a
+  /// connection-owned [OracleResultSet] backed by the shared [ResultSetCursor]
+  /// engine, and registers it as this connection's single open lazy handle.
+  ///
+  /// Returns [response]'s OUT bind values with the cursor descriptor replaced by
+  /// its [OracleResultSet]; a response with no cursor OUT bind returns its
+  /// values unchanged and registers nothing.
+  ///
+  /// Story 9.1 supports exactly one cursor OUT bind per PL/SQL call. More than
+  /// one fails loud — multi-cursor ownership (a single connection owns one open
+  /// handle over one TTC stream) is deferred to Stories 9.2 / 9.3. The cursor's
+  /// server id is decoded as non-zero by the time it reaches here ([_decodeValueByOraType]
+  /// throws on id 0), and PL/SQL is never cache-eligible, so the result set is
+  /// non-cached: [OracleResultSet.close] queues its id through the existing
+  /// close-cursor piggyback.
+  List<Object?> _wrapRefCursorOutBinds(ExecuteResponse response) {
+    final values = response.outBindValues;
+    var cursorCount = 0;
+    for (final v in values) {
+      if (v is DecodedCursorResult) cursorCount++;
+    }
+    if (cursorCount == 0) return values;
+    if (cursorCount > 1) {
+      _cache.requeueCursorsToClose(
+        values.whereType<DecodedCursorResult>().map(
+          (decoded) => decoded.cursorId,
+        ),
+      );
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'PL/SQL call returned $cursorCount REF CURSOR OUT binds; this '
+            'driver supports exactly one cursor OUT bind per call. Multiple '
+            'cursor OUT binds (or implicit results) are not yet supported.',
+      );
+    }
+    final newValues = List<Object?>.of(values);
+    for (var i = 0; i < newValues.length; i++) {
+      final decoded = newValues[i];
+      if (decoded is! DecodedCursorResult) continue;
+      // A returned REF CURSOR ships only describe metadata and a server cursor
+      // id — its rows arrive on the first continuation FETCH. Seed the engine
+      // with an empty first batch and serverHasMoreRows so the first read pulls
+      // a batch (node-oracledb createCursorFromDescribe: moreRowsToFetch = true).
+      final cursor = ResultSetCursor(
+        transport: _transport,
+        cursorId: decoded.cursorId,
+        columns: decoded.columns,
+        firstBatch: const <List<Object?>>[],
+        serverHasMoreRows: true,
+        prefetchRows: _defaultPrefetchRows,
+        preserveTimestampTimeZone: _preserveTimestampTimeZone,
+        materializePerBatch: true,
+      );
+      final rs = OracleResultSet.fromCursor(
+        connection: this,
+        cursor: cursor,
+        cacheEntry: null, // PL/SQL REF CURSORs are never statement-cached
+        cursorId: decoded.cursorId,
+      );
+      _openResultSet = rs;
+      newValues[i] = rs;
+    }
+    return newValues;
   }
 
   /// Infers the Oracle wire-protocol type indicator for a raw Dart bind value.
@@ -507,8 +573,11 @@ class OracleConnection {
       _executeInProgress = true;
       final OracleResultSet rs;
       try {
-        rs = await _openResultSetGuarded(sql, bindValues,
-            prefetchRows: effectiveFetchSize);
+        rs = await _openResultSetGuarded(
+          sql,
+          bindValues,
+          prefetchRows: effectiveFetchSize,
+        );
       } finally {
         _executeInProgress = false;
       }
@@ -584,9 +653,7 @@ class OracleConnection {
       // stay raw until here so a value aliased into several rows is read once.
       var response = open.response;
       final effectiveCursorId = response.cursorId;
-      if (stmt.isQuery &&
-          response.moreRowsToFetch &&
-          effectiveCursorId != 0) {
+      if (stmt.isQuery && response.moreRowsToFetch && effectiveCursorId != 0) {
         final cursor = ResultSetCursor(
           transport: _transport,
           cursorId: effectiveCursorId,
@@ -598,7 +665,8 @@ class OracleConnection {
           materializePerBatch: false,
         );
         final drained = await cursor.drainRemaining(
-            maxFetchIterations: _transport.maxFetchIterations);
+          maxFetchIterations: _transport.maxFetchIterations,
+        );
         final failure = cursor.fetchFailure;
         if (failure != null) {
           response = ExecuteResponse(
@@ -647,8 +715,10 @@ class OracleConnection {
 
       // Materialize CLOB/BLOB locators over the fully-drained result so a
       // locator aliased into several rows is read exactly once.
-      response = await _transport.materializeLobs(response,
-          bindMetadata: stmt.bindMetadata);
+      response = await _transport.materializeLobs(
+        response,
+        bindMetadata: stmt.bindMetadata,
+      );
 
       // Update the cache from the successful response.
       if (stmt.eligible && cacheEntry != null) {
@@ -689,12 +759,19 @@ class OracleConnection {
         _cache.invalidateAll();
       }
 
+      // Wrap any returned SYS_REFCURSOR OUT bind into a connection-owned
+      // OracleResultSet and register it as the one open lazy handle. Done last
+      // (after cache disposition) so a thrown wrap never leaves a phantom
+      // open-handle on a connection whose cache state was not yet settled.
+      final outBindValues = _wrapRefCursorOutBinds(response);
+
       return OracleResult(
         columnMetadata: response.columnMetadata,
         rowData: response.rows,
         rowsAffected: stmt.isPlSql ? null : response.rowsAffected,
         outBinds: _buildOutBinds(
-          response: response,
+          outBindIndices: response.outBindIndices,
+          values: outBindValues,
           bindNames: stmt.bindNames,
           outBindNameIndex: stmt.outBindNameIndex,
         ),
@@ -791,7 +868,8 @@ class OracleConnection {
           // else (or a second occurrence) propagates. invalidate() queues the
           // dead cursor for close, so the retry's drain piggybacks it exactly
           // as node-oracledb's clearCursor does.
-          final canRetry = !describeRetryUsed &&
+          final canRetry =
+              !describeRetryUsed &&
               stmt.isQuery &&
               (code == oc.oraVarNotInSelectList ||
                   code == oc.oraDataTypeNotSupported);
@@ -973,7 +1051,10 @@ class OracleConnection {
   /// the concurrent-operation [OracleException]. Throws [OracleException] when
   /// [sql] is not a query — DML / PL/SQL must use [execute].
   @visibleForTesting
-  Future<OracleResultSet> openResultSet(String sql, [Object? bindValues]) async {
+  Future<OracleResultSet> openResultSet(
+    String sql, [
+    Object? bindValues,
+  ]) async {
     _ensureOpen();
     _rejectConcurrentOperation();
     _executeInProgress = true;
@@ -1036,7 +1117,11 @@ class OracleConnection {
     _executeInProgress = true;
     final OracleResultSet rs;
     try {
-      rs = await _openResultSetGuarded(sql, bindValues, prefetchRows: fetchSize);
+      rs = await _openResultSetGuarded(
+        sql,
+        bindValues,
+        prefetchRows: fetchSize,
+      );
     } finally {
       // The open round trip is complete; the cursor is now idle between pulls.
       _executeInProgress = false;
@@ -1074,12 +1159,13 @@ class OracleConnection {
     String sql, [
     Object? bindValues,
     int fetchSize = _defaultPrefetchRows,
-  ]) =>
-      executeStream(sql, bindValues, fetchSize);
+  ]) => executeStream(sql, bindValues, fetchSize);
 
   Future<OracleResultSet> _openResultSetGuarded(
-      String sql, Object? bindValues,
-      {int? prefetchRows}) async {
+    String sql,
+    Object? bindValues, {
+    int? prefetchRows,
+  }) async {
     _log.fine(
       'Opening result set: '
       '${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
@@ -1101,8 +1187,10 @@ class OracleConnection {
     try {
       // Materialize the first batch's locators now (the streaming path
       // materializes each batch as it is fetched).
-      firstResponse = await _transport.materializeLobs(firstResponse,
-          bindMetadata: stmt.bindMetadata);
+      firstResponse = await _transport.materializeLobs(
+        firstResponse,
+        bindMetadata: stmt.bindMetadata,
+      );
 
       // Cache disposition: keep the entry inUse for the result set's lifetime;
       // OracleResultSet.close() releases it through the same path execute uses.
