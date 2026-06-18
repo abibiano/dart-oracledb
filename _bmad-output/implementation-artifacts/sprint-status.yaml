@@ -36,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-06-18  # Story 8.5 → done (code-review)
+last_updated: 2026-06-18  # Epic 8 retrospective -> done
 project: dart-oracledb
 project_key: NOKEY
 tracking_system: file-system
@@ -163,13 +163,13 @@ development_status:
   # ==========================================================================
 
   # Epic 8: Streaming & Incremental Result Consumption [architecture review required]
-  epic-8: in-progress
+  epic-8: done  # 2026-06-18 - all stories 8.1-8.5 + retrospective complete. See epic-8-retro-2026-06-18.md
   8-1-oracle-result-set: done  # 2026-06-13 — code review complete (3-layer adversarial). 2 patches applied (streaming FETCH-error cache invalidation; terminal state on mid-stream LOB materialize throw — both High, error-path correctness) + 2 regression tests; 1 deferred (cross-batch duplicate-column sentinel test); 12 dismissed. Dual-env re-validated after patches: 23ai 334/7, 21c 335/6; unit 1143/12; dart analyze clean.
   8-2-query-stream-execute-stream: done  # 2026-06-16 — code review complete. executeStream()/queryStream() Stream<OracleRow> layer over the 8.1 ResultSet engine (one prefetchRows param + two methods in connection.dart). dart analyze clean; 10 new unit tests pass; integration 23ai 340/7, 21c 341/6 (+6 streaming tests each). Pre-existing env-only connect-timeout unit failure documented in DAR (not a regression).
   8-3-execute-result-set-option: done  # 2026-06-16 — Code review complete (3-layer adversarial). 1 decision resolved (AC1/AC3 `options:` named→positional reconciled to story text; positional 3rd-arg is node-oracledb-faithful), 1 patch applied (fetchSize upper-bound guard: reject >0xFFFFFFFF before wire, +1 regression test), 2 deferred (pre-existing LOB-materialize cursor leak already tracked from 8.2; 8.2+connect-timeout diff-hygiene note), 10 dismissed. dart analyze clean; 1165 unit pass / 0 fail. OracleExecuteOptions + execute() 3rd-arg resultSet path; dual-env validated (dev: 347/348).
   8-4-stream-cancellation-connection-reuse: done  # 2026-06-18 — code review clean (bmad-code-review: Blind Hunter / Edge Case Hunter / Acceptance Auditor; 0 decision/0 patch/0 defer/15 dismissed). Diff-only flakiness/race concerns refuted by source+live-run verification; AC10 Dartdoc edits verified accurate; no production logic changed (8.1–8.3 paths audited correct). dev-story: explicit StreamSubscription.cancel() (AC1), overlapping-pull rejection (AC7), all-entry-point concurrent guard (AC6), public execute(resultSet:true) pool leak-guard (AC8) tests. dart analyze clean; unit 1168/12; full integration 23ai 349/7 + 21c 350/6; streaming suite 25/25 on both.
   8-5-statement-cache-safety-dual-env: done  # 2026-06-18 — code review complete (3-layer adversarial). 4 patches applied: (1) AC5 baseline assertion added before rs.close(); (2) execute(resultSet:true) AC1/AC3 unit test added; (3) executeStream() AC1/AC3 unit test added; (4) AC2 reachability comment added to _openResultSetGuarded. 1 false positive dismissed (P1 group nesting). 5 deferred (describe-mismatch cursorId==0, invalidate key vs entry, streaming describe-mismatch integration, failed+close+rs.close cursor leak, release removes by key). dart analyze clean; unit 1181/12 (was 1179; +2 new test blocks).
-  epic-8-retrospective: optional
+  epic-8-retrospective: done  # 2026-06-18 - Retrospective complete. See epic-8-retro-2026-06-18.md
 
   # Epic 9: REF CURSOR & Implicit Results [depends on Epic 8]
   epic-9: backlog
