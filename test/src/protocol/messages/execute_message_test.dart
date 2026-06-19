@@ -3178,6 +3178,184 @@ void main() {
     );
   });
 
+  // Implicit result sets (Story 9.3): a PL/SQL block that calls
+  // DBMS_SQL.RETURN_RESULT ships a TTC message type 27 carrying a UB4 result
+  // count and, per result, a skipped byte segment, an embedded cursor describe
+  // (same shape as a REF CURSOR OUT bind, no version preamble), and a UB2
+  // server cursor id. Each becomes a DecodedCursorResult on the response.
+  group('implicit result set decode (DBMS_SQL.RETURN_RESULT, type 27)', () {
+    test('a single implicit result decodes into one DecodedCursorResult', () {
+      final payload = _buildPayload([
+        _ioVector([16]), // a scalar OUT bind coexists with implicit results
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()), // OUT bind = 5
+          ..._ub4(0), // SB4 actualNumBytes trailer
+        ],
+        _implicitResultSet([
+          (
+            columns: [
+              _columnInfo(name: 'ID', oraType: oraTypeNumber, maxSize: 0),
+              _columnInfo(name: 'NAME', oraType: oraTypeVarchar, maxSize: 40),
+            ],
+            cursorId: 101,
+          ),
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeNumber, dir: BindDir.output),
+        ],
+      );
+      // Scalar OUT bind coexists with the implicit result (AC6).
+      expect(r.outBindValues, equals([5]));
+      expect(r.implicitResults, hasLength(1));
+      final cursor = r.implicitResults.single;
+      expect(cursor.cursorId, equals(101));
+      expect(cursor.columns.map((c) => c.name), equals(['ID', 'NAME']));
+      expect(cursor.columns[1].oracleType, equals(oraTypeVarchar));
+      expect(cursor.columns[1].maxLength, equals(40));
+      // Implicit cursors are NOT eager-decoded into rows by the decoder.
+      expect(r.rows, isEmpty);
+    });
+
+    test('two implicit results decode in server-returned order', () {
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (
+            columns: [_columnInfo(name: 'A', oraType: oraTypeNumber, maxSize: 0)],
+            cursorId: 201,
+          ),
+          (
+            columns: [
+              _columnInfo(name: 'B', oraType: oraTypeVarchar, maxSize: 10),
+            ],
+            cursorId: 202,
+          ),
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.implicitResults.map((c) => c.cursorId), equals([201, 202]));
+      expect(r.implicitResults[0].columns.single.name, equals('A'));
+      expect(r.implicitResults[1].columns.single.name, equals('B'));
+    });
+
+    test('skipped per-result byte segment is consumed (non-zero numBytes)', () {
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (
+            columns: [_columnInfo(name: 'A', oraType: oraTypeNumber, maxSize: 0)],
+            cursorId: 301,
+          ),
+        ], skipBytes: 5),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.implicitResults.single.cursorId, equals(301));
+    });
+
+    test('zero implicit results yields an empty list (canonical const)', () {
+      final payload = _buildPayload([
+        _implicitResultSet(const []),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.implicitResults, isEmpty);
+    });
+
+    test('cursor id 0 fails loud, carrying prior cursor ids for cleanup', () {
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (
+            columns: [_columnInfo(name: 'A', oraType: oraTypeNumber, maxSize: 0)],
+            cursorId: 401, // decoded successfully before the bad one
+          ),
+          (
+            columns: [_columnInfo(name: 'B', oraType: oraTypeNumber, maxSize: 0)],
+            cursorId: 0, // invalid → fail loud
+          ),
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      Object? thrown;
+      try {
+        decodeExecuteResponse(payload, isQuery: false);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown, isA<ImplicitResultDecodeException>());
+      final ex = thrown! as ImplicitResultDecodeException;
+      expect(ex.errorCode, equals(oraProtocolError));
+      expect(ex.message, contains('cursor id = 0'));
+      expect(ex.cursorIds, equals([401]),
+          reason: 'the cursor decoded before the bad descriptor is reapable');
+    });
+
+    test('malformed descriptor (zero columns) fails loud', () {
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (columns: const [], cursorId: 501),
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(payload, isQuery: false),
+        throwsA(
+          isA<ImplicitResultDecodeException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('zero columns')),
+        ),
+      );
+    });
+
+    test('unsupported embedded column type fails loud with oraUnsupportedType',
+        () {
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (
+            columns: [_columnInfo(name: 'L', oraType: oraTypeLong, maxSize: 4000)],
+            cursorId: 601,
+          ),
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(payload, isQuery: false),
+        throwsA(
+          isA<ImplicitResultDecodeException>()
+              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+              .having((e) => e.message, 'message', contains('column type 8')),
+        ),
+      );
+    });
+
+    test('completion probe consumes the implicit-result message leniently', () {
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (
+            columns: [_columnInfo(name: 'A', oraType: oraTypeNumber, maxSize: 0)],
+            cursorId: 0, // would fail the strict pass, but the probe skips it
+          ),
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(ttcStreamIsComplete(payload), isTrue,
+          reason: 'the probe locates the terminal message despite a bad id');
+    });
+  });
+
   // Cursor-VALUED SELECT columns (Story 9.2 nested cursors): a
   // `SELECT ..., CURSOR(SELECT ...) AS nc FROM ...` query ships the cursor
   // column with oraTypeNum 102 in DESCRIBE_INFO and the same embedded-cursor
@@ -4035,6 +4213,24 @@ List<int> _cursorOutBindValue(List<List<int>> columns, int cursorId) {
     ..._embeddedCursorDescribe(columns),
     ..._ub2(cursorId), // UB2 cursor id
   ];
+}
+
+/// Builds a TTC implicit result-set message (type 27, `DBMS_SQL.RETURN_RESULT`):
+/// a UB4 result count, then for each result a UInt8 skip-length plus that many
+/// skip bytes, the embedded cursor describe block, and the UB2 server cursor id
+/// (matches node-oracledb `processImplicitResultSet`).
+List<int> _implicitResultSet(
+  List<({List<List<int>> columns, int cursorId})> results, {
+  int skipBytes = 0,
+}) {
+  final out = <int>[ttcMsgTypeImplicitResultSet, ..._ub4(results.length)];
+  for (final result in results) {
+    out.add(skipBytes); // UInt8 numBytes
+    out.addAll(List<int>.filled(skipBytes, 0));
+    out.addAll(_embeddedCursorDescribe(result.columns));
+    out.addAll(_ub2(result.cursorId));
+  }
+  return out;
 }
 
 /// Builds a single column-info entry for DESCRIBE_INFO.

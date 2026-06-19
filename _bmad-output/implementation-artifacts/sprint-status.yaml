@@ -1,5 +1,5 @@
 # generated: 2025-12-16
-# last_updated: 2026-06-19  # Story 9.2 code review complete
+# last_updated: 2026-06-19  # Story 9.3 ready for dev
 # project: dart-oracledb
 # project_key: NOKEY
 # tracking_system: file-system
@@ -36,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-06-19  # Story 9.2 done
+last_updated: 2026-06-19  # Story 9.3 done (code review complete)
 project: dart-oracledb
 project_key: NOKEY
 tracking_system: file-system
@@ -175,7 +175,7 @@ development_status:
   epic-9: in-progress
   9-1-ref-cursor-out-bind: done
   9-2-nested-cursors: done
-  9-3-implicit-result-sets: backlog
+  9-3-implicit-result-sets: done  # 2026-06-19 — code review complete (3-layer adversarial). 4 patches applied (eager-drain cap fail-loud; AC7 decode-failure reaping moved to live _openCursor site + removed dead handler; close() clears _openImplicitResultSets; REF CURSOR+implicit coexistence test), 1 deferred (node-oracledb-style explicit maxRows → 9.4/backlog), 8 dismissed. dart analyze clean; unit 1243/12; integration 23ai 6/6 + 21c 6/6 (focused implicit-result suite).
   9-4-dual-env-integration-tests: backlog
   epic-9-retrospective: optional
 

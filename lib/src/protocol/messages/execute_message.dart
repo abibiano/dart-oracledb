@@ -773,6 +773,29 @@ class DecodedCursorResult {
   final int cursorId;
 }
 
+/// Thrown by [decodeExecuteResponse] when an implicit result-set descriptor
+/// (TTC message type 27) is malformed, carries an invalid cursor id (0), or
+/// describes an unsupported column type.
+///
+/// Carries [cursorIds] — the server cursor ids of every implicit result decoded
+/// *before* the failing descriptor in the same response — so the connection
+/// layer can queue them for the existing close-cursor piggyback before the
+/// error escapes, leaving no leaked server cursor. Package-internal: never
+/// surfaced as a distinct type to public callers (it is an [OracleException]).
+class ImplicitResultDecodeException extends OracleException {
+  /// Creates an implicit-result decode error carrying the already-decoded
+  /// cursor ids that still need to be queued for close.
+  ImplicitResultDecodeException({
+    required this.cursorIds,
+    required super.errorCode,
+    required super.message,
+    super.cause,
+  });
+
+  /// Server cursor ids decoded before the failing descriptor.
+  final List<int> cursorIds;
+}
+
 /// Returns the 0-based indices of every cursor-typed column in [columns]
 /// (Oracle type [oraTypeCursor], the `CURSOR(SELECT ...)` subquery shape).
 ///
@@ -812,6 +835,7 @@ class ExecuteResponse {
     List<List<Object?>> rows = const [],
     List<Object?> outBindValues = const [],
     List<int> outBindIndices = const [],
+    List<DecodedCursorResult> implicitResults = const [],
     this.rowsAffected,
     this.moreRowsToFetch = false,
     this.errorCode,
@@ -828,7 +852,10 @@ class ExecuteResponse {
            : List<Object?>.unmodifiable(outBindValues),
        outBindIndices = outBindIndices.isEmpty
            ? const <int>[]
-           : List<int>.unmodifiable(outBindIndices);
+           : List<int>.unmodifiable(outBindIndices),
+       implicitResults = implicitResults.isEmpty
+           ? const <DecodedCursorResult>[]
+           : List<DecodedCursorResult>.unmodifiable(implicitResults);
 
   /// Whether the call succeeded (no Oracle error).
   final bool isSuccess;
@@ -851,6 +878,14 @@ class ExecuteResponse {
   /// [outBindValues]. Lets higher layers map decoded values back to the
   /// original bind name or position. Unmodifiable.
   final List<int> outBindIndices;
+
+  /// Implicit result-set cursor descriptors returned by a PL/SQL block that
+  /// called `DBMS_SQL.RETURN_RESULT` (TTC message type 27). Each entry carries
+  /// the embedded cursor describe metadata and the server cursor id; rows
+  /// arrive lazily on continuation FETCH rounds, exactly like a REF CURSOR OUT
+  /// bind. Empty for SELECT, DML, and PL/SQL that returns no implicit results.
+  /// Unmodifiable — the decoder's accumulation list is never aliased in.
+  final List<DecodedCursorResult> implicitResults;
 
   /// Rows affected by DML (null for SELECT before FETCH end).
   final int? rowsAffected;
@@ -992,6 +1027,7 @@ ExecuteResponse decodeExecuteResponse(
     rows: state.rows,
     outBindValues: state.outBindValues,
     outBindIndices: state.outBindIndices,
+    implicitResults: state.implicitResults,
     rowsAffected: state.rowsAffected,
     moreRowsToFetch: state.moreRowsToFetch,
     errorCode: isSuccess ? null : state.errorNum,
@@ -1031,6 +1067,12 @@ class _DecodeState {
   final List<BindMetadata> bindMetadata;
   final List<int> outBindIndices = [];
   final List<Object?> outBindValues = [];
+
+  /// Implicit result-set cursor descriptors accumulated while decoding TTC
+  /// message type 27 (`DBMS_SQL.RETURN_RESULT`). Populated only on the strict
+  /// (real) decode pass; the lenient completion probe consumes the bytes but
+  /// adds nothing here.
+  final List<DecodedCursorResult> implicitResults = [];
 
   /// Set after the first PL/SQL OUT-bind ROW_DATA has been decoded. Tracked
   /// explicitly (not derived from `outBindValues.isEmpty`) so that an
@@ -1099,6 +1141,9 @@ void _dispatch(int msgType, ReadBuffer buf, _DecodeState s) {
       return;
     case ttcMsgTypeServerSidePiggyback:
       processServerSidePiggybackBody(buf);
+      return;
+    case ttcMsgTypeImplicitResultSet:
+      _processImplicitResultSet(buf, s);
       return;
     case ttcMsgTypeEndOfRequest:
       s.endOfResponse = true;
@@ -1610,6 +1655,70 @@ List<ColumnMetadata> _readEmbeddedCursorDescribe(
   final tailBytes = buf.readUB4();
   if (tailBytes > 0) buf.readBytesWithLength(); // tail (chunked)
   return columns;
+}
+
+/// Decodes a TTC implicit result-set message (type 27), produced when a PL/SQL
+/// block calls `DBMS_SQL.RETURN_RESULT`.
+///
+/// Wire layout (node-oracledb `processImplicitResultSet`):
+/// - UB4: number of results
+/// - For each result:
+///   - UInt8: number of skip bytes, then that many opaque bytes (skipped)
+///   - embedded cursor describe (`_readEmbeddedCursorDescribe`, no version
+///     preamble — same shape a REF CURSOR OUT bind carries)
+///   - UB2: server cursor id
+///
+/// Each decoded descriptor is accumulated in [s.implicitResults]. A cursor id
+/// of 0, a malformed embedded describe, or an unsupported column type fails
+/// loud on the strict (real) decode pass, surfacing as an
+/// [ImplicitResultDecodeException] that carries the cursor ids decoded so far so
+/// the caller can reap them. The lenient completion probe (strict == false)
+/// consumes the same bytes without throwing or accumulating, so it can still
+/// locate the terminal message.
+void _processImplicitResultSet(ReadBuffer buf, _DecodeState s) {
+  final numResults = buf.readUB4();
+  for (var i = 0; i < numResults; i++) {
+    final numBytes = buf.readUint8();
+    if (numBytes > 0) buf.skip(numBytes);
+    final List<ColumnMetadata> columns;
+    try {
+      columns = _readEmbeddedCursorDescribe(
+        buf,
+        s.ttcFieldVersion,
+        strict: s.strictTypes,
+      );
+    } on OracleException catch (e) {
+      // Strict pass: a zero-column or unsupported-type embedded describe
+      // surfaces here. Re-raise carrying the cursor ids decoded before this
+      // descriptor so they can be queued for close. (The lenient probe never
+      // throws from `_readEmbeddedCursorDescribe`, so this only fires strict.)
+      throw ImplicitResultDecodeException(
+        cursorIds: [for (final r in s.implicitResults) r.cursorId],
+        errorCode: e.errorCode,
+        message: e.message,
+        cause: e,
+      );
+    }
+    final cursorId = buf.readUB2();
+    if (cursorId == 0) {
+      // An implicit result with cursor id 0 is an invalid server cursor — the
+      // block returned a result that was never opened. Same fail-loud contract
+      // as a REF CURSOR OUT bind.
+      if (!s.strictTypes) continue; // probe: bytes consumed, skip the loud error
+      throw ImplicitResultDecodeException(
+        cursorIds: [for (final r in s.implicitResults) r.cursorId],
+        errorCode: oraProtocolError,
+        message:
+            'Implicit result set returned an invalid server cursor '
+            '(cursor id = 0); the PL/SQL block may not have opened the cursor',
+      );
+    }
+    if (s.strictTypes) {
+      s.implicitResults.add(
+        DecodedCursorResult(columns: columns, cursorId: cursorId),
+      );
+    }
+  }
 }
 
 bool _isSupportedRefCursorColumn(ColumnMetadata col) {

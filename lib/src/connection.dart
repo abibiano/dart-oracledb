@@ -144,7 +144,24 @@ class OracleConnection {
   /// The currently open [OracleResultSet], if one is holding this connection's
   /// cursor open between row pulls. `null` when no result set is open. A
   /// connection owns at most one open result set at a time (single TTC stream).
+  ///
+  /// This single slot backs a top-level SELECT result set or a single
+  /// `SYS_REFCURSOR` OUT bind. Lazy implicit result sets — a PL/SQL block can
+  /// return several at once — are tracked in [_openImplicitResultSets] instead.
   OracleResultSet? _openResultSet;
+
+  /// Open lazy implicit result-set handles from a single PL/SQL
+  /// `DBMS_SQL.RETURN_RESULT` call (Story 9.3).
+  ///
+  /// Unlike [_openResultSet], a PL/SQL block can return MORE THAN ONE implicit
+  /// cursor, so they are tracked as a group. The connection is considered owned
+  /// — and rejects other operations — while this set is non-empty OR
+  /// [_openResultSet] is non-null. Each handle's `close()` removes itself from
+  /// the set via [releaseResultSet]; the connection frees up only once the set
+  /// empties (and [_openResultSet] is null). Insertion order is preserved so a
+  /// force-close reaps them deterministically.
+  final Set<OracleResultSet> _openImplicitResultSets =
+      <OracleResultSet>{};
 
   /// The configured statement cache size for this connection.
   int get statementCacheSize => _cache.maxSize;
@@ -222,12 +239,16 @@ class OracleConnection {
   /// Whether an [OracleResultSet] is currently holding this connection's
   /// cursor open (between row pulls, so [isExecuting] is `false`).
   ///
+  /// True for the single top-level / REF CURSOR handle ([_openResultSet]) and
+  /// for any open lazy implicit result-set handle ([_openImplicitResultSets]).
+  ///
   /// Package-internal seam for the connection pool: a connection released with
   /// an open-but-idle result set is recoverable — the pool closes the result
-  /// set (queuing the cursor for the existing close-cursor piggyback) and
+  /// set(s) (queuing the cursor for the existing close-cursor piggyback) and
   /// reclaims the session — whereas a mid-RPC race ([isExecuting]) is not.
   @internal
-  bool get hasOpenResultSet => _openResultSet != null;
+  bool get hasOpenResultSet =>
+      _openResultSet != null || _openImplicitResultSets.isNotEmpty;
 
   /// Whether the connection is currently open and usable.
   ///
@@ -360,7 +381,9 @@ class OracleConnection {
         message:
             'PL/SQL call returned $cursorCount REF CURSOR OUT binds; this '
             'driver supports exactly one cursor OUT bind per call. Multiple '
-            'cursor OUT binds (or implicit results) are not yet supported.',
+            'cursor OUT binds are not yet supported. (Implicit results from '
+            'DBMS_SQL.RETURN_RESULT are returned through '
+            'OracleResult.implicitResults instead.)',
       );
     }
     final newValues = List<Object?>.of(values);
@@ -469,6 +492,141 @@ class OracleConnection {
     } finally {
       _cache.requeueCursorsToClose([decoded.cursorId]);
     }
+  }
+
+  /// Eagerly drains every implicit result cursor ([descriptors]) returned by a
+  /// PL/SQL `DBMS_SQL.RETURN_RESULT` block, in server-returned order, into one
+  /// `List<OracleRow>` per cursor.
+  ///
+  /// Every cursor id is queued for the existing close-cursor piggyback in a
+  /// `finally` — on a clean drain AND on a mid-drain failure — so no server
+  /// cursor leaks (the close queue dedupes, so this never double-enqueues).
+  /// AC3 / AC7.
+  Future<List<Object>> _drainImplicitResults(
+    List<DecodedCursorResult> descriptors,
+  ) async {
+    try {
+      final out = <Object>[];
+      for (final descriptor in descriptors) {
+        out.add(await _drainOneImplicitResult(descriptor));
+      }
+      return out;
+    } finally {
+      _cache.requeueCursorsToClose(descriptors.map((d) => d.cursorId));
+    }
+  }
+
+  /// Drains one implicit result cursor to completion as a `List<OracleRow>`.
+  ///
+  /// Mirrors the eager top-level SELECT drain: rows are fetched raw
+  /// ([ResultSetCursor] with `materializePerBatch: false`), then CLOB/BLOB
+  /// locators are materialized once over the whole result (so a locator aliased
+  /// into several rows is read once), then any nested cursor columns are
+  /// materialized. An empty cursor yields `[]`, never `null` (AC3). A FETCH
+  /// failure — or hitting the eager-drain safety cap — fails loud; the caller's
+  /// `finally` still queues every cursor id.
+  Future<List<OracleRow>> _drainOneImplicitResult(
+    DecodedCursorResult descriptor,
+  ) async {
+    final cursor = ResultSetCursor(
+      transport: _transport,
+      cursorId: descriptor.cursorId,
+      columns: descriptor.columns,
+      firstBatch: const <List<Object?>>[],
+      serverHasMoreRows: true,
+      prefetchRows: _defaultPrefetchRows,
+      preserveTimestampTimeZone: _preserveTimestampTimeZone,
+      materializePerBatch: false,
+    );
+    final drained = await cursor.drainRemaining(
+      maxFetchIterations: _transport.maxFetchIterations,
+    );
+    final failure = cursor.fetchFailure;
+    if (failure != null) {
+      throw OracleException(
+        errorCode: failure.errorCode ?? oraProtocolError,
+        message: failure.errorMessage ??
+            'FETCH failed while draining an implicit result set',
+        offset: failure.errorOffset,
+      );
+    }
+    // The eager drain is bounded by a safety backstop (maxFetchIterations).
+    // If it tripped, rows are still pending and an eager `List<OracleRow>` has
+    // no channel to report incompleteness — fail loud rather than silently
+    // truncate the tail. node-oracledb drains an implicit cursor in full; this
+    // upholds the same no-silent-truncation contract (Story 7.9). Callers with
+    // very large implicit results should consume them through the uncapped lazy
+    // mode (`OracleExecuteOptions(resultSet: true)`).
+    if (cursor.incompleteDrain) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'Implicit result set exceeded the eager-drain safety limit; use '
+            'OracleExecuteOptions(resultSet: true) to consume it lazily',
+      );
+    }
+    // Materialize CLOB/BLOB locators across the fully-drained result, exactly
+    // like a normal SELECT (result-wide locator dedup).
+    var response = ExecuteResponse(
+      isSuccess: true,
+      cursorId: descriptor.cursorId,
+      columnMetadata: descriptor.columns,
+      rows: drained,
+    );
+    response = await _transport.materializeLobs(response);
+    // Implicit result rows can themselves carry cursor-valued columns; resolve
+    // them with the same eager nested-cursor pass SELECT rows use.
+    final nestedCursorIndices = cursorColumnIndicesOf(descriptor.columns);
+    if (nestedCursorIndices.isNotEmpty) {
+      await _materializeNestedCursorsInBatch(response.rows, nestedCursorIndices);
+    }
+    final builder = OracleRowBuilder(descriptor.columns);
+    return response.rows.map(builder.build).toList();
+  }
+
+  /// Wraps every implicit result cursor ([descriptors]) into a connection-owned
+  /// lazy [OracleResultSet] and registers them as the open implicit-result
+  /// group, returning the handles in server order.
+  ///
+  /// The connection is owned until every returned handle is closed or drained
+  /// ([_openImplicitResultSets]); regular operations fail fast meanwhile, and
+  /// each handle's cursor id rides the existing close-cursor piggyback on
+  /// `close()`. Synchronous and never throws — so it cannot leave a partially
+  /// registered group. AC4 / AC5.
+  List<Object> _wrapImplicitResultsLazy(
+    List<DecodedCursorResult> descriptors, {
+    required int prefetchRows,
+  }) {
+    final handles = <Object>[];
+    for (final descriptor in descriptors) {
+      final nestedCursorIndices = cursorColumnIndicesOf(descriptor.columns);
+      final cursor = ResultSetCursor(
+        transport: _transport,
+        cursorId: descriptor.cursorId,
+        columns: descriptor.columns,
+        firstBatch: const <List<Object?>>[],
+        serverHasMoreRows: true,
+        prefetchRows: prefetchRows,
+        preserveTimestampTimeZone: _preserveTimestampTimeZone,
+        materializePerBatch: true,
+        // Materialize cursor-valued columns in each fetched batch, mirroring the
+        // streaming SELECT path. Null (no per-batch work) for the common
+        // scalar/LOB implicit result.
+        onBatchDecoded: nestedCursorIndices.isEmpty
+            ? null
+            : (batch) =>
+                _materializeNestedCursorsInBatch(batch, nestedCursorIndices),
+      );
+      final rs = OracleResultSet.fromCursor(
+        connection: this,
+        cursor: cursor,
+        cacheEntry: null, // implicit result cursors are never statement-cached
+        cursorId: descriptor.cursorId,
+      );
+      _openImplicitResultSets.add(rs);
+      handles.add(rs);
+    }
+    return handles;
   }
 
   /// Infers the Oracle wire-protocol type indicator for a raw Dart bind value.
@@ -648,6 +806,39 @@ class OracleConnection {
           'must be positive and fit in a UB4 (1..0xFFFFFFFF)',
         );
       }
+
+      final isQuery = isQuerySql(sql);
+      if (!isQuery && isPlSqlSql(sql)) {
+        // PL/SQL lazy implicit-results path: run the block and expose any
+        // DBMS_SQL.RETURN_RESULT cursors as lazy OracleResultSet handles
+        // (OracleResult.implicitResults). A REF CURSOR OUT bind, if present,
+        // still returns through outBinds. resultSet stays null.
+        _executeInProgress = true;
+        try {
+          return await _executeGuarded(
+            sql,
+            bindValues,
+            lazyImplicit: true,
+            implicitPrefetchRows: effectiveFetchSize,
+          );
+        } finally {
+          _executeInProgress = false;
+        }
+      }
+      if (!isQuery) {
+        // DML / DDL: a lazy result set is not meaningful. Reject before any
+        // wire round trip (no cursor is opened, the connection stays clean).
+        throw const OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'OracleExecuteOptions(resultSet: true) is only supported for '
+              'SELECT queries and PL/SQL blocks (which may return implicit '
+              'results); use execute() without resultSet for DML/DDL '
+              'statements.',
+        );
+      }
+
+      // Top-level SELECT: lazy cursor-backed OracleResultSet.
       _executeInProgress = true;
       final OracleResultSet rs;
       try {
@@ -687,7 +878,9 @@ class OracleConnection {
   /// "Concurrent execute" for continuity with existing callers/tests while also
   /// naming the open-result-set case.
   void _rejectConcurrentOperation() {
-    if (_executeInProgress || _openResultSet != null) {
+    if (_executeInProgress ||
+        _openResultSet != null ||
+        _openImplicitResultSets.isNotEmpty) {
       throw const OracleException(
         errorCode: oraProtocolError,
         message:
@@ -711,7 +904,20 @@ class OracleConnection {
   /// stalls the result set), so it is rejected up front rather than mis-encoded.
   static const int _maxFetchSize = 0xFFFFFFFF;
 
-  Future<OracleResult> _executeGuarded(String sql, Object? bindValues) async {
+  /// Runs the eager `execute()` path for SELECT, DML, and PL/SQL.
+  ///
+  /// When [lazyImplicit] is true (set only by the public
+  /// `execute(plsql, ..., OracleExecuteOptions(resultSet: true))` path), any
+  /// PL/SQL implicit results are exposed as lazy [OracleResultSet] handles
+  /// (fetched at [implicitPrefetchRows] per continuation round) rather than
+  /// eagerly drained into row lists. It has no effect for SELECT/DML, which
+  /// never return implicit results.
+  Future<OracleResult> _executeGuarded(
+    String sql,
+    Object? bindValues, {
+    bool lazyImplicit = false,
+    int implicitPrefetchRows = _defaultPrefetchRows,
+  }) async {
     _log.fine(
       'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
     );
@@ -865,6 +1071,20 @@ class OracleConnection {
       // open-handle on a connection whose cache state was not yet settled.
       final outBindValues = _wrapRefCursorOutBinds(response);
 
+      // Implicit results from DBMS_SQL.RETURN_RESULT (PL/SQL only; the list is
+      // empty for SELECT/DML). In the default eager path each cursor is drained
+      // into a List<OracleRow>; in lazy mode each becomes an OracleResultSet
+      // handle owned by the implicit-result group.
+      List<Object> implicitResults = const <Object>[];
+      if (response.implicitResults.isNotEmpty) {
+        implicitResults = lazyImplicit
+            ? _wrapImplicitResultsLazy(
+                response.implicitResults,
+                prefetchRows: implicitPrefetchRows,
+              )
+            : await _drainImplicitResults(response.implicitResults);
+      }
+
       return OracleResult(
         columnMetadata: response.columnMetadata,
         rowData: response.rows,
@@ -876,6 +1096,7 @@ class OracleConnection {
           outBindNameIndex: stmt.outBindNameIndex,
         ),
         moreRowsAvailable: response.moreRowsToFetch,
+        implicitResults: implicitResults,
       );
     } catch (e) {
       // A drain / materialize failure leaves a held cached cursor in an unknown
@@ -886,6 +1107,17 @@ class OracleConnection {
       }
       if (unhandledCursorId != 0) {
         _cache.requeueCursorsToClose([unhandledCursorId]);
+      }
+      // NOTE: implicit-result decode failures (ImplicitResultDecodeException)
+      // are reaped at their origin in `_openCursor`'s catch — they throw while
+      // decoding the execute response, which happens before this try is
+      // entered, so they never reach here.
+      // If this PL/SQL execute registered any lazy handles (a REF CURSOR OUT
+      // bind, or lazy implicit results) before failing, close them so the
+      // connection is left reusable. _rejectConcurrentOperation guarantees no
+      // handle was open at entry, so anything open now belongs to this call.
+      if (_openResultSet != null || _openImplicitResultSets.isNotEmpty) {
+        await forceCloseOpenResultSet();
       }
       if (e is OracleException) rethrow;
       throw OracleException(
@@ -1012,6 +1244,15 @@ class OracleConnection {
         // wire. Put the drained IDs back so the next call (or close()) retries.
         if (cursorsToClose.isNotEmpty) {
           _cache.requeueCursorsToClose(cursorsToClose);
+        }
+        // A malformed implicit-result message (TTC type 27) throws here, while
+        // decoding the execute response — this is the live cleanup site. The
+        // throw propagates out through the `await _openCursor(...)` that sits
+        // *before* `_executeGuarded`'s try, so that catch never sees it. Queue
+        // the cursor ids decoded before the bad descriptor for the close-cursor
+        // piggyback so they are reaped rather than leaked. AC7.
+        if (e is ImplicitResultDecodeException) {
+          _cache.requeueCursorsToClose(e.cursorIds);
         }
         if (e is OracleException) rethrow;
         throw OracleException(
@@ -1450,16 +1691,29 @@ class OracleConnection {
     if (identical(_openResultSet, rs)) {
       _openResultSet = null;
     }
+    // Lazy implicit result handles belong to a group; the connection frees up
+    // only once every handle in the group is closed (set empties). remove() is
+    // a no-op for a handle that is not a member, so this is safe for the
+    // single-slot REF CURSOR / SELECT handles handled above.
+    _openImplicitResultSets.remove(rs);
   }
 
-  /// Closes the open [OracleResultSet], if any, reclaiming the cursor so the
-  /// connection stays reusable. Package-internal seam for the connection pool's
-  /// leaked-result-set cleanup on release.
+  /// Closes every open [OracleResultSet] this connection holds — the single
+  /// top-level / REF CURSOR handle and all lazy implicit result handles —
+  /// reclaiming their cursors so the connection stays reusable. Package-internal
+  /// seam for the connection pool's leaked-result-set cleanup on release.
   @internal
   Future<void> forceCloseOpenResultSet() async {
     final rs = _openResultSet;
-    if (rs == null) return;
-    await rs.close();
+    if (rs != null) {
+      await rs.close();
+    }
+    // Snapshot before iterating: each close() calls back into releaseResultSet,
+    // which mutates _openImplicitResultSets.
+    final implicit = _openImplicitResultSets.toList(growable: false);
+    for (final handle in implicit) {
+      await handle.close();
+    }
   }
 
   /// The database server hostname.
@@ -1887,8 +2141,11 @@ class OracleConnection {
     // Drop any open result set's cursor reference. Its server cursor is reaped
     // at session teardown along with the cached cursors below; a later
     // OracleResultSet.close() then no-ops (getRow/getRows already fail via the
-    // closed-connection guard).
+    // closed-connection guard). Clear the lazy implicit-result group too, so
+    // hasOpenResultSet does not keep reporting `true` on a closed connection
+    // when implicit handles were abandoned.
     _openResultSet = null;
+    _openImplicitResultSets.clear();
 
     // Clear cache state locally; per node-oracledb reference, cached cursors
     // are only ever closed via piggyback on a subsequent execute. On close

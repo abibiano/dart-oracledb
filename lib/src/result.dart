@@ -44,6 +44,7 @@ class OracleResult {
     OracleOutBinds? outBinds,
     bool moreRowsAvailable = false,
     OracleResultSet? resultSet,
+    List<Object> implicitResults = const [],
   }) {
     final nameToIndex = _buildNameMap(columnMetadata);
     final rows = rowData
@@ -60,6 +61,9 @@ class OracleResult {
       outBinds: outBinds ?? const OracleOutBinds.empty(),
       moreRowsAvailable: moreRowsAvailable,
       resultSet: resultSet,
+      implicitResults: implicitResults.isEmpty
+          ? const <Object>[]
+          : List<Object>.unmodifiable(implicitResults),
     );
   }
 
@@ -70,6 +74,7 @@ class OracleResult {
     this.rowsAffected,
     this.moreRowsAvailable = false,
     this.resultSet,
+    this.implicitResults = const [],
   });
 
   final List<ColumnMetadata> _columnMetadata;
@@ -104,6 +109,27 @@ class OracleResult {
   /// all row data is accessed through this result set. Always `null` on the
   /// default eager path.
   final OracleResultSet? resultSet;
+
+  /// Query results returned implicitly by a PL/SQL block via
+  /// `DBMS_SQL.RETURN_RESULT` (node-oracledb parity name).
+  ///
+  /// Empty for SELECT, DML, and PL/SQL that returns no implicit results. Each
+  /// element corresponds to one returned cursor, in server-returned order, and
+  /// is one of two shapes depending on how [OracleConnection.execute] was
+  /// called:
+  ///
+  /// - **Default eager mode** (no [OracleExecuteOptions]): each element is a
+  ///   `List<OracleRow>` — the fully-drained rows of that implicit cursor (an
+  ///   empty returned cursor is `[]`, never `null`).
+  /// - **Lazy mode** (`OracleExecuteOptions(resultSet: true)`): each element is
+  ///   an [OracleResultSet] handle; metadata is available before the first
+  ///   fetch, and the caller must `close()` (or fully drain) each one. While any
+  ///   handle is open the connection rejects other operations.
+  ///
+  /// The list is unmodifiable. [resultSet] is always `null` when implicit
+  /// results are present — top-level SELECT result sets and PL/SQL implicit
+  /// results never coexist.
+  final List<Object> implicitResults;
 
   /// Whether the driver stopped fetching while the server still had rows
   /// pending.

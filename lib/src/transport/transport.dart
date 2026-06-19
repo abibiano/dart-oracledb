@@ -1184,6 +1184,9 @@ class Transport {
       rows: rows,
       outBindValues: outBindValues,
       outBindIndices: response.outBindIndices,
+      // PL/SQL with both an OUT LOB bind and implicit results reaches here;
+      // preserve the decoded implicit cursor descriptors through the rebuild.
+      implicitResults: response.implicitResults,
       rowsAffected: response.rowsAffected,
       moreRowsToFetch: response.moreRowsToFetch,
     );

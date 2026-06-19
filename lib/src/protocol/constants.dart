@@ -295,6 +295,13 @@ const int ttcMsgTypeBitVector = 21;
 /// Server-side piggyback (transactional updates, LTXID, etc.).
 const int ttcMsgTypeServerSidePiggyback = 23;
 
+/// Implicit result set message (PL/SQL `DBMS_SQL.RETURN_RESULT`).
+///
+/// Carries one or more server cursors returned implicitly by a PL/SQL block,
+/// each as an embedded cursor describe block plus a UB2 server cursor id
+/// (node-oracledb `TNS_MSG_TYPE_IMPLICIT_RESULTSET`).
+const int ttcMsgTypeImplicitResultSet = 27;
+
 /// End of request marker (response complete).
 const int ttcMsgTypeEndOfRequest = 29;
 
