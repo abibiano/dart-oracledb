@@ -380,6 +380,13 @@ class OracleConnection {
         prefetchRows: _defaultPrefetchRows,
         preserveTimestampTimeZone: _preserveTimestampTimeZone,
         materializePerBatch: true,
+        // No `onBatchDecoded`: a REF CURSOR OUT bind result set (Story 9.1)
+        // is a cursor-backed handle whose rows are plain scalar/LOB rows, NOT
+        // SELECT rows carrying embedded cursor columns. It must not run the
+        // eager nested-cursor materialization path. (A nested cursor column
+        // inside a REF CURSOR already fails loud at decode —
+        // `_isSupportedRefCursorColumn` rejects `oraTypeCursor` — so its
+        // cursorColumnIndices are structurally empty regardless.)
       );
       final rs = OracleResultSet.fromCursor(
         connection: this,
@@ -391,6 +398,77 @@ class OracleConnection {
       newValues[i] = rs;
     }
     return newValues;
+  }
+
+  /// Eagerly materializes every cursor-typed SELECT column value in [rows].
+  ///
+  /// For each row, each column position in [cursorColumnIndices] holding a
+  /// [DecodedCursorResult] is replaced by that nested cursor's fully-drained
+  /// rows as a `List<OracleRow>`; a `null` position (a NULL nested cursor) is
+  /// left `null`. Mutates the inner row lists in place — only inner lists are
+  /// written, never the (possibly unmodifiable) outer list, and every caller
+  /// passes rows whose inner lists are mutable (freshly decoded, or copied by
+  /// `materializeLobs`).
+  ///
+  /// A distinct [DecodedCursorResult] instance is drained at most once per call
+  /// per server cursor id, so duplicate-column aliases or repeated descriptors
+  /// never double-drain (or double-close) the same server cursor.
+  Future<void> _materializeNestedCursorsInBatch(
+    List<List<Object?>> rows,
+    List<int> cursorColumnIndices,
+  ) async {
+    if (cursorColumnIndices.isEmpty || rows.isEmpty) return;
+    final drained = <int, List<OracleRow>>{};
+    for (final row in rows) {
+      for (final i in cursorColumnIndices) {
+        final value = row[i];
+        if (value is! DecodedCursorResult) continue; // NULL cursor stays null
+        var nestedRows = drained[value.cursorId];
+        if (nestedRows == null) {
+          nestedRows = await _drainNestedCursor(value);
+          drained[value.cursorId] = nestedRows;
+        }
+        row[i] = nestedRows;
+      }
+    }
+  }
+
+  /// Drains one nested cursor ([DecodedCursorResult]) to completion, returning
+  /// its rows wrapped as `List<OracleRow>` against the embedded describe's
+  /// column metadata.
+  ///
+  /// Reuses the shared [ResultSetCursor] engine over the nested server cursor
+  /// id — same multi-batch FETCH continuation, per-batch LOB materialization,
+  /// and fail-loud contract as any top-level result set (seeded empty with
+  /// `serverHasMoreRows: true`, exactly as a REF CURSOR OUT bind: rows arrive on
+  /// the first FETCH). The nested cursor never carries its own cursor columns
+  /// (`onBatchDecoded` is omitted) — `_isSupportedRefCursorColumn` rejects a
+  /// cursor-typed embedded column, so nesting cannot recurse here.
+  ///
+  /// The nested cursor id is queued for the existing close-cursor piggyback in a
+  /// `finally`, so it is reaped whether the drain succeeds or throws (a failed
+  /// drain queues its id before the error propagates). The close queue is a
+  /// `LinkedHashSet`, so a repeated id is never enqueued twice.
+  Future<List<OracleRow>> _drainNestedCursor(
+    DecodedCursorResult decoded,
+  ) async {
+    final nested = ResultSetCursor(
+      transport: _transport,
+      cursorId: decoded.cursorId,
+      columns: decoded.columns,
+      firstBatch: const <List<Object?>>[],
+      serverHasMoreRows: true,
+      prefetchRows: _defaultPrefetchRows,
+      preserveTimestampTimeZone: _preserveTimestampTimeZone,
+      materializePerBatch: true,
+    );
+    try {
+      final rawRows = await nested.nextAllRowsData();
+      final builder = OracleRowBuilder(decoded.columns);
+      return rawRows.map(builder.build).toList();
+    } finally {
+      _cache.requeueCursorsToClose([decoded.cursorId]);
+    }
   }
 
   /// Infers the Oracle wire-protocol type indicator for a raw Dart bind value.
@@ -645,6 +723,7 @@ class OracleConnection {
     // FIRST batch. The cache entry (if any) is still held (inUse) on return.
     final open = await _openCursor(sql, stmt);
     StatementCacheEntry? cacheEntry = open.cacheEntry;
+    var unhandledCursorId = open.response.cursorId;
 
     try {
       // Drain the rest of the cursor through the shared lazy engine (same code
@@ -720,6 +799,25 @@ class OracleConnection {
         bindMetadata: stmt.bindMetadata,
       );
 
+      // Eagerly materialize any cursor-typed SELECT columns
+      // (`CURSOR(SELECT ...)` subqueries) over the fully-drained result. Runs
+      // AFTER LOB materialization (AC6: outer LOB columns are resolved before
+      // cursor columns are replaced) and only for queries — PL/SQL OUT-bind
+      // cursors flow through `_wrapRefCursorOutBinds`, never this path, and a
+      // non-query response carries no SELECT column metadata so the index set
+      // is empty regardless.
+      if (stmt.isQuery) {
+        final cursorColumnIndices = cursorColumnIndicesOf(
+          response.columnMetadata,
+        );
+        if (cursorColumnIndices.isNotEmpty) {
+          await _materializeNestedCursorsInBatch(
+            response.rows,
+            cursorColumnIndices,
+          );
+        }
+      }
+
       // Update the cache from the successful response.
       if (stmt.eligible && cacheEntry != null) {
         // Re-executed a cached cursor. A successful re-execute often echoes
@@ -735,6 +833,7 @@ class OracleConnection {
         }
         _cache.release(cacheEntry);
         cacheEntry = null;
+        unhandledCursorId = 0;
       } else if (stmt.eligible && response.cursorId != 0) {
         // First execution (or post-retry full parse): store the fresh cursor.
         _cache.store(
@@ -744,6 +843,7 @@ class OracleConnection {
             columnMetadata: response.columnMetadata,
           ),
         );
+        unhandledCursorId = 0;
       }
 
       // A successful DDL can alter the result shape or invalidate server-side
@@ -783,6 +883,9 @@ class OracleConnection {
       // reparses rather than reusing a possibly-corrupt cursor.
       if (cacheEntry != null) {
         _cache.invalidate(stmt.cacheKey);
+      }
+      if (unhandledCursorId != 0) {
+        _cache.requeueCursorsToClose([unhandledCursorId]);
       }
       if (e is OracleException) rethrow;
       throw OracleException(
@@ -1184,6 +1287,8 @@ class OracleConnection {
     final acquiredEntry = open.cacheEntry;
     ExecuteResponse firstResponse = open.response;
     StatementCacheEntry? heldEntry;
+    var cursorColumnIndices = const <int>[];
+    final unhandledCursorId = firstResponse.cursorId;
     try {
       // Materialize the first batch's locators now (the streaming path
       // materializes each batch as it is fetched).
@@ -1191,6 +1296,19 @@ class OracleConnection {
         firstResponse,
         bindMetadata: stmt.bindMetadata,
       );
+
+      // Eagerly materialize any cursor-typed SELECT columns in the first batch
+      // BEFORE the cursor buffers it (the constructor seeds the buffer
+      // synchronously, so per-batch materialization via `onBatchDecoded` only
+      // covers continuation rounds). Runs after LOB materialization, same order
+      // as the eager path (AC6).
+      cursorColumnIndices = cursorColumnIndicesOf(firstResponse.columnMetadata);
+      if (cursorColumnIndices.isNotEmpty) {
+        await _materializeNestedCursorsInBatch(
+          firstResponse.rows,
+          cursorColumnIndices,
+        );
+      }
 
       // Cache disposition: keep the entry inUse for the result set's lifetime;
       // OracleResultSet.close() releases it through the same path execute uses.
@@ -1235,6 +1353,9 @@ class OracleConnection {
       if (acquiredEntry != null) {
         _cache.invalidate(stmt.cacheKey);
       }
+      if (unhandledCursorId != 0) {
+        _cache.requeueCursorsToClose([unhandledCursorId]);
+      }
       if (e is OracleException) rethrow;
       throw OracleException(
         errorCode: oraProtocolError,
@@ -1253,6 +1374,13 @@ class OracleConnection {
       prefetchRows: prefetchRows ?? _defaultPrefetchRows,
       preserveTimestampTimeZone: _preserveTimestampTimeZone,
       materializePerBatch: true,
+      // Materialize cursor columns on each continuation FETCH batch (the first
+      // batch was materialized above, before this seed). Null when the result
+      // has no cursor columns, so the common path adds no per-batch work.
+      onBatchDecoded: cursorColumnIndices.isEmpty
+          ? null
+          : (batch) =>
+                _materializeNestedCursorsInBatch(batch, cursorColumnIndices),
     );
     return OracleResultSet.fromCursor(
       connection: this,

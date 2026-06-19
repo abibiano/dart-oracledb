@@ -3178,6 +3178,176 @@ void main() {
     );
   });
 
+  // Cursor-VALUED SELECT columns (Story 9.2 nested cursors): a
+  // `SELECT ..., CURSOR(SELECT ...) AS nc FROM ...` query ships the cursor
+  // column with oraTypeNum 102 in DESCRIBE_INFO and the same embedded-cursor
+  // byte shape as a REF CURSOR OUT bind in each ROW_DATA. Unlike the OUT bind
+  // path, a cursor id 0 on a column is a NULL value, not a programming error.
+  group('cursor (SYS_REFCURSOR) SELECT column decode (nested cursors)', () {
+    test('cursorColumnIndicesOf reports cursor column positions', () {
+      const columns = [
+        ColumnMetadata(name: 'ID', oracleType: oraTypeNumber, maxLength: 0),
+        ColumnMetadata(name: 'NC', oracleType: oraTypeCursor, maxLength: 0),
+        ColumnMetadata(name: 'NAME', oracleType: oraTypeVarchar, maxLength: 50),
+        ColumnMetadata(name: 'NC2', oracleType: oraTypeCursor, maxLength: 0),
+      ];
+      expect(cursorColumnIndicesOf(columns), equals([1, 3]));
+    });
+
+    test('cursorColumnIndicesOf is empty when no cursor columns exist', () {
+      const columns = [
+        ColumnMetadata(name: 'ID', oracleType: oraTypeNumber, maxLength: 0),
+        ColumnMetadata(name: 'NAME', oracleType: oraTypeVarchar, maxLength: 50),
+      ];
+      expect(cursorColumnIndicesOf(columns), isEmpty);
+    });
+
+    test('describe with a cursor column produces a DecodedCursorResult row '
+        'value (column path, id 0 allowed)', () {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'ID', oraType: oraTypeNumber, maxSize: 0),
+          _columnInfo(name: 'NC', oraType: oraTypeCursor, maxSize: 0),
+        ]),
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()), // ID = 5
+          // Cursor column value: same wire shape as the OUT-bind value but
+          // WITHOUT the SB4 trailer (that trailer is OUT-bind only).
+          ..._cursorOutBindValue([
+            _columnInfo(name: 'X', oraType: oraTypeNumber, maxSize: 0),
+          ], 77),
+        ],
+        _errorMessage(errorNum: 1403), // end of fetch
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.columnMetadata[1].oracleType, equals(oraTypeCursor));
+      expect(r.columnMetadata[1].name, equals('NC'));
+      expect(
+        r.columnMetadata[1].maxLength,
+        equals(4),
+        reason: 'a cursor column reports the wire buffer size 4 '
+            '(node-oracledb bufferSizeFactor), not the server-sent size 0',
+      );
+      expect(
+        cursorColumnIndicesOf(r.columnMetadata),
+        equals([1]),
+        reason: 'the describe pass must flag column 1 as a cursor column',
+      );
+      expect(r.rows, hasLength(1));
+      final row = r.rows.single;
+      expect(row[0], equals(5));
+      expect(row[1], isA<DecodedCursorResult>());
+      final cursor = row[1]! as DecodedCursorResult;
+      expect(cursor.cursorId, equals(77));
+      expect(cursor.columns.single.name, equals('X'));
+    });
+
+    test('cursor column with server cursor id 0 decodes to null (NOT a '
+        'programming error like the OUT-bind path)', () {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'NC', oraType: oraTypeCursor, maxSize: 0),
+        ]),
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          // Full describe present, but cursor id 0 → NULL nested cursor.
+          ..._cursorOutBindValue([
+            _columnInfo(name: 'X', oraType: oraTypeNumber, maxSize: 0),
+          ], 0),
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(
+        r.rows.single,
+        equals([null]),
+        reason: 'a column cursor id 0 is a null value, not an exception',
+      );
+    });
+
+    test('NULL cursor column (numBytes 0) decodes to null with no describe',
+        () {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'ID', oraType: oraTypeNumber, maxSize: 0),
+          _columnInfo(name: 'NC', oraType: oraTypeCursor, maxSize: 0),
+        ]),
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()), // ID = 5
+          0, // cursor column numBytes = 0 → SQL NULL, no describe follows
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.rows.single, equals([5, null]));
+    });
+
+    test('cursor column embedded describe is parsed at the negotiated TTC '
+        'field version, not the default 24 (pre-23 / Oracle 21c regression)',
+        () {
+      // ttcFieldVersion 14 (20.1) is >= 12.2 (oaccolid present) but < 23.1
+      // (no domain), < 23.1-ext3 (no annotations), and < 23.4 (no vector
+      // tail). Decoding the embedded cursor describe at the default 24 would
+      // read those absent fields and shear the row stream — the exact ORA-12547
+      // "malformed TTC stream" failure this driver hit on Oracle 21c before the
+      // column decode path threaded the negotiated version through.
+      const v = ttcCcapFieldVersion20_1; // 14
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'ID', oraType: oraTypeNumber, maxSize: 0,
+              ttcFieldVersion: v),
+          _columnInfo(name: 'NC', oraType: oraTypeCursor, maxSize: 0,
+              ttcFieldVersion: v),
+        ]),
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()), // ID = 5
+          ..._cursorOutBindValue([
+            _columnInfo(name: 'X', oraType: oraTypeNumber, maxSize: 0,
+                ttcFieldVersion: v),
+          ], 88),
+        ],
+        _errorMessage(errorNum: 1403, ttcFieldVersion: v),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true,
+          ttcFieldVersion: v);
+      expect(r.rows, hasLength(1));
+      final cursor = r.rows.single[1]! as DecodedCursorResult;
+      expect(cursor.cursorId, equals(88));
+      expect(cursor.columns.single.name, equals('X'));
+    });
+
+    test('scalar-only SELECT rows are unaffected (no cursor columns)', () {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'ID', oraType: oraTypeNumber, maxSize: 0),
+          _columnInfo(name: 'NAME', oraType: oraTypeVarchar, maxSize: 50),
+        ]),
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._bytesWithLength('hi'.codeUnits),
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(cursorColumnIndicesOf(r.columnMetadata), isEmpty);
+      expect(r.rows.single, equals([5, 'hi']));
+    });
+  });
+
   // Define-mode ExecuteRequest (the DEFINE call sent for open CLOB query
   // cursors, mirroring node-oracledb `_handleDefines`).
   group('define-mode ExecuteRequest', () {
@@ -3268,6 +3438,42 @@ void main() {
         clobIdx,
         greaterThan(numberIdx),
         reason: 'defines are written in column order',
+      );
+    });
+
+    test('cursor-typed column define uses buffer size 4 (Story 9.2)', () {
+      const cursorCol = ColumnMetadata(
+        name: 'NC',
+        oracleType: oraTypeCursor,
+        maxLength: 0,
+      );
+      final req = ExecuteRequest(
+        sql: 'SELECT id, CURSOR(SELECT 1 FROM dual) FROM t',
+        isQuery: true,
+        cursorId: 9,
+        defineColumns: [cursorCol],
+      );
+      final bytes = req.toBytes();
+      // node-oracledb DB_TYPE_CURSOR.bufferSizeFactor = 4. The cursor column
+      // reports maxLength 0, so the pre-fix `default` branch would have written
+      // a buffer size of 1; the byte after the 4-byte define header must be the
+      // UB4 encoding of 4 ([1, 4]), not of 1 ([1, 1]).
+      final cursorDefine = [
+        oraTypeCursor, ttcBindUseIndicators, 0, 0,
+        1, 4, // UB4 buffer size = 4 (bufferSizeFactor), NOT the default 1
+        0, // max num elements
+        0, // contFlag = 0 (no LOB/JSON prefetch flag)
+        0, // OID
+        0, // version
+        0, // UB2 charset = 0 (csfrm 0)
+        0, // csfrm
+        0, // prefetch length
+        0, // oaccolid
+      ];
+      expect(
+        _indexOfSub(bytes, cursorDefine),
+        greaterThanOrEqualTo(0),
+        reason: 'cursor define block with buffer size 4 not found',
       );
     });
   });

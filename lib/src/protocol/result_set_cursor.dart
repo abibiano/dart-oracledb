@@ -52,6 +52,7 @@ class ResultSetCursor {
     required int prefetchRows,
     required bool preserveTimestampTimeZone,
     required bool materializePerBatch,
+    Future<void> Function(List<List<Object?>> batch)? onBatchDecoded,
     Duration? fetchTimeout = const Duration(minutes: 2),
   })  : _transport = transport,
         _cursorId = cursorId,
@@ -60,6 +61,7 @@ class ResultSetCursor {
         _prefetchRows = prefetchRows,
         _preserveTimestampTimeZone = preserveTimestampTimeZone,
         _materializePerBatch = materializePerBatch,
+        _onBatchDecoded = onBatchDecoded,
         _fetchTimeout = fetchTimeout,
         _buffer = Queue<List<Object?>>.of(firstBatch),
         _previousRoundLastRow =
@@ -71,6 +73,19 @@ class ResultSetCursor {
   final int _prefetchRows;
   final bool _preserveTimestampTimeZone;
   final bool _materializePerBatch;
+
+  /// Optional per-batch post-processor invoked on every freshly fetched batch
+  /// (after per-batch LOB materialization, before the rows are buffered) on the
+  /// streaming/result-set path. The connection layer supplies it to eagerly
+  /// materialize nested cursor columns in place: each [DecodedCursorResult] at
+  /// a cursor-column position is replaced with its drained `List<OracleRow>`.
+  ///
+  /// Null on the eager `execute()` drain path — that path materializes the
+  /// whole drained result once, above this cursor, so nested cursors are not
+  /// materialized per batch here. The first batch is materialized by the caller
+  /// before construction (the constructor seeds the buffer synchronously), so
+  /// this callback only ever runs on continuation FETCH rounds.
+  final Future<void> Function(List<List<Object?>> batch)? _onBatchDecoded;
   final Duration? _fetchTimeout;
 
   /// Rows decoded but not yet handed to the caller.
@@ -226,6 +241,16 @@ class ResultSetCursor {
       final batch = _materializePerBatch
           ? await _transport.materializeLobs(fetched, timeout: _fetchTimeout)
           : fetched;
+      // Eager nested-cursor materialization runs AFTER LOB materialization and
+      // BEFORE buffering, so the replaced `List<OracleRow>` values are what
+      // both `_buffer` and `_previousRoundLastRow` carry. Capturing a still-raw
+      // `DecodedCursorResult` as the previous-round row would let a duplicate
+      // bit on the next round's first row re-materialize an already-drained
+      // (and closed) nested cursor.
+      final onBatch = _onBatchDecoded;
+      if (onBatch != null && batch.rows.isNotEmpty) {
+        await onBatch(batch.rows);
+      }
       if (batch.rows.isNotEmpty) {
         _buffer.addAll(batch.rows);
         _previousRoundLastRow = batch.rows.last;

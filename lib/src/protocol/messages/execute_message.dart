@@ -464,6 +464,14 @@ class ExecuteRequest extends Message {
         return 11;
       case oraTypeTimestampTz:
         return 13;
+      case oraTypeCursor:
+        // Cursor-valued SELECT columns (the `CURSOR(SELECT ...)` subquery
+        // shape). node-oracledb DB_TYPE_CURSOR.bufferSizeFactor = 4; the
+        // server never sends a non-zero max for the cursor type, so the
+        // `default` branch below would otherwise hand the server a buffer size
+        // of 1 and the define would be rejected or produce a malformed
+        // descriptor.
+        return 4;
       default:
         return col.maxLength > 0 ? col.maxLength : 1;
     }
@@ -765,6 +773,24 @@ class DecodedCursorResult {
   final int cursorId;
 }
 
+/// Returns the 0-based indices of every cursor-typed column in [columns]
+/// (Oracle type [oraTypeCursor], the `CURSOR(SELECT ...)` subquery shape).
+///
+/// Empty for the common no-cursor-column SELECT, so callers can cheaply skip
+/// the eager nested-cursor materialization pass. The connection layer derives
+/// the set from the response's column metadata; [_DecodeState] tracks the same
+/// set right after DESCRIBE_INFO so the decode pass records which columns hold
+/// embedded cursors.
+List<int> cursorColumnIndicesOf(List<ColumnMetadata> columns) {
+  List<int>? indices;
+  for (var i = 0; i < columns.length; i++) {
+    if (columns[i].oracleType == oraTypeCursor) {
+      (indices ??= <int>[]).add(i);
+    }
+  }
+  return indices ?? const <int>[];
+}
+
 /// Result of an EXECUTE / FETCH response cycle.
 ///
 /// Immutable: all fields are `final` and the list fields are
@@ -984,7 +1010,7 @@ class _DecodeState {
     this.strictTypes = true,
     this.preserveTimestampTimeZone = false,
     this.previousRoundLastRow,
-  });
+  }) : cursorColumnIndices = cursorColumnIndicesOf(columns);
 
   final bool isQuery;
   final int ttcFieldVersion;
@@ -1025,6 +1051,12 @@ class _DecodeState {
   /// the first row of this response (see [decodeExecuteResponse]).
   final List<Object?>? previousRoundLastRow;
   List<ColumnMetadata> columns;
+
+  /// 0-based indices of cursor-typed ([oraTypeCursor]) columns in [columns].
+  /// Re-derived whenever [columns] is (re)assigned from DESCRIBE_INFO, so the
+  /// decode pass records which columns ship an embedded cursor descriptor for
+  /// the eager nested-cursor materialization that runs above the transport.
+  List<int> cursorColumnIndices;
   final List<List<Object?>> rows = [];
   int cursorId = 0;
   int? rowsAffected;
@@ -1100,6 +1132,7 @@ void _processDescribeInfo(ReadBuffer buf, _DecodeState s) {
   final tailBytes = buf.readUB4();
   if (tailBytes > 0) buf.readBytesWithLength();
   s.columns = columns;
+  s.cursorColumnIndices = cursorColumnIndicesOf(columns);
 }
 
 ColumnMetadata _processColumnInfo(ReadBuffer buf, int ttcFieldVersion) {
@@ -1181,7 +1214,15 @@ ColumnMetadata _processColumnInfo(ReadBuffer buf, int ttcFieldVersion) {
   return ColumnMetadata(
     name: name,
     oracleType: dataType,
-    maxLength: dataType == oraTypeRaw ? maxSize : size,
+    // RAW reports its width in `maxSize`; a cursor-typed column is reported
+    // with the wire buffer size 4 (node-oracledb DB_TYPE_CURSOR
+    // bufferSizeFactor — the server sends `size` 0 for cursor columns, so the
+    // bufferSizeFactor is the meaningful width); every other type uses `size`.
+    maxLength: dataType == oraTypeRaw
+        ? maxSize
+        : dataType == oraTypeCursor
+            ? 4
+            : size,
     precision: precision > 0 ? precision : null,
     scale: scale > 0 ? scale : null,
     csfrm: csfrm,
@@ -1289,6 +1330,7 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
         col,
         strict: s.strictTypes,
         preserveTimestampTimeZone: s.preserveTimestampTimeZone,
+        ttcFieldVersion: s.ttcFieldVersion,
       ),
     );
   }
@@ -1329,6 +1371,7 @@ Object? _decodeValueByOraType(
   int csfrm = 0,
   int? outMaxSize,
   int ttcFieldVersion = 24,
+  bool isColumnCursor = false,
 }) {
   switch (oraType) {
     case oraTypeLong:
@@ -1490,6 +1533,12 @@ Object? _decodeValueByOraType(
         // the PL/SQL block likely did not open the cursor, which is a
         // programming error that should surface immediately.
         if (!strict) return null; // completion probe: consume, skip loud error
+        // SELECT cursor columns differ: a `CURSOR(SELECT ...)` value can
+        // legitimately resolve to id 0 (a synthetically null / unresolved
+        // nested cursor, e.g. an outer join with no matching rows). Treat it
+        // as a NULL column value, same as a null-length numBytes — only the
+        // OUT bind path treats id 0 as a programming error.
+        if (isColumnCursor) return null;
         throw const OracleException(
           errorCode: oraProtocolError,
           message:
@@ -1601,6 +1650,7 @@ Object? _decodeColumnValue(
   ColumnMetadata col, {
   required bool strict,
   bool preserveTimestampTimeZone = false,
+  int ttcFieldVersion = 24,
 }) => _decodeValueByOraType(
   buf,
   col.oracleType,
@@ -1608,6 +1658,16 @@ Object? _decodeColumnValue(
   scale: col.scale,
   preserveTimestampTimeZone: preserveTimestampTimeZone,
   csfrm: col.csfrm,
+  // Forward the negotiated TTC field version so a cursor column's embedded
+  // describe (`_readEmbeddedCursorDescribe` → `_processColumnInfo`) reads only
+  // the version-gated fields the server actually sent. Defaulting to 24 here
+  // mis-parses the embedded describe on pre-23 servers (Oracle 21c), shearing
+  // the row stream — the OUT-bind decode path already threads this through.
+  ttcFieldVersion: ttcFieldVersion,
+  // SELECT column decode: a cursor-typed column with server cursor id 0 is a
+  // NULL nested cursor, not the OUT-bind "block never opened the cursor"
+  // programming error.
+  isColumnCursor: true,
 );
 
 void _processBitVector(ReadBuffer buf, _DecodeState s) {
