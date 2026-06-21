@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
+import 'package:meta/meta.dart';
 
 import '../errors.dart';
 
@@ -85,18 +86,16 @@ class OracleSocket {
         },
       );
     } on SocketException catch (e) {
+      // `Socket.connect(timeout:)` reports a connect timeout as a
+      // SocketException ("Connection timed out…"), NOT a TimeoutException, so
+      // the timeout case is handled here: `_mapSocketError` matches the "timed
+      // out" message and returns `oraConnectTimeout`. (There is intentionally no
+      // `on TimeoutException` branch — it would be dead code; nothing in this
+      // method raises a bare TimeoutException.)
       _log.warning('Connection failed: $e');
       throw OracleException(
         errorCode: _mapSocketError(e),
         message: 'Failed to connect to $host:$port: ${e.message}',
-        cause: e,
-      );
-    } on TimeoutException catch (e) {
-      _log.warning('Connection timeout: $e');
-      throw OracleException(
-        errorCode: oraConnectTimeout,
-        message:
-            'Connection to $host:$port timed out after ${timeout.inSeconds}s',
         cause: e,
       );
     } catch (e) {
@@ -348,8 +347,44 @@ class OracleSocket {
     _cleanup();
   }
 
+  /// OS error codes for `EHOSTUNREACH` ("no route to host") and `ENETUNREACH`
+  /// ("network is unreachable"), across all platforms this driver supports
+  /// (macOS, Linux, Windows, Android, iOS — see pubspec `platforms`).
+  ///
+  /// These codes are platform-dependent and — critically — the value Dart's VM
+  /// surfaces in `SocketException.osError.errorCode` does NOT cleanly track
+  /// `Platform.operatingSystem` (a genuine macos_arm64 host was observed to
+  /// report the Linux-style errno 110 for "Connection timed out"). Matching the
+  /// union of every platform's values is therefore both safe and robust:
+  /// - `EHOSTUNREACH` = 65 (BSD/macOS) / 113 (Linux) / 10065 (Windows WSA)
+  /// - `ENETUNREACH`  = 51 (BSD/macOS) / 101 (Linux) / 10051 (Windows WSA)
+  ///
+  /// The union is collision-free in practice: on each OS only its own two
+  /// network error codes are reachable through `dart:io` socket calls (the
+  /// kernel's connect/send syscalls only ever return that platform's own
+  /// constants), so a "foreign" number that means something non-network on
+  /// another OS can never be produced here. None of these collide with the
+  /// "timed out" (110/60/10060) or "refused" (61/111/10061) values either, so
+  /// the message-string outcomes below are unaffected.
+  static const Set<int> _unreachableErrno = {
+    51, 65, 101, 113, // POSIX (BSD/macOS + Linux)
+    10051, 10065, // Windows WSAENETUNREACH / WSAEHOSTUNREACH
+  };
+
   /// Maps socket exception types to Oracle error codes.
-  int _mapSocketError(SocketException e) {
+  ///
+  /// Delegates to [mapSocketError] (a test-only seam) so the mapping can be
+  /// driven deterministically with synthetic [SocketException]s carrying a
+  /// chosen [OSError] errno, without needing a live socket failure.
+  int _mapSocketError(SocketException e) => mapSocketError(e);
+
+  /// Test-only seam exposing the socket-error → Oracle-code mapping.
+  ///
+  /// Pure function of the exception; not part of the public API. Exposed so the
+  /// errno-based EHOSTUNREACH/ENETUNREACH mapping (and the message-string cases)
+  /// can be asserted deterministically. See [_unreachableErrno].
+  @visibleForTesting
+  static int mapSocketError(SocketException e) {
     final message = e.message.toLowerCase();
 
     if (message.contains('connection refused')) {
@@ -366,6 +401,17 @@ class OracleSocket {
     if (message.contains('connection reset') ||
         message.contains('broken pipe')) {
       return oraProtocolError;
+    }
+
+    // OS-level host/network unreachable (EHOSTUNREACH / ENETUNREACH). Common for
+    // non-routable or firewalled addresses on corporate networks, VPNs and CI.
+    // The message text for these ("No route to host" / "Network is
+    // unreachable") matches none of the strings above, so consult the errno
+    // before falling back to the generic network error. Checked after the
+    // message matches so an explicit message never has its mapping overridden.
+    final errno = e.osError?.errorCode;
+    if (errno != null && _unreachableErrno.contains(errno)) {
+      return oraHostUnreachable;
     }
 
     return oraNetworkError;
