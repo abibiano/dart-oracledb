@@ -117,6 +117,12 @@ class ResultSetCursor {
   /// (iteration cap reached, or no usable cursor id).
   bool _incompleteDrain = false;
 
+  /// True when a deliberate [maxRows] cap stopped an eager drain that had (or
+  /// would have had) more rows than the cap. Distinct from [_incompleteDrain]:
+  /// this is a caller-requested bound, not the safety backstop, and is NOT a
+  /// failure.
+  bool _maxRowsCapped = false;
+
   /// The cursor's result column metadata (available before any row is read).
   List<ColumnMetadata> get columns => _columns;
 
@@ -192,12 +198,30 @@ class ResultSetCursor {
   /// single result-wide pass. A FETCH failure does not throw here — it is
   /// captured in [fetchFailure] so the caller can rebuild the unsuccessful
   /// response (matching the previous transport-level drain contract). Hitting
-  /// the cap with rows still pending sets [incompleteDrain].
+  /// the [maxFetchIterations] cap with rows still pending sets [incompleteDrain].
+  ///
+  /// [maxRows] is a DELIBERATE, caller-requested upper bound on the number of
+  /// rows returned (node-oracledb `maxRows` parity — `_getAllRows()`). `0` (the
+  /// default) means unlimited. A positive N returns at most N rows and stops
+  /// fetching the moment N rows are buffered, so the server is never asked for
+  /// rows past the cap. Unlike the safety backstop, hitting the [maxRows] cap is
+  /// NOT an incomplete drain — it does NOT set [incompleteDrain]; instead the
+  /// caller learns the result was bounded via [maxRowsCapped]. The cap and the
+  /// [maxFetchIterations] backstop are independent: the backstop still guards
+  /// the unlimited (`maxRows == 0`) case.
   Future<List<List<Object?>>> drainRemaining(
-      {required int maxFetchIterations}) async {
+      {required int maxFetchIterations, int maxRows = 0}) async {
     final out = <List<Object?>>[];
     out.addAll(_buffer);
     _buffer.clear();
+    // The first batch (seeded from the buffer) may already satisfy the cap; if
+    // so, return exactly N without ANY continuation FETCH. A longer set (more
+    // buffered rows, or the server still holds rows) means we capped.
+    if (maxRows > 0 && out.length >= maxRows) {
+      if (out.length > maxRows || _serverHasMoreRows) _maxRowsCapped = true;
+      _truncateTo(out, maxRows);
+      return out;
+    }
     if (!_serverHasMoreRows) return out;
     if (_cursorId == 0) {
       // Server reports more rows but there is no cursor to fetch on (the
@@ -217,9 +241,30 @@ class ResultSetCursor {
       out.addAll(_buffer);
       _buffer.clear();
       if (_fetchFailure != null) break;
+      // Deliberate cap: a continuation batch may have overshot N, so truncate
+      // to exactly N and stop. We never issue another FETCH once N is reached
+      // (node-oracledb: "the rest are simply not fetched"). A longer set (this
+      // batch overshot N, or the server still holds rows) means we capped.
+      if (maxRows > 0 && out.length >= maxRows) {
+        if (out.length > maxRows || _serverHasMoreRows) _maxRowsCapped = true;
+        _truncateTo(out, maxRows);
+        break;
+      }
     }
     return out;
   }
+
+  /// Drops every row past index [n] from [rows] (in place).
+  static void _truncateTo(List<List<Object?>> rows, int n) {
+    if (rows.length > n) rows.removeRange(n, rows.length);
+  }
+
+  /// Whether a deliberate [drainRemaining] `maxRows` cap bounded a result that
+  /// had more rows than the cap. True only when the cap actually discarded /
+  /// withheld rows (the result was longer than N). Distinct from
+  /// [incompleteDrain] (the safety backstop / no-cursor case) — a cap is a
+  /// caller-requested bound, never a failure.
+  bool get maxRowsCapped => _maxRowsCapped;
 
   Future<void> _fetchNextBatch() async {
     final fetched = await _transport.fetchRows(

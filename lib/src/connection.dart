@@ -47,7 +47,11 @@ final _log = Logger('OracleConnection');
 /// All fields are optional. Omitting [options] (or passing `null`) is
 /// identical to `const OracleExecuteOptions()` — the default eager path.
 class OracleExecuteOptions {
-  const OracleExecuteOptions({this.resultSet = false, this.fetchSize});
+  const OracleExecuteOptions({
+    this.resultSet = false,
+    this.fetchSize,
+    this.maxRows = 0,
+  });
 
   /// When `true`, [OracleConnection.execute] returns a lazy
   /// [OracleResultSet] in [OracleResult.resultSet] instead of materializing
@@ -66,6 +70,28 @@ class OracleExecuteOptions {
   /// range (`<= 0` or `> 0xFFFFFFFF`) throws [ArgumentError] before any wire
   /// round trip.
   final int? fetchSize;
+
+  /// Maximum number of rows to materialize on the EAGER `execute()` paths
+  /// (node-oracledb `maxRows` parity).
+  ///
+  /// `0` (the default) means **unlimited** — every row is returned, exactly as
+  /// before this option existed. A positive N is a deliberate, caller-requested
+  /// upper bound: at most N rows are returned and the driver stops fetching once
+  /// N is reached (the rest are simply not fetched — it is a cap, NOT an error).
+  /// When a cap bounds a longer result, [OracleResult.moreRowsAvailable] is
+  /// `true` so callers can tell a capped result apart from a fully-drained one.
+  ///
+  /// Applies to the two eager paths only:
+  /// * the eager `execute()` SELECT drain ([OracleResult.rows]); and
+  /// * eager draining of PL/SQL implicit results
+  ///   (`DBMS_SQL.RETURN_RESULT`) into the `List<OracleRow>`s of
+  ///   [OracleResult.implicitResults].
+  ///
+  /// It is intentionally a no-op for [resultSet] `true` (the lazy
+  /// [OracleResultSet] already bounds reads via pull-based `getRows(n)`) and for
+  /// DML / OUT binds (there is no row set to cap). A negative value throws
+  /// [ArgumentError] before any wire round trip.
+  final int maxRows;
 }
 
 /// A connection to an Oracle database.
@@ -502,12 +528,13 @@ class OracleConnection {
   /// cursor leaks (the close queue dedupes, so this never double-enqueues).
   /// AC3 / AC7.
   Future<List<Object>> _drainImplicitResults(
-    List<DecodedCursorResult> descriptors,
-  ) async {
+    List<DecodedCursorResult> descriptors, {
+    int maxRows = 0,
+  }) async {
     try {
       final out = <Object>[];
       for (final descriptor in descriptors) {
-        out.add(await _drainOneImplicitResult(descriptor));
+        out.add(await _drainOneImplicitResult(descriptor, maxRows: maxRows));
       }
       return out;
     } finally {
@@ -525,8 +552,9 @@ class OracleConnection {
   /// failure — or hitting the eager-drain safety cap — fails loud; the caller's
   /// `finally` still queues every cursor id.
   Future<List<OracleRow>> _drainOneImplicitResult(
-    DecodedCursorResult descriptor,
-  ) async {
+    DecodedCursorResult descriptor, {
+    int maxRows = 0,
+  }) async {
     final cursor = ResultSetCursor(
       transport: _transport,
       cursorId: descriptor.cursorId,
@@ -537,8 +565,11 @@ class OracleConnection {
       preserveTimestampTimeZone: _preserveTimestampTimeZone,
       materializePerBatch: false,
     );
+    // maxRows (node-oracledb parity): a positive N caps this implicit result at
+    // exactly N rows and stops fetching once N is reached; 0 = unlimited.
     final drained = await cursor.drainRemaining(
       maxFetchIterations: _transport.maxFetchIterations,
+      maxRows: maxRows,
     );
     final failure = cursor.fetchFailure;
     if (failure != null) {
@@ -800,6 +831,17 @@ class OracleConnection {
     _ensureOpen();
     _rejectConcurrentOperation();
 
+    // node-oracledb parity: maxRows must be >= 0 (0 = unlimited). Validate
+    // before any wire round trip so a bad value never opens a cursor.
+    final maxRows = options?.maxRows ?? 0;
+    if (maxRows < 0) {
+      throw ArgumentError.value(
+        maxRows,
+        'options.maxRows',
+        'must be >= 0 (0 = unlimited)',
+      );
+    }
+
     if (options?.resultSet == true) {
       final effectiveFetchSize = options!.fetchSize ?? _defaultPrefetchRows;
       if (effectiveFetchSize <= 0 || effectiveFetchSize > _maxFetchSize) {
@@ -867,7 +909,7 @@ class OracleConnection {
     // the connection.
     _executeInProgress = true;
     try {
-      return await _executeGuarded(sql, bindValues);
+      return await _executeGuarded(sql, bindValues, maxRows: maxRows);
     } finally {
       _executeInProgress = false;
     }
@@ -918,11 +960,17 @@ class OracleConnection {
   /// (fetched at [implicitPrefetchRows] per continuation round) rather than
   /// eagerly drained into row lists. It has no effect for SELECT/DML, which
   /// never return implicit results.
+  ///
+  /// [maxRows] (node-oracledb parity; `0` = unlimited) caps the EAGER paths only
+  /// — the eager SELECT drain and eager implicit-result draining. A positive N
+  /// returns at most N rows and stops fetching once N is reached (a deliberate
+  /// bound, not the safety backstop). It is a no-op when [lazyImplicit] is true.
   Future<OracleResult> _executeGuarded(
     String sql,
     Object? bindValues, {
     bool lazyImplicit = false,
     int implicitPrefetchRows = _defaultPrefetchRows,
+    int maxRows = 0,
   }) async {
     _log.fine(
       'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
@@ -955,8 +1003,12 @@ class OracleConnection {
           preserveTimestampTimeZone: _preserveTimestampTimeZone,
           materializePerBatch: false,
         );
+        // maxRows (node-oracledb parity): 0 = unlimited; a positive N caps the
+        // eager SELECT drain at exactly N rows and stops fetching once N is
+        // reached. The cap is a deliberate bound, NOT the safety backstop.
         final drained = await cursor.drainRemaining(
           maxFetchIterations: _transport.maxFetchIterations,
+          maxRows: maxRows,
         );
         final failure = cursor.fetchFailure;
         if (failure != null) {
@@ -980,11 +1032,28 @@ class OracleConnection {
             outBindValues: response.outBindValues,
             outBindIndices: response.outBindIndices,
             rowsAffected: response.rowsAffected,
-            // A drain stopped early by the safety cap reports the result as
-            // honestly incomplete (moreRowsAvailable) rather than truncated.
-            moreRowsToFetch: cursor.incompleteDrain,
+            // A drain stopped early reports the result as honestly incomplete
+            // (moreRowsAvailable) rather than truncated — whether stopped by the
+            // safety backstop OR by a deliberate maxRows cap that bounded a
+            // longer result.
+            moreRowsToFetch: cursor.incompleteDrain || cursor.maxRowsCapped,
           );
         }
+      } else if (stmt.isQuery && maxRows > 0 && response.rows.length > maxRows) {
+        // The whole result already arrived in the first EXECUTE batch (no more
+        // rows server-side) but it exceeds the cap: truncate to exactly N and
+        // report rows remain, so a single-batch capped result behaves like a
+        // multi-batch one. No continuation FETCH is issued.
+        response = ExecuteResponse(
+          isSuccess: response.isSuccess,
+          cursorId: response.cursorId,
+          columnMetadata: response.columnMetadata,
+          rows: response.rows.sublist(0, maxRows),
+          outBindValues: response.outBindValues,
+          outBindIndices: response.outBindIndices,
+          rowsAffected: response.rowsAffected,
+          moreRowsToFetch: true,
+        );
       }
 
       // A FETCH error during the drain is handled exactly like an EXECUTE
@@ -1088,7 +1157,10 @@ class OracleConnection {
                 response.implicitResults,
                 prefetchRows: implicitPrefetchRows,
               )
-            : await _drainImplicitResults(response.implicitResults);
+            : await _drainImplicitResults(
+                response.implicitResults,
+                maxRows: maxRows,
+              );
       }
 
       return OracleResult(
