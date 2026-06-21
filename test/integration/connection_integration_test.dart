@@ -197,5 +197,34 @@ void main() {
         await connection.close();
       }
     });
+
+    test('execute -> ping -> execute does not desync the connection',
+        () async {
+      // Regression (deferred item D): ping() under-read its TTC reply, leaving
+      // stale bytes on the socket so the next execute() misframed and hung to
+      // ORA-12170. Drive the exact repro and assert both executes succeed on
+      // BOTH Oracle 23ai (END_OF_REQUEST) and 21c (STATUS-terminated reply).
+      final connection = await connectForTest();
+
+      try {
+        final before = await connection.execute('SELECT 1 AS n FROM dual');
+        expect(before.rows[0]['N'], equals(1));
+
+        expect(await connection.ping(), isTrue);
+
+        // Previously hung: this execute read the stale ping bytes as its own
+        // response header and misframed. It must now return the correct row.
+        final after = await connection.execute('SELECT 42 AS n FROM dual');
+        expect(after.rows[0]['N'], equals(42));
+
+        // Connection stays healthy and reusable across repeated pings.
+        expect(await connection.ping(), isTrue);
+        expect(await connection.ping(), isTrue);
+        final last = await connection.execute('SELECT 7 AS n FROM dual');
+        expect(last.rows[0]['N'], equals(7));
+      } finally {
+        await connection.close();
+      }
+    });
   });
 }

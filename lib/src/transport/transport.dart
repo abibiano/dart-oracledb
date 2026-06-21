@@ -13,7 +13,6 @@ import '../protocol/messages/auth_message.dart';
 import '../protocol/messages/execute_message.dart';
 import '../protocol/messages/fast_auth_message.dart';
 import '../protocol/messages/lob_op_message.dart';
-import '../protocol/messages/ping_message.dart';
 import '../protocol/messages/protocol_message.dart';
 import 'packet.dart';
 import 'socket.dart';
@@ -1684,26 +1683,38 @@ class Transport {
   Future<void> sendPing({Duration timeout = const Duration(seconds: 5)}) async {
     _log.fine('Sending ping...');
 
-    final pingMessage = PingMessage();
-    final pingData = pingMessage.toBytes();
+    // Build a proper TTC FUNCTION message (node-oracledb writeFunctionHeader
+    // parity: messageType FUNCTION + function code + sequence + 23.1 token UB8),
+    // exactly like sendCommit/sendRollback. The legacy PingMessage emitted only
+    // the bare function-code byte `[0x93]` with no FUNCTION framing or sequence —
+    // the server then replied with a non-standard packet that the old single
+    // `receive()` swallowed without validation, leaving stale TTC bytes on the
+    // socket that the next RPC misframed (the ORA-12170 hang in deferred item D).
+    final buf = WriteBuffer();
+    buf.writeUint8(ttcMsgTypeFunction);
+    buf.writeUint8(ttcPing);
+    buf.writeUint8(nextSequence() & 0xFF);
+    if (_ttcFieldVersion >= ttcCcapFieldVersion23_1Ext1) {
+      buf.writeUB8(0);
+    }
+    await sendData(buf.toBytes());
 
-    final packet = TnsPacket(type: tnsPacketData, payload: pingData);
-    await send(packet);
-
-    // Wait for response with timeout; poison the transport on timeout so the
-    // orphaned server response cannot be misread as the reply to a subsequent RPC.
-    final response = await receive().timeout(
-      timeout,
-      onTimeout: () {
-        _poison();
-        throw OracleException(
-          errorCode: oraConnectTimeout,
-          message:
-              'Ping timed out after ${timeout.inMilliseconds}ms; transport poisoned',
-        );
-      },
-    );
-    _log.fine('Ping response received: type=${response.type}');
+    // Drain the FULL TTC ping reply through the same completion-probe path every
+    // other RPC uses (see sendCommit/sendRollback) and surface any server error.
+    // `_receiveDataWithTimeout` poisons the transport on timeout, so a ping that
+    // never replies still fails fast and cannot corrupt a later RPC.
+    final response = await _receiveDataWithTimeout(timeout, operation: 'Ping');
+    final decoded = decodeExecuteResponse(response,
+        isQuery: false,
+        ttcFieldVersion: _ttcFieldVersion,
+        endOfRequestSupport: _supportsEndOfRequest);
+    if (!decoded.isSuccess) {
+      throw OracleException(
+        errorCode: decoded.errorCode ?? oraProtocolError,
+        message: decoded.errorMessage ?? 'Ping failed',
+      );
+    }
+    _log.fine('Ping response drained (${response.length} bytes)');
   }
 
   /// Sends a TNS CONNECT packet and waits for an ACCEPT response.
