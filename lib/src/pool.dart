@@ -851,7 +851,10 @@ class OraclePool {
         'Connection released with an open OracleResultSet; closing it and '
         'reclaiming the session. Always close() result sets before release.',
       );
-      await connection.forceCloseOpenResultSet();
+      // reclaimedByPool: a stream subscriber still iterating this result set
+      // must see a clear pool-reclaim error on its next fetch, not the generic
+      // "OracleResultSet is closed" detail (the borrower never closed it).
+      await connection.forceCloseOpenResultSet(reclaimedByPool: true);
     }
 
     try {

@@ -57,7 +57,7 @@ class _FakeConnection extends OracleConnection {
   bool get hasOpenResultSet => leakedResultSet;
 
   @override
-  Future<void> forceCloseOpenResultSet() async {
+  Future<void> forceCloseOpenResultSet({bool reclaimedByPool = false}) async {
     forceCloseResultSetCalls++;
     // Closing the result set clears the open-but-idle state, just as the real
     // OracleResultSet.close() does.

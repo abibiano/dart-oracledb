@@ -82,6 +82,14 @@ class OracleResultSet {
 
   bool _closed = false;
 
+  /// Set when the connection pool force-closed this result set on connection
+  /// reclaim (see [OracleConnection.forceCloseOpenResultSet]), as opposed to a
+  /// borrower-initiated [close]. When set, [_ensureOpen] surfaces a clear,
+  /// intentional pool-reclaim error to the stream subscriber instead of the
+  /// generic "is closed" detail — the borrower never closed this result set,
+  /// the pool reclaimed the connection underneath the live stream.
+  bool _reclaimedByPool = false;
+
   /// The result set's column metadata, available before any row is fetched.
   ///
   /// Returns an unmodifiable view; shape matches `OracleResult.columns`.
@@ -156,8 +164,37 @@ class OracleResultSet {
     );
   }
 
+  /// Marks this result set as force-closed by the connection pool on connection
+  /// reclaim, so a subsequent [getRow]/[getRows] surfaces a clear pool-reclaim
+  /// error to the stream subscriber rather than the generic "is closed" detail.
+  ///
+  /// Called by [OracleConnection.forceCloseOpenResultSet] just before it
+  /// [close]s the result set during [release]. Has no effect on the cursor
+  /// reaping / cache invalidation done by [close]; it only changes which error
+  /// a post-reclaim fetch raises. Package-internal seam for the connection pool.
+  @internal
+  void markReclaimedByPool() {
+    _reclaimedByPool = true;
+  }
+
   void _ensureOpen() {
     if (_closed) {
+      if (_reclaimedByPool) {
+        throw const OracleException(
+          // The connection went away underneath the live stream — the same
+          // lifecycle event the package models with ORA-03113 elsewhere
+          // (closed-connection / closed-pool rejections), mirroring how
+          // node-oracledb surfaces a clear invalid-state error (not a leaked
+          // internal detail) when a result set is used after its pooled
+          // connection was released.
+          errorCode: oraConnectionClosed,
+          message:
+              'the connection pool reclaimed this connection while its '
+              'result-set stream was active; the stream was terminated. Close '
+              'the result set (or finish/cancel the stream) before releasing '
+              'the connection to the pool.',
+        );
+      }
       throw const OracleException(
         errorCode: oraProtocolError,
         message: 'OracleResultSet is closed; open a new one to read more rows',

@@ -1739,16 +1739,30 @@ class OracleConnection {
   /// top-level / REF CURSOR handle and all lazy implicit result handles —
   /// reclaiming their cursors so the connection stays reusable. Package-internal
   /// seam for the connection pool's leaked-result-set cleanup on release.
+  ///
+  /// [reclaimedByPool] is set ONLY by the connection pool's reclaim path
+  /// ([OraclePool.release]): when true, each handle is marked reclaimed-by-pool
+  /// BEFORE it is closed, so a stream subscriber mid-flight (a getRow()/
+  /// getRows() loop or executeStream()/queryStream() generator paused between
+  /// pulls) sees a clear pool-reclaim error on its next fetch rather than the
+  /// generic "OracleResultSet is closed" detail — the borrower never closed
+  /// this result set, the pool reclaimed the connection underneath the live
+  /// stream. The default (`false`) is the plain "reap any leaked handles"
+  /// behavior used by the execute-failure cleanup path, which is NOT a pool
+  /// reclaim and must not mislabel its handles. The cursor reaping is identical
+  /// either way.
   @internal
-  Future<void> forceCloseOpenResultSet() async {
+  Future<void> forceCloseOpenResultSet({bool reclaimedByPool = false}) async {
     final rs = _openResultSet;
     if (rs != null) {
+      if (reclaimedByPool) rs.markReclaimedByPool();
       await rs.close();
     }
     // Snapshot before iterating: each close() calls back into releaseResultSet,
     // which mutates _openImplicitResultSets.
     final implicit = _openImplicitResultSets.toList(growable: false);
     for (final handle in implicit) {
+      if (reclaimedByPool) handle.markReclaimedByPool();
       await handle.close();
     }
   }

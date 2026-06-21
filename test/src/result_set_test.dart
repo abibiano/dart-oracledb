@@ -442,6 +442,125 @@ void main() {
       await expectLater(rs.getRows(1), throwsA(isA<OracleException>()));
     });
 
+    test(
+        'an ordinary borrower close() keeps the generic "is closed" error '
+        '(not the pool-reclaim error)', () async {
+      // The borrower closed the result set itself — that is correct caller
+      // feedback and must keep the existing generic message, NOT the
+      // pool-reclaim surface (which only applies when the pool force-closes).
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch(
+          [
+            [1],
+          ],
+          more: false,
+          columns: [_col('N')],
+        ),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+      final rs = await conn.openResultSet('SELECT n FROM t FOR UPDATE');
+      await rs.close();
+
+      await expectLater(
+        rs.getRow(),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('is closed')),
+        ),
+      );
+    });
+
+    test(
+        'forceCloseOpenResultSet() surfaces a clear pool-reclaim error to a '
+        'mid-flight fetch, not the generic "is closed" detail', () async {
+      // Simulates the pool reclaiming a connection (release()) while a stream /
+      // getRow() loop is idle between pulls: forceCloseOpenResultSet() marks the
+      // open result set reclaimed-by-pool and closes it, so the next fetch the
+      // subscriber issues surfaces a CLEAR, intentional ORA-03113 reclaim error
+      // — NOT the leaked generic "OracleResultSet is closed" implementation
+      // detail (which reads as if the caller closed it).
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch(
+          [
+            [1],
+            [2],
+          ],
+          more: true,
+          cursorId: 7,
+          columns: [_col('N')],
+        ),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+      // FOR UPDATE is non-cacheable, so the reaped cursor id is queued for the
+      // close-cursor piggyback (deterministic no-leak assertion) rather than
+      // returned to the statement cache.
+      final rs = await conn.openResultSet('SELECT n FROM t FOR UPDATE');
+
+      // Consume a row, leaving the cursor open (mid-flight, idle between pulls).
+      expect((await rs.getRow())!['N'], equals(1));
+      expect(conn.hasOpenResultSet, isTrue);
+
+      // The pool reclaims the connection while the stream is live.
+      await conn.forceCloseOpenResultSet(reclaimedByPool: true);
+      expect(conn.hasOpenResultSet, isFalse,
+          reason: 'the cursor is reaped; the session stays reusable (no leak)');
+      expect(conn.debugPendingCloseCount, equals(1),
+          reason: 'the open cursor id is queued for the close-cursor piggyback');
+
+      // The subscriber issues its next pull and gets the clear reclaim error.
+      await expectLater(
+        rs.getRow(),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)
+              .having((e) => e.message, 'message', contains('reclaimed')),
+        ),
+      );
+      await expectLater(
+        rs.getRows(10),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed),
+        ),
+      );
+
+      // The connection is reusable after the reclaim (cursor was reaped).
+      await conn.execute('SELECT 1 FROM dual');
+    });
+
+    test(
+        'forceCloseOpenResultSet() default (execute-failure cleanup) keeps the '
+        'generic error — only the pool reclaim path marks reclaimed', () async {
+      // forceCloseOpenResultSet() is also the generic "reap any leaked handles"
+      // helper on the execute-failure cleanup path. Without reclaimedByPool it
+      // must NOT mislabel the handle as pool-reclaimed: a later fetch keeps the
+      // generic "is closed" message, not the reclaim message.
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch(
+          [
+            [1],
+          ],
+          more: true,
+          cursorId: 7,
+          columns: [_col('N')],
+        ),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+      final rs = await conn.openResultSet('SELECT n FROM t FOR UPDATE');
+      expect((await rs.getRow())!['N'], equals(1));
+
+      await conn.forceCloseOpenResultSet(); // default: not a pool reclaim
+      await expectLater(
+        rs.getRow(),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('is closed')),
+        ),
+      );
+    });
+
     test('a server FETCH error invalidates the cached cursor instead of '
         'returning it to the cache', () async {
       // A cache-eligible SELECT whose continuation FETCH fails server-side. The

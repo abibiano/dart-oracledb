@@ -328,6 +328,62 @@ void main() {
         await pool.close();
       }
     });
+
+    test(
+        'reclaiming a connection mid-stream surfaces a clear pool-reclaim error '
+        'to the subscriber, not the generic "is closed" detail (deferred-work F)',
+        () async {
+      // When the pool reclaims a connection while a queryStream is live (idle
+      // between row pulls), the subscriber must see a CLEAR, intentional
+      // ORA-03113 pool-reclaim error on its next fetch — NOT the leaked generic
+      // "OracleResultSet is closed" implementation detail. The cursor must still
+      // be reaped and the physical session handed back healthy (no leak).
+      final pool = await OraclePool.create(
+        testConnectString,
+        user: testUser,
+        password: testPassword,
+        minConnections: 1,
+        maxConnections: 1,
+      );
+      try {
+        final conn = await pool.acquire();
+        // A multi-batch SELECT so the cursor stays open after the first pull.
+        final rs = await conn.openResultSet(
+            'SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 120');
+        // Pull one row, leaving the cursor open and idle between pulls
+        // (isExecuting == false, hasOpenResultSet == true) — exactly the window
+        // the pool reclaims through forceCloseOpenResultSet().
+        await rs.getRow();
+
+        // The pool reclaims the connection underneath the live stream.
+        await pool.release(conn);
+
+        // The subscriber's next pull surfaces the clear reclaim error.
+        OracleException? caught;
+        try {
+          await rs.getRow();
+        } on OracleException catch (e) {
+          caught = e;
+        }
+        expect(caught, isNotNull,
+            reason: 'the reclaimed stream must fail loudly on its next fetch');
+        expect(caught!.errorCode, equals(oraConnectionClosed),
+            reason: 'a clear connection-reclaim code, not a generic protocol '
+                'error');
+        expect(caught.message, contains('reclaimed'),
+            reason: 'the message names the pool reclaim, not "is closed"');
+        expect(caught.message, isNot(contains('open a new one to read')),
+            reason: 'the leaked generic detail must not surface here');
+
+        // No leak: the same physical session is reused and immediately usable.
+        final reused = await pool.acquire();
+        final result = await reused.execute('SELECT 55 AS v FROM dual');
+        expect(result.rows.single['V'], equals(55));
+        await pool.release(reused);
+      } finally {
+        await pool.close();
+      }
+    });
   });
 
   group('queryStream() / executeStream() row delivery',
