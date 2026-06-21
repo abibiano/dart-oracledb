@@ -40,6 +40,12 @@ class _FakeResultSetTransport extends Transport {
   /// should equal the stream's fetchSize (the cursor's prefetch granularity).
   final List<int> fetchNumRows = [];
 
+  /// The `previousRoundLastRow` the cursor threaded into each continuation
+  /// FETCH, in order. Proves `ResultSetCursor._previousRoundLastRow` carries the
+  /// last buffered row of the prior round into the next round's duplicate-column
+  /// dedup source (the streaming cross-batch sentinel).
+  final List<List<Object?>?> fetchPreviousRoundLastRows = [];
+
   @override
   bool get isConnected => true;
 
@@ -84,6 +90,7 @@ class _FakeResultSetTransport extends Transport {
     fetchCalls++;
     lastFetchCursorId = cursorId;
     fetchNumRows.add(numRows);
+    fetchPreviousRoundLastRows.add(previousRoundLastRow);
     final index = fetchCalls - 1;
     if (index < fetchBatches.length) return fetchBatches[index];
     return ExecuteResponse(isSuccess: true, moreRowsToFetch: false);
@@ -215,6 +222,96 @@ void main() {
       expect(t.fetchNumRows, equals([50]),
           reason: 'continuation FETCH defaults to 50 rows '
               '(_defaultPrefetchRows) when no fetchSize is given');
+    });
+
+    test('fetchSize == 1 delivers every row exactly once, in order, one FETCH '
+        'round per continuation row (degenerate boundary)', () async {
+      // The degenerate granularity: after the single buffered first batch, each
+      // subsequent row arrives in its own FETCH round. Five rows split as one
+      // first-batch row + four single-row continuation batches. Every row must
+      // be delivered exactly once and in result order, with one FETCH per
+      // continuation row (no row dropped, none doubled).
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([
+          [1],
+        ], more: true, cursorId: 7, columns: [_col('N')]),
+        fetchBatches: [
+          _batch([
+            [2],
+          ], more: true),
+          _batch([
+            [3],
+          ], more: true),
+          _batch([
+            [4],
+          ], more: true),
+          _batch([
+            [5],
+          ], more: false),
+        ],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final received = <int>[];
+      await for (final row in conn.executeStream('SELECT n FROM t', null, 1)) {
+        received.add(row['N'] as int);
+      }
+
+      expect(received, equals([1, 2, 3, 4, 5]),
+          reason: 'every row delivered exactly once, in order');
+      expect(t.fetchNumRows, equals([1, 1, 1, 1]),
+          reason: 'fetchSize 1 requests one row per continuation FETCH round');
+      expect(conn.hasOpenResultSet, isFalse,
+          reason: 'the stream completion finally closed the result set');
+      await conn.execute('SELECT 1 FROM dual');
+    });
+
+    test('duplicate-column sentinel carries the prior round\'s last row into '
+        'the next FETCH (streaming cross-batch boundary)', () async {
+      // I-c: prove ResultSetCursor._previousRoundLastRow threads the last
+      // buffered row of round 1 into round 2's `previousRoundLastRow:` — the
+      // dedup source the decoder uses when Oracle marks row[0] of a continuation
+      // as a duplicate of the prior round's last row. Two columns so a duplicate
+      // on one column at the boundary is meaningful. fetchSize 2: first batch
+      // buffers two rows, then one continuation FETCH delivers the next two.
+      final cols = [_col('A'), _col('B')];
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([
+          ['a1', 'b1'],
+          ['a2', 'b2'],
+        ], more: true, cursorId: 7, columns: cols),
+        fetchBatches: [
+          // On a live server the DECODER (not the cursor) resolves a duplicate
+          // bit on row[0] by copying column A from previousRoundLastRow; the
+          // already-decoded `'a2'` here stands in for that resolved value. The
+          // load-bearing assertion below is on the SENTINEL the cursor threaded
+          // into this FETCH — that is the streaming wiring under test, decode is
+          // covered separately in execute_message_test.dart.
+          _batch([
+            ['a2', 'b3'], // column A == prior round's last row (duplicate shape)
+            ['a4', 'b4'],
+          ], more: false),
+        ],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final received = <List<Object?>>[];
+      await for (final row in conn.executeStream('SELECT a, b FROM t', null, 2)) {
+        received.add([row['A'], row['B']]);
+      }
+
+      expect(received, equals([
+        ['a1', 'b1'],
+        ['a2', 'b2'],
+        ['a2', 'b3'],
+        ['a4', 'b4'],
+      ]), reason: 'all rows delivered in order across the batch boundary');
+      expect(t.fetchPreviousRoundLastRows, hasLength(1),
+          reason: 'exactly one continuation FETCH was issued');
+      expect(t.fetchPreviousRoundLastRows.single, equals(['a2', 'b2']),
+          reason: 'the cursor threaded round 1\'s last buffered row as the '
+              'duplicate-column dedup source for round 2 (the streaming '
+              'cross-batch sentinel _previousRoundLastRow)');
     });
 
     test('cancelling the subscription early closes the result set', () async {
@@ -774,6 +871,108 @@ void main() {
       expect(received, equals([1, 2, 3, 4]));
       expect(t.fetchNumRows, equals([2]),
           reason: 'queryStream threads fetchSize to the FETCH granularity');
+    });
+  });
+
+  group('openResultSet() prefetchRows seam (I-a)', () {
+    test('threads prefetchRows to the continuation FETCH granularity; '
+        'EXECUTE prefetch stays 50', () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([
+          [1],
+          [2],
+        ], more: true, cursorId: 7, columns: [_col('N')]),
+        fetchBatches: [
+          _batch([
+            [3],
+            [4],
+          ], more: false),
+        ],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final rs = await conn.openResultSet('SELECT n FROM t FOR UPDATE', null, 2);
+      try {
+        final rows = await rs.getRows();
+        expect(rows.map((r) => r['N']), equals([1, 2, 3, 4]),
+            reason: 'all batches delivered in order');
+      } finally {
+        await rs.close();
+      }
+
+      expect(t.lastExecutePrefetch, equals(50),
+          reason: 'initial EXECUTE prefetch stays at 50 regardless of '
+              'the openResultSet prefetchRows argument');
+      expect(t.fetchNumRows, equals([2]),
+          reason: 'openResultSet threads prefetchRows to the continuation '
+              'FETCH granularity (the in-scope seam change)');
+    });
+
+    test('omitting prefetchRows defaults the continuation FETCH to 50',
+        () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([
+          [1],
+        ], more: true, cursorId: 7, columns: [_col('N')]),
+        fetchBatches: [_batch([[2]], more: false)],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final rs = await conn.openResultSet('SELECT n FROM t FOR UPDATE');
+      try {
+        await rs.getRows();
+      } finally {
+        await rs.close();
+      }
+
+      expect(t.fetchNumRows, equals([50]),
+          reason: 'null prefetchRows falls back to _defaultPrefetchRows (50), '
+              'matching prior openResultSet behaviour');
+    });
+
+    test('prefetchRows == 1 requests exactly one row per continuation FETCH '
+        '(degenerate boundary through the seam)', () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([
+          [1],
+        ], more: true, cursorId: 7, columns: [_col('N')]),
+        fetchBatches: [
+          _batch([[2]], more: true),
+          _batch([[3]], more: false),
+        ],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final rs = await conn.openResultSet('SELECT n FROM t FOR UPDATE', null, 1);
+      final received = <int>[];
+      try {
+        for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
+          received.add(row['N'] as int);
+        }
+      } finally {
+        await rs.close();
+      }
+
+      expect(received, equals([1, 2, 3]),
+          reason: 'every row delivered exactly once, in order');
+      expect(t.fetchNumRows, equals([1, 1]),
+          reason: 'prefetchRows 1 requests one row per continuation FETCH');
+    });
+
+    test('prefetchRows <= 0 throws ArgumentError before any wire round trip',
+        () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: _batch([[1]], more: false, columns: [_col('N')]),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      await expectLater(
+        conn.openResultSet('SELECT n FROM t', null, 0),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(t.sendExecuteCalls, equals(0),
+          reason: 'ArgumentError fires before any wire round trip');
+      expect(conn.hasOpenResultSet, isFalse);
     });
   });
 }

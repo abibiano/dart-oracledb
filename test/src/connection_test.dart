@@ -368,8 +368,8 @@ void main() {
           conn.execute('SELECT 2 FROM dual'),
           throwsA(isA<OracleException>()
               .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having(
-                  (e) => e.message, 'message', contains('Concurrent execute'))),
+              .having((e) => e.message, 'message',
+                  contains('Concurrent operation'))),
         );
 
         // Release the first call; it completes normally and clears the guard.

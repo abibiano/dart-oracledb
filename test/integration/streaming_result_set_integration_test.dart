@@ -498,6 +498,50 @@ void main() {
       }
       expect(received, equals([for (var i = 1; i <= 25; i++) i]));
     });
+
+    test('fetchSize == 1 delivers every row exactly once, in order '
+        '(degenerate per-row FETCH boundary)', () async {
+      // I-b: the degenerate granularity end-to-end on a live server. The initial
+      // EXECUTE prefetch (50) returns the first 50 rows; each of the remaining
+      // 70 then arrives in its own single-row continuation FETCH round. Every
+      // row must be delivered exactly once, in result order — no row dropped at
+      // a batch boundary, none doubled. A duplicate is detectable here: the
+      // received list is compared for both order AND multiplicity.
+      final received = <int>[];
+      await for (final row in connection.executeStream(multiBatchSql, null, 1)) {
+        received.add(row['N'] as int);
+      }
+      expect(received, equals(expectedRows),
+          reason: 'fetchSize=1 delivers every row exactly once, in order');
+      expect(received.toSet().length, equals(received.length),
+          reason: 'no row is delivered twice at a single-row FETCH boundary');
+      expect(connection.hasOpenResultSet, isFalse,
+          reason: 'the stream completion closed the result set');
+      // The connection is immediately reusable.
+      final probe = await connection.execute('SELECT 42 AS v FROM dual');
+      expect(probe.rows.single['V'], equals(42));
+    });
+
+    test('openResultSet(prefetchRows: 1) drains a multi-batch result in order '
+        'exactly once (seam parity with fetchSize=1)', () async {
+      // I-a + I-b through the @visibleForTesting seam: prefetchRows: 1 must
+      // drive the same per-row continuation granularity executeStream uses.
+      final rs = await connection.openResultSet(multiBatchSql, null, 1);
+      final received = <int>[];
+      try {
+        for (var row = await rs.getRow();
+            row != null;
+            row = await rs.getRow()) {
+          received.add(row['N'] as int);
+        }
+      } finally {
+        await rs.close();
+      }
+      expect(received, equals(expectedRows),
+          reason: 'prefetchRows=1 delivers every row exactly once, in order');
+      expect(received.toSet().length, equals(received.length),
+          reason: 'no row duplicated across single-row FETCH boundaries');
+    });
   });
 
   group('execute() with OracleExecuteOptions(resultSet: true) — public API',

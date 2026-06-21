@@ -719,7 +719,7 @@ void main() {
                 .having(
                   (e) => e.message,
                   'message',
-                  contains('Concurrent execute'),
+                  contains('Concurrent operation'),
                 ),
           ),
         );
@@ -967,7 +967,7 @@ void main() {
               .having(
                 (e) => e.message,
                 'message',
-                contains('Concurrent execute'),
+                contains('Concurrent operation'),
               ),
         ),
       );

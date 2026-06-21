@@ -877,9 +877,11 @@ class OracleConnection {
   /// already running a wire round trip or holding an [OracleResultSet] open.
   ///
   /// Fail-fast, never queue: a single connection multiplexes one TTC stream, so
-  /// a second operation cannot safely interleave. The message keeps the word
-  /// "Concurrent execute" for continuity with existing callers/tests while also
-  /// naming the open-result-set case.
+  /// a second operation cannot safely interleave. This guard fronts EVERY entry
+  /// point that starts work — `execute()` (eager or `resultSet: true`),
+  /// `executeStream()` / `queryStream()`, and `openResultSet()` — so the message
+  /// is phrased entry-point-agnostically rather than naming `execute()` alone.
+  /// The error CODE ([oraProtocolError]) is unchanged.
   void _rejectConcurrentOperation() {
     if (_executeInProgress ||
         _openResultSet != null ||
@@ -887,10 +889,11 @@ class OracleConnection {
       throw const OracleException(
         errorCode: oraProtocolError,
         message:
-            'Concurrent execute() on a single OracleConnection is not '
-            'supported: another statement or an open OracleResultSet is still '
-            'in progress on this connection. Await the previous execute() (or '
-            'close the OracleResultSet) before starting another, or use a '
+            'Concurrent operation on a single OracleConnection is not '
+            'supported: another operation (an execute(), executeStream(), '
+            'queryStream(), openResultSet(), or an open OracleResultSet) is '
+            'still in progress on this connection. Await the previous operation '
+            '(or close the OracleResultSet) before starting another, or use a '
             'separate connection for concurrent work.',
       );
     }
@@ -1406,17 +1409,35 @@ class OracleConnection {
   /// concurrent [execute] or [openResultSet] while one is open fails fast with
   /// the concurrent-operation [OracleException]. Throws [OracleException] when
   /// [sql] is not a query — DML / PL/SQL must use [execute].
+  ///
+  /// [prefetchRows] sets the continuation FETCH batch granularity (mirroring
+  /// `executeStream`'s `fetchSize`); when null the driver default (50) is used.
+  /// Exposed so tests can drive small fetch granularity (e.g. the `fetchSize: 1`
+  /// boundary) through the same seam `executeStream` uses.
   @visibleForTesting
   Future<OracleResultSet> openResultSet(
     String sql, [
     Object? bindValues,
+    int? prefetchRows,
   ]) async {
+    if (prefetchRows != null &&
+        (prefetchRows <= 0 || prefetchRows > _maxFetchSize)) {
+      throw ArgumentError.value(
+        prefetchRows,
+        'prefetchRows',
+        'must be positive and fit in a UB4 (1..0xFFFFFFFF)',
+      );
+    }
     _ensureOpen();
     _rejectConcurrentOperation();
     _executeInProgress = true;
     final OracleResultSet rs;
     try {
-      rs = await _openResultSetGuarded(sql, bindValues);
+      rs = await _openResultSetGuarded(
+        sql,
+        bindValues,
+        prefetchRows: prefetchRows,
+      );
     } finally {
       // The open round trip is complete; the cursor is now idle between pulls.
       _executeInProgress = false;
