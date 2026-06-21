@@ -1608,7 +1608,27 @@ class OracleConnection {
       );
     }
 
-    final effectiveCursorId = firstResponse.cursorId;
+    // Resolve the usable cursor id. The server echoes cursorId 0 on a cached
+    // re-execute while the original cursor stays open; the transport patches the
+    // echo back only when more rows remain, so a single-batch cache reuse
+    // arrives here as 0 — fall back to the held entry's real cursor id (a cached
+    // entry always has a non-zero id; store() requires it).
+    final effectiveCursorId = firstResponse.cursorId != 0
+        ? firstResponse.cursorId
+        : (heldEntry?.cursorId ?? 0);
+    // No usable cursor at all (no echo AND no cached cursor — e.g. a describe-
+    // mismatch full-reparse retry that returned no cursor): a result set backed
+    // by cursor 0 would make every fetchRows(0, ...) error or read stale data,
+    // so fail loud rather than hand back a phantom result set. Nothing to reap
+    // (cursorId 0 means the server opened no cursor) and the connection stays
+    // reusable. Legitimate cache-reuse echoes are exempted by the fallback above.
+    if (effectiveCursorId == 0) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message: 'openResultSet received cursorId 0 from the server with no '
+            'cached cursor to fall back to; cannot open a result set',
+      );
+    }
     final cursor = ResultSetCursor(
       transport: _transport,
       cursorId: effectiveCursorId,
@@ -1679,7 +1699,12 @@ class OracleConnection {
   }) {
     if (cacheEntry != null) {
       if (failed) {
-        _cache.invalidate(cacheEntry.key);
+        // Identity-aware: queue THIS held cursor for close and drop the cache
+        // slot only if it still holds this exact entry. invalidate(key) would
+        // (a) be a silent no-op if conn.close()/invalidateAll already removed
+        // the entry — leaking the held cursor — and (b) evict a newer entry
+        // stored under the same key, leaking ITS cursor instead of this one.
+        _cache.invalidateEntry(cacheEntry);
       } else {
         // Returns the cursor to the cache, or queues its id for close if the
         // entry was evicted while the result set was open (returnToCache false).

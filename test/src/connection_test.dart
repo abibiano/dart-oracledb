@@ -712,6 +712,61 @@ void main() {
       });
     });
 
+    group('openResultSet cursorId-0 guard (E1)', () {
+      test(
+          'a first-time result-set open with NO usable cursor (server cursorId 0, '
+          'nothing cached) fails loud and leaves the connection reusable',
+          () async {
+        final t = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: t);
+
+        // First open of an uncached SQL: nothing in the cache to fall back to,
+        // so a cursorId-0 response means the server opened NO cursor. It must
+        // NOT yield an OracleResultSet backed by cursor 0 (fetchRows(0, ...)
+        // would error or read stale data) — it must fail loud.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+        await expectLater(
+          conn.openResultSet('SELECT 1 FROM dual'),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+        );
+
+        // cursorId 0 means there is nothing to reap, and the connection stays
+        // usable for the next statement.
+        expect(conn.debugPendingCloseCount, equals(0));
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 200));
+        await conn.execute('SELECT 2 FROM dual');
+        expect(t.executeCalls, equals(2),
+            reason: 'the connection accepts a follow-up execute after the throw');
+      });
+
+      test(
+          'a CACHED SELECT re-opened as a result set tolerates a cursorId-0 echo '
+          '(reuse falls back to the cached cursor — no spurious throw)', () async {
+        // Regression guard: the cursorId-0 fail-loud must NOT fire for the normal
+        // cache-reuse path. The server echoes cursorId 0 on a cached re-execute
+        // while the original cursor stays open; the transport only patches that
+        // echo back when more rows remain, so a single-batch cache reuse reaches
+        // _openResultSetGuarded as 0. The real cursor must come from the cached
+        // entry. (An over-broad `cursorId == 0` throw would break every cached
+        // small SELECT re-run via the result-set API.)
+        final t = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: t);
+
+        // First eager execute caches the SELECT with a real server cursor (100).
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 100));
+        await conn.execute('SELECT 1 FROM dual');
+        expect(conn.debugCacheSize, equals(1));
+
+        // Re-open the SAME SQL via the result-set path; the server echoes 0.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+        final rs = await conn.openResultSet('SELECT 1 FROM dual');
+        expect(rs, isNotNull,
+            reason: 'cached reuse with a cursorId-0 echo must not fail loud');
+        await rs.close();
+      });
+    });
+
     group('statementCacheSize upper bound', () {
       test('value above the cap rejects before network', () {
         expect(

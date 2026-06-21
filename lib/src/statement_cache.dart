@@ -234,10 +234,13 @@ class StatementCache {
     if (entry.returnToCache) {
       entry.inUse = false;
     } else {
-      _entries.remove(entry.key);
-      if (entry.cursorId != 0) {
-        _cursorsToClose.add(entry.cursorId);
-      }
+      // Evicted while in use, or the cache was closed while this entry was held:
+      // reclaim the cursor. Delegate to [invalidateEntry] so the identity-guarded
+      // removal + always-queue logic lives in ONE place — critically, it removes
+      // the cache slot ONLY if it still holds THIS entry (a newer same-key entry
+      // stored during the in-use window is not collateral-evicted) while always
+      // queuing this entry's own cursor so it can never leak.
+      invalidateEntry(entry);
       entry.inUse = false;
     }
   }
@@ -249,6 +252,29 @@ class StatementCache {
   void invalidate(StatementCacheKey key) {
     final entry = _entries.remove(key);
     if (entry != null && entry.cursorId != 0) {
+      _cursorsToClose.add(entry.cursorId);
+    }
+  }
+
+  /// Invalidates a specific held [entry] after a failed result set / mid-stream
+  /// error, queuing its cursor for close.
+  ///
+  /// Unlike [invalidate], which removes by key, this is identity-aware and is
+  /// the correct primitive for the held-cursor close path:
+  /// - it always queues [entry]'s OWN cursor id for close, so a held cursor is
+  ///   reaped even when the entry was already removed by [closeAll] /
+  ///   [invalidateAll] (where `invalidate(key)` would be a silent no-op); and
+  /// - it drops the cache slot only if it still `identical`-holds [entry], so a
+  ///   newer entry stored under the same key (re-execute after `invalidateAll`)
+  ///   is never collateral-damaged.
+  ///
+  /// Mirrors node-oracledb's identity-keyed cursor tracking (statementCache.js
+  /// `_addCursorToClose(statement)`).
+  void invalidateEntry(StatementCacheEntry entry) {
+    if (identical(_entries[entry.key], entry)) {
+      _entries.remove(entry.key);
+    }
+    if (entry.cursorId != 0) {
       _cursorsToClose.add(entry.cursorId);
     }
   }

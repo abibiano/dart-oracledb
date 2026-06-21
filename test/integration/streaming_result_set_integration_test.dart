@@ -68,6 +68,34 @@ void main() {
       }
     });
 
+    test(
+        'a cached single-batch SELECT re-opened as a result set reuses the '
+        'cursor (cursorId-0 echo tolerated)', () async {
+      // Regression for the E1 cursorId-0 guard: a cached SELECT whose result
+      // fits in one batch echoes cursorId 0 on re-execute (the transport patches
+      // the echo back only when more rows remain). Re-opening it via the
+      // result-set path must reuse the cached cursor, not fail loud — an
+      // over-broad `cursorId == 0` throw would break every cached small SELECT
+      // re-run through the result-set API. Single batch (1 row << prefetch).
+      const sql = 'SELECT 1 AS n FROM dual';
+
+      final rs1 = await connection.openResultSet(sql); // caches the statement
+      try {
+        expect((await rs1.getRow())!['N'], equals(1));
+      } finally {
+        await rs1.close();
+      }
+
+      // Second open hits the statement cache → cursorId-0 echo on the wire.
+      final rs2 = await connection.openResultSet(sql);
+      try {
+        expect((await rs2.getRow())!['N'], equals(1),
+            reason: 'cached single-batch reuse must deliver the row, not throw');
+      } finally {
+        await rs2.close();
+      }
+    });
+
     test('getRow() drains a multi-batch result set in order', () async {
       final rs = await connection.openResultSet(multiBatchSql);
       try {

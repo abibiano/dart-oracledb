@@ -352,6 +352,100 @@ void main() {
       });
     });
 
+    // A held cursor must be reaped by its OWN id and must never collateral-evict
+    // a NEWER entry stored under the same key. Pins E4 (release identity guard)
+    // and E2/E3 (invalidateEntry). Each contrasts the old buggy primitive with
+    // the fix so the leak is demonstrated, not just the corrected behaviour.
+    group('identity-safe cursor reclamation (E2/E3/E4)', () {
+      test(
+          'E4: release of a stale in-use-evicted entry reaps its own cursor and '
+          'leaves a newer same-key entry intact', () {
+        final cache = StatementCache(10);
+        final stale = StatementCacheEntry(key: _k('A'), cursorId: 10);
+        cache.store(stale);
+        cache.acquire(_k('A')); // stale now inUse
+        // Models "evicted while in use" (state proven reachable by the AC2 group
+        // above); a concurrent re-execute then stores a NEWER live entry.
+        stale.returnToCache = false;
+        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 20));
+
+        cache.release(stale);
+
+        // The stale cursor is reaped by its own id...
+        expect(cache.drainCursorsToClose(), equals([10]));
+        // ...and the newer live entry survives. Before the identity guard,
+        // release() removed it by key and leaked its cursor (20).
+        final live = cache.acquire(_k('A'));
+        expect(live, isNotNull,
+            reason: 'newer same-key entry must survive release of the stale one');
+        expect(live!.cursorId, equals(20));
+      });
+
+      test('E2: invalidateEntry leaves a newer same-key entry intact', () {
+        // Buggy path: invalidate(key) drops whatever is currently at the key —
+        // the newer live entry — leaking its cursor instead of the held one.
+        final buggy = StatementCache(10);
+        buggy.store(StatementCacheEntry(key: _k('A'), cursorId: 10)); // stale
+        buggy.store(StatementCacheEntry(key: _k('A'), cursorId: 20)); // newer
+        buggy.invalidate(_k('A'));
+        expect(buggy.acquire(_k('A')), isNull,
+            reason: 'demonstrates E2: invalidate(key) evicts the newer entry');
+        expect(buggy.drainCursorsToClose(), equals([20]),
+            reason: 'and queues the WRONG (newer) cursor');
+
+        // Fixed path: invalidateEntry reaps the held entry by identity.
+        final fixed = StatementCache(10);
+        final stale = StatementCacheEntry(key: _k('A'), cursorId: 10);
+        fixed.store(stale);
+        fixed.store(StatementCacheEntry(key: _k('A'), cursorId: 20)); // newer
+        fixed.invalidateEntry(stale);
+        expect(fixed.drainCursorsToClose(), equals([10]),
+            reason: 'the held cursor is reaped by its own id');
+        final live = fixed.acquire(_k('A'));
+        expect(live, isNotNull,
+            reason: 'invalidateEntry must not drop a newer same-key entry');
+        expect(live!.cursorId, equals(20));
+      });
+
+      test('E3: invalidateEntry reaps the held cursor after closeAll removed it',
+          () {
+        // Buggy path: invalidate(key) after closeAll is a silent no-op — leak.
+        final buggy = StatementCache(10);
+        final a = StatementCacheEntry(key: _k('A'), cursorId: 10);
+        buggy.store(a);
+        buggy.acquire(_k('A')); // inUse → closeAll defers its close to release
+        buggy.closeAll();
+        buggy.invalidate(_k('A')); // entry already gone → no-op
+        expect(buggy.drainCursorsToClose(), isEmpty,
+            reason: 'demonstrates E3: invalidate(key) reaps nothing → leak');
+
+        // Fixed path: invalidateEntry queues the held cursor by its own id.
+        final fixed = StatementCache(10);
+        final held = StatementCacheEntry(key: _k('A'), cursorId: 10);
+        fixed.store(held);
+        fixed.acquire(_k('A'));
+        fixed.closeAll();
+        expect(fixed.pendingCloseCount, equals(0));
+        fixed.invalidateEntry(held);
+        expect(fixed.drainCursorsToClose(), equals([10]),
+            reason: 'invalidateEntry reaps the held cursor even when gone');
+      });
+
+      test(
+          'invalidateEntry on the current entry removes it and queues '
+          '(regression)', () {
+        final cache = StatementCache(10);
+        final entry = StatementCacheEntry(key: _k('A'), cursorId: 10);
+        cache.store(entry);
+
+        cache.invalidateEntry(entry);
+
+        expect(cache.acquire(_k('A')), isNull,
+            reason: 'the current entry is removed from the cache');
+        expect(cache.drainCursorsToClose(), equals([10]));
+      });
+    });
+
     // DDL invalidates the whole per-connection cache.
     group('invalidateAll', () {
       test('queues all non-inUse cursors and clears cache, stays usable', () {
