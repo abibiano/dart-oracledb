@@ -160,8 +160,7 @@ class OracleConnection {
   /// the set via [releaseResultSet]; the connection frees up only once the set
   /// empties (and [_openResultSet] is null). Insertion order is preserved so a
   /// force-close reaps them deterministically.
-  final Set<OracleResultSet> _openImplicitResultSets =
-      <OracleResultSet>{};
+  final Set<OracleResultSet> _openImplicitResultSets = <OracleResultSet>{};
 
   /// The configured statement cache size for this connection.
   int get statementCacheSize => _cache.maxSize;
@@ -545,7 +544,8 @@ class OracleConnection {
     if (failure != null) {
       throw OracleException(
         errorCode: failure.errorCode ?? oraProtocolError,
-        message: failure.errorMessage ??
+        message:
+            failure.errorMessage ??
             'FETCH failed while draining an implicit result set',
         offset: failure.errorOffset,
       );
@@ -578,7 +578,10 @@ class OracleConnection {
     // them with the same eager nested-cursor pass SELECT rows use.
     final nestedCursorIndices = cursorColumnIndicesOf(descriptor.columns);
     if (nestedCursorIndices.isNotEmpty) {
-      await _materializeNestedCursorsInBatch(response.rows, nestedCursorIndices);
+      await _materializeNestedCursorsInBatch(
+        response.rows,
+        nestedCursorIndices,
+      );
     }
     final builder = OracleRowBuilder(descriptor.columns);
     return response.rows.map(builder.build).toList();
@@ -588,11 +591,11 @@ class OracleConnection {
   /// lazy [OracleResultSet] and registers them as the open implicit-result
   /// group, returning the handles in server order.
   ///
-  /// The connection is owned until every returned handle is closed or drained
-  /// ([_openImplicitResultSets]); regular operations fail fast meanwhile, and
-  /// each handle's cursor id rides the existing close-cursor piggyback on
-  /// `close()`. Synchronous and never throws — so it cannot leave a partially
-  /// registered group. AC4 / AC5.
+  /// The connection is owned until every returned handle is explicitly closed
+  /// ([_openImplicitResultSets]), matching node-oracledb's ResultSet contract;
+  /// regular operations fail fast meanwhile, and each handle's cursor id rides
+  /// the existing close-cursor piggyback on `close()`. Synchronous and never
+  /// throws — so it cannot leave a partially registered group. AC4 / AC5.
   List<Object> _wrapImplicitResultsLazy(
     List<DecodedCursorResult> descriptors, {
     required int prefetchRows,
@@ -615,7 +618,7 @@ class OracleConnection {
         onBatchDecoded: nestedCursorIndices.isEmpty
             ? null
             : (batch) =>
-                _materializeNestedCursorsInBatch(batch, nestedCursorIndices),
+                  _materializeNestedCursorsInBatch(batch, nestedCursorIndices),
       );
       final rs = OracleResultSet.fromCursor(
         connection: this,

@@ -1741,6 +1741,15 @@ bool _isSupportedRefCursorColumn(ColumnMetadata col) {
       return true;
     case oraTypeClob:
       return col.csfrm != ttcCsfrmNChar;
+    // A nested CURSOR(SELECT ...) column inside an embedded cursor describe
+    // (REF CURSOR OUT bind OR implicit result) is rejected. Materializing it
+    // would require the nested cursor's column structure, which Oracle pre-23
+    // (21c) does NOT transmit in the implicit-result response — it ships only a
+    // per-row cursor id and marks the cursor `requiresFullExecute`, i.e. a
+    // separate describe/execute round-trip per nested cursor id. That pre-23
+    // protocol capability is out of scope; nested cursors inside implicit
+    // results are deferred (Story 9.4 decision — see deferred-work.md). The
+    // default fail-loud path keeps behaviour consistent across 23ai and 21c.
     default:
       return false;
   }
