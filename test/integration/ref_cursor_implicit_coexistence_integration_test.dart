@@ -318,6 +318,11 @@ void main() {
         'eager mode: a nested CURSOR() column inside an implicit result fails '
         'loud (deferred), leaving the connection reusable — both envs (AC3)',
         () async {
+          // B2 (spec-embedded-cursor-reaping-on-failure): the fail-loud must
+          // ALSO reap the implicit cursor's server id — the describe is parsed
+          // far enough to reach the trailing UB2 id before the error is raised,
+          // so the id rides the close-cursor piggyback instead of leaking.
+          final pendingBefore = connection.debugPendingCloseCount;
           await expectLater(
             connection.execute(nestedImplicitBlock),
             throwsA(
@@ -333,9 +338,17 @@ void main() {
                 'nested cursors inside implicit results are deferred and must '
                 'fail loud identically on Oracle 23ai and Oracle 21c',
           );
+          expect(
+            connection.debugPendingCloseCount,
+            greaterThanOrEqualTo(pendingBefore + 1),
+            reason:
+                'the failing implicit cursor id is queued for close, not '
+                'leaked (B2)',
+          );
 
           // The fail-loud happens while decoding the execute response (before any
           // FETCH), so the connection is NOT poisoned and a fresh query succeeds.
+          // The queued cursor id rides this next execute's piggyback and drains.
           final after = await connection.execute(
             'SELECT COUNT(*) AS C FROM $parentTab',
           );
@@ -343,6 +356,82 @@ void main() {
             after.rows.single['C'],
             equals(3),
             reason: 'the decode-time fail-loud leaves the connection reusable',
+          );
+          expect(
+            connection.debugPendingCloseCount,
+            equals(0),
+            reason: 'the reaped implicit cursor id rode the next execute',
+          );
+        },
+      );
+
+      test(
+        'eager mode: a nested CURSOR() column inside a REF CURSOR OUT bind fails '
+        'loud (deferred) AND reaps the OUT-bind cursor id — both envs (B1)',
+        () async {
+          // A procedure whose OUT SYS_REFCURSOR opens a SELECT carrying a nested
+          // CURSOR() column. Same deferred-feature fail-loud as the implicit
+          // path, but on the REF CURSOR OUT-bind decode path. The OUT bind's own
+          // server cursor id is encoded AFTER the embedded describe, so the fix
+          // must read it before raising the validation error to reap it.
+          final nestedRcProc = uniqueTableName('cox_nrc');
+          await connection.execute('''
+            CREATE OR REPLACE PROCEDURE $nestedRcProc (p_rc OUT SYS_REFCURSOR) IS
+            BEGIN
+              OPEN p_rc FOR
+                SELECT p.id,
+                       CURSOR(
+                         SELECT c.val FROM $childTab c
+                         WHERE c.parent_id = p.id
+                         ORDER BY c.val
+                       ) AS nc
+                FROM $parentTab p
+                ORDER BY p.id;
+            END;
+          ''');
+          addTearDown(() async {
+            try {
+              await connection.execute('DROP PROCEDURE $nestedRcProc');
+            } on OracleException {
+              // best-effort cleanup
+            }
+          });
+
+          final pendingBefore = connection.debugPendingCloseCount;
+          await expectLater(
+            connection.execute('BEGIN $nestedRcProc(:rc); END;', {
+              'rc': OracleBind.out(type: OracleDbType.cursor),
+            }),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    contains('column type 102'),
+                  ),
+            ),
+            reason:
+                'nested cursors inside REF CURSOR OUT binds are deferred and '
+                'must fail loud identically on Oracle 23ai and Oracle 21c',
+          );
+          expect(
+            connection.debugPendingCloseCount,
+            greaterThanOrEqualTo(pendingBefore + 1),
+            reason:
+                'the failing REF CURSOR OUT bind server cursor id is queued for '
+                'close, not leaked (B1)',
+          );
+
+          // Connection stays reusable; the queued id rides the next execute.
+          final after = await connection.execute(
+            'SELECT COUNT(*) AS C FROM $parentTab',
+          );
+          expect(after.rows.single['C'], equals(3));
+          expect(
+            connection.debugPendingCloseCount,
+            equals(0),
+            reason: 'the reaped REF CURSOR cursor id rode the next execute',
           );
         },
       );

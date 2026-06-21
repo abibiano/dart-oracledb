@@ -3079,10 +3079,21 @@ void main() {
       );
     });
 
-    test('zero-column cursor descriptor fails loud as malformed', () {
+    test('a bad describe takes fail-loud priority over the id-0 check', () {
+      // Fail-loud IDENTITY preserved: an unsupported nested-cursor describe
+      // throws its OWN validation error (the SAME error the inline strict
+      // describe threw before the id was read), NOT the id-0 error, even when
+      // the trailing id is 0. cursorId 0 is carried but harmless (filtered when
+      // queued). Regression guard against re-introducing an id-0-wins ordering.
       final payload = _buildPayload([
         _ioVector([16]),
-        [ttcMsgTypeRowData, ..._cursorOutBindValue(const [], 42), ..._ub4(0)],
+        [
+          ttcMsgTypeRowData,
+          ..._cursorOutBindValue([
+            _columnInfo(name: 'NC', oraType: oraTypeCursor, maxSize: 0),
+          ], 0), // nested cursor column AND id 0
+          ..._ub4(0),
+        ],
         _errorMessage(errorNum: 0),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
@@ -3095,11 +3106,39 @@ void main() {
           ],
         ),
         throwsA(
-          isA<OracleException>().having(
-            (e) => e.message,
-            'message',
-            contains('zero columns'),
-          ),
+          isA<EmbeddedCursorDecodeException>()
+              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+              .having((e) => e.message, 'message', contains('column type 102'))
+              .having((e) => e.cursorId, 'cursorId', 0),
+        ),
+      );
+    });
+
+    test('zero-column cursor descriptor fails loud as malformed', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [ttcMsgTypeRowData, ..._cursorOutBindValue(const [], 42), ..._ub4(0)],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      // Fail-loud preserved AND the server cursor id is reaped (B1): the
+      // describe is parsed leniently far enough to reach the trailing UB2 id,
+      // so the thrown EmbeddedCursorDecodeException carries cursorId 42 for the
+      // close-cursor piggyback. Proven-to-fail before the fix: the old decoder
+      // threw a plain OracleException with no id (the leak this resolves).
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
+          ],
+        ),
+        throwsA(
+          isA<EmbeddedCursorDecodeException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('zero columns'))
+              .having((e) => e.cursorId, 'cursorId', 42),
         ),
       );
       expect(
@@ -3127,6 +3166,8 @@ void main() {
         _errorMessage(errorNum: 0),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
+      // Fail-loud preserved (oraUnsupportedType, "column type 8") AND the
+      // cursor id (42) is carried for reaping — see the zero-column test.
       expect(
         () => decodeExecuteResponse(
           payload,
@@ -3136,9 +3177,10 @@ void main() {
           ],
         ),
         throwsA(
-          isA<OracleException>()
+          isA<EmbeddedCursorDecodeException>()
               .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-              .having((e) => e.message, 'message', contains('column type 8')),
+              .having((e) => e.message, 'message', contains('column type 8'))
+              .having((e) => e.cursorId, 'cursorId', 42),
         ),
       );
       expect(
@@ -3198,6 +3240,8 @@ void main() {
           _errorMessage(errorNum: 0),
           [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
         ]);
+        // Fail-loud preserved on the nested CURSOR(102) column AND the OUT
+        // bind's own cursor id (42) is carried for reaping.
         expect(
           () => decodeExecuteResponse(
             payload,
@@ -3207,13 +3251,14 @@ void main() {
             ],
           ),
           throwsA(
-            isA<OracleException>()
+            isA<EmbeddedCursorDecodeException>()
                 .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
                 .having(
                   (e) => e.message,
                   'message',
                   contains('column type 102'),
-                ),
+                )
+                .having((e) => e.cursorId, 'cursorId', 42),
           ),
         );
       },
@@ -3353,24 +3398,30 @@ void main() {
       );
     });
 
-    test('malformed descriptor (zero columns) fails loud', () {
+    test('malformed descriptor (zero columns) fails loud, carries own id', () {
       final payload = _buildPayload([
         _implicitResultSet([(columns: const [], cursorId: 501)]),
         _errorMessage(errorNum: 0),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
+      // Fail-loud preserved AND the failing descriptor's own cursor id (501) is
+      // now carried for reaping (B2): the describe is parsed leniently so the
+      // trailing UB2 id is reached before the error is raised. Proven-to-fail
+      // before the fix: the old decoder threw before reading the id, so
+      // cursorIds was empty (the leak this resolves).
       expect(
         () => decodeExecuteResponse(payload, isQuery: false),
         throwsA(
           isA<ImplicitResultDecodeException>()
               .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('zero columns')),
+              .having((e) => e.message, 'message', contains('zero columns'))
+              .having((e) => e.cursorIds, 'cursorIds', [501]),
         ),
       );
     });
 
     test(
-      'unsupported embedded column type fails loud with oraUnsupportedType',
+      'unsupported embedded column type fails loud, carries own id',
       () {
         final payload = _buildPayload([
           _implicitResultSet([
@@ -3384,16 +3435,93 @@ void main() {
           _errorMessage(errorNum: 0),
           [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
         ]);
+        // Fail-loud preserved AND the failing descriptor's id (601) reaped.
         expect(
           () => decodeExecuteResponse(payload, isQuery: false),
           throwsA(
             isA<ImplicitResultDecodeException>()
                 .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-                .having((e) => e.message, 'message', contains('column type 8')),
+                .having((e) => e.message, 'message', contains('column type 8'))
+                .having((e) => e.cursorIds, 'cursorIds', [601]),
           ),
         );
       },
     );
+
+    test(
+      'a bad descriptor after a good one carries BOTH ids (prior + current)',
+      () {
+        // First result decodes cleanly (id 701); the second fails strict
+        // validation (nested CURSOR column, id 702). Both ids must be queued
+        // for close so neither leaks. Proven-to-fail before the fix: the old
+        // decoder carried only the prior id [701] and dropped the current 702.
+        final payload = _buildPayload([
+          _implicitResultSet([
+            (
+              columns: [
+                _columnInfo(name: 'A', oraType: oraTypeNumber, maxSize: 0),
+              ],
+              cursorId: 701,
+            ),
+            (
+              columns: [
+                _columnInfo(name: 'NC', oraType: oraTypeCursor, maxSize: 0),
+              ],
+              cursorId: 702,
+            ),
+          ]),
+          _errorMessage(errorNum: 0),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        expect(
+          () => decodeExecuteResponse(payload, isQuery: false),
+          throwsA(
+            isA<ImplicitResultDecodeException>()
+                .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('column type 102'),
+                )
+                .having((e) => e.cursorIds, 'cursorIds', [701, 702]),
+          ),
+        );
+      },
+    );
+
+    test('a bad describe takes fail-loud priority over the id-0 check; a 0 own '
+        'id is omitted from the carried ids', () {
+      // Fail-loud IDENTITY preserved: a malformed describe (here zero columns)
+      // throws its OWN validation error — exactly what the inline strict
+      // describe threw before the id was read — NOT the id-0 error, even when
+      // the trailing id happens to be 0. The 0 own-id is nothing to reap, so
+      // only the prior id (801) is carried.
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (
+            columns: [
+              _columnInfo(name: 'A', oraType: oraTypeNumber, maxSize: 0),
+            ],
+            cursorId: 801,
+          ),
+          (
+            columns: const [], // zero columns AND id 0
+            cursorId: 0,
+          ),
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        () => decodeExecuteResponse(payload, isQuery: false),
+        throwsA(
+          isA<ImplicitResultDecodeException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('zero columns'))
+              .having((e) => e.cursorIds, 'cursorIds', [801]),
+        ),
+      );
+    });
 
     test('completion probe consumes the implicit-result message leniently', () {
       final payload = _buildPayload([

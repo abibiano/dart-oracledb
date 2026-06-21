@@ -1111,10 +1111,10 @@ class OracleConnection {
       if (unhandledCursorId != 0) {
         _cache.requeueCursorsToClose([unhandledCursorId]);
       }
-      // NOTE: implicit-result decode failures (ImplicitResultDecodeException)
-      // are reaped at their origin in `_openCursor`'s catch — they throw while
-      // decoding the execute response, which happens before this try is
-      // entered, so they never reach here.
+      // NOTE: embedded-cursor decode failures (ImplicitResultDecodeException
+      // and EmbeddedCursorDecodeException) are reaped at their origin in
+      // `_openCursor`'s catch — they throw while decoding the execute response,
+      // which happens before this try is entered, so they never reach here.
       // If this PL/SQL execute registered any lazy handles (a REF CURSOR OUT
       // bind, or lazy implicit results) before failing, close them so the
       // connection is left reusable. _rejectConcurrentOperation guarantees no
@@ -1252,10 +1252,19 @@ class OracleConnection {
         // decoding the execute response — this is the live cleanup site. The
         // throw propagates out through the `await _openCursor(...)` that sits
         // *before* `_executeGuarded`'s try, so that catch never sees it. Queue
-        // the cursor ids decoded before the bad descriptor for the close-cursor
-        // piggyback so they are reaped rather than leaked. AC7.
+        // the cursor ids carried by the decode failure (prior results plus the
+        // failing descriptor's own id) for the close-cursor piggyback so they
+        // are reaped rather than leaked. AC7.
         if (e is ImplicitResultDecodeException) {
           _cache.requeueCursorsToClose(e.cursorIds);
+        }
+        // A REF CURSOR OUT bind whose embedded describe fails strict validation
+        // (zero columns / unsupported nested-cursor column) throws here too,
+        // carrying its own server cursor id. Reap it the same way so the
+        // fail-loud path leaves no leaked cursor; the validation error still
+        // propagates to the caller below.
+        if (e is EmbeddedCursorDecodeException) {
+          _cache.requeueCursorsToClose([e.cursorId]);
         }
         if (e is OracleException) rethrow;
         throw OracleException(

@@ -777,14 +777,20 @@ class DecodedCursorResult {
 /// (TTC message type 27) is malformed, carries an invalid cursor id (0), or
 /// describes an unsupported column type.
 ///
-/// Carries [cursorIds] — the server cursor ids of every implicit result decoded
-/// *before* the failing descriptor in the same response — so the connection
-/// layer can queue them for the existing close-cursor piggyback before the
-/// error escapes, leaving no leaked server cursor. Package-internal: never
-/// surfaced as a distinct type to public callers (it is an [OracleException]).
+/// Carries [cursorIds] — the server cursor ids that still need to be queued for
+/// close so no leaked server cursor escapes: every implicit result decoded
+/// *before* the failing descriptor, PLUS the failing descriptor's own cursor id
+/// when it was reachable (a zero-column / unsupported-type describe is fully
+/// byte-parseable, so its trailing UB2 id is read before this error is raised;
+/// an id of 0 — the "block never opened the cursor" case — is nothing to reap
+/// and is omitted). The connection layer queues all of [cursorIds] through the
+/// existing close-cursor piggyback before the error escapes. Package-internal:
+/// never surfaced as a distinct type to public callers (it is an
+/// [OracleException]).
 class ImplicitResultDecodeException extends OracleException {
-  /// Creates an implicit-result decode error carrying the already-decoded
-  /// cursor ids that still need to be queued for close.
+  /// Creates an implicit-result decode error carrying the cursor ids that still
+  /// need to be queued for close (prior results plus, when reachable, the
+  /// failing descriptor's own id).
   ImplicitResultDecodeException({
     required this.cursorIds,
     required super.errorCode,
@@ -792,8 +798,35 @@ class ImplicitResultDecodeException extends OracleException {
     super.cause,
   });
 
-  /// Server cursor ids decoded before the failing descriptor.
+  /// Server cursor ids to queue for close (prior results + the current id when
+  /// it was read before the failure).
   final List<int> cursorIds;
+}
+
+/// Thrown by [decodeExecuteResponse] when a `SYS_REFCURSOR` OUT bind value
+/// carries an embedded describe that fails strict validation (a zero-column or
+/// unsupported-type — e.g. nested `CURSOR(...)` — column).
+///
+/// Carries [cursorId] — the OUT bind's own server cursor id, which the decoder
+/// reads *before* raising this error (the describe is byte-parseable regardless
+/// of column type, so the trailing UB2 id is reachable). The connection layer
+/// queues it through the close-cursor piggyback so the fail-loud path does not
+/// leak the cursor. This mirrors how [ImplicitResultDecodeException] reaps
+/// implicit-result ids; the validation error itself is preserved verbatim
+/// (same [errorCode] and [message]). Package-internal: never surfaced as a
+/// distinct type to public callers (it is an [OracleException]).
+class EmbeddedCursorDecodeException extends OracleException {
+  /// Creates a REF CURSOR OUT-bind decode error carrying the bind's own server
+  /// cursor id to queue for close.
+  EmbeddedCursorDecodeException({
+    required this.cursorId,
+    required super.errorCode,
+    required super.message,
+    super.cause,
+  });
+
+  /// The OUT bind's server cursor id (read before the validation failure).
+  final int cursorId;
 }
 
 /// Returns the 0-based indices of every cursor-typed column in [columns]
@@ -1566,18 +1599,40 @@ Object? _decodeValueByOraType(
       // but without the leading version-bytes preamble), then UB2 cursor id.
       final numBytes = buf.readUint8();
       if (numBytes == 0 || numBytes == ttcNullLengthIndicator) return null;
-      final columns = _readEmbeddedCursorDescribe(
+      final describe = _readEmbeddedCursorDescribe(
         buf,
         ttcFieldVersion,
         strict: strict,
       );
+      // The cursor id is encoded AFTER the describe, so it is now in hand even
+      // when the describe failed strict validation. Read it before any throw so
+      // a fail-loud below can carry it for reaping (close-cursor piggyback).
       final cursorId = buf.readUB2();
+      if (!strict) {
+        return null; // completion probe: bytes consumed, value unused
+      }
+      // Describe-validation failure (zero columns / unsupported nested-cursor
+      // column) takes priority over the id-0 check — this is the SAME error,
+      // with the SAME code and message, the inline strict path used to throw
+      // BEFORE the id was read (fail-loud identity preserved). The only change
+      // is that the id is now in hand, so it can be carried for reaping. It
+      // fires for both the OUT-bind and SELECT-column paths (a malformed inner
+      // describe is invalid regardless of bind direction or cursor id). A
+      // carried id of 0 is harmless — `requeueCursorsToClose` filters it.
+      final validationError = describe.validationError;
+      if (validationError != null) {
+        throw EmbeddedCursorDecodeException(
+          cursorId: cursorId,
+          errorCode: validationError.errorCode,
+          message: validationError.message,
+          cause: validationError,
+        );
+      }
       if (cursorId == 0) {
         // Cursor id = 0 is an invalid cursor for any non-IN bind direction.
         // Fail loud instead of returning null or an unusable result set —
         // the PL/SQL block likely did not open the cursor, which is a
         // programming error that should surface immediately.
-        if (!strict) return null; // completion probe: consume, skip loud error
         // SELECT cursor columns differ: a `CURSOR(SELECT ...)` value can
         // legitimately resolve to id 0 (a synthetically null / unresolved
         // nested cursor, e.g. an outer join with no matching rows). Treat it
@@ -1591,15 +1646,30 @@ Object? _decodeValueByOraType(
               '(cursor id = 0); the PL/SQL block may not have opened the cursor',
         );
       }
-      if (!strict) {
-        return null; // completion probe: bytes consumed, value unused
-      }
-      return DecodedCursorResult(columns: columns, cursorId: cursorId);
+      return DecodedCursorResult(columns: describe.columns, cursorId: cursorId);
     default:
       buf.readBytesWithLength();
       return null;
   }
 }
+
+/// Outcome of reading one embedded cursor-describe block: the decoded
+/// [columns] and the FIRST strict-validation failure ([validationError]), if
+/// any.
+///
+/// Validation is deliberately DEFERRED rather than thrown inline so the caller
+/// can finish consuming the descriptor and read the trailing UB2 server cursor
+/// id BEFORE the error is raised — the id is then reapable via the close-cursor
+/// piggyback instead of leaking. The byte walk is identical whether or not a
+/// column is supported (an unsupported / nested-cursor column is rejected
+/// *semantically*, not at the byte level), so reaching the id never weakens the
+/// fail-loud guarantee: the held [validationError] is thrown verbatim by the
+/// caller once the id is in hand. On the lenient completion-probe pass
+/// ([strict] == false) [validationError] is always null.
+typedef _EmbeddedDescribe = ({
+  List<ColumnMetadata> columns,
+  OracleException? validationError,
+});
 
 /// Reads an embedded cursor-describe block: same structure as a DESCRIBE_INFO
 /// TTC message body, but without the leading version-bytes chunk consumed by
@@ -1615,15 +1685,21 @@ Object? _decodeValueByOraType(
 /// - UB4: date-bytes length; if > 0, chunked bytes (current date)
 /// - UB4: dcbflag, UB4: dcbmdbz, UB4: dcbmnpr, UB4: dcbmxpr
 /// - UB4: tail-bytes length; if > 0, chunked bytes
-List<ColumnMetadata> _readEmbeddedCursorDescribe(
+///
+/// Strict-pass validation (zero columns, unsupported / nested-cursor column
+/// type) is collected into the returned record's `validationError` rather than
+/// thrown here, so the caller can read the trailing cursor id and reap it. The
+/// entire descriptor is consumed either way.
+_EmbeddedDescribe _readEmbeddedCursorDescribe(
   ReadBuffer buf,
   int ttcFieldVersion, {
   required bool strict,
 }) {
+  OracleException? validationError;
   buf.skipUB4(); // max row size
   final numCols = buf.readUB4();
   if (strict && numCols == 0) {
-    throw const OracleException(
+    validationError = const OracleException(
       errorCode: oraProtocolError,
       message:
           'Malformed SYS_REFCURSOR descriptor: embedded describe has zero '
@@ -1636,8 +1712,12 @@ List<ColumnMetadata> _readEmbeddedCursorDescribe(
   final columns = <ColumnMetadata>[];
   for (var i = 0; i < numCols; i++) {
     final column = _processColumnInfo(buf, ttcFieldVersion);
-    if (strict && !_isSupportedRefCursorColumn(column)) {
-      throw OracleException(
+    // Collect the FIRST unsupported-column failure but keep walking the bytes:
+    // the descriptor must be fully consumed so the caller reaches the cursor id.
+    if (strict &&
+        validationError == null &&
+        !_isSupportedRefCursorColumn(column)) {
+      validationError = OracleException(
         errorCode: oraUnsupportedType,
         message:
             'Unsupported SYS_REFCURSOR column type ${column.oracleType} '
@@ -1654,7 +1734,7 @@ List<ColumnMetadata> _readEmbeddedCursorDescribe(
   buf.skipUB4(); // dcbmxpr
   final tailBytes = buf.readUB4();
   if (tailBytes > 0) buf.readBytesWithLength(); // tail (chunked)
-  return columns;
+  return (columns: columns, validationError: validationError);
 }
 
 /// Decodes a TTC implicit result-set message (type 27), produced when a PL/SQL
@@ -1671,40 +1751,53 @@ List<ColumnMetadata> _readEmbeddedCursorDescribe(
 /// Each decoded descriptor is accumulated in [s.implicitResults]. A cursor id
 /// of 0, a malformed embedded describe, or an unsupported column type fails
 /// loud on the strict (real) decode pass, surfacing as an
-/// [ImplicitResultDecodeException] that carries the cursor ids decoded so far so
-/// the caller can reap them. The lenient completion probe (strict == false)
-/// consumes the same bytes without throwing or accumulating, so it can still
-/// locate the terminal message.
+/// [ImplicitResultDecodeException] that carries the cursor ids to queue for
+/// close: every result decoded before the failing descriptor, PLUS the failing
+/// descriptor's own id (its trailing UB2 is read before the error is raised —
+/// the describe is byte-parseable regardless of column type — so it is reapable
+/// rather than leaked; an id of 0 is nothing to reap and is omitted). The
+/// lenient completion probe (strict == false) consumes the same bytes without
+/// throwing or accumulating, so it can still locate the terminal message.
 void _processImplicitResultSet(ReadBuffer buf, _DecodeState s) {
   final numResults = buf.readUB4();
   for (var i = 0; i < numResults; i++) {
     final numBytes = buf.readUint8();
     if (numBytes > 0) buf.skip(numBytes);
-    final List<ColumnMetadata> columns;
-    try {
-      columns = _readEmbeddedCursorDescribe(
-        buf,
-        s.ttcFieldVersion,
-        strict: s.strictTypes,
-      );
-    } on OracleException catch (e) {
-      // Strict pass: a zero-column or unsupported-type embedded describe
-      // surfaces here. Re-raise carrying the cursor ids decoded before this
-      // descriptor so they can be queued for close. (The lenient probe never
-      // throws from `_readEmbeddedCursorDescribe`, so this only fires strict.)
+    // Strict-pass validation (zero columns / unsupported nested-cursor column)
+    // is deferred: the describe is consumed in full so the trailing cursor id
+    // is reachable and can be carried for close BEFORE the error is raised.
+    final describe = _readEmbeddedCursorDescribe(
+      buf,
+      s.ttcFieldVersion,
+      strict: s.strictTypes,
+    );
+    final cursorId = buf.readUB2();
+    if (!s.strictTypes) continue; // probe: bytes consumed, skip the loud error
+    final validationError = describe.validationError;
+    if (validationError != null) {
+      // Strict pass: a zero-column or unsupported-type embedded describe. This
+      // takes priority over the id-0 check — it is the SAME error the inline
+      // strict describe used to throw BEFORE the id was read (fail-loud
+      // identity preserved). Carry the prior ids AND this descriptor's
+      // now-known id so all are queued for close; a 0 id (the degenerate
+      // "block never opened the cursor" case) is nothing to reap and is
+      // omitted. (The lenient probe leaves validationError null, so this never
+      // fires there.)
       throw ImplicitResultDecodeException(
-        cursorIds: [for (final r in s.implicitResults) r.cursorId],
-        errorCode: e.errorCode,
-        message: e.message,
-        cause: e,
+        cursorIds: [
+          for (final r in s.implicitResults) r.cursorId,
+          if (cursorId != 0) cursorId,
+        ],
+        errorCode: validationError.errorCode,
+        message: validationError.message,
+        cause: validationError,
       );
     }
-    final cursorId = buf.readUB2();
     if (cursorId == 0) {
       // An implicit result with cursor id 0 is an invalid server cursor — the
       // block returned a result that was never opened. Same fail-loud contract
-      // as a REF CURSOR OUT bind.
-      if (!s.strictTypes) continue; // probe: bytes consumed, skip the loud error
+      // as a REF CURSOR OUT bind. Nothing to reap (id is 0); carry only prior
+      // ids.
       throw ImplicitResultDecodeException(
         cursorIds: [for (final r in s.implicitResults) r.cursorId],
         errorCode: oraProtocolError,
@@ -1713,11 +1806,10 @@ void _processImplicitResultSet(ReadBuffer buf, _DecodeState s) {
             '(cursor id = 0); the PL/SQL block may not have opened the cursor',
       );
     }
-    if (s.strictTypes) {
-      s.implicitResults.add(
-        DecodedCursorResult(columns: columns, cursorId: cursorId),
-      );
-    }
+    // Strict pass only (the probe `continue`d above): accumulate the result.
+    s.implicitResults.add(
+      DecodedCursorResult(columns: describe.columns, cursorId: cursorId),
+    );
   }
 }
 
