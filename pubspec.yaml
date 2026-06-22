@@ -1,6 +1,6 @@
 name: oracledb
 description: A pure Dart Oracle Database driver implementing thin-mode TNS/TTC wire protocol. No Oracle Client required.
-version: 1.0.0
+version: 1.1.0
 repository: https://github.com/abibiano/dart-oracledb
 issue_tracker: https://github.com/abibiano/dart-oracledb/issues
 documentation: https://github.com/abibiano/dart-oracledb#readme

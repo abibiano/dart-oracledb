@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.1.0
+
+Server-side cursor support: queries can now be streamed instead of fully
+materialized, PL/SQL `REF CURSOR` OUT binds and implicit result sets are
+consumable, and `CURSOR()` columns nested inside a query are materialized
+inline. All additive — no breaking changes — and validated against Oracle 23ai
+and Oracle 21c.
+
+### Features
+
+- **Streaming result sets** (`OracleResultSet`): pass
+  `OracleExecuteOptions(resultSet: true)` to `execute()` to receive a
+  cursor-backed `OracleResultSet` in `OracleResult.resultSet` instead of
+  materializing every row. Read incrementally with `getRow()` / `getRows([n])`,
+  inspect `columnNames` before the first fetch, tune the batch size with
+  `fetchSize`, and `close()` to release the server cursor and free the
+  connection for reuse.
+- **Row streams** (`queryStream()` / `executeStream()`): read a `SELECT`'s rows
+  as a `Stream<OracleRow>` for incremental consumption. Cancelling the
+  subscription early closes the underlying cursor and returns the connection to
+  a usable state.
+- **REF CURSOR OUT binds**: bind a PL/SQL `SYS_REFCURSOR` as an OUT parameter
+  with `OracleBind.out(type: OracleDbType.cursor)` and consume the returned
+  cursor as a result set. (`IN OUT` cursor binds are intentionally unsupported.)
+- **PL/SQL implicit result sets**: cursors returned by `DBMS_SQL.RETURN_RESULT`
+  surface in `OracleResult.implicitResults` (node-oracledb parity name), in
+  server-returned order — eager `List<OracleRow>` per cursor by default, or
+  lazy `OracleResultSet` handles under `OracleExecuteOptions(resultSet: true)`.
+- **Nested cursor columns**: a `CURSOR(SELECT ...)` column in a query projection
+  materializes inline on the parent row as a `List<OracleRow>` (an empty nested
+  cursor is `[]`, a NULL cursor column is `null`), across the eager,
+  `queryStream()`, and `resultSet: true` paths.
+- **`maxRows` cap** (`OracleExecuteOptions(maxRows: N)`): bounds how many rows
+  the eager paths materialize (`0` = unlimited), matching node-oracledb's
+  `maxRows`. `OracleResult.moreRowsAvailable` reports when the result was
+  truncated.
+
+### Bug Fixes
+
+- **Connection ping no longer desyncs the TTC stream**: ping is now issued as a
+  proper FUNCTION RPC whose reply is fully drained, so the next operation on a
+  pooled connection after a ping can no longer read a stale, misframed
+  response.
+- **Cursor reclamation is identity-based**: result-set and embedded-cursor
+  cleanup now matches the exact statement that owns a cursor (with a result-set
+  `cursorId 0` guard), preventing a cursor from being reclaimed against the
+  wrong statement.
+- **Embedded cursors are reaped on fail-loud describe validation**: when a
+  describe mismatch is rejected, the associated server cursor ids are now
+  released instead of leaked.
+- **Pool reclaim surfaces a clear error to live stream subscribers**: a pool
+  reclaim that races an open result-set stream now reports an explicit error to
+  the subscriber rather than failing obscurely.
+- **Network-unreachable errors map cleanly**: host/network-unreachable socket
+  `OSError`s are now mapped to `oraHostUnreachable` instead of a generic error.
+
 ## 1.0.0
 
 First stable release. Connection pooling — the milestone the 0.9.0 notes named

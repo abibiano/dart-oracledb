@@ -2,11 +2,11 @@
 
 A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire protocol. No Oracle Client libraries required.
 
-[![Pub Version](https://img.shields.io/badge/pub-v1.0.0-orange)](https://pub.dev/packages/oracledb)
+[![Pub Version](https://img.shields.io/badge/pub-v1.1.0-orange)](https://pub.dev/packages/oracledb)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **1.0 — stable API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is complete: `OraclePool.create()` builds a pool of prewarmed authenticated sessions, `acquire()`/`release()` borrow and recycle them (with automatic rollback of uncommitted work on release), `withConnection()` wraps the pair leak-safely, queued acquires can be bounded with `acquireTimeout`, surplus idle sessions shrink back to `minConnections` with `idleTimeout`, `close(drainTimeout: ...)` waits for borrowed sessions on shutdown, and session tagging (`acquire(tag: ...)` with an optional `sessionCallback`) reuses session state such as NLS settings across borrowers. Depend on `oracledb: ^1.0.0`; the public API now follows semantic versioning (breaking changes bump the major version).
+> **Stable API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is complete: `OraclePool.create()` builds a pool of prewarmed authenticated sessions, `acquire()`/`release()` borrow and recycle them (with automatic rollback of uncommitted work on release), `withConnection()` wraps the pair leak-safely, queued acquires can be bounded with `acquireTimeout`, surplus idle sessions shrink back to `minConnections` with `idleTimeout`, `close(drainTimeout: ...)` waits for borrowed sessions on shutdown, and session tagging (`acquire(tag: ...)` with an optional `sessionCallback`) reuses session state such as NLS settings across borrowers. As of 1.1, query results can also be consumed incrementally — `OracleResultSet` and `queryStream()` / `executeStream()` stream rows without materializing them, PL/SQL `REF CURSOR` OUT binds and `DBMS_SQL.RETURN_RESULT` implicit result sets are consumable, and nested `CURSOR()` columns materialize inline. Depend on `oracledb: ^1.1.0`; the public API now follows semantic versioning (breaking changes bump the major version).
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -19,6 +19,8 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 - **TLS/SSL** — encrypted connections with certificate validation
 - **Full query support** — SELECT, INSERT, UPDATE, DELETE with positional and named bind parameters
 - **PL/SQL** — stored procedures and functions with OUT / IN OUT bind parameters
+- **Result sets & streaming** — consume large queries incrementally via `OracleResultSet` or `queryStream()` / `executeStream()` instead of materializing every row
+- **REF CURSOR & implicit results** — PL/SQL `SYS_REFCURSOR` OUT binds, `DBMS_SQL.RETURN_RESULT` implicit result sets, and nested `CURSOR()` columns
 - **Transactions** — commit, rollback, and transaction helper
 - **TIMESTAMP WITH TIME ZONE** — decoded as UTC `DateTime`, or as `OracleTimestampTz` preserving the original offset (opt-in)
 - **Statement caching** — transparent prepared-statement cache
@@ -53,7 +55,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  oracledb: ^1.0.0
+  oracledb: ^1.1.0
 ```
 
 Then run:
@@ -286,6 +288,109 @@ print(r.outBinds['value']); // 42
 
 `TIMESTAMP WITH TIME ZONE` parameters bind with `OracleDbType.timestampTz`. OUT / IN OUT values follow the connection's decode contract: a UTC `DateTime` by default, or an `OracleTimestampTz` carrying the server-sent offset on a connection opened with `preserveTimestampTimeZone: true`. IN OUT input values may be an `OracleTimestampTz` (the offset travels on the wire) or a plain `DateTime`.
 
+### Result Sets & Streaming
+
+Large queries can be consumed incrementally instead of materializing every row up front. These paths have no 1,000-fetch safety cap — that bound applies only to eager `execute()`.
+
+**Row stream.** `queryStream()` / `executeStream()` return a single-subscription `Stream<OracleRow>`. The cursor opens when a subscriber listens and is closed automatically when the stream completes, is cancelled, or errors:
+
+```dart
+await for (final row in connection.queryStream('SELECT id, name FROM big_table')) {
+  print(row['NAME']);
+}
+// executeStream() is identical; queryStream() is the node-oracledb-parity name.
+// Pass a third argument to tune the FETCH batch size: queryStream(sql, binds, 100).
+```
+
+**Result set handle.** Pass `OracleExecuteOptions(resultSet: true)` to `execute()` to get an `OracleResultSet` in `result.resultSet` for manual, batched pulls. Column metadata is available before the first fetch. Always `close()` it (or fully drain it) to release the cursor and free the connection:
+
+```dart
+final result = await connection.execute(
+  'SELECT id, name FROM big_table',
+  null,
+  OracleExecuteOptions(resultSet: true, fetchSize: 100),
+);
+final rs = result.resultSet!;
+try {
+  print(rs.columnNames);                 // available before the first row
+  for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
+    print(row.toMap());
+  }
+  // or pull in batches: final batch = await rs.getRows(50);
+} finally {
+  await rs.close();
+}
+```
+
+> A connection owns a single TTC byte stream, so only one result set or row stream may be open on it at a time — overlapping operations fail fast with a concurrent-operation `OracleException`. Close the result set before running the next statement.
+
+#### REF CURSOR OUT binds
+
+Bind a PL/SQL `SYS_REFCURSOR` OUT parameter with `OracleBind.out(type: OracleDbType.cursor)`; the returned cursor arrives in `result.outBinds` as an `OracleResultSet`:
+
+```dart
+final result = await connection.execute(
+  'BEGIN open_employees(:rc, :dept); END;',
+  {
+    'rc': OracleBind.out(type: OracleDbType.cursor),
+    'dept': 10,
+  },
+);
+final rs = result.outBinds['rc']! as OracleResultSet;
+try {
+  for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
+    print(row['FIRST_NAME']);
+  }
+} finally {
+  await rs.close();
+}
+```
+
+`IN OUT` cursor binds are not supported — use `OracleBind.out(type: OracleDbType.cursor)`.
+
+#### Implicit result sets
+
+Result sets a PL/SQL block returns via `DBMS_SQL.RETURN_RESULT` surface in `result.implicitResults`, in server-returned order. By default each element is a fully-drained `List<OracleRow>`:
+
+```dart
+final result = await connection.execute('BEGIN report(); END;');
+for (final cursor in result.implicitResults) {
+  for (final row in cursor as List<OracleRow>) {
+    print(row.toMap());
+  }
+}
+```
+
+Under `OracleExecuteOptions(resultSet: true)`, each element is a lazy `OracleResultSet` handle instead — `close()` (or fully drain) each one.
+
+#### Nested cursor columns
+
+A `CURSOR(SELECT ...)` column in a query projection materializes inline on the parent row as a `List<OracleRow>` (an empty nested cursor is `[]`, a NULL cursor column is `null`), on the eager, streaming, and result-set paths alike:
+
+```dart
+final result = await connection.execute('''
+  SELECT d.name,
+         CURSOR(SELECT e.name FROM employees e WHERE e.dept_id = d.id) AS staff
+  FROM departments d
+''');
+for (final row in result.rows) {
+  final staff = row['STAFF']! as List<OracleRow>;
+  print('${row['NAME']}: ${staff.map((r) => r['NAME']).join(', ')}');
+}
+```
+
+#### Capping eager results
+
+`OracleExecuteOptions(maxRows: N)` caps how many rows an eager `execute()` materializes (`0` = unlimited; node-oracledb `maxRows` parity); check `result.moreRowsAvailable` to detect truncation. It is a no-op for `resultSet: true` and the streaming paths, which are already incremental.
+
+```dart
+final top = await connection.execute(
+  'SELECT * FROM employees ORDER BY salary DESC',
+  null,
+  OracleExecuteOptions(maxRows: 10),
+);
+```
+
 ### TLS/SSL Connections
 
 ```dart
@@ -323,9 +428,18 @@ final isAlive = await connection.ping();
 | `OracleConnection.connect(...)`           | Open a connection                                   |
 | `OracleConnection.withConnection(...)`    | Open, use, and auto-close a connection              |
 | `connection.execute(sql, [bindValues])`   | Run a query, DML statement, or PL/SQL block         |
+| `connection.execute(sql, binds, OracleExecuteOptions(...))` | Eager (default), lazy result set (`resultSet: true`), or row-capped (`maxRows:`) execution |
+| `connection.queryStream(sql, [binds])` / `executeStream(...)` | Stream a query's rows as `Stream<OracleRow>` |
 | `OracleBind.out(type: ..., maxSize: ...)` | Declare a PL/SQL OUT bind parameter                 |
+| `OracleBind.out(type: OracleDbType.cursor)` | Declare a PL/SQL REF CURSOR OUT bind (returned as an `OracleResultSet`) |
 | `OracleBind.inOut(value: ..., type: ...)` | Declare a PL/SQL IN OUT bind parameter              |
 | `result.outBinds`                         | OUT / IN OUT values, by name or position            |
+| `result.resultSet`                        | The `OracleResultSet` when `OracleExecuteOptions(resultSet: true)` was used |
+| `result.implicitResults`                  | PL/SQL `DBMS_SQL.RETURN_RESULT` result sets (eager `List<OracleRow>` / lazy `OracleResultSet`) |
+| `result.moreRowsAvailable`                | Whether an eager result was truncated by the fetch cap or `maxRows` |
+| `resultSet.getRow()` / `getRows([n])`     | Pull the next row / next batch from a result set    |
+| `resultSet.columnNames`                   | Result-set column names (available before the first fetch) |
+| `resultSet.close()`                       | Close the cursor and free the connection            |
 | `connection.ping()`                       | Send a ping to verify the connection is alive       |
 | `connection.commit()`                     | Commit the current transaction                      |
 | `connection.rollback()`                   | Roll back the current transaction                   |
@@ -348,6 +462,7 @@ final isAlive = await connection.ping();
 | CLOB                      | `String` (see [CLOB support](#clob-support))                                     |
 | BLOB                      | `Uint8List` (see [BLOB support](#blob-support))                                  |
 | JSON (21c+)               | `Map<String, Object?>` / `List<Object?>` (see [JSON support](#json-support))     |
+| CURSOR / REF CURSOR       | `OracleResultSet` (OUT bind) / `List<OracleRow>` (nested `CURSOR()` column) (see [Result Sets & Streaming](#result-sets--streaming)) |
 | NULL                      | `null`                                                                           |
 
 ### RAW support
@@ -507,6 +622,7 @@ This package implements a subset of the full Oracle driver feature set. Below is
 | PL/SQL execution (stored procedures, functions) | ✅ Done        |
 | Advanced data types (CLOB, BLOB, RAW, JSON)     | ✅ Done        |
 | Connection pooling                              | ✅ Done        |
+| Result sets, streaming, REF CURSOR & implicit results | ✅ Done  |
 
 ### Planned After 1.0
 
@@ -514,14 +630,12 @@ After the 1.0 release, the project roadmap includes larger API and compatibility
 
 | Priority | Planned enhancement                                                                       |
 | -------- | ----------------------------------------------------------------------------------------- |
-| 1        | Streaming and `ResultSet` API for incremental result consumption                          |
-| 2        | REF CURSOR and implicit results, built on `ResultSet`                                     |
-| 3        | Non-`AL32UTF8` database character set compatibility                                       |
-| 4        | Bulk DML / `executeMany()`                                                                |
-| 5        | Public LOB streaming and temporary LOBs                                                   |
-| 6        | Extended JSON / OSON parity (Oracle-specific JSON scalars, OSON-in-BLOB helpers)          |
-| 7        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
-| 8        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
+| 1        | Non-`AL32UTF8` database character set compatibility                                       |
+| 2        | Bulk DML / `executeMany()`                                                                |
+| 3        | Public LOB streaming and temporary LOBs                                                   |
+| 4        | Extended JSON / OSON parity (Oracle-specific JSON scalars, OSON-in-BLOB helpers)          |
+| 5        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
+| 6        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
 
 ## Tests
 
@@ -555,7 +669,7 @@ RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test
 - **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work.
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
 - **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) are rejected on decode; offset-based zones (e.g. `+02:00`) are supported. Region-name compatibility is planned as a post-1.0 temporal enhancement.
-- **Very large result sets** — a single `execute()` is bounded by a safety cap of 1,000 fetch round-trips (about 50,000 rows at the default fetch size); if the cap is hit, a warning is logged, the rows fetched so far are returned, and `result.moreRowsAvailable` is `true` so the truncation is detectable. The same flag is also set (with a logged warning) in the rarer case where the server reports more rows pending but the driver has no usable cursor id to continue fetching — in either case `true` means the rows are an incomplete prefix of the full result set.
+- **Very large result sets** — a single `execute()` is bounded by a safety cap of 1,000 fetch round-trips (about 50,000 rows at the default fetch size); if the cap is hit, a warning is logged, the rows fetched so far are returned, and `result.moreRowsAvailable` is `true` so the truncation is detectable. The same flag is also set (with a logged warning) in the rarer case where the server reports more rows pending but the driver has no usable cursor id to continue fetching — in either case `true` means the rows are an incomplete prefix of the full result set. Streaming (`queryStream()` / `executeStream()`) and result-set (`OracleExecuteOptions(resultSet: true)`) consumption have **no such cap** — prefer them for very large result sets.
 
 ## Thin Mode Limitations
 
