@@ -2,7 +2,7 @@
 title: 'Materialize nested CURSOR() columns inside REF CURSOR OUT binds and PL/SQL implicit results'
 type: 'feature-plan'
 created: '2026-06-21'
-status: 'draft'
+status: 'closed-no-go'  # S0 spike (2026-06-22) proved 21c cannot materialize this; permanent (evidence-backed) deferral. See "## S0 findings".
 baseline_commit: d60e19091e1446038f083e2b3a4587874cac4ab2
 context:
   - _bmad-output/implementation-artifacts/deferred-work.md (deferred item "A")
@@ -122,7 +122,14 @@ outcome is to keep the feature fail-loud on 21c — which means the feature as
 specified (dual-env) is **not deliverable**, and the deferral stands
 permanently with that rationale recorded.
 
-### The candidate 21c mechanism (must be proven, not assumed)
+### The candidate 21c mechanism (DISPROVEN by the S0 spike — see "## S0 findings")
+
+> **Status after S0 (2026-06-22): DISPROVEN.** On a live 21c server the bare
+> nested cursorId yields NO out-of-band describe by any RPC tried, and 21c
+> additionally refuses to deliver the nested cursor's row data to a client that
+> never received its describe. The mechanism below was the hypothesis; the
+> empirical result is in the "## S0 findings" section. It is retained here for
+> the record, not as a buildable design.
 
 If 21c is to work, the missing nested describe must be obtained out-of-band. The
 plausible mechanism, by analogy to how the driver already drives an open cursor:
@@ -231,6 +238,109 @@ materialize, or both stay fail-loud. Do NOT silently truncate a nested result.
   (e.g. describe-present-by-remaining-bytes), which is fragile and must be
   unit-pinned with hand-crafted fixtures for both shapes.
 
+## S0 findings (2026-06-22)
+
+Executed the S0 feasibility spike on live 23ai (`localhost:1521/FREEPDB1`,
+`ttcFieldVersion=24`) and live 21c (`localhost:1522/XEPDB1`,
+`ttcFieldVersion=16`). All instrumentation was throwaway and has been fully
+reverted (`git diff --stat -- lib/` shows zero net change); no production code
+was modified. Reproduction fixture: the implicit-result-with-nested-`CURSOR()`
+block from `ref_cursor_implicit_coexistence_integration_test.dart`
+(parent→child, parent 1 has children 10/20/30).
+
+### Reference (node-oracledb) — confirms NO precedent for an out-of-band fetch
+
+Verified the spec's reference claims against the bundled thin client:
+
+- `lib/thin/protocol/messages/withData.js` `processColumnData`
+  (`TNS_DATA_TYPE_CURSOR` branch, L348-364): calls `createCursorFromDescribe(buf)`
+  **unconditionally**, then `readUB2()` for the id. There is NO branch for an
+  id-only nested cursor value — it always expects an inline describe.
+- `createCursorFromDescribe` (withData.js L762-769): calls
+  `processDescribeInfo(buf, resultSet)` (reads the inline describe from the
+  buffer) and sets `requiresFullExecute = true`. The describe MUST already be in
+  the byte stream.
+- `requiresFullExecute` is NOT a describe round trip:
+  `resultSet.js _fetchMoreRows` (L41-46) merely chooses `ExecuteMessage`
+  (full OAL8) over `FetchMessage` (OFETCH) for the FIRST fetch of the
+  already-open cursor; `execute.js writeReExecuteMessage`/`writeExecuteMessage`
+  (L236-281 / L63-199) re-execute the open cursorId and do not re-request a
+  describe.
+
+**Conclusion: node-oracledb has no "fetch the missing nested describe" path.**
+The nested-cursor-inside-implicit-result combination is effectively a
+23ai-and-later capability in the reference client too. The candidate 21c
+mechanism therefore had no reference precedent and had to be observed.
+
+### Wire shapes confirmed (raw bytes)
+
+**EXECUTE of the block** (both versions): returns only the type-27
+implicit-result message carrying the *implicit* cursor's describe — columns
+`ID` (NUMBER, type 2) and `NC` (CURSOR, type 102) — plus the implicit cursor id.
+The fail-loud (`ImplicitResultDecodeException`, "Unsupported SYS_REFCURSOR column
+type 102 for column NC") fires here, at the implicit cursor's *describe*; the
+per-row nested-cursor values are NOT in this response.
+
+**FETCH of the implicit cursor** (the per-row `NC` value):
+
+- **23ai** — INLINE describe present. Each row's `NC` value is
+  `numBytes(0x4C=76) + <76-byte embedded describe> + UB2 cursorId`. Confirmed
+  nested ids 4/5/6 with a full inline describe per row.
+- **21c** — ID-ONLY. Each row's `NC` value is literally `02 01 04`, `02 01 05`,
+  `02 01 06` = `numBytes(0x02) + UB2 cursorId(01 xx)`, **NO embedded describe**.
+  This reproduces the Story 9.4 capture exactly. With the production decoder
+  (which always reads an inline describe) the 21c FETCH shears
+  (`Integer too large: size=7`) and poisons the connection.
+
+### THE EXPERIMENT — bare nested cursorId on a LIVE 21c session
+
+To run the experiment without the shear killing the session, the spike
+temporarily switched the cursor-value decoder to the id-only shape so the 21c
+FETCH completed and the nested cursors (ids 4/5/6) stayed open. Then, on the
+SAME live session, two RPCs were driven against the bare nested cursorId 4
+(parent 1, whose children are 10/20/30):
+
+- **Probe A — fresh full EXECUTE (OAL8), `isQuery=true`, `cursorId=4`, empty SQL
+  (the `requiresFullExecute`/re-execute-open-cursor shape).** Result on 21c:
+  **the server returned NOTHING — the call timed out (0 bytes received).** No
+  DESCRIBE_INFO, no rows, no error. (Same on 23ai.)
+- **Probe B/C — OFETCH (OFETCH RPC) against the bare nested cursorId 4.**
+  Result on 21c: the call returns `isSuccess=true` but the response is
+  `ROW_HEADER` + three **empty** `ROW_DATA` markers (`06 …  07 07 07  04 …`)
+  ending in ORA-01403 — i.e. **NO DESCRIBE_INFO and ZERO column bytes**. The
+  nested cursor's actual data was NOT delivered. Decisive contrast: the
+  byte-identical OFETCH on **23ai** returned the real values
+  (`07 02 c1 0b`=10, `07 02 c1 15`=20, `07 02 c1 1f`=30) — but still NO
+  DESCRIBE_INFO. So even on 23ai the describe only ever exists inline; on 21c
+  neither the describe NOR the row data is retrievable for a cursor the client
+  never received a describe for.
+
+**Answers to the open empirical questions:**
+
+1. *Does an EXECUTE/OFETCH with the existing nested cursorId return a
+   DESCRIBE_INFO + rows on 21c?* **NO.** A full EXECUTE returns nothing (timeout);
+   an OFETCH returns empty rows and never a DESCRIBE_INFO. The missing nested
+   describe cannot be obtained out-of-band on 21c.
+2. *Is the nested cursor still open/valid at outer-drain time?* The cursor id is
+   accepted by the OFETCH RPC (no "invalid cursor" error), so it is live — but it
+   is useless: the server will not describe it nor return its rows to this client.
+3. *Interaction with the close-cursor piggyback and the single-in-flight guard?*
+   The production FETCH of the id-only stream **shears and poisons the
+   connection** before any follow-up RPC is even possible; a poisoned transport
+   refuses all further RPCs. A server cursor id is session-scoped, so the id
+   cannot be retried on another session. Any "extra round trip mid-drain" design
+   (R2/R3) is therefore moot on 21c — there is nothing usable to round-trip for.
+
+### Secondary 23ai sanity check
+
+Confirmed (via the inline-describe shape above) that the 23ai per-row value
+carries a full embedded describe that the existing
+`_readEmbeddedCursorDescribe` machinery already decodes — so lifting the
+`_isSupportedRefCursorColumn` guard would make the 23ai half work with a small
+change, exactly as the spec claims (S1). This was NOT shipped; the guard remains
+intact. It is irrelevant to deliverability because the dual-env rule forbids a
+23ai-only enablement.
+
 ## Decision record
 
 Evaluated 2026-06-21 against baseline `d60e190`. Outcome: **NO-GO for immediate
@@ -241,3 +351,19 @@ could not be performed in the evaluating session; and (2) substantively, the
 so a single autonomous cycle cannot responsibly deliver and validate it. Current
 fail-loud + reaping behaviour left exactly as-is. This plan should drive a
 dedicated epic starting with the S0 feasibility gate.
+
+**S0 outcome (2026-06-22): NO-GO — PERMANENT, EVIDENCE-BACKED DEFERRAL.** The S0
+spike (findings above) settled R1 empirically: on a live 21c server the per-row
+nested-cursor value is id-only (no inline describe), and the missing describe
+**cannot** be obtained out-of-band — a fresh full EXECUTE on the bare nested
+cursorId returns nothing (timeout) and an OFETCH returns empty rows with no
+DESCRIBE_INFO and no data. node-oracledb has no such fetch path either
+(`withData.js processColumnData` always assumes the inline describe). Because
+the absolute dual-env rule forbids shipping a 23ai-only path, and 21c cannot
+materialize this combination at all, **the feature as specified (dual-env) is
+undeliverable.** The epic ends at S0. The driver's current behaviour — fail-loud
+(`oraUnsupportedType`, "column type 102") with B1/B2 cursor-id reaping intact, on
+both versions — is correct and is left exactly as-is. This is a settled
+(not "resolved-by-implementation") deferral: revisit only if a future pre-23
+server build is shown to transmit the nested describe, or the project's
+dual-env support floor moves to 23ai+.
