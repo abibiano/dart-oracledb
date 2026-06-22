@@ -172,7 +172,7 @@ development_status:
   epic-8-retrospective: done  # 2026-06-18 - Retrospective complete. See epic-8-retro-2026-06-18.md
 
   # Epic 9: REF CURSOR & Implicit Results [depends on Epic 8]
-  epic-9: in-progress
+  epic-9: done  # 2026-06-22 — all stories 9.1-9.4 + retrospective complete (see epic-9-retro-2026-06-21.md); status flipped from in-progress
   9-1-ref-cursor-out-bind: done
   9-2-nested-cursors: done
   9-3-implicit-result-sets: done  # 2026-06-19 — code review complete (3-layer adversarial). 4 patches applied (eager-drain cap fail-loud; AC7 decode-failure reaping moved to live _openCursor site + removed dead handler; close() clears _openImplicitResultSets; REF CURSOR+implicit coexistence test), 1 deferred (node-oracledb-style explicit maxRows → 9.4/backlog), 8 dismissed. dart analyze clean; unit 1243/12; integration 23ai 6/6 + 21c 6/6 (focused implicit-result suite).

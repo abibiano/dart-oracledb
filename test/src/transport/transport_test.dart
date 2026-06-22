@@ -676,6 +676,118 @@ void main() {
       });
     });
 
+    group('sendPing FUNCTION-header wire-byte pin', () {
+      // Captures the first outbound packet emitted by sendPing without ever
+      // awaiting sendPing itself: the fake server never replies, so awaiting
+      // would hang on the post-sendData reply probe. We fire-and-forget the
+      // ping (swallowing the inevitable timeout/disconnect error) and assert on
+      // the captured request bytes.
+      //
+      // The captured DATA packet layout (default serverMajorVersion 23):
+      //   bytes[0..1] = TNS length (big-endian, total packet length)
+      //   bytes[4]    = TNS packet type (DATA = 6)
+      //   bytes[8..9] = data-flags (END_OF_RPC default 0x0800)
+      //   bytes[10]   = ttcMsgTypeFunction (0x03)
+      //   bytes[11]   = ttcPing (0x93)
+      //   bytes[12]   = sequence byte (nextSequence() & 0xFF)
+      //   bytes[13]   = UB8 token 0x00 — present only when field version >= 18
+      Future<Uint8List> captureFirstPingPacket(int fieldVersion,
+          {required int expectedSeq}) async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        final firstPacket = Completer<Uint8List>();
+        server.listen((s) {
+          s.listen((data) {
+            if (!firstPacket.isCompleted) {
+              firstPacket.complete(Uint8List.fromList(data));
+            }
+          });
+        });
+        final transport = Transport();
+        await transport.connect('127.0.0.1', server.port,
+            timeout: const Duration(seconds: 2));
+        // connect() may reset the field version during negotiation, so drive
+        // the branch selector AFTER connect returns but BEFORE sendPing builds
+        // the header.
+        transport.debugTtcFieldVersion = fieldVersion;
+        // The sequence counter returns-then-advances starting at 1; pin the
+        // expected outbound byte so the assertion is load-bearing, not a
+        // tautology that re-reads whatever the implementation emitted.
+        expect(transport.debugSequence, equals(expectedSeq),
+            reason: 'fresh transport sequence should be the documented start');
+
+        // Fire-and-forget: the server never replies, so sendPing's reply probe
+        // will time out / the disconnect below will tear the socket down.
+        // Swallow that error so it does not surface as an unhandled async error.
+        unawaited(transport
+            .sendPing(timeout: const Duration(milliseconds: 200))
+            .catchError((_) {}));
+
+        final bytes =
+            await firstPacket.future.timeout(const Duration(seconds: 2));
+        await transport.disconnect();
+        await server.close();
+        return bytes;
+      }
+
+      test('field version >= 18 (23.1+) appends a trailing UB8 0x00 token',
+          () async {
+        // Fresh transport starts at sequence 1; nextSequence() returns 1.
+        final bytes = await captureFirstPingPacket(24, expectedSeq: 1);
+
+        // Parse the framed TNS packet length so the payload boundary is exact,
+        // not hard-indexed past the end.
+        final packetLen = (bytes[0] << 8) | bytes[1];
+        expect(packetLen, equals(bytes.length),
+            reason: 'TNS length field must cover the whole captured packet');
+
+        expect(bytes[4], equals(tnsPacketData),
+            reason: 'ping is framed as a TNS DATA packet');
+        expect(bytes[10], equals(ttcMsgTypeFunction),
+            reason: 'message type FUNCTION (0x03)');
+        expect(bytes[11], equals(ttcPing),
+            reason: 'function code PING (0x93)');
+        expect(bytes[12], equals(1),
+            reason: 'sequence byte from nextSequence() & 0xFF');
+
+        // TTC payload runs from byte 10 (after 8-byte header + 2-byte flags) to
+        // the end of the framed packet: type + function + sequence + UB8 token.
+        const ttcPayloadStart = tnsHeaderSize + 2;
+        final ttcPayloadLen = packetLen - ttcPayloadStart;
+        expect(ttcPayloadLen, equals(4),
+            reason: 'FUNCTION header + trailing UB8 token = 4 bytes');
+        expect(bytes[13], equals(0x00),
+            reason: 'writeUB8(0) emits the single 0x00 length-0 form');
+      });
+
+      test('field version < 18 (pre-23 / 21c) omits the trailing UB8 token',
+          () async {
+        // Fresh transport starts at sequence 1; nextSequence() returns 1.
+        final bytes = await captureFirstPingPacket(17, expectedSeq: 1);
+
+        final packetLen = (bytes[0] << 8) | bytes[1];
+        expect(packetLen, equals(bytes.length),
+            reason: 'TNS length field must cover the whole captured packet');
+
+        expect(bytes[4], equals(tnsPacketData),
+            reason: 'ping is framed as a TNS DATA packet');
+        expect(bytes[10], equals(ttcMsgTypeFunction),
+            reason: 'message type FUNCTION (0x03)');
+        expect(bytes[11], equals(ttcPing),
+            reason: 'function code PING (0x93)');
+        expect(bytes[12], equals(1),
+            reason: 'sequence byte from nextSequence() & 0xFF');
+
+        // TTC payload must end right after the sequence byte: NO trailing UB8.
+        // Computing the boundary from the framed length means a stray UB8 byte
+        // would make this assertion fail (payload would be 4, not 3).
+        const ttcPayloadStart = tnsHeaderSize + 2;
+        final ttcPayloadLen = packetLen - ttcPayloadStart;
+        expect(ttcPayloadLen, equals(3),
+            reason: 'pre-23 FUNCTION header has no trailing UB8 token; '
+                'the payload is exactly one byte shorter than the >=18 branch');
+      });
+    });
+
     group('sendData SDU fragmentation', () {
       test('a TTC message larger than the SDU spans multiple DATA packets',
           () async {
