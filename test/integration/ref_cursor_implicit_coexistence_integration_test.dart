@@ -10,11 +10,13 @@
 ///    [_openImplicitResultSets] group) in lazy `OracleExecuteOptions(resultSet:
 ///    true)` mode — mixed ownership keeps the connection owned until every
 ///    handle closes (AC2).
-///  * A nested `CURSOR(SELECT ...)` column *inside* an implicit result, which
-///    is deferred (Story 9.4 decision) and must fail loud consistently on both
-///    server versions without poisoning the connection (AC3). See
-///    deferred-work.md — pre-23 servers do not transmit the nested cursor's
-///    describe in the implicit-result response.
+///  * A nested `CURSOR(SELECT ...)` column *inside* an implicit result AND
+///    *inside* a REF CURSOR OUT bind, which MATERIALIZE to `List<OracleRow>` on
+///    both server versions (eager + lazy). Pre-23 (21c) DOES transmit the nested
+///    cursor's inline describe at the negotiated field version — verified
+///    against node-oracledb; see spec-nested-cursor-materialization.md
+///    "S0 RECONCILIATION". A genuinely unsupported inner column type still fails
+///    loud consistently on both versions and reaps its cursor id.
 ///  * A pooled connection released while it holds an abandoned REF CURSOR OUT
 ///    bind handle AND an abandoned lazy implicit-result handle — the pool's
 ///    leak guard reaps both so the next borrower gets a clean session (AC4).
@@ -145,6 +147,32 @@ void main() {
           ],
         );
       });
+
+      // Asserts the three parent rows carry the expected materialized nested
+      // cursor rows: parent 1 -> [10,20,30], parent 2 -> [] (empty nested
+      // cursor), parent 3 -> [1..bigChildCount] (multi-round nested drain).
+      void expectNestedShape(List<OracleRow> rows) {
+        expect(rows.map((r) => r['ID']), equals([1, 2, 3]),
+            reason: 'parent rows arrive in id order');
+
+        final nc1 = rows[0]['NC'];
+        expect(nc1, isA<List<OracleRow>>(),
+            reason: 'a nested cursor column materializes to List<OracleRow>');
+        expect((nc1! as List<OracleRow>).map((r) => r['VAL']),
+            equals([10, 20, 30]));
+
+        final nc2 = rows[1]['NC'];
+        expect(nc2, isA<List<OracleRow>>());
+        expect((nc2! as List<OracleRow>), isEmpty,
+            reason: 'an empty nested cursor materializes to []');
+
+        final nc3 = rows[2]['NC']! as List<OracleRow>;
+        expect(nc3, hasLength(bigChildCount),
+            reason: 'a nested cursor larger than the prefetch size is fully '
+                'drained across multiple FETCH rounds');
+        expect(nc3.map((r) => r['VAL']),
+            equals([for (var i = 1; i <= bigChildCount; i++) i]));
+      }
 
       test('lazy mode: a REF CURSOR OUT bind and an implicit result coexist; '
           'both own the connection until each closes (AC2)', () async {
@@ -305,75 +333,62 @@ void main() {
         );
       });
 
-      // AC3 (Story 9.4 decision): nested cursors INSIDE an implicit result are
-      // deferred to a dedicated feature story — materializing them needs the
-      // nested cursor's column structure, which Oracle pre-23 (21c) does not
-      // transmit in the implicit-result response (it ships only a per-row cursor
-      // id and marks the cursor `requiresFullExecute`, i.e. a separate
-      // describe/execute round-trip per nested cursor id). Rather than support
-      // it on one server version and shear the stream on the other, the driver
-      // fails loud consistently on BOTH environments at decode time, before any
-      // row is fetched, so the connection stays usable. See deferred-work.md.
+      // Nested-cursor materialization (spec-nested-cursor-materialization.md,
+      // "S0 RECONCILIATION"): a nested CURSOR() column inside a PL/SQL implicit
+      // result MATERIALIZES to List<OracleRow> on BOTH 23ai and 21c. The per-row
+      // cursor value carries a full inline describe at the negotiated field
+      // version on both servers (node-oracledb parity — verified against the
+      // reference client), so the existing materialization machinery drains it
+      // with no server-version branching.
       test(
-        'eager mode: a nested CURSOR() column inside an implicit result fails '
-        'loud (deferred), leaving the connection reusable — both envs (AC3)',
+        'eager mode: a nested CURSOR() column inside an implicit result '
+        'materializes to List<OracleRow> — both envs',
         () async {
-          // B2 (spec-embedded-cursor-reaping-on-failure): the fail-loud must
-          // ALSO reap the implicit cursor's server id — the describe is parsed
-          // far enough to reach the trailing UB2 id before the error is raised,
-          // so the id rides the close-cursor piggyback instead of leaking.
-          final pendingBefore = connection.debugPendingCloseCount;
-          await expectLater(
-            connection.execute(nestedImplicitBlock),
-            throwsA(
-              isA<OracleException>()
-                  .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-                  .having(
-                    (e) => e.message,
-                    'message',
-                    contains('column type 102'),
-                  ),
-            ),
-            reason:
-                'nested cursors inside implicit results are deferred and must '
-                'fail loud identically on Oracle 23ai and Oracle 21c',
-          );
-          expect(
-            connection.debugPendingCloseCount,
-            greaterThanOrEqualTo(pendingBefore + 1),
-            reason:
-                'the failing implicit cursor id is queued for close, not '
-                'leaked (B2)',
-          );
+          final result = await connection.execute(nestedImplicitBlock);
+          expect(result.implicitResults, hasLength(1));
+          final rows = result.implicitResults.single as List<OracleRow>;
+          expectNestedShape(rows);
 
-          // The fail-loud happens while decoding the execute response (before any
-          // FETCH), so the connection is NOT poisoned and a fresh query succeeds.
-          // The queued cursor id rides this next execute's piggyback and drains.
+          // Connection is fully usable afterwards (nested cursor ids reaped).
           final after = await connection.execute(
             'SELECT COUNT(*) AS C FROM $parentTab',
           );
-          expect(
-            after.rows.single['C'],
-            equals(3),
-            reason: 'the decode-time fail-loud leaves the connection reusable',
-          );
-          expect(
-            connection.debugPendingCloseCount,
-            equals(0),
-            reason: 'the reaped implicit cursor id rode the next execute',
-          );
+          expect(after.rows.single['C'], equals(3));
         },
       );
 
       test(
-        'eager mode: a nested CURSOR() column inside a REF CURSOR OUT bind fails '
-        'loud (deferred) AND reaps the OUT-bind cursor id — both envs (B1)',
+        'lazy mode: a nested CURSOR() column inside an implicit result '
+        'materializes when the handle is drained — both envs',
+        () async {
+          final result = await connection.execute(
+            nestedImplicitBlock,
+            null,
+            const OracleExecuteOptions(resultSet: true),
+          );
+          expect(result.implicitResults, hasLength(1));
+          final rs = result.implicitResults.single as OracleResultSet;
+          try {
+            expectNestedShape(await rs.getRows());
+          } finally {
+            await rs.close();
+          }
+
+          final after = await connection.execute(
+            'SELECT COUNT(*) AS C FROM $parentTab',
+          );
+          expect(after.rows.single['C'], equals(3));
+        },
+      );
+
+      test(
+        'a nested CURSOR() column inside a REF CURSOR OUT bind materializes '
+        'through the OUT-bind handle — both envs',
         () async {
           // A procedure whose OUT SYS_REFCURSOR opens a SELECT carrying a nested
-          // CURSOR() column. Same deferred-feature fail-loud as the implicit
-          // path, but on the REF CURSOR OUT-bind decode path. The OUT bind's own
-          // server cursor id is encoded AFTER the embedded describe, so the fix
-          // must read it before raising the validation error to reap it.
+          // CURSOR() column. The OUT bind is wrapped as a lazy OracleResultSet;
+          // draining it materializes the nested cursor per fetched batch via the
+          // _wrapRefCursorOutBinds onBatchDecoded wiring.
           final nestedRcProc = uniqueTableName('cox_nrc');
           await connection.execute('''
             CREATE OR REPLACE PROCEDURE $nestedRcProc (p_rc OUT SYS_REFCURSOR) IS
@@ -397,33 +412,66 @@ void main() {
             }
           });
 
+          final result = await connection.execute(
+            'BEGIN $nestedRcProc(:rc); END;',
+            {'rc': OracleBind.out(type: OracleDbType.cursor)},
+          );
+          final rs = result.outBinds['rc']! as OracleResultSet;
+          try {
+            expectNestedShape(await rs.getRows());
+          } finally {
+            await rs.close();
+          }
+
+          final after = await connection.execute(
+            'SELECT COUNT(*) AS C FROM $parentTab',
+          );
+          expect(after.rows.single['C'], equals(3));
+        },
+      );
+
+      // The guard is NOT blanket-lifted: a GENUINELY unsupported column type in
+      // an embedded describe still fails loud (and reaps its cursor id),
+      // identically on both servers — proving embedded-cursor support is
+      // selected by the describe's content, never by server version.
+      test(
+        'a genuinely unsupported column type in an implicit-result describe '
+        'still fails loud AND reaps the cursor id — both envs (B2 preserved)',
+        () async {
+          // INTERVAL DAY TO SECOND is not a supported embedded-describe column
+          // type. An implicit result projecting it fails loud at decode time
+          // (before any FETCH), reaping the implicit cursor id (B2).
+          final unsupportedBlock = '''
+            DECLARE
+              c_impl SYS_REFCURSOR;
+            BEGIN
+              OPEN c_impl FOR
+                SELECT p.id, TO_DSINTERVAL('1 02:03:04') AS iv
+                FROM $parentTab p
+                ORDER BY p.id;
+              DBMS_SQL.RETURN_RESULT(c_impl);
+            END;
+          ''';
           final pendingBefore = connection.debugPendingCloseCount;
           await expectLater(
-            connection.execute('BEGIN $nestedRcProc(:rc); END;', {
-              'rc': OracleBind.out(type: OracleDbType.cursor),
-            }),
+            connection.execute(unsupportedBlock),
             throwsA(
-              isA<OracleException>()
-                  .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-                  .having(
-                    (e) => e.message,
-                    'message',
-                    contains('column type 102'),
-                  ),
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'errorCode',
+                oraUnsupportedType,
+              ),
             ),
             reason:
-                'nested cursors inside REF CURSOR OUT binds are deferred and '
-                'must fail loud identically on Oracle 23ai and Oracle 21c',
+                'an unsupported column type fails loud identically on '
+                'Oracle 23ai and Oracle 21c',
           );
           expect(
             connection.debugPendingCloseCount,
             greaterThanOrEqualTo(pendingBefore + 1),
-            reason:
-                'the failing REF CURSOR OUT bind server cursor id is queued for '
-                'close, not leaked (B1)',
+            reason: 'the failing implicit cursor id is queued for close (B2)',
           );
 
-          // Connection stays reusable; the queued id rides the next execute.
           final after = await connection.execute(
             'SELECT COUNT(*) AS C FROM $parentTab',
           );
@@ -431,7 +479,7 @@ void main() {
           expect(
             connection.debugPendingCloseCount,
             equals(0),
-            reason: 'the reaped REF CURSOR cursor id rode the next execute',
+            reason: 'the reaped implicit cursor id rode the next execute',
           );
         },
       );

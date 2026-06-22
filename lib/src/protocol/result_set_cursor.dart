@@ -43,6 +43,18 @@ class ResultSetCursor {
   /// batches stay raw — locators are left for the caller to materialize once
   /// over the fully-drained result (the eager `execute()` path, preserving
   /// result-wide locator dedup).
+  ///
+  /// When [requiresFullExecute] is true, the FIRST fetch round is issued as a
+  /// full EXECUTE (OAL8) on the open cursor id rather than a plain OFETCH; every
+  /// continuation round is a plain OFETCH. This is node-oracledb's
+  /// `requiresFullExecute` (`reference/node-oracledb/lib/thin/resultSet.js`,
+  /// set by `withData.js createCursorFromDescribe`): a describe-created cursor
+  /// whose rows carry nested `CURSOR()` (Oracle type 102) columns needs it on
+  /// pre-23 (21c), where the per-row nested-cursor value ships its INLINE
+  /// describe ONLY in a full-EXECUTE response — a plain OFETCH yields an id-only
+  /// `numBytes + cursorId` that the decoder shears on. 23ai is tolerant (inline
+  /// describe even on OFETCH). See `spec-nested-cursor-materialization.md`
+  /// "S0 RECONCILIATION".
   ResultSetCursor({
     required Transport transport,
     required int cursorId,
@@ -52,12 +64,14 @@ class ResultSetCursor {
     required int prefetchRows,
     required bool preserveTimestampTimeZone,
     required bool materializePerBatch,
+    bool requiresFullExecute = false,
     Future<void> Function(List<List<Object?>> batch)? onBatchDecoded,
     Duration? fetchTimeout = const Duration(minutes: 2),
   })  : _transport = transport,
         _cursorId = cursorId,
         _columns = columns,
         _serverHasMoreRows = serverHasMoreRows,
+        _requiresFullExecute = requiresFullExecute,
         _prefetchRows = prefetchRows,
         _preserveTimestampTimeZone = preserveTimestampTimeZone,
         _materializePerBatch = materializePerBatch,
@@ -94,6 +108,13 @@ class ResultSetCursor {
   /// Whether the server reported more rows are available beyond what has been
   /// fetched so far. Once false, no further FETCH is ever issued.
   bool _serverHasMoreRows;
+
+  /// Whether the FIRST fetch must be a full EXECUTE (OAL8) instead of a plain
+  /// OFETCH. Cleared after that first fetch — continuation rounds always OFETCH
+  /// (node-oracledb clears `requiresFullExecute` after `_fetchMoreRows` picks
+  /// the ExecuteMessage once). See the constructor doc and CHANGE 1 in
+  /// `spec-nested-cursor-materialization.md` "S0 RECONCILIATION".
+  bool _requiresFullExecute;
 
   /// Last row of the most recently buffered batch, used as the duplicate-column
   /// dedup source for the first row of the next FETCH round (Oracle may encode
@@ -267,14 +288,47 @@ class ResultSetCursor {
   bool get maxRowsCapped => _maxRowsCapped;
 
   Future<void> _fetchNextBatch() async {
-    final fetched = await _transport.fetchRows(
-      _cursorId,
-      _prefetchRows,
-      columns: _columns,
-      timeout: _fetchTimeout,
-      preserveTimestampTimeZone: _preserveTimestampTimeZone,
-      previousRoundLastRow: _previousRoundLastRow,
-    );
+    // node-oracledb `requiresFullExecute`: a describe-created cursor whose rows
+    // carry nested `CURSOR()` (type 102) columns ships the per-row nested
+    // describe INLINE only in a full-EXECUTE (OAL8) response on pre-23 (21c). A
+    // plain OFETCH there yields an id-only nested value the decoder shears on
+    // ("Integer too large: size=7"). So the FIRST fetch is a full EXECUTE
+    // (OAL8, ttcFuncExecute=94) on the open cursor — `sendExecute('', isQuery:
+    // true, cursorId: nonzero)`. Because no SQL travels, that OAL8 carries the
+    // FETCH option but NOT the EXECUTE/PARSE bits (node-oracledb gates EXECUTE on
+    // `stmt.sql`; see ExecuteRequest.encode's `hasSql` branch), which is exactly
+    // the describe-created-cursor first fetch node sends. Continuation rounds use
+    // plain OFETCH (we clear the flag below, matching node-oracledb clearing
+    // `requiresFullExecute` after the first `_fetchMoreRows`). The full-EXECUTE
+    // ExecuteResponse has the same shape (rows + moreRowsToFetch) as a fetch
+    // response, so all downstream handling is identical. 23ai is tolerant
+    // (inline describe even on OFETCH). See
+    // `spec-nested-cursor-materialization.md` "S0 RECONCILIATION".
+    //
+    // KNOWN pre-23 limitation: only the FIRST fetch is a full EXECUTE. An OUTER
+    // cursor that itself carries nested-cursor columns AND returns MORE rows
+    // than `prefetchRows` could hit id-only nested values on a continuation
+    // OFETCH on 21c. Validated fixtures keep the outer cursor at or below the
+    // prefetch, so this edge is not exercised (and not tested) here.
+    final fetched = _requiresFullExecute
+        ? await _transport.sendExecute(
+            '',
+            isQuery: true,
+            cursorId: _cursorId,
+            expectedColumns: _columns,
+            prefetchRows: _prefetchRows,
+            timeout: _fetchTimeout,
+            preserveTimestampTimeZone: _preserveTimestampTimeZone,
+          )
+        : await _transport.fetchRows(
+            _cursorId,
+            _prefetchRows,
+            columns: _columns,
+            timeout: _fetchTimeout,
+            preserveTimestampTimeZone: _preserveTimestampTimeZone,
+            previousRoundLastRow: _previousRoundLastRow,
+          );
+    _requiresFullExecute = false; // first fetch only; continuation uses OFETCH
     if (!fetched.isSuccess) {
       _fetchFailure = fetched;
       _failed = true;

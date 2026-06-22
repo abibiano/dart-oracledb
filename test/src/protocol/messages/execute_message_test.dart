@@ -3080,18 +3080,20 @@ void main() {
     });
 
     test('a bad describe takes fail-loud priority over the id-0 check', () {
-      // Fail-loud IDENTITY preserved: an unsupported nested-cursor describe
+      // Fail-loud IDENTITY preserved: an unsupported embedded-describe column
       // throws its OWN validation error (the SAME error the inline strict
       // describe threw before the id was read), NOT the id-0 error, even when
       // the trailing id is 0. cursorId 0 is carried but harmless (filtered when
       // queued). Regression guard against re-introducing an id-0-wins ordering.
+      // LONG (type 8) is the unsupported column here — nested CURSOR columns are
+      // now supported and materialized, so they no longer drive this fail-loud.
       final payload = _buildPayload([
         _ioVector([16]),
         [
           ttcMsgTypeRowData,
           ..._cursorOutBindValue([
-            _columnInfo(name: 'NC', oraType: oraTypeCursor, maxSize: 0),
-          ], 0), // nested cursor column AND id 0
+            _columnInfo(name: 'L', oraType: oraTypeLong, maxSize: 4000),
+          ], 0), // unsupported column AND id 0
           ..._ub4(0),
         ],
         _errorMessage(errorNum: 0),
@@ -3108,7 +3110,7 @@ void main() {
         throwsA(
           isA<EmbeddedCursorDecodeException>()
               .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-              .having((e) => e.message, 'message', contains('column type 102'))
+              .having((e) => e.message, 'message', contains('column type 8'))
               .having((e) => e.cursorId, 'cursorId', 0),
         ),
       );
@@ -3219,13 +3221,16 @@ void main() {
       },
     );
 
-    // Story 9.4 keeps nested cursor columns inside embedded cursor describes
-    // fail-loud for both REF CURSOR OUT binds and implicit results. A REF
-    // CURSOR OUT bind has no nested-cursor materialization wiring
-    // (`_wrapRefCursorOutBinds` omits `onBatchDecoded`), so this must not leak
-    // un-materialized DecodedCursorResult values into the rows.
+    // Nested cursor columns inside embedded cursor describes are now SUPPORTED
+    // (materialized) on both 23ai and 21c — the per-row value carries the inline
+    // describe at the negotiated field version (node-oracledb parity; see
+    // spec-nested-cursor-materialization.md "S0 RECONCILIATION"). The REF CURSOR
+    // OUT bind decode therefore yields a DecodedCursorResult whose describe
+    // includes the nested CURSOR(102) column; the rows (and each row's nested
+    // cursor) are materialized lazily on FETCH, not in the execute response.
     test(
-      'a nested cursor column inside a REF CURSOR OUT bind still fails loud',
+      'a nested cursor column inside a REF CURSOR OUT bind decodes to a '
+      'DecodedCursorResult (no longer fails loud)',
       () {
         final payload = _buildPayload([
           _ioVector([16]),
@@ -3240,27 +3245,23 @@ void main() {
           _errorMessage(errorNum: 0),
           [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
         ]);
-        // Fail-loud preserved on the nested CURSOR(102) column AND the OUT
-        // bind's own cursor id (42) is carried for reaping.
-        expect(
-          () => decodeExecuteResponse(
-            payload,
-            isQuery: false,
-            bindMetadata: const [
-              BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
-            ],
-          ),
-          throwsA(
-            isA<EmbeddedCursorDecodeException>()
-                .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-                .having(
-                  (e) => e.message,
-                  'message',
-                  contains('column type 102'),
-                )
-                .having((e) => e.cursorId, 'cursorId', 42),
-          ),
+        final r = decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
+          ],
         );
+        final decoded = r.outBindValues.single;
+        expect(decoded, isA<DecodedCursorResult>());
+        final cursor = decoded! as DecodedCursorResult;
+        expect(cursor.cursorId, equals(42));
+        expect(cursor.columns.map((c) => c.name), equals(['ID', 'NC']));
+        expect(cursor.columns[1].oracleType, equals(oraTypeCursor),
+            reason: 'the nested CURSOR(102) column is kept in the describe');
+        // Rows (and the nested cursor) are materialized lazily on FETCH, not
+        // eagerly in the execute response.
+        expect(r.rows, isEmpty);
       },
     );
   });
@@ -3452,9 +3453,11 @@ void main() {
       'a bad descriptor after a good one carries BOTH ids (prior + current)',
       () {
         // First result decodes cleanly (id 701); the second fails strict
-        // validation (nested CURSOR column, id 702). Both ids must be queued
+        // validation (unsupported LONG column, id 702). Both ids must be queued
         // for close so neither leaks. Proven-to-fail before the fix: the old
         // decoder carried only the prior id [701] and dropped the current 702.
+        // (LONG is the unsupported type — nested CURSOR columns are now
+        // supported and materialized, so they no longer drive this fail-loud.)
         final payload = _buildPayload([
           _implicitResultSet([
             (
@@ -3465,7 +3468,7 @@ void main() {
             ),
             (
               columns: [
-                _columnInfo(name: 'NC', oraType: oraTypeCursor, maxSize: 0),
+                _columnInfo(name: 'L', oraType: oraTypeLong, maxSize: 4000),
               ],
               cursorId: 702,
             ),
@@ -3481,7 +3484,7 @@ void main() {
                 .having(
                   (e) => e.message,
                   'message',
-                  contains('column type 102'),
+                  contains('column type 8'),
                 )
                 .having((e) => e.cursorIds, 'cursorIds', [701, 702]),
           ),
@@ -3543,16 +3546,14 @@ void main() {
       );
     });
 
-    // Story 9.4: a nested CURSOR(SELECT ...) column inside an implicit result
-    // fails loud, exactly like one inside a REF CURSOR OUT bind. Materializing
-    // it would need the nested cursor's column structure, which Oracle pre-23
-    // (21c) does not transmit in the implicit-result response (it ships only a
-    // per-row cursor id), so this is deferred to a dedicated nested-cursor-in-
-    // implicit-results feature story. Keeping it fail-loud here makes the
-    // behaviour consistent across Oracle 23ai and 21c rather than working on
-    // one server version and shearing the stream on the other.
-    test('a nested cursor column inside an implicit result fails loud '
-        '(deferred — see deferred-work.md)', () {
+    // A nested CURSOR(SELECT ...) column inside an implicit result is now
+    // SUPPORTED: the describe accepts the CURSOR(102) column and accumulates the
+    // descriptor; the per-row cursor value (carrying its own inline describe at
+    // the negotiated field version on both 23ai and 21c — node-oracledb parity)
+    // is materialized lazily/eagerly on FETCH by the connection layer, not in
+    // this decode pass. See spec-nested-cursor-materialization.md.
+    test('a nested cursor column inside an implicit result is accepted in the '
+        'describe (materialized on FETCH)', () {
       final payload = _buildPayload([
         _implicitResultSet([
           (
@@ -3566,14 +3567,15 @@ void main() {
         _errorMessage(errorNum: 0),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
-      expect(
-        () => decodeExecuteResponse(payload, isQuery: false),
-        throwsA(
-          isA<ImplicitResultDecodeException>()
-              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-              .having((e) => e.message, 'message', contains('column type 102')),
-        ),
-      );
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.implicitResults, hasLength(1));
+      final descriptor = r.implicitResults.single;
+      expect(descriptor.cursorId, equals(701));
+      expect(descriptor.columns.map((c) => c.name), equals(['ID', 'NC']));
+      expect(descriptor.columns[1].oracleType, equals(oraTypeCursor),
+          reason: 'the nested CURSOR(102) column is kept in the describe');
+      expect(cursorColumnIndicesOf(descriptor.columns), equals([1]),
+          reason: 'the cursor column is flagged for FETCH-time materialization');
     });
   });
 

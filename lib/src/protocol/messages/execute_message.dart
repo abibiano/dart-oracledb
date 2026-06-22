@@ -208,7 +208,22 @@ class ExecuteRequest extends Message {
       // stays clear.
       options |= ttcExecOptionDefine | ttcExecOptionNotPlSql;
     } else {
-      options |= ttcExecOptionExecute;
+      // node-oracledb writeExecuteMessage gates EXECUTE (and the implicit-
+      // resultset DML flag) on `stmt.sql` being present: it sets them only
+      // `if (!parseOnly && stmt.sql)`. A describe-created cursor re-executed for
+      // its FIRST fetch (`requiresFullExecute`) has an OPEN cursor id and NO SQL
+      // — so it must NOT carry EXECUTE; it carries only FETCH (a full EXECUTE on
+      // the open cursor with EXECUTE|FETCH semantics minus the EXECUTE bit,
+      // which is exactly the OAL8 the 21c server accepts to ship the inline
+      // nested describe). Setting EXECUTE without SQL on an open cursor draws
+      // ORA-01059 ("parse expected before a bind or execute"). `hasSql` mirrors
+      // node's `stmt.sql`: true for a full parse (cursorId == 0) or a cached-
+      // cursor re-execute that re-sends SQL bytes, false for a describe-created
+      // cursor's first fetch.
+      if (hasSql) {
+        options |= ttcExecOptionExecute;
+        dmlOptions |= ttcExecOptionImplicitResultset;
+      }
       if (cursorId == 0) {
         options |= ttcExecOptionParse;
       }
@@ -222,7 +237,6 @@ class ExecuteRequest extends Message {
       if (numParams > 0) {
         options |= ttcExecOptionBind;
       }
-      dmlOptions |= ttcExecOptionImplicitResultset;
     }
 
     buffer.writeUB4(options);
@@ -1834,14 +1848,20 @@ bool _isSupportedRefCursorColumn(ColumnMetadata col) {
     case oraTypeClob:
       return col.csfrm != ttcCsfrmNChar;
     // A nested CURSOR(SELECT ...) column inside an embedded cursor describe
-    // (REF CURSOR OUT bind OR implicit result) is rejected. Materializing it
-    // would require the nested cursor's column structure, which Oracle pre-23
-    // (21c) does NOT transmit in the implicit-result response — it ships only a
-    // per-row cursor id and marks the cursor `requiresFullExecute`, i.e. a
-    // separate describe/execute round-trip per nested cursor id. That pre-23
-    // protocol capability is out of scope; nested cursors inside implicit
-    // results are deferred (Story 9.4 decision — see deferred-work.md). The
-    // default fail-loud path keeps behaviour consistent across 23ai and 21c.
+    // (REF CURSOR OUT bind OR implicit result) IS supported. The per-row cursor
+    // value carries a full INLINE describe followed by the server cursor id on
+    // BOTH 23ai and 21c at the negotiated field version (node-oracledb parity:
+    // `withData.js processColumnData` reads `createCursorFromDescribe` then the
+    // UB2 id; the rows are first-fetched via `requiresFullExecute`). The earlier
+    // belief that 21c omits the inline describe was a mis-measurement (see
+    // spec-nested-cursor-materialization.md "S0 RECONCILIATION"). The value
+    // decodes to a [DecodedCursorResult] (`_decodeValueByOraType` oraTypeCursor
+    // branch), which the existing materialization machinery drains
+    // (`_materializeNestedCursorsInBatch` / `_drainNestedCursor`), recursively
+    // for deeper nesting. A genuinely unsupported inner column type still falls
+    // through to the fail-loud `default` below — consistently on both versions.
+    case oraTypeCursor:
+      return true;
     default:
       return false;
   }

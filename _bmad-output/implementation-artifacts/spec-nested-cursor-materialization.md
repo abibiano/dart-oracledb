@@ -2,7 +2,7 @@
 title: 'Materialize nested CURSOR() columns inside REF CURSOR OUT binds and PL/SQL implicit results'
 type: 'feature-plan'
 created: '2026-06-21'
-status: 'active'  # REOPENED 2026-06-22: the S0 "NO-GO" was RETRACTED — it rested on a mis-instrumented spike. The reference client (node-oracledb 7.0.0 thin) materializes this on 21c at the SAME negotiated field version 16 (the inline describe IS present). Deliverable dual-env, no new protocol capability. See "## S0 RECONCILIATION (2026-06-22)".
+status: 'implemented'  # 2026-06-22: shipped dual-env (23ai + 21c full integration green). The S0 "NO-GO" was RETRACTED (mis-instrumented spike); node-oracledb materializes this on 21c at field version 16. Fix = lift the oraTypeCursor guard + decode the inline describe + reuse the Story 9.2 drain + `requiresFullExecute` full-EXECUTE first-fetch (the one real protocol addition). See "## S0 RECONCILIATION" and "## Implementation (2026-06-22)".
 baseline_commit: d60e19091e1446038f083e2b3a4587874cac4ab2
 context:
   - _bmad-output/implementation-artifacts/deferred-work.md (deferred item "A")
@@ -416,6 +416,43 @@ mis-offset `02 01 04` that "confirmed" the assumption; its EXECUTE probe didn't
 match the reference message builder so it timed out. It never first observed what
 the reference client actually does. Checking node-oracledb FIRST (the standing
 project rule) would have prevented the false NO-GO outright.
+
+## Implementation (2026-06-22)
+
+Shipped and validated on BOTH servers (full integration: 23ai 391 pass / 8 skip,
+21c 392 pass / 7 skip; unit 1293 pass; `dart analyze` clean). The fix was small
+and content-driven (never server-version-branched):
+
+1. **Lift the guard** — `_isSupportedRefCursorColumn` now returns `true` for
+   `oraTypeCursor` (`lib/src/protocol/messages/execute_message.dart`). The
+   per-row cursor value already decodes to a `DecodedCursorResult` via the
+   existing `_decodeValueByOraType` oraTypeCursor branch + `_readEmbeddedCursorDescribe`.
+2. **Reuse the Story 9.2 drain** — `_materializeNestedCursorsInBatch` /
+   `_drainNestedCursor` materialize the nested cursor; `_drainNestedCursor` gained
+   a recursive pass so deeper nesting also materializes
+   (`lib/src/connection.dart`).
+3. **REF CURSOR OUT-bind wiring** — `_wrapRefCursorOutBinds` now threads
+   `onBatchDecoded` (S3) so OUT-bind result sets materialize nested cursors like
+   implicit results.
+4. **`requiresFullExecute` first-fetch** (the one new protocol capability) —
+   `ResultSetCursor` gained a `requiresFullExecute` flag: when the describe
+   carries nested cursor columns (`cursorColumnIndicesOf(...).isNotEmpty`), the
+   FIRST fetch is a full EXECUTE (OAL8) on the open cursor id
+   (`sendExecute('', isQuery: true, cursorId: …)`) instead of a plain OFETCH,
+   then continuation rounds OFETCH. On pre-23 (21c) the per-row nested describe
+   ships INLINE only in a full-EXECUTE response; a plain OFETCH yields id-only
+   and shears. `ExecuteRequest.encode` was corrected to gate the EXECUTE option
+   on `hasSql` (mirroring node-oracledb `writeExecuteMessage` gating on
+   `stmt.sql`), so the SQL-less open-cursor EXECUTE carries FETCH-only and
+   avoids ORA-01059. Set at the four describe-created-cursor sites in
+   `lib/src/connection.dart`.
+
+Fail-loud + B1/B2 reaping preserved for genuinely unsupported inner column types
+(driven by describe content). **Known pre-23 limitation:** only the first fetch
+is a full EXECUTE — an outer cursor that itself carries nested-cursor columns AND
+exceeds `prefetchRows` (50) could hit id-only nested values on a continuation
+OFETCH on 21c; not exercised by current fixtures (outer ≤ prefetch). Documented
+in code.
 
 ## Decision record
 

@@ -419,6 +419,12 @@ class OracleConnection {
       // id — its rows arrive on the first continuation FETCH. Seed the engine
       // with an empty first batch and serverHasMoreRows so the first read pulls
       // a batch (node-oracledb createCursorFromDescribe: moreRowsToFetch = true).
+      //
+      // A REF CURSOR whose SELECT projects a CURSOR() column carries cursor-
+      // typed columns; materialize them per fetched batch, mirroring
+      // `_wrapImplicitResultsLazy` and the streaming SELECT path. Null (no
+      // per-batch work) for the common scalar/LOB REF CURSOR.
+      final nestedCursorIndices = cursorColumnIndicesOf(decoded.columns);
       final cursor = ResultSetCursor(
         transport: _transport,
         cursorId: decoded.cursorId,
@@ -428,13 +434,16 @@ class OracleConnection {
         prefetchRows: _defaultPrefetchRows,
         preserveTimestampTimeZone: _preserveTimestampTimeZone,
         materializePerBatch: true,
-        // No `onBatchDecoded`: a REF CURSOR OUT bind result set (Story 9.1)
-        // is a cursor-backed handle whose rows are plain scalar/LOB rows, NOT
-        // SELECT rows carrying embedded cursor columns. It must not run the
-        // eager nested-cursor materialization path. (A nested cursor column
-        // inside a REF CURSOR already fails loud at decode —
-        // `_isSupportedRefCursorColumn` rejects `oraTypeCursor` — so its
-        // cursorColumnIndices are structurally empty regardless.)
+        // node-oracledb requiresFullExecute: when this describe-created cursor
+        // carries nested CURSOR() columns, its FIRST fetch must be a full
+        // EXECUTE so pre-23 (21c) ships the per-row nested describe inline (a
+        // plain OFETCH would shear). Scalar/LOB REF CURSORs (no cursor columns)
+        // stay on plain OFETCH.
+        requiresFullExecute: nestedCursorIndices.isNotEmpty,
+        onBatchDecoded: nestedCursorIndices.isEmpty
+            ? null
+            : (batch) =>
+                  _materializeNestedCursorsInBatch(batch, nestedCursorIndices),
       );
       final rs = OracleResultSet.fromCursor(
         connection: this,
@@ -489,9 +498,10 @@ class OracleConnection {
   /// id — same multi-batch FETCH continuation, per-batch LOB materialization,
   /// and fail-loud contract as any top-level result set (seeded empty with
   /// `serverHasMoreRows: true`, exactly as a REF CURSOR OUT bind: rows arrive on
-  /// the first FETCH). The nested cursor never carries its own cursor columns
-  /// (`onBatchDecoded` is omitted) — `_isSupportedRefCursorColumn` rejects a
-  /// cursor-typed embedded column, so nesting cannot recurse here.
+  /// the first FETCH). If the nested cursor's own describe carries cursor-typed
+  /// columns (a `CURSOR()` nested inside this nested cursor), they are drained
+  /// recursively over the same machinery — matching node-oracledb, which
+  /// materializes nested cursors to arbitrary depth.
   ///
   /// The nested cursor id is queued for the existing close-cursor piggyback in a
   /// `finally`, so it is reaped whether the drain succeeds or throws (a failed
@@ -500,6 +510,11 @@ class OracleConnection {
   Future<List<OracleRow>> _drainNestedCursor(
     DecodedCursorResult decoded,
   ) async {
+    // A nested cursor can itself project a CURSOR() column. Computed once here
+    // so it also drives requiresFullExecute below (pre-23 needs the inline
+    // nested describe, which only a full EXECUTE carries) and the post-fetch
+    // deeper materialization.
+    final deeperCursorIndices = cursorColumnIndicesOf(decoded.columns);
     final nested = ResultSetCursor(
       transport: _transport,
       cursorId: decoded.cursorId,
@@ -509,9 +524,20 @@ class OracleConnection {
       prefetchRows: _defaultPrefetchRows,
       preserveTimestampTimeZone: _preserveTimestampTimeZone,
       materializePerBatch: true,
+      // node-oracledb requiresFullExecute: when this nested cursor itself
+      // carries deeper CURSOR() columns, its FIRST fetch must be a full EXECUTE
+      // so pre-23 (21c) ships the deeper describe inline (a plain OFETCH would
+      // shear). A scalar/LOB nested cursor stays on plain OFETCH.
+      requiresFullExecute: deeperCursorIndices.isNotEmpty,
     );
     try {
       final rawRows = await nested.nextAllRowsData();
+      // Resolve any deeper CURSOR() columns with the same eager pass, recursing
+      // through this method (the close queue dedupes ids, so recursion never
+      // double-reaps).
+      if (deeperCursorIndices.isNotEmpty) {
+        await _materializeNestedCursorsInBatch(rawRows, deeperCursorIndices);
+      }
       final builder = OracleRowBuilder(decoded.columns);
       return rawRows.map(builder.build).toList();
     } finally {
@@ -564,6 +590,12 @@ class OracleConnection {
       prefetchRows: _defaultPrefetchRows,
       preserveTimestampTimeZone: _preserveTimestampTimeZone,
       materializePerBatch: false,
+      // node-oracledb requiresFullExecute: when this implicit result carries
+      // nested CURSOR() columns, its FIRST fetch must be a full EXECUTE so
+      // pre-23 (21c) ships the per-row nested describe inline (a plain OFETCH
+      // would shear). Scalar/LOB implicit results stay on plain OFETCH.
+      requiresFullExecute:
+          cursorColumnIndicesOf(descriptor.columns).isNotEmpty,
     );
     // maxRows (node-oracledb parity): a positive N caps this implicit result at
     // exactly N rows and stops fetching once N is reached; 0 = unlimited.
@@ -643,6 +675,11 @@ class OracleConnection {
         prefetchRows: prefetchRows,
         preserveTimestampTimeZone: _preserveTimestampTimeZone,
         materializePerBatch: true,
+        // node-oracledb requiresFullExecute: when this implicit result carries
+        // nested CURSOR() columns, its FIRST fetch must be a full EXECUTE so
+        // pre-23 (21c) ships the per-row nested describe inline (a plain OFETCH
+        // would shear). Scalar/LOB implicit results stay on plain OFETCH.
+        requiresFullExecute: nestedCursorIndices.isNotEmpty,
         // Materialize cursor-valued columns in each fetched batch, mirroring the
         // streaming SELECT path. Null (no per-batch work) for the common
         // scalar/LOB implicit result.
