@@ -369,6 +369,64 @@ void main() {
             reason: 'AUTH_PASSWORD must be in AUTH_PHASE_TWO request');
       });
 
+      test('SESSION_CLIENT_CHARSET value is driven by ttcCharsetUtf8 (873)',
+          () {
+        // AC5: AUTH_PHASE_TWO must encode SESSION_CLIENT_CHARSET=873, sourced
+        // from the ttcCharsetUtf8 constant rather than an unexplained literal.
+        expect(ttcCharsetUtf8, equals(873),
+            reason: 'Primary client charset constant must be AL32UTF8 (873)');
+
+        final request = AuthPhaseTwoRequest(
+          encryptedProof: mockProof,
+          sessionKey: mockSessionKey,
+          sequence: 2,
+        );
+        final bytes = request.toBytes();
+
+        // Locate the SESSION_CLIENT_CHARSET key name.
+        final keyName = utf8.encode('SESSION_CLIENT_CHARSET');
+        int keyIndex = -1;
+        for (int i = 0; i <= bytes.length - keyName.length; i++) {
+          bool match = true;
+          for (int j = 0; j < keyName.length; j++) {
+            if (bytes[i + j] != keyName[j]) {
+              match = false;
+              break;
+            }
+          }
+          if (match) {
+            keyIndex = i;
+            break;
+          }
+        }
+        expect(keyIndex, greaterThan(-1),
+            reason: 'SESSION_CLIENT_CHARSET key must be present');
+
+        // The value follows the key as a length-prefixed key-value pair. It
+        // must equal ttcCharsetUtf8.toString() ("873").
+        final expectedValue = utf8.encode(ttcCharsetUtf8.toString());
+        final searchStart = keyIndex + keyName.length;
+        final searchEnd = (searchStart + 16).clamp(0, bytes.length);
+        bool valueFound = false;
+        for (int i = searchStart; i <= searchEnd - expectedValue.length; i++) {
+          bool match = true;
+          for (int j = 0; j < expectedValue.length; j++) {
+            if (bytes[i + j] != expectedValue[j]) {
+              match = false;
+              break;
+            }
+          }
+          if (match) {
+            valueFound = true;
+            break;
+          }
+        }
+        expect(valueFound, isTrue,
+            reason:
+                'SESSION_CLIENT_CHARSET value must be ttcCharsetUtf8.toString() '
+                '("873") immediately after the key');
+      });
+
       test('username bytes appear in output when non-empty', () {
         const username = 'oracleuser';
         final request = AuthPhaseTwoRequest(

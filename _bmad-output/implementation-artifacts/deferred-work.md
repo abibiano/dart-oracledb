@@ -1,6 +1,11 @@
 
 ## Open
 
+- `encodeDataTypesMessage` caps length byte (`writeUint8(compileCaps.length)`) is not guarded against overflow if caps > 255 bytes — pre-existing behavior from the original inlined code. `_buildCompileCapabilities()` currently produces 53 bytes so no immediate risk, but a future cap expansion past 255 would silently truncate the length prefix and corrupt the DataTypes message on both 23ai and 21c. [lib/src/transport/transport.dart] — Deferred from code review of 10-2-client-utf8-negotiation-model (2026-06-23)
+- Classical DataTypes response parser may have misaligned preamble skip vs the FAST_AUTH path: the parser does not skip the 5-byte charset/flags preamble or the two length-prefixed caps blocks before entering the data-type mapping loop. Pre-existing; integration tests pass on both 23ai and 21c. [lib/src/transport/transport.dart] — Deferred from code review of 10-2-client-utf8-negotiation-model (2026-06-23)
+- No unit test covers `encodeDataTypesMessage` with production-length caps (53+7 bytes); existing test uses synthetic 3+2-byte caps only. A future off-by-one in `_buildCompileCapabilities()` would only be caught by integration runs. — Deferred from code review of 10-2-client-utf8-negotiation-model (2026-06-23)
+- `_sendDataTypesNegotiation` receives a `protoResponse` parameter that is never read inside the method — the classical path cannot gate capabilities on the server's actual advertised compile-cap vector. Pre-existing design issue. [lib/src/transport/transport.dart] — Deferred from code review of 10-2-client-utf8-negotiation-model (2026-06-23)
+
 - `resetExecuteInstrumentation()` excludes `_sequence`, `_lobReadOps`, and `_describeRetries` from reset scope. Correct for the current VARCHAR2-only `NLS_DATABASE_PARAMETERS` detection query. If any future Epic 10 story changes the detection query to read a LOB column, these counters would carry detection footprint into post-connect instrumentation assertions. Note this scope boundary when modifying `resetExecuteInstrumentation()`. [lib/src/transport/transport.dart] — Deferred from code review of 10-1-charset-capability-detection (2026-06-23)
 
 ## Resolved as of 2026-06-22

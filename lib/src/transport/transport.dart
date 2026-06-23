@@ -2131,38 +2131,7 @@ class Transport {
     final compileCaps = _buildCompileCapabilities();
     final runtimeCaps = _buildRuntimeCapabilities();
 
-    // Build data types message
-    final buffer = WriteBuffer();
-
-    // Message type
-    buffer.writeUint8(2); // TNS_MSG_TYPE_DATA_TYPES
-
-    // Character set (UTF-8 = 873)
-    buffer.writeUint16LE(873);
-    buffer.writeUint16LE(873);
-
-    // Encoding flags
-    buffer.writeUint8(0x01 | 0x02); // MULTI_BYTE | CONV_LENGTH
-
-    // Compile caps (length-prefixed)
-    buffer.writeUint8(compileCaps.length);
-    buffer.writeBytes(compileCaps);
-
-    // Runtime caps (length-prefixed)
-    buffer.writeUint8(runtimeCaps.length);
-    buffer.writeBytes(runtimeCaps);
-
-    // Data type mappings (matching node-oracledb format)
-    // Format: [dataType, convType, repType, 0] each as UInt16BE
-    // repType: 0=NATIVE, 1=UNIVERSAL, 10=ORACLE
-    for (final dt in _dataTypes) {
-      _writeDataTypeMapping(buffer, dt[0], dt[1], dt[2]);
-    }
-
-    // Terminator
-    buffer.writeUint16BE(0);
-
-    await sendData(buffer.toBytes());
+    await sendData(encodeDataTypesMessage(compileCaps, runtimeCaps));
 
     // Receive data types response
     final respData = await receiveData();
@@ -2189,6 +2158,57 @@ class Transport {
     }
 
     _log.info('Data types negotiation complete');
+  }
+
+  /// Encodes the classical-path DataTypes negotiation message body.
+  ///
+  /// Layout (matching node-oracledb `dataType.js` encode()):
+  ///   - message type byte (`TNS_MSG_TYPE_DATA_TYPES` = 2)
+  ///   - primary client charset, little-endian uint16 ([ttcCharsetUtf8])
+  ///   - national charset slot, little-endian uint16 (also [ttcCharsetUtf8]
+  ///     under the thin model; functional NCHAR/AL16UTF16 support is Story 10.4)
+  ///   - encoding flags byte (MULTI_BYTE | CONV_LENGTH)
+  ///   - length-prefixed compile caps, then length-prefixed runtime caps
+  ///   - data type mappings (each 4×uint16BE), then a uint16BE terminator
+  ///
+  /// Extracted from [_sendDataTypesNegotiation] so the exact byte layout can be
+  /// unit-tested without a live socket. The primary client character set is
+  /// always [ttcCharsetUtf8] (AL32UTF8/UTF-8); the server converts to/from its
+  /// database charset and no client-side codec is selected.
+  @visibleForTesting
+  Uint8List encodeDataTypesMessage(Uint8List compileCaps, Uint8List runtimeCaps) {
+    final buffer = WriteBuffer();
+
+    // Message type (TNS_MSG_TYPE_DATA_TYPES; named constant is ambiguous in
+    // this library, so the literal matches the rest of the negotiation code).
+    buffer.writeUint8(2);
+
+    // Primary client charset (and national charset slot) — both UTF-8.
+    buffer.writeUint16LE(ttcCharsetUtf8); // primary client charset
+    buffer.writeUint16LE(ttcCharsetUtf8); // national charset slot (Story 10.4)
+
+    // Encoding flags
+    buffer.writeUint8(0x01 | 0x02); // MULTI_BYTE | CONV_LENGTH
+
+    // Compile caps (length-prefixed)
+    buffer.writeUint8(compileCaps.length);
+    buffer.writeBytes(compileCaps);
+
+    // Runtime caps (length-prefixed)
+    buffer.writeUint8(runtimeCaps.length);
+    buffer.writeBytes(runtimeCaps);
+
+    // Data type mappings (matching node-oracledb format)
+    // Format: [dataType, convType, repType, 0] each as UInt16BE
+    // repType: 0=NATIVE, 1=UNIVERSAL, 10=ORACLE
+    for (final dt in _dataTypes) {
+      _writeDataTypeMapping(buffer, dt[0], dt[1], dt[2]);
+    }
+
+    // Terminator
+    buffer.writeUint16BE(0);
+
+    return buffer.toBytes();
   }
 
   /// Writes a data type mapping entry.

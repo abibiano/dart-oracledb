@@ -7,6 +7,7 @@ import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/messages/auth_message.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
+import 'package:oracledb/src/protocol/messages/fast_auth_message.dart';
 import 'package:oracledb/src/protocol/result_set_cursor.dart';
 import 'package:oracledb/src/transport/packet.dart';
 import 'package:oracledb/src/transport/transport.dart';
@@ -971,6 +972,110 @@ void main() {
                   isNot(contains('single round-trip read limit')))),
         );
       });
+    });
+  });
+
+  group('encodeDataTypesMessage (classical DataTypes negotiation)', () {
+    test('encodes exact charset/flags/caps field layout', () {
+      // AC1: the classical path's primary client charset is constant-driven.
+      expect(ttcCharsetUtf8, equals(873),
+          reason: 'Primary client charset constant must be AL32UTF8 (873)');
+
+      final transport = Transport();
+      final compileCaps = Uint8List.fromList([0x01, 0x02, 0x03]);
+      final runtimeCaps = Uint8List.fromList([0x0A, 0x0B]);
+
+      final bytes = transport.encodeDataTypesMessage(compileCaps, runtimeCaps);
+
+      // 873 = 0x0369, written little-endian as [0x69, 0x03].
+      const lo = ttcCharsetUtf8 & 0xFF;
+      const hi = (ttcCharsetUtf8 >> 8) & 0xFF;
+
+      // Field layout (see transport.dart encodeDataTypesMessage):
+      //   [0]      message type byte (TNS_MSG_TYPE_DATA_TYPES = 2)
+      //   [1..2]   primary client charset, little-endian uint16
+      //   [3..4]   national charset slot, little-endian uint16
+      //   [5]      encoding flags (MULTI_BYTE | CONV_LENGTH)
+      //   [6]      compile caps length, then the caps bytes
+      //   [..]     runtime caps length, then the caps bytes
+      expect(bytes[0], equals(2), reason: 'DataTypes message type byte');
+      expect(bytes[1], equals(lo), reason: 'Primary charset LE low byte');
+      expect(bytes[2], equals(hi), reason: 'Primary charset LE high byte');
+      expect(bytes[3], equals(lo),
+          reason: 'National charset slot must also be UTF-8 (Story 10.2)');
+      expect(bytes[4], equals(hi));
+      expect(bytes[5], equals(0x01 | 0x02),
+          reason: 'Encoding flags must be MULTI_BYTE | CONV_LENGTH');
+
+      // Compile caps: length byte then the bytes verbatim.
+      expect(bytes[6], equals(compileCaps.length));
+      expect(bytes.sublist(7, 7 + compileCaps.length), equals(compileCaps));
+
+      // Runtime caps follow immediately.
+      final runtimeLenIndex = 7 + compileCaps.length;
+      expect(bytes[runtimeLenIndex], equals(runtimeCaps.length));
+      expect(
+        bytes.sublist(
+            runtimeLenIndex + 1, runtimeLenIndex + 1 + runtimeCaps.length),
+        equals(runtimeCaps),
+      );
+    });
+
+    test('terminates with a uint16BE zero after the data type mappings', () {
+      final transport = Transport();
+      final bytes =
+          transport.encodeDataTypesMessage(Uint8List(0), Uint8List(0));
+      // The message ends with the 2-byte terminator (0x00 0x00).
+      expect(bytes.length, greaterThan(8));
+      expect(bytes[bytes.length - 2], equals(0));
+      expect(bytes[bytes.length - 1], equals(0));
+    });
+
+    test('FAST_AUTH and classical paths advertise the same primary charset',
+        () {
+      // AC3: both negotiation paths must advertise the same UTF-8 client
+      // charset, both sourced from ttcCharsetUtf8.
+      const lo = ttcCharsetUtf8 & 0xFF;
+      const hi = (ttcCharsetUtf8 >> 8) & 0xFF;
+
+      final transport = Transport();
+      final classical =
+          transport.encodeDataTypesMessage(Uint8List(0), Uint8List(0));
+      final classicalCharset = <int>[classical[1], classical[2]];
+
+      final fastBuffer = WriteBuffer();
+      FastAuthRequest(
+        username: 'u',
+        clientNonce: Uint8List(16),
+        compileCaps: Uint8List(0),
+        runtimeCaps: Uint8List(0),
+        dataTypes: const [
+          [2, 1, 0],
+        ],
+        ttcFieldVersion: 13,
+        sequence: 1,
+      ).encode(fastBuffer);
+      final fastBytes = fastBuffer.toBytes();
+
+      // Locate the embedded DataTypes header [type, primary-charset LE].
+      int dt = -1;
+      for (int i = 0; i < fastBytes.length - 2; i++) {
+        if (fastBytes[i] == 2 &&
+            fastBytes[i + 1] == lo &&
+            fastBytes[i + 2] == hi) {
+          dt = i;
+          break;
+        }
+      }
+      expect(dt, greaterThan(-1),
+          reason: 'FAST_AUTH must embed a DataTypes header with the UTF-8 '
+              'primary charset');
+      final fastCharset = <int>[fastBytes[dt + 1], fastBytes[dt + 2]];
+
+      expect(classicalCharset, equals(<int>[lo, hi]),
+          reason: 'Classical path primary charset must be ttcCharsetUtf8 LE');
+      expect(fastCharset, equals(classicalCharset),
+          reason: 'Both paths must advertise the same primary charset');
     });
   });
 }

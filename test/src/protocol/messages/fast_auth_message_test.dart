@@ -220,31 +220,58 @@ void main() {
       expect(found, isTrue, reason: 'Driver name "dart-oracledb" not found');
     });
 
-    test('DataTypes message includes UTF-8 charset (873)', () {
+    test('DataTypes message: exact charset/flags/caps field layout', () {
+      // AC5: pin the negotiation contract at the field level rather than
+      // searching loosely for any 873 byte pair.
+      expect(ttcCharsetUtf8, equals(873),
+          reason: 'Primary client charset constant must be AL32UTF8 (873)');
+
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
 
-      final dataTypesIndex = bytes.indexOf(ttcMsgTypeDataTypes);
-      expect(dataTypesIndex, greaterThan(-1),
-          reason: 'DataTypes message type (2) must be present in message');
+      // 873 = 0x0369, written little-endian as [0x69, 0x03].
+      const lo = ttcCharsetUtf8 & 0xFF;
+      const hi = (ttcCharsetUtf8 >> 8) & 0xFF;
 
-      // UTF-8 charset (873 = 0x0369) is written as little-endian uint16
-      final charsetBytes = <int>[873 & 0xFF, (873 >> 8) & 0xFF];
-
-      // Search 30 bytes from DataTypes type byte with bounds protection
-      bool foundCharset = false;
-      final charsetSearchEnd = (dataTypesIndex + 30).clamp(0, bytes.length - 1);
-      for (int i = dataTypesIndex; i < charsetSearchEnd; i++) {
-        if (i + 1 < bytes.length &&
-            bytes[i] == charsetBytes[0] &&
-            bytes[i + 1] == charsetBytes[1]) {
-          foundCharset = true;
+      // Anchor on the DataTypes header: the type byte immediately followed by
+      // the primary charset (little-endian). This signature uniquely marks the
+      // start of the embedded DataTypes message.
+      int dtIndex = -1;
+      for (int i = 0; i < bytes.length - 2; i++) {
+        if (bytes[i] == ttcMsgTypeDataTypes &&
+            bytes[i + 1] == lo &&
+            bytes[i + 2] == hi) {
+          dtIndex = i;
           break;
         }
       }
-      expect(foundCharset, isTrue,
-          reason: 'UTF-8 charset (873) should be in DataTypes message');
+      expect(dtIndex, greaterThan(-1),
+          reason: 'DataTypes header [type, primary-charset LE] must be present');
+
+      // Field layout (see fast_auth_message.dart _encodeDataTypesMessageContent):
+      //   [+0]      message type byte
+      //   [+1..+2]  primary client charset, little-endian uint16
+      //   [+3..+4]  national charset slot, little-endian uint16 (unchanged 10.2)
+      //   [+5]      encoding flags (MULTI_BYTE | CONV_LENGTH)
+      //   [+6]      compile caps length byte
+      //   [+7]      runtime caps length byte (compile caps trimmed to 0 here)
+      expect(bytes[dtIndex], equals(ttcMsgTypeDataTypes));
+      expect(bytes[dtIndex + 1], equals(lo),
+          reason: 'Primary charset low byte must be ttcCharsetUtf8 LE');
+      expect(bytes[dtIndex + 2], equals(hi),
+          reason: 'Primary charset high byte must be ttcCharsetUtf8 LE');
+      expect(bytes[dtIndex + 3], equals(lo),
+          reason: 'National charset slot must stay UTF-8 (unchanged in 10.2)');
+      expect(bytes[dtIndex + 4], equals(hi),
+          reason: 'National charset slot must stay UTF-8 (unchanged in 10.2)');
+      expect(bytes[dtIndex + 5], equals(0x01 | 0x02),
+          reason: 'Encoding flags must be MULTI_BYTE | CONV_LENGTH');
+      // The default fixture supplies all-zero caps, which trim to length 0.
+      expect(bytes[dtIndex + 6], equals(0),
+          reason: 'All-zero compile caps trim to length 0');
+      expect(bytes[dtIndex + 7], equals(0),
+          reason: 'All-zero runtime caps trim to length 0');
     });
 
     test('Username is embedded in AUTH_PHASE_ONE', () {
@@ -340,10 +367,11 @@ void main() {
 
       // DataTypes layout from fast_auth_message.dart encode():
       //   [0] type byte (ttcMsgTypeDataTypes=2)
-      //   [1-2] charset uint16LE (2 bytes)
-      //   [3-4] ncharset uint16LE (2 bytes)
-      //   [5] compile caps length byte
-      final capsLengthIndex = dataTypesIndex + 1 + 2 + 2;
+      //   [1-2] primary charset uint16LE (2 bytes)
+      //   [3-4] national charset uint16LE (2 bytes)
+      //   [5] encoding flags byte (MULTI_BYTE | CONV_LENGTH)
+      //   [6] compile caps length byte
+      final capsLengthIndex = dataTypesIndex + 1 + 2 + 2 + 1;
       final compileCapsLength = bytes[capsLengthIndex];
 
       expect(compileCapsLength, equals(3),

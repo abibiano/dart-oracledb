@@ -488,7 +488,9 @@ class AuthPhaseTwoRequest {
       buffer.writeKeyValue('AUTH_PBKDF2_SPEEDY_KEY', speedyKeyHex);
     }
 
-    buffer.writeKeyValue('SESSION_CLIENT_CHARSET', '873'); // UTF-8
+    // Primary client charset: AL32UTF8/UTF-8 (ttcCharsetUtf8). The server
+    // converts to/from its database charset; no client-side codec is selected.
+    buffer.writeKeyValue('SESSION_CLIENT_CHARSET', ttcCharsetUtf8.toString());
     buffer.writeKeyValue('SESSION_CLIENT_DRIVER_NAME',
         'dart-oracledb : 0.1.0 thn'); // Match node-oracledb format
     buffer.writeKeyValue('SESSION_CLIENT_VERSION',

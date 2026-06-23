@@ -1,5 +1,5 @@
 # generated: 2025-12-16
-# last_updated: 2026-06-23  # Story 10.1 code review complete → done
+# last_updated: 2026-06-23  # Story 10.2 code review complete → done
 # project: dart-oracledb
 # project_key: NOKEY
 # tracking_system: file-system
@@ -36,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-06-23  # Story 10.1 code review complete → done
+last_updated: 2026-06-23  # Story 10.2 code review complete → done
 project: dart-oracledb
 project_key: NOKEY
 tracking_system: file-system
@@ -182,7 +182,7 @@ development_status:
   # Epic 10: Non-AL32UTF8 Database Character Set Compatibility [architecture review required]
   epic-10: in-progress
   10-1-charset-capability-detection: done  # 2026-06-23 — Code review complete (3-layer adversarial). 4 patches applied: (1) null PARAMETER column now throws TypeError rather than silently mapping to empty key; (2) non-OracleException errors preserve original stack trace via Error.throwWithStackTrace; (3) AC5 credential-free test expanded to assert absence of verifier and session key terms; (4) AC8 integration test given project-standard dual-env doc comment. 1 deferred (resetExecuteInstrumentation scope boundary for future LOB-query change). 7 dismissed. dart analyze clean.
-  10-2-client-utf8-negotiation-model: backlog
+  10-2-client-utf8-negotiation-model: done  # 2026-06-23 — Code review complete (3-layer adversarial). 2 patches applied: (1) capabilities.dart defaultCharset doc comment cross-references ttcCharsetUtf8 (AC1 single-source-of-truth); (2) "Capabilities are trimmed" test offset fixed from +5 (flags byte) to +6 (compile caps length byte) — was a coincidental pass (AC5). 4 deferred. 9 dismissed. dart analyze clean.
   10-3-varchar2-char-clob-roundtrip: backlog
   10-4-national-charset-handling: backlog
   10-5-docs-ci-fixture: backlog

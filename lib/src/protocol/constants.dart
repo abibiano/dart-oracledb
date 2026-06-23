@@ -373,7 +373,18 @@ const int ttcCsfrmImplicit = 1;
 /// NCHAR charset.
 const int ttcCsfrmNChar = 2;
 
-/// Oracle wire charset UTF-8 (AL32UTF8).
+/// Primary client character set advertised on the wire: AL32UTF8/UTF-8.
+///
+/// The thin driver always negotiates this single primary client charset for
+/// character data and relies on the Oracle server to convert to/from its own
+/// database character set (the node-oracledb thin model). This is independent
+/// of the detected [OracleCharsetInfo.databaseCharset], which is diagnostic
+/// only and must never select a client-side codec. Both the DataTypes
+/// negotiation charset fields and the AUTH_PHASE_TWO `SESSION_CLIENT_CHARSET`
+/// session attribute are written from this constant.
+///
+/// National character set (NCHAR/NVARCHAR2/NCLOB, AL16UTF16) support is a
+/// separate concern owned by Story 10.4 — see [ttcCsfrmNChar].
 const int ttcCharsetUtf8 = 873;
 
 // ============================================================================

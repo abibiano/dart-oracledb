@@ -21,7 +21,11 @@ const int _minCapabilitiesSize = 8;
 /// Default protocol version supported.
 const int defaultProtocolVersion = 312;
 
-/// Default charset (AL32UTF8).
+/// Default charset for capability negotiation (AL32UTF8/UTF-8).
+///
+/// Same value as [ttcCharsetUtf8] from constants.dart; kept as a separate
+/// constant in this layer so the Capabilities object does not depend on the
+/// TTC message constants. Both must remain 873 (AL32UTF8).
 const int defaultCharset = 873;
 
 /// Default client capability flags.
