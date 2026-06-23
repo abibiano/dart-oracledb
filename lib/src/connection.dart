@@ -8,6 +8,7 @@ import 'package:logging/logging.dart';
 import 'crypto/auth.dart';
 import 'errors.dart';
 import 'oracle_bind.dart';
+import 'oracle_charset_info.dart';
 import 'protocol/bind_parser.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/data_types.dart' as dt;
@@ -149,6 +150,42 @@ class OracleConnection {
   final bool _preserveTimestampTimeZone;
   bool _isClosed;
   bool _inTransaction = false;
+
+  /// The character sets detected once at connection startup, or `null` before
+  /// detection runs. Populated by [_detectCharsetInfo] during [connect] (and on
+  /// every pooled physical session, which opens through the same path) before
+  /// the connection is handed to user code. Read through [charsetInfo].
+  OracleCharsetInfo? _charsetInfo;
+
+  /// The database and national character sets this connection detected once,
+  /// during startup (Story 10.1).
+  ///
+  /// Detection happens exactly once per physical connection — inside [connect],
+  /// after authentication and before the connection is returned — by querying
+  /// `NLS_DATABASE_PARAMETERS`. Pooled connections inherit it automatically
+  /// because [OraclePool] opens its physical sessions through the same
+  /// [connect] path; there is no pool-specific detection.
+  ///
+  /// Primary character data (`VARCHAR2`/`CHAR`/`CLOB`) always travels the wire
+  /// as UTF-8 and is server-converted, independent of
+  /// [OracleCharsetInfo.databaseCharset]; the national-charset compatibility
+  /// flag concerns `NCHAR`/`NVARCHAR2`/`NCLOB` only. See [OracleCharsetInfo].
+  ///
+  /// Always non-null on a connection obtained from [connect] / [withConnection]
+  /// or an [OraclePool]. Throws [StateError] only on a connection built by the
+  /// test-only [OracleConnection.forTesting] constructor, which bypasses
+  /// startup detection.
+  OracleCharsetInfo get charsetInfo {
+    final info = _charsetInfo;
+    if (info == null) {
+      throw StateError(
+        'charsetInfo is unavailable: this connection was created without '
+        'startup charset detection (OracleConnection.forTesting). Connections '
+        'from connect()/withConnection()/OraclePool always populate it.',
+      );
+    }
+    return info;
+  }
 
   /// Guards against overlapping TTC round trips on a single connection.
   ///
@@ -989,6 +1026,98 @@ class OracleConnection {
   /// stalls the result set), so it is rejected up front rather than mis-encoded.
   static const int _maxFetchSize = 0xFFFFFFFF;
 
+  /// Startup charset-detection query (Story 10.1).
+  ///
+  /// Mirrors node-oracledb Thin's globalization detection: the permanent
+  /// database NLS parameters live in `NLS_DATABASE_PARAMETERS` (columns
+  /// `PARAMETER`, `VALUE`). Reads both the database and national character set
+  /// names in one round trip. Run uncacheable (see [_detectCharsetInfo]) so it
+  /// occupies no statement-cache slot. Double-quoted because it embeds
+  /// single-quoted SQL literals.
+  static const String _charsetDetectionSql =
+      'SELECT parameter, value FROM nls_database_parameters '
+      "WHERE parameter IN ('NLS_CHARACTERSET', 'NLS_NCHAR_CHARACTERSET')";
+
+  /// Detects this connection's database and national character sets once,
+  /// during startup (Story 10.1).
+  ///
+  /// Runs the [_charsetDetectionSql] query against `NLS_DATABASE_PARAMETERS`
+  /// and stores the parsed [OracleCharsetInfo] in [_charsetInfo]. Called from
+  /// [connect] after authentication and before the connection is returned, so
+  /// detection happens exactly once per physical connection — pooled sessions
+  /// inherit it because [OraclePool] opens through [connect] (AC1/AC2).
+  ///
+  /// The query is run **uncacheable** so it leaves no statement-cache entry and
+  /// holds no server cursor open (the cursor is closed by the server at fetch
+  /// EOF, exactly like any non-cached single-batch SELECT); the execute
+  /// instrumentation counters are then reset so the internal round trip is
+  /// invisible to post-connect instrumentation (AC6).
+  ///
+  /// On any failure — the query erroring, or the rows missing/blank/conflicting
+  /// — the connection is [close]d before an [OracleException] propagates, so a
+  /// half-initialized, still-open connection never escapes to user code (AC5).
+  /// No password, verifier, session key, or connect-string credential is ever
+  /// included in the error (the detection query carries none, and [close]
+  /// touches no credentials).
+  Future<void> _detectCharsetInfo() async {
+    try {
+      // Mirror execute()'s in-progress guard around the single wire round trip;
+      // there is no concurrency at startup, so the public reject/ensure guards
+      // are unnecessary — _executeGuarded is invoked directly.
+      _executeInProgress = true;
+      final OracleResult result;
+      try {
+        result = await _executeGuarded(
+          _charsetDetectionSql,
+          null,
+          forceUncacheable: true,
+        );
+      } finally {
+        _executeInProgress = false;
+      }
+      _charsetInfo = OracleCharsetInfo.fromParameterRows(
+        result.rows.map(
+          (row) => MapEntry(
+            row['PARAMETER'] as String,
+            row['VALUE'] as String?,
+          ),
+        ),
+      );
+      // The detection query is internal and pre-handover: erase its parse/reuse
+      // footprint so post-connect instrumentation reflects only user work.
+      _transport.resetExecuteInstrumentation();
+    } catch (e, st) {
+      // Detection failed after a successful auth. Tear the transport down
+      // before the error escapes so no open, half-initialized connection leaks
+      // (AC5). close() is idempotent and must not mask the detection error.
+      try {
+        await close();
+      } catch (_) {
+        // Swallow a secondary close failure — the detection error is primary.
+      }
+      if (e is OracleException) rethrow;
+      Error.throwWithStackTrace(
+        OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'Failed to detect the database character set during connection '
+              'startup',
+          cause: e,
+        ),
+        st,
+      );
+    }
+  }
+
+  /// Test-only entry point for [_detectCharsetInfo].
+  ///
+  /// Lets focused unit tests drive startup charset detection against a fake
+  /// [Transport] (success and cleanup-on-failure paths) without a live Oracle
+  /// server. Not part of the public API — production code reaches detection
+  /// only through [connect].
+  @visibleForTesting
+  Future<void> detectCharsetInfoForTesting() => _detectCharsetInfo();
+
   /// Runs the eager `execute()` path for SELECT, DML, and PL/SQL.
   ///
   /// When [lazyImplicit] is true (set only by the public
@@ -1002,18 +1131,25 @@ class OracleConnection {
   /// — the eager SELECT drain and eager implicit-result draining. A positive N
   /// returns at most N rows and stops fetching once N is reached (a deliberate
   /// bound, not the safety backstop). It is a no-op when [lazyImplicit] is true.
+  ///
+  /// [forceUncacheable] (set only by [_detectCharsetInfo]) classifies the
+  /// statement as cache-ineligible regardless of its SQL, so the internal
+  /// startup detection query opens no cached cursor and leaves the
+  /// statement cache untouched.
   Future<OracleResult> _executeGuarded(
     String sql,
     Object? bindValues, {
     bool lazyImplicit = false,
     int implicitPrefetchRows = _defaultPrefetchRows,
     int maxRows = 0,
+    bool forceUncacheable = false,
   }) async {
     _log.fine(
       'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
     );
 
-    final stmt = _prepareStatement(sql, bindValues);
+    final stmt = _prepareStatement(sql, bindValues,
+        forceUncacheable: forceUncacheable);
 
     // Open the cursor: full parse / cached-cursor reuse, describe-mismatch
     // retry, and close-cursor piggyback flushing all happen here and yield the
@@ -1391,7 +1527,8 @@ class OracleConnection {
   /// Parses and validates [bindValues], classifies [sql], and builds the
   /// bind-signature-aware cache key — the side-effect-free prelude shared by
   /// eager [execute] and the [openResultSet] seam.
-  _PreparedStatement _prepareStatement(String sql, Object? bindValues) {
+  _PreparedStatement _prepareStatement(String sql, Object? bindValues,
+      {bool forceUncacheable = false}) {
     // Validate and prepare bind values.
     List<dynamic>? bindList;
     List<String>? bindNames;
@@ -1446,7 +1583,10 @@ class OracleConnection {
 
     final isQuery = isQuerySql(sql);
     final isPlSql = !isQuery && isPlSqlSql(sql);
-    final eligible = isCacheEligibleSql(sql);
+    // [forceUncacheable] keeps the internal startup charset-detection query out
+    // of the statement cache (Story 10.1): no cached cursor, no held server
+    // cursor, no cache slot consumed.
+    final eligible = !forceUncacheable && isCacheEligibleSql(sql);
 
     // Convert any OracleBind specs into wire-level BindVariable objects and
     // build the parallel metadata list the decoder needs to decode OUT binds.
@@ -2230,13 +2370,21 @@ class OracleConnection {
       );
     }
 
-    _log.info('Connected successfully');
-    return OracleConnection._(
+    final connection = OracleConnection._(
       transport: transport,
       connectionInfo: connectionInfo,
       statementCacheSize: statementCacheSize,
       preserveTimestampTimeZone: preserveTimestampTimeZone,
     );
+
+    // Detect the database/national character sets once per physical connection,
+    // after auth and before handing the connection to user code (Story 10.1,
+    // AC1/AC2). On failure _detectCharsetInfo closes the connection before the
+    // error propagates (AC5), so a half-initialized connection never escapes.
+    await connection._detectCharsetInfo();
+
+    _log.info('Connected successfully');
+    return connection;
   }
 
   /// Executes a callback with an automatically managed connection.

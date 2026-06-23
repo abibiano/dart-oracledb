@@ -443,6 +443,22 @@ class Transport {
   /// Number of cursor-reuse EXECUTEs sent (cursorId != 0, parse skipped).
   int get debugReuseExecutes => _reuseExecutes;
 
+  /// Resets the execute instrumentation counters ([debugFullParseExecutes] /
+  /// [debugReuseExecutes]) to zero.
+  ///
+  /// Called once by [OracleConnection] immediately after the internal
+  /// connection-startup charset-detection query (Story 10.1), so that the
+  /// detection round trip — which user code never issued — is invisible to the
+  /// post-connect instrumentation that tests and pool diagnostics observe.
+  /// Detection runs as an uncacheable query (no cache entry, server-closed
+  /// cursor on fetch EOF), so only these parse/reuse counters need resetting.
+  /// Not part of the public API.
+  @internal
+  void resetExecuteInstrumentation() {
+    _fullParseExecutes = 0;
+    _reuseExecutes = 0;
+  }
+
   /// Temporary LOB locators awaiting a free-temp piggyback.
   ///
   /// Internal temporary CLOBs created for bind values are not freed with a

@@ -32,6 +32,9 @@ export 'src/protocol/constants.dart'
 // Connection API
 export 'src/connection.dart' show OracleConnection, OracleExecuteOptions;
 
+// Charset capability detection (Story 10.1)
+export 'src/oracle_charset_info.dart' show OracleCharsetInfo;
+
 // Connection pooling
 export 'src/pool.dart' show OraclePool, PoolSessionCallback;
 

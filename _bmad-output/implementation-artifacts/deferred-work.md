@@ -1,8 +1,15 @@
 
 ## Open
 
-**None.** All tracked items below are resolved (or are dismissed / process
-notes, not open work) as of 2026-06-22. The last two engineering items —
+- `resetExecuteInstrumentation()` excludes `_sequence`, `_lobReadOps`, and `_describeRetries` from reset scope. Correct for the current VARCHAR2-only `NLS_DATABASE_PARAMETERS` detection query. If any future Epic 10 story changes the detection query to read a LOB column, these counters would carry detection footprint into post-connect instrumentation assertions. Note this scope boundary when modifying `resetExecuteInstrumentation()`. [lib/src/transport/transport.dart] — Deferred from code review of 10-1-charset-capability-detection (2026-06-23)
+
+## Resolved as of 2026-06-22
+
+**All previously open items resolved as of 2026-06-22.** The last two engineering items —
+the ping FUNCTION-header wire-byte pin and the nested-`CURSOR()`
+materialization feature — were closed 2026-06-22. Earlier Epic 5 follow-ups
+were closed for the 1.0.0 release on 2026-06-12 (see **Resolved: Release 1.0
+closeout**). Each section below is retained for the record / post-mortem. The last two engineering items —
 the ping FUNCTION-header wire-byte pin and the nested-`CURSOR()`
 materialization feature — were closed 2026-06-22. Earlier Epic 5 follow-ups
 were closed for the 1.0.0 release on 2026-06-12 (see **Resolved: Release 1.0
