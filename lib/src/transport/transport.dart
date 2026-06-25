@@ -474,10 +474,41 @@ class Transport {
   /// Detection runs as an uncacheable query (no cache entry, server-closed
   /// cursor on fetch EOF), so only these parse/reuse counters need resetting.
   /// Not part of the public API.
+  ///
+  /// SCOPE BOUNDARY — counters this method deliberately does NOT reset, and the
+  /// invariant that makes the exclusion correct *for the current detection
+  /// query* (`SELECT parameter, value FROM nls_database_parameters …`, two
+  /// VARCHAR2 columns, uncacheable — see [OracleConnection] `_charsetDetectionSql`):
+  ///
+  /// - [_sequence] (TTC packet sequence byte) — this is wire protocol state, not
+  ///   a footprint counter. The detection round trip *does* advance it, and it
+  ///   MUST stay advanced: rewinding it would desync the server's sequence
+  ///   tracking on the next message. Never add it here.
+  /// - [_lobReadOps] — incremented only by [sendLobOp] with `tnsLobOpRead`. The
+  ///   current detection query selects only VARCHAR2 columns, so it issues no
+  ///   LOB READ and this counter is still 0 when reset runs. Nothing to reset.
+  /// - `OracleConnection._describeRetries` — incremented only by a cached-query
+  ///   ORA-01007/00932 describe-mismatch re-execute. Detection is forced
+  ///   uncacheable, and a fresh connection has nothing to mismatch against, so
+  ///   it can never fire for the detection query. Nothing to reset.
+  ///
+  /// WARNING for a future change: if any later Epic 10 story rewrites the
+  /// detection query to read a **LOB column** (advancing [_lobReadOps]) — or
+  /// otherwise makes it cacheable in a way that could trip a describe-mismatch
+  /// retry — that detection footprint would then leak into the post-connect
+  /// instrumentation that tests/pool diagnostics assert on. In that case extend
+  /// this reset to cover the newly-advanced counter (and reset
+  /// `_describeRetries` from the connection-side reset path, since it lives on
+  /// [OracleConnection], not here). [_sequence] always stays excluded.
   @internal
   void resetExecuteInstrumentation() {
     _fullParseExecutes = 0;
     _reuseExecutes = 0;
+    // Intentionally NOT reset: _sequence (wire state, must stay advanced),
+    // _lobReadOps (detection issues no LOB READ today), and
+    // OracleConnection._describeRetries (detection is uncacheable, never
+    // mismatches). See the SCOPE BOUNDARY note in this method's doc comment
+    // before changing the detection query to read a LOB column.
   }
 
   /// Temporary LOB locators awaiting a free-temp piggyback.

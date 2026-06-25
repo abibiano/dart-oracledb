@@ -1036,6 +1036,15 @@ class OracleConnection {
   /// names in one round trip. Run uncacheable (see [_detectCharsetInfo]) so it
   /// occupies no statement-cache slot. Double-quoted because it embeds
   /// single-quoted SQL literals.
+  ///
+  /// IMPORTANT: this query selects only two VARCHAR2 columns and is
+  /// uncacheable. [Transport.resetExecuteInstrumentation] relies on that to keep
+  /// the detection footprint invisible to post-connect instrumentation — it
+  /// resets only the parse/reuse counters, NOT `_lobReadOps` or
+  /// `_describeRetries`. If you change this query to read a LOB column (or make
+  /// it cacheable), read the SCOPE BOUNDARY note on
+  /// [Transport.resetExecuteInstrumentation] first: those counters would then
+  /// carry detection footprint and the reset must be widened to match.
   static const String _charsetDetectionSql =
       'SELECT parameter, value FROM nls_database_parameters '
       "WHERE parameter IN ('NLS_CHARACTERSET', 'NLS_NCHAR_CHARACTERSET')";
