@@ -2292,14 +2292,47 @@ class Transport {
     final respData = await receiveData();
     _log.fine('Received data types response: ${respData.length} bytes');
 
-    // Parse response - skip data type mappings
+    parseDataTypesResponse(respData);
+
+    _log.info('Data types negotiation complete');
+  }
+
+  /// Parses the classical-path DataTypes negotiation RESPONSE body.
+  ///
+  /// The classical path issues its DataTypes request as a standalone round
+  /// trip (see [_sendDataTypesNegotiation]), so [receiveData] hands this method
+  /// a buffer that contains EXACTLY one DataTypes response and nothing else:
+  ///
+  ///   `[ message-type byte (2) ][ data-type mapping loop ... ][ 0x0000 ]`
+  ///
+  /// CRITICAL — the RESPONSE is NOT shaped like the REQUEST. The request that
+  /// [encodeDataTypesMessage] builds carries a 5-byte charset/flags preamble
+  /// (primary charset + national charset + encoding flags) and the two
+  /// length-prefixed caps blocks BEFORE the mapping loop. The server's response
+  /// carries NONE of that — it is the message-type byte followed immediately by
+  /// the mapping loop. This mirrors node-oracledb's reference thin client
+  /// exactly: `dataType.js` `DataTypeMessage.processMessage` (the single handler
+  /// used by BOTH the FAST_AUTH and classical negotiations — see
+  /// `fastAuth.js` `processMessage` dispatching `TNS_MSG_TYPE_DATA_TYPES` to it)
+  /// reads only `readUInt16BE()` pairs until a 0 terminator AFTER the dispatcher
+  /// has consumed the one-byte message type in `base.js` `process()`. There is
+  /// no preamble or caps skip on the response side in the reference client, so
+  /// adding one here would consume real mapping-loop bytes and desync the
+  /// stream. Extracted from [_sendDataTypesNegotiation] so this node-oracledb
+  /// parity invariant is pinned by a unit test and cannot silently regress.
+  @visibleForTesting
+  static void parseDataTypesResponse(Uint8List respData) {
     final respBuffer = ReadBuffer(respData);
     final msgType = respBuffer.readUint8();
+    // Literal 2 (TNS_MSG_TYPE_DATA_TYPES): the named constant is exported by
+    // two imported libraries here, so it is ambiguous unqualified — the encode
+    // path uses the literal for the same reason.
     if (msgType != 2) {
       _log.warning('Unexpected data types response type: $msgType');
     }
 
-    // Read and skip data type mappings until terminator
+    // Read and skip data type mappings until the 0x0000 terminator. No 5-byte
+    // preamble and no caps blocks precede this loop (node-oracledb parity).
     while (respBuffer.hasRemaining) {
       final dataType = respBuffer.readUint16BE();
       if (dataType == 0) break;
@@ -2311,8 +2344,6 @@ class Transport {
         }
       }
     }
-
-    _log.info('Data types negotiation complete');
   }
 
   /// Encodes the classical-path DataTypes negotiation message body.

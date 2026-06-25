@@ -1186,4 +1186,85 @@ void main() {
       expect(bytes[runtimeLenIndex], equals(255));
     });
   });
+
+  // Pins the node-oracledb parity invariant for the classical-path DataTypes
+  // RESPONSE parser (deferred-work item, dismissed 2026-06-25). node-oracledb's
+  // `dataType.js` DataTypeMessage.processMessage — the single handler used by
+  // BOTH the classical and FAST_AUTH negotiations — reads ONLY uint16BE pairs
+  // until a 0 terminator after the dispatcher consumes the 1-byte message type.
+  // The 5-byte charset/flags preamble and the two length-prefixed caps blocks
+  // exist ONLY in the REQUEST (encode), never in the RESPONSE. These tests stop
+  // a future "fix" from wrongly adding a preamble/caps skip on the response
+  // side, which would consume real mapping-loop bytes and desync the stream.
+  group('parseDataTypesResponse (classical DataTypes response parity)', () {
+    // Builds a realistic standalone classical DataTypes response exactly as the
+    // server sends it (and as node-oracledb decodes it): message-type byte then
+    // [dataType, convType] uint16BE pairs, terminated by a uint16BE 0. NO
+    // 5-byte preamble and NO caps blocks precede the mapping loop.
+    Uint8List buildResponse(List<List<int>> mappings) {
+      final buf = WriteBuffer();
+      buf.writeUint8(2); // TNS_MSG_TYPE_DATA_TYPES
+      for (final m in mappings) {
+        buf.writeUint16BE(m[0]); // dataType
+        buf.writeUint16BE(m[1]); // convType
+      }
+      buf.writeUint16BE(0); // terminator
+      return buf.toBytes();
+    }
+
+    test('drains a standalone response with no preamble/caps to the terminator',
+        () {
+      // VARCHAR(1)->VARCHAR(1), NUMBER(2)->NUMBER(2), DATE(12)->DATE(12).
+      final resp = buildResponse([
+        [1, 1],
+        [2, 2],
+        [12, 12],
+      ]);
+      // Must consume the whole buffer (type byte + 3 pairs + terminator)
+      // without throwing — i.e. the parser does NOT skip a non-existent
+      // preamble/caps before the loop.
+      expect(() => Transport.parseDataTypesResponse(resp), returnsNormally);
+    });
+
+    test('tolerates an empty mapping list (immediate terminator)', () {
+      final resp = buildResponse(const []);
+      expect(() => Transport.parseDataTypesResponse(resp), returnsNormally);
+    });
+
+    test(
+        'a hypothetical preamble/caps skip would desync — proving its ABSENCE '
+        'is load-bearing', () {
+      // Reconstruct the WRONG variant the deferred-work item proposed: skip the
+      // 5-byte charset/flags preamble + two length-prefixed caps blocks before
+      // the mapping loop. Run it against the REAL response shape. With no such
+      // structure present, the skip lands inside the mapping data and the
+      // wrongful caps-length bytes drive an out-of-range read — i.e. it throws.
+      // The real parser (parseDataTypesResponse) handles the same bytes
+      // cleanly, so the divergence is genuine, not a tautology.
+      final resp = buildResponse([
+        [1, 1],
+        [2, 2],
+      ]);
+
+      void wrongParserWithPreambleSkip(Uint8List data) {
+        final b = ReadBuffer(data);
+        b.readUint8(); // type
+        b.skip(5); // WRONG: charset(2) + nCharset(2) + flags(1)
+        final compileLen = b.readUint8(); // WRONG: caps length prefix
+        if (compileLen > 0) b.skip(compileLen);
+        final runtimeLen = b.readUint8();
+        if (runtimeLen > 0) b.skip(runtimeLen);
+        while (b.hasRemaining) {
+          final dt = b.readUint16BE();
+          if (dt == 0) break;
+          b.readUint16BE();
+        }
+      }
+
+      // Control: the real parser is fine.
+      expect(() => Transport.parseDataTypesResponse(resp), returnsNormally);
+      // Divergence: the preamble-skip variant over-reads and throws.
+      expect(() => wrongParserWithPreambleSkip(resp), throwsA(anything));
+    });
+  });
 }
