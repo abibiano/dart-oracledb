@@ -1091,5 +1091,99 @@ void main() {
       expect(fastNational, equals(<int>[lo, hi]),
           reason: 'FAST_AUTH national charset slot must be UTF-8 LE');
     });
+
+    test('encodes production-length caps (53 compile + 7 runtime) intact', () {
+      // The existing layout test above uses synthetic 3+2-byte caps. This pins
+      // the encoder against the REAL production cap vectors so a future
+      // off-by-one in _buildCompileCapabilities() (e.g. _ccapMax drift) is
+      // caught at the unit level, not only by a live integration run.
+      final transport = Transport();
+      final compileCaps = transport.debugBuildCompileCapabilities();
+      final runtimeCaps = transport.debugBuildRuntimeCapabilities();
+
+      // Guard the seam: these are the documented production sizes (TNS_CCAP_MAX
+      // = 53, TNS_RCAP_MAX = 7). If these change the deferred-work analysis and
+      // this test must be revisited together.
+      expect(compileCaps.length, equals(53),
+          reason: 'Production compile caps must be TNS_CCAP_MAX (53) bytes');
+      expect(runtimeCaps.length, equals(7),
+          reason: 'Production runtime caps must be TNS_RCAP_MAX (7) bytes');
+
+      final bytes = transport.encodeDataTypesMessage(compileCaps, runtimeCaps);
+
+      // The single-byte length prefix must carry the full 53/7 lengths and the
+      // cap bytes must round-trip verbatim at the documented offsets.
+      const compileLenIndex = 6; // after type(1) + 2 charsets(4) + flags(1)
+      expect(bytes[compileLenIndex], equals(53),
+          reason: 'Compile-cap length prefix must hold the full 53 bytes');
+      expect(
+        bytes.sublist(compileLenIndex + 1, compileLenIndex + 1 + 53),
+        equals(compileCaps),
+        reason: 'Production compile caps must be written verbatim',
+      );
+
+      const runtimeLenIndex = compileLenIndex + 1 + 53;
+      expect(bytes[runtimeLenIndex], equals(7),
+          reason: 'Runtime-cap length prefix must hold the full 7 bytes');
+      expect(
+        bytes.sublist(runtimeLenIndex + 1, runtimeLenIndex + 1 + 7),
+        equals(runtimeCaps),
+        reason: 'Production runtime caps must be written verbatim',
+      );
+
+      // Message still terminates with the uint16BE zero after the mappings.
+      expect(bytes[bytes.length - 2], equals(0));
+      expect(bytes[bytes.length - 1], equals(0));
+    });
+
+    test('throws (not truncates) when compile caps exceed the 1-byte prefix',
+        () {
+      // WITHOUT the guard, writeUint8(256) wraps to 0: the length prefix would
+      // read as 0, the server would consume zero cap bytes, then misparse the
+      // 256 cap bytes as the runtime-cap block + data-type mappings — a silent
+      // handshake corruption. The guard must fail loud instead.
+      final transport = Transport();
+      final oversized = Uint8List(256); // 256 > 0xFF single-byte max
+      final runtime = Uint8List(7);
+
+      expect(
+        () => transport.encodeDataTypesMessage(oversized, runtime),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('compile')),
+        ),
+      );
+    });
+
+    test('throws (not truncates) when runtime caps exceed the 1-byte prefix',
+        () {
+      final transport = Transport();
+      final compile = Uint8List(53);
+      final oversized = Uint8List(256);
+
+      expect(
+        () => transport.encodeDataTypesMessage(compile, oversized),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('runtime')),
+        ),
+      );
+    });
+
+    test('accepts exactly 255 cap bytes (the single-byte prefix boundary)', () {
+      // 255 fits the prefix exactly and must encode without throwing; 256 is
+      // the first wrapping value (covered by the throw tests above).
+      final transport = Transport();
+      final caps255 = Uint8List(255);
+
+      final bytes = transport.encodeDataTypesMessage(caps255, caps255);
+      const compileLenIndex = 6;
+      expect(bytes[compileLenIndex], equals(255),
+          reason: '255 is the max value the single-byte prefix can hold');
+      const runtimeLenIndex = compileLenIndex + 1 + 255;
+      expect(bytes[runtimeLenIndex], equals(255));
+    });
   });
 }

@@ -2351,11 +2351,19 @@ class Transport {
     // Encoding flags
     buffer.writeUint8(0x01 | 0x02); // MULTI_BYTE | CONV_LENGTH
 
-    // Compile caps (length-prefixed)
+    // Compile caps (length-prefixed). The length prefix is a single byte, so a
+    // cap vector longer than 255 bytes would silently truncate the prefix and
+    // corrupt the DataTypes message on the wire (the server would read fewer
+    // caps than were written and then misparse the runtime-caps block and the
+    // data-type mappings). Fail loud instead. _buildCompileCapabilities()
+    // currently produces 53 bytes, so this only fires on a future cap
+    // expansion past the single-byte limit.
+    _checkCapLengthFitsPrefix(compileCaps.length, 'compile');
     buffer.writeUint8(compileCaps.length);
     buffer.writeBytes(compileCaps);
 
-    // Runtime caps (length-prefixed)
+    // Runtime caps (length-prefixed) — same single-byte prefix constraint.
+    _checkCapLengthFitsPrefix(runtimeCaps.length, 'runtime');
     buffer.writeUint8(runtimeCaps.length);
     buffer.writeBytes(runtimeCaps);
 
@@ -2370,6 +2378,28 @@ class Transport {
     buffer.writeUint16BE(0);
 
     return buffer.toBytes();
+  }
+
+  /// Maximum value a single-byte (uint8) capability length prefix can hold.
+  static const int _capLengthPrefixMax = 0xFF;
+
+  /// Guards the single-byte length prefix that precedes each capability block
+  /// in the DataTypes message. Oracle encodes the compile-/runtime-cap lengths
+  /// as one byte each; a vector longer than 255 bytes would wrap the prefix and
+  /// silently truncate the block, desyncing the rest of the message. Throw a
+  /// clear protocol error rather than emit a corrupt handshake.
+  static void _checkCapLengthFitsPrefix(int length, String which) {
+    if (length > _capLengthPrefixMax) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'DataTypes $which capabilities are $length bytes but the wire '
+            'length prefix is a single byte (max $_capLengthPrefixMax) — '
+            'encoding it would truncate the prefix and corrupt the handshake. '
+            'A cap-vector expansion past $_capLengthPrefixMax bytes requires a '
+            'wider length prefix on both client and server.',
+      );
+    }
   }
 
   /// Writes a data type mapping entry.
@@ -2733,6 +2763,17 @@ class Transport {
   static const int _rcapCompat = 0;
   static const int _rcapTtc = 6;
   static const int _rcapMax = 7;
+
+  /// Test seam exposing the real production compile-cap vector (the same bytes
+  /// [encodeDataTypesMessage] sends on the wire) so the encoder can be unit
+  /// tested with production-length caps, not synthetic short vectors.
+  @visibleForTesting
+  Uint8List debugBuildCompileCapabilities() => _buildCompileCapabilities();
+
+  /// Test seam exposing the real production runtime-cap vector. See
+  /// [debugBuildCompileCapabilities].
+  @visibleForTesting
+  Uint8List debugBuildRuntimeCapabilities() => _buildRuntimeCapabilities();
 
   /// Builds client compile-time capabilities.
   /// Buffer size must be TNS_CCAP_MAX (53 bytes).
