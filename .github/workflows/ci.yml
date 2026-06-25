@@ -291,10 +291,20 @@ jobs:
       # init behavior under this job. `-slim` is the lighter CI variant (omits the
       # bundled sample schemas this fixture does not need); it is multi-arch and
       # shares the same `/container-entrypoint-initdb.d` first-boot init path.
+      # HOST PORT 1523 (not 1521) is deliberate: the standard `integration` and
+      # `integration-21c` jobs both publish host port 1521. This job is manual
+      # (workflow_dispatch) and GitHub-hosted runners are one-job-per-VM, so a
+      # 1521 collision is not reachable today — but binding 1523 here (matching
+      # the local docker-compose `oracle-non-al32` service and test_helper.dart's
+      # ORACLE_NON_AL32UTF8_PORT default) removes the latent conflict for good and
+      # makes this job safe to promote to a required/auto check later. Only the
+      # HOST mapping changes: the container's INTERNAL listener stays 1521, so the
+      # in-container sqlplus readiness probe below still targets //localhost:1521.
+      # The Dart test step is given ORACLE_NON_AL32UTF8_PORT=1523 to match.
       - name: Launch WE8MSWIN1252 fixture (gvenzl/oracle-free + CSALTER init)
         run: |
           docker run -d --name oracle-non-al32 \
-            -p 1521:1521 \
+            -p 1523:1521 \
             -e ORACLE_PASSWORD=testpassword \
             -v "$PWD/test/integration/fixtures/non_al32utf8_setup.sql:/container-entrypoint-initdb.d/01_we8mswin1252_pdb.sql:ro" \
             gvenzl/oracle-free:23-slim
@@ -325,7 +335,12 @@ jobs:
           RUN_INTEGRATION_TESTS: 'true'
           RUN_NON_AL32UTF8_TESTS: 'true'
           ORACLE_NON_AL32UTF8_HOST: localhost
-          ORACLE_NON_AL32UTF8_PORT: '1521'
+          # Matches the published HOST port above (1523). The dart test connects
+          # from the runner host (not inside the container), so it must use the
+          # host mapping, NOT the container-internal 1521 used by the in-container
+          # sqlplus readiness probe. test_helper.dart reads this via
+          # ORACLE_NON_AL32UTF8_PORT (nonAl32Port getter; default 1523).
+          ORACLE_NON_AL32UTF8_PORT: '1523'
           ORACLE_NON_AL32UTF8_SERVICE: we8pdb1
           ORACLE_NON_AL32UTF8_USER: system
           # Ephemeral CI-only credential (same rationale as the other Oracle
