@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual trigger for the non-AL32UTF8 charset fixture job (see
+  # integration-non-al32utf8 below). It is intentionally NOT a push/PR check.
+  workflow_dispatch:
 
 # Avoid wasted CI cycles when force-pushing or pushing rapid follow-ups.
 concurrency:
@@ -240,3 +243,88 @@ jobs:
           ORACLE_USER: system
           ORACLE_PASSWORD: testpassword
         run: dart test --tags=integration --reporter=expanded
+
+  # Non-AL32UTF8 (WE8MSWIN1252) database character-set fixture — MANUAL ONLY.
+  #
+  # GATED to `workflow_dispatch` on purpose (Story 10.5 AC3; architecture
+  # "Validation" note: "Gate it if it can't be made reliable, and document the
+  # gap rather than silently skipping"). The gvenzl/oracle-free cold start PLUS
+  # the in-PDB CSALTER charset migration is slower and less proven on GitHub
+  # Actions than the AL32UTF8 service jobs, so this is NOT a blocking push/PR
+  # check. Run it on demand from the Actions tab; promote it to a required check
+  # only once it proves consistently green inside the timeout.
+  #
+  # WHY a `docker run` step instead of a `services:` block: GitHub `services:`
+  # containers start BEFORE `actions/checkout` and cannot bind-mount repo files,
+  # but this fixture's whole point is the init SQL (non_al32utf8_setup.sql) that
+  # creates and migrates the we8pdb1 PDB down to WE8MSWIN1252. So the container
+  # is launched with `docker run -v` AFTER checkout.
+  #
+  # This job can NEVER silently pass: the wait step asserts the live charset is
+  # WE8MSWIN1252, and the suite's own guard (Story 10.3 AC1) hard-fails if it is
+  # ever pointed at an AL32UTF8 database.
+  integration-non-al32utf8:
+    name: Non-AL32UTF8 Charset Fixture (WE8MSWIN1252, manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      # gvenzl/oracle-free is a public, multi-arch community image (no registry
+      # credentials). The init SQL is bind-mounted into the first-boot init dir,
+      # exactly like the local `non-al32utf8` docker-compose profile.
+      - name: Launch WE8MSWIN1252 fixture (gvenzl/oracle-free + CSALTER init)
+        run: |
+          docker run -d --name oracle-non-al32 \
+            -p 1521:1521 \
+            -e ORACLE_PASSWORD=testpassword \
+            -v "$PWD/test/integration/fixtures/non_al32utf8_setup.sql:/container-entrypoint-initdb.d/01_we8mswin1252_pdb.sql:ro" \
+            gvenzl/oracle-free:latest
+
+      # Self-contained readiness loop (not the shared ci_wait_for_oracle.sh):
+      # the cold start + charset migration can exceed that script's ~10 min
+      # budget, and we additionally want to assert the migrated charset. 50 x
+      # 30s = 25 min, comfortably inside timeout-minutes above.
+      - name: Wait for we8pdb1 readiness (assert WE8MSWIN1252)
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 50); do
+            if echo "SELECT value FROM nls_database_parameters WHERE parameter = 'NLS_CHARACTERSET';" \
+                 | docker exec -i oracle-non-al32 sqlplus -S -L "system/testpassword@//localhost:1521/we8pdb1" 2>/dev/null \
+                 | grep -q 'WE8MSWIN1252'; then
+              echo "we8pdb1 ready with WE8MSWIN1252 charset (after ${i} attempts)"
+              exit 0
+            fi
+            echo "we8pdb1 not ready / not yet migrated (attempt ${i}/50)..."
+            sleep 30
+          done
+          echo "::error::we8pdb1 did not become ready as WE8MSWIN1252 within timeout"
+          docker logs oracle-non-al32 2>&1 | tail -n 200 || true
+          exit 1
+
+      - name: Run non-AL32UTF8 integration suite (real WE8MSWIN1252 DB)
+        env:
+          RUN_INTEGRATION_TESTS: 'true'
+          RUN_NON_AL32UTF8_TESTS: 'true'
+          ORACLE_NON_AL32UTF8_HOST: localhost
+          ORACLE_NON_AL32UTF8_PORT: '1521'
+          ORACLE_NON_AL32UTF8_SERVICE: we8pdb1
+          ORACLE_NON_AL32UTF8_USER: system
+          # Ephemeral CI-only credential (same rationale as the other Oracle
+          # jobs): protects a throwaway database destroyed with the job.
+          ORACLE_NON_AL32UTF8_PASSWORD: testpassword
+        run: dart test test/integration/charset_non_al32utf8_integration_test.dart --reporter=expanded
+
+      - name: Fixture container logs (always)
+        if: always()
+        run: docker logs oracle-non-al32 2>&1 | tail -n 200 || true

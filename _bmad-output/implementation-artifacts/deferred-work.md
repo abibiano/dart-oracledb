@@ -161,3 +161,9 @@ From the code review of 4-4-json-data-type:
 > **Resolved: Release 1.0 closeout — Epic 5 follow-ups** near the top of this
 > file (the stale-cache item was fixed; the aliasing item was dismissed as
 > node-oracledb parity).
+
+
+## Deferred from: code review of 10-5-docs-ci-fixture (2026-06-25)
+
+- `gvenzl/oracle-free:latest` unpinned tag in `integration-non-al32utf8` CI job — inconsistent with oracle-21c's pinned `gvenzl/oracle-xe:21`; reproducibility risk if a new Oracle Free release changes init behavior. Pin to a specific tag (e.g. `gvenzl/oracle-free:23-slim`) when the job proves stable.
+- Port-1521 conflict if `integration-non-al32utf8` is ever promoted to a required check — the standard `integration` job also uses host port 1521; concurrent runs on the same runner would collide. Requires redesigning to use a different host port (e.g. 1523, matching local compose) before promotion.

@@ -19,8 +19,9 @@
 -- privilege and container this migration needs. The optional `non-al32utf8`
 -- docker-compose profile bind-mounts this file there.
 --
--- This is a LOCAL-ONLY test helper. CI wiring and the README support matrix
--- remain Story 10.5.
+-- This helper is also wired into CI as the manual `integration-non-al32utf8`
+-- job in .github/workflows/ci.yml (Story 10.5). The README support matrix and
+-- CONTRIBUTING.md document the local and CI usage.
 
 WHENEVER SQLERROR EXIT SQL.SQLCODE
 SET ECHO OFF

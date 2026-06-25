@@ -453,13 +453,14 @@ final isAlive = await connection.ping();
 
 | Oracle Type               | Dart Type                                                                        |
 | ------------------------- | -------------------------------------------------------------------------------- |
-| VARCHAR2, CHAR, NVARCHAR2 | `String`                                                                         |
+| VARCHAR2, CHAR            | `String` (see [Character Set Support](#character-set-support))                    |
+| NCHAR, NVARCHAR2, NCLOB   | `String` (national charset — see [Character Set Support](#character-set-support)) |
 | NUMBER                    | `num` / `int` / `double`                                                         |
 | DATE                      | `DateTime`                                                                       |
 | TIMESTAMP                 | `DateTime`                                                                       |
 | TIMESTAMP WITH TIME ZONE  | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` |
 | RAW                       | `Uint8List` (see [RAW support](#raw-support))                                    |
-| CLOB                      | `String` (see [CLOB support](#clob-support))                                     |
+| CLOB                      | `String` (see [CLOB support](#clob-support), [Character Set Support](#character-set-support)) |
 | BLOB                      | `Uint8List` (see [BLOB support](#blob-support))                                  |
 | JSON (21c+)               | `Map<String, Object?>` / `List<Object?>` (see [JSON support](#json-support))     |
 | CURSOR / REF CURSOR       | `OracleResultSet` (OUT bind) / `List<OracleRow>` (nested `CURSOR()` column) (see [Result Sets & Streaming](#result-sets--streaming)) |
@@ -557,8 +558,9 @@ IN binds and IN OUT round trips, plus IN binds straddling the 64 KiB
 wire-chunk boundary exactly (BLOB at 65,535/65,536/65,537 payload bytes; CLOB
 at the nearest even UTF-16BE sizes 65,534/65,536/65,538). Unbounded/multi-gigabyte LOBs are
 still not claimed: values are materialized in memory as a single `String` /
-`Uint8List`. NCLOB and BFILE columns are not yet supported and fail with a
-clear `OracleException` (see roadmap).
+`Uint8List`. NCLOB columns are supported as Dart `String` (the national
+`AL16UTF16` charset — see [Character Set Support](#character-set-support)); BFILE
+columns are not supported and fail with a clear `OracleException`.
 
 ### JSON support
 
@@ -611,6 +613,62 @@ Oracle-specific JSON scalar types (dates/timestamps/intervals/binary inside
 JSON documents). Documents containing such scalars fail loudly with
 `OracleException` rather than decoding silently.
 
+## Character Set Support
+
+This driver follows node-oracledb's **thin-mode** character-set model: the client
+always negotiates **UTF-8** (`AL32UTF8`) on the wire, and the **Oracle server**
+performs any conversion to and from the database's own character set. There is no
+configurable client-side database-charset codec, and the driver does **not** read
+the `NLS_LANG` environment variable — character handling is delegated to the
+server exactly as Oracle's own thin drivers do. `connection.charsetInfo` exposes
+the detected `databaseCharset` / `nationalCharset` for diagnostics
+(`OracleCharsetInfo`).
+
+### Database character set — `VARCHAR2`, `CHAR`, `CLOB`
+
+Because the client speaks UTF-8 and the server converts, the database character
+set is transparent to your code:
+
+- **`AL32UTF8`** (the Oracle default since 12c) round-trips directly.
+- **Single-byte / non-`AL32UTF8`** database character sets round-trip via
+  Oracle's server-side conversion. This is validated end-to-end against
+  **`WE8MSWIN1252`** (Windows-1252 Western European), exercising characters that
+  are specific to that code page — euro sign, smart quotes, en/em dashes,
+  ellipsis, bullet — so the round-trip proves real UTF-8 ⇆ server conversion
+  rather than a byte-identity accident.
+
+You never select a client codec; the driver keeps primary text on the UTF-8 wire
+path regardless of the database character set.
+
+### National character set — `NCHAR`, `NVARCHAR2`, `NCLOB`
+
+National-character types are supported when the database's national character set
+is **`AL16UTF16`** — the standard (and only non-deprecated) national charset,
+which both validated server lines (Oracle 23ai and 21c) use. National values
+travel the wire as UTF-16BE and map to Dart `String`:
+
+- Selecting an `NCHAR` / `NVARCHAR2` / `NCLOB` column returns a `String`.
+- Bind national data with `OracleDbType.nVarchar` (NCHAR / NVARCHAR2) or
+  `OracleDbType.nClob` (NCLOB). `connection.charsetInfo.supportsNationalCharacterSet`
+  is `true` when the server's national charset is `AL16UTF16`.
+
+### Fail-loud on unsupported national character sets
+
+If a connection's national character set is **not** `AL16UTF16` (for example the
+deprecated `UTF8` national charset, which thin mode does not support), the driver
+**fails loud** with an `OracleException` on any `NCHAR` / `NVARCHAR2` / `NCLOB`
+bind or column — it never silently produces mojibake. Ordinary
+`VARCHAR2` / `CHAR` / `CLOB` columns are unaffected and keep working over the
+UTF-8 wire path regardless of the national character set.
+
+### Thin-model boundaries
+
+- **No `NLS_LANG` parsing** — the environment variable is ignored (node-oracledb
+  thin parity).
+- **No configurable client-side database-charset codec** — the server performs
+  database-charset conversion.
+- **One national character set is supported:** `AL16UTF16`.
+
 ## Project Status
 
 This package implements a subset of the full Oracle driver feature set. Below is the current roadmap:
@@ -623,6 +681,7 @@ This package implements a subset of the full Oracle driver feature set. Below is
 | Advanced data types (CLOB, BLOB, RAW, JSON)     | ✅ Done        |
 | Connection pooling                              | ✅ Done        |
 | Result sets, streaming, REF CURSOR & implicit results | ✅ Done  |
+| Character set support (`AL32UTF8` + non-`AL32UTF8` databases, national types) | ✅ Done |
 
 ### Planned After 1.0
 
@@ -630,12 +689,11 @@ After the 1.0 release, the project roadmap includes larger API and compatibility
 
 | Priority | Planned enhancement                                                                       |
 | -------- | ----------------------------------------------------------------------------------------- |
-| 1        | Non-`AL32UTF8` database character set compatibility                                       |
-| 2        | Bulk DML / `executeMany()`                                                                |
-| 3        | Public LOB streaming and temporary LOBs                                                   |
-| 4        | Extended JSON / OSON parity (Oracle-specific JSON scalars, OSON-in-BLOB helpers)          |
-| 5        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
-| 6        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
+| 1        | Bulk DML / `executeMany()`                                                                |
+| 2        | Public LOB streaming and temporary LOBs                                                   |
+| 3        | Extended JSON / OSON parity (Oracle-specific JSON scalars, OSON-in-BLOB helpers)          |
+| 4        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
+| 5        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
 
 ## Tests
 
@@ -660,9 +718,24 @@ docker compose --profile oracle21c up -d oracle21c
 RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test/integration/
 ```
 
+The non-`AL32UTF8` character-set round-trip is proven by an optional, local-only
+fixture (a `WE8MSWIN1252` database on port 1523). It is double-gated behind
+`RUN_NON_AL32UTF8_TESTS` and is **not** part of `docker compose up` — see
+[CONTRIBUTING.md](CONTRIBUTING.md#non-al32utf8-character-set-fixture) for the full
+walkthrough. In CI it runs as a manually-dispatched (`workflow_dispatch`) job
+rather than a blocking push/PR check (the gvenzl cold-start plus charset migration
+is slower and less proven than the standard service jobs):
+
+```bash
+# Optional: non-AL32UTF8 (WE8MSWIN1252) database charset round-trip
+docker compose --profile non-al32utf8 up -d oracle-non-al32   # wait for healthy
+RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
+  dart test test/integration/charset_non_al32utf8_integration_test.dart
+```
+
 ## Known Limitations
 
-- **Character sets** — the driver assumes the database character set is UTF-8 (`AL32UTF8`, the Oracle default since 12c). Data stored in non-UTF-8 character sets may decode incorrectly.
+- **Character sets** — primary character data (`VARCHAR2`/`CHAR`/`CLOB`) is handled via Oracle's server-side conversion while the client always negotiates UTF-8, so both `AL32UTF8` and non-`AL32UTF8` database character sets are supported (validated against `WE8MSWIN1252`). National types (`NCHAR`/`NVARCHAR2`/`NCLOB`) require the `AL16UTF16` national charset and otherwise fail loud — there is no client-side codec and `NLS_LANG` is ignored. See [Character Set Support](#character-set-support) for the full matrix.
 - **Statement cache and external DDL** — top-level DDL executed on the same connection clears the statement cache, but DDL issued from another session (or inside a PL/SQL block) can leave stale cached SELECT metadata. This matches node-oracledb thin-mode behavior.
 - **CLOB/BLOB cursor re-parse** — result cursors for queries selecting CLOB or BLOB columns are always re-parsed, never blind-reused from the statement cache (fresh defines are required to keep the LOB-prefetch metadata); RAW queries keep normal cursor reuse.
 - **NUMBER beyond 2⁵³** — integer-valued NUMBERs larger than 2⁵³ decode to `double` and lose precision (Dart `double` limit; matches node-oracledb).

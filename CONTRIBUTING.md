@@ -80,6 +80,57 @@ RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 dart test test
 
 > **Important:** All new features and bug fixes must pass integration tests on **both** Oracle 23ai and Oracle 21c before being considered complete. Running only one version is not sufficient.
 
+### Non-AL32UTF8 character set fixture
+
+The two standard databases above both use the default `AL32UTF8` database
+character set. To prove that `VARCHAR2`/`CHAR`/`CLOB` text round-trips through
+Oracle's **server-side** conversion against a *non*-`AL32UTF8` database (the
+node-oracledb thin model — the client always negotiates UTF-8 on the wire), there
+is an **optional, local/CI-manual** fixture: a `WE8MSWIN1252` (single-byte Western)
+database published on port `1523`, service `we8pdb1`.
+
+It is gated behind its own docker-compose profile and is **not** started by a
+plain `docker compose up`, nor run by the default integration suites:
+
+```bash
+# Runs on Docker Desktop — the gvenzl/oracle-free image is native ARM64.
+docker context use desktop-linux
+docker compose --profile non-al32utf8 up -d oracle-non-al32   # wait for healthy
+
+# Double-gated: RUN_NON_AL32UTF8_TESTS is required IN ADDITION to RUN_INTEGRATION_TESTS.
+RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
+  dart test test/integration/charset_non_al32utf8_integration_test.dart
+```
+
+How it works: every readily-available Oracle Free image ships a prebuilt
+`AL32UTF8` database and ignores `ORACLE_CHARACTERSET`, so the fixture's init
+script (`test/integration/fixtures/non_al32utf8_setup.sql`, bind-mounted into the
+container's first-boot init dir) creates a fresh `we8pdb1` PDB and migrates it —
+while still empty — down to `WE8MSWIN1252`. The suite's own guard fails loud if it
+is ever pointed at an `AL32UTF8` database, so a green run always means a real
+non-`AL32UTF8` round-trip.
+
+The connection parameters come from `test_helper.dart` and can be overridden via
+environment variables (defaults shown, matching the compose service):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `RUN_NON_AL32UTF8_TESTS` | _(unset → suite skips)_ | Set to `true` to enable the suite |
+| `ORACLE_NON_AL32UTF8_HOST` | `localhost` | Fixture host |
+| `ORACLE_NON_AL32UTF8_PORT` | `1523` | Fixture port |
+| `ORACLE_NON_AL32UTF8_SERVICE` | `we8pdb1` | Migrated `WE8MSWIN1252` PDB |
+| `ORACLE_NON_AL32UTF8_USER` | `system` | Fixture user |
+| `ORACLE_NON_AL32UTF8_PASSWORD` | `testpassword` | Fixture password (ephemeral) |
+
+**Why CI does not run it by default.** It is wired into CI as the
+`integration-non-al32utf8` job, but **gated to manual `workflow_dispatch`** rather
+than running on every push/PR: the gvenzl cold start plus the in-PDB charset
+migration is slower and less proven on GitHub Actions than the standard
+`AL32UTF8` service jobs. Trigger it on demand from the **Actions** tab; it
+launches the same image + init SQL with `docker run` (GitHub `services:`
+containers start before checkout and cannot bind-mount the init script) and runs
+the focused suite against the migrated database.
+
 ### Static analysis
 
 ```bash

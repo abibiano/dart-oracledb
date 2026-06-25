@@ -70,14 +70,18 @@ services:
       retries: 10
       start_period: 300s
 
-  # OPTIONAL local-only fixture for Story 10.3: a 23ai Free database whose
+  # OPTIONAL local-only fixture (Story 10.3): a 23ai Free database whose
   # *database* character set is the single-byte Western WE8MSWIN1252 instead of
   # the default AL32UTF8. It proves that VARCHAR2/CHAR/CLOB primary text
   # round-trips through Oracle's server-side conversion while the driver keeps
   # negotiating UTF-8 on the wire (the node-oracledb thin model). It does NOT
-  # run on `docker compose up` (gated behind the `non-al32utf8` profile) and is
-  # NOT wired into CI - CI fixture hardening and the README support matrix
-  # remain Story 10.5.
+  # run on `docker compose up` (gated behind the `non-al32utf8` profile).
+  #
+  # CI (Story 10.5): wired as the MANUAL `integration-non-al32utf8` job in
+  # .github/workflows/ci.yml (a `docker run` of this same gvenzl image + init
+  # SQL). It is gated to `workflow_dispatch` rather than run on every push/PR:
+  # the gvenzl cold-start + CSALTER migration is slower/less proven on GitHub
+  # Actions than the standard AL32UTF8 service jobs. Locally it stays opt-in.
   #
   # HOW THE non-AL32UTF8 CHARSET IS OBTAINED: every readily available Oracle
   # 23ai/26ai Free image (the official `container-registry.oracle.com/database/
