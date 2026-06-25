@@ -283,13 +283,21 @@ jobs:
       # gvenzl/oracle-free is a public, multi-arch community image (no registry
       # credentials). The init SQL is bind-mounted into the first-boot init dir,
       # exactly like the local `non-al32utf8` docker-compose profile.
+      #
+      # Tag pinned to the 23 major version (the Oracle Free 23ai line validated
+      # locally — the running fixture reports 23.26.x) rather than the floating
+      # `:latest`, mirroring the integration-21c job's pinned `gvenzl/oracle-xe:21`
+      # so a new Oracle Free release can never silently change first-boot/CSALTER
+      # init behavior under this job. `-slim` is the lighter CI variant (omits the
+      # bundled sample schemas this fixture does not need); it is multi-arch and
+      # shares the same `/container-entrypoint-initdb.d` first-boot init path.
       - name: Launch WE8MSWIN1252 fixture (gvenzl/oracle-free + CSALTER init)
         run: |
           docker run -d --name oracle-non-al32 \
             -p 1521:1521 \
             -e ORACLE_PASSWORD=testpassword \
             -v "$PWD/test/integration/fixtures/non_al32utf8_setup.sql:/container-entrypoint-initdb.d/01_we8mswin1252_pdb.sql:ro" \
-            gvenzl/oracle-free:latest
+            gvenzl/oracle-free:23-slim
 
       # Self-contained readiness loop (not the shared ci_wait_for_oracle.sh):
       # the cold start + charset migration can exceed that script's ~10 min
