@@ -62,6 +62,24 @@ class Transport {
   /// Set after parsing ACCEPT packet flag2 field.
   bool _supportsEndOfRequest = false;
 
+  /// Whether this connection's national character set (AL16UTF16) can
+  /// round-trip NCHAR/NVARCHAR2/NCLOB values as UTF-16BE.
+  ///
+  /// Set once by the connection after startup charset detection (Story 10.1)
+  /// from [OracleCharsetInfo.supportsNationalCharacterSet], and threaded into
+  /// every execute/fetch response decode. When `false`, decoding a
+  /// national-charset value fails loud instead of risking silent corruption.
+  /// Defaults to `true` so the startup detection query itself (and any decode
+  /// before detection completes, which never touches national types) is
+  /// unaffected.
+  bool supportsNationalCharset = true;
+
+  /// National charset name reported by the connection startup detection query.
+  ///
+  /// Used only in fail-loud diagnostics. Defaults to the supported value so
+  /// unit-test and pre-detection transport paths keep their historical behavior.
+  String nationalCharset = 'AL16UTF16';
+
   /// Buffered data from FAST_AUTH response (AUTH_PHASE_ONE response).
   /// When FAST_AUTH returns multiple messages in one packet, the AUTH response
   /// is buffered here so the next receiveData() call can return it.
@@ -219,7 +237,8 @@ class Transport {
     if (_corrupted) {
       throw const OracleException(
         errorCode: oraConnectionClosed,
-        message: 'Transport is no longer usable: a previous RPC timed out and '
+        message:
+            'Transport is no longer usable: a previous RPC timed out and '
             'may have left an unread response on the connection. Close this '
             'connection and open a new one.',
       );
@@ -269,8 +288,9 @@ class Transport {
     _ensureUsable();
     final bytes = encodeTnsPacket(packet, useLargeSdu: _useLargeSdu);
     _log.fine(
-        'Sending TNS packet: type=${packet.type}, length=${bytes.length}, '
-        'largeSdu=$_useLargeSdu');
+      'Sending TNS packet: type=${packet.type}, length=${bytes.length}, '
+      'largeSdu=$_useLargeSdu',
+    );
     await _socket.send(bytes);
     _log.fine('Packet sent successfully');
   }
@@ -313,7 +333,8 @@ class Transport {
 
     final packet = decodeTnsPacket(fullPacket, useLargeSdu: _useLargeSdu);
     _log.fine(
-        'Decoded TNS packet: type=${packet.type}, payload=${packet.payload.length} bytes');
+      'Decoded TNS packet: type=${packet.type}, payload=${packet.payload.length} bytes',
+    );
 
     return packet;
   }
@@ -501,8 +522,10 @@ class Transport {
     List<int> cursorsToClose = const [],
     bool preserveTimestampTimeZone = false,
   }) async {
-    _log.fine('Sending execute request (isQuery=$isQuery, isPlSql=$isPlSql, '
-        'cursorId=$cursorId)...');
+    _log.fine(
+      'Sending execute request (isQuery=$isQuery, isPlSql=$isPlSql, '
+      'cursorId=$cursorId)...',
+    );
 
     // Record whether this execute reuses a cached server cursor (parse bit
     // cleared) or performs a full parse. The cursorId sent on the wire is the
@@ -530,8 +553,11 @@ class Transport {
       effectiveBinds = null;
     } else {
       try {
-        effectiveBinds = await _prepareLobBinds(bindValues, isPlSql: isPlSql,
-            timeout: timeout);
+        effectiveBinds = await _prepareLobBinds(
+          bindValues,
+          isPlSql: isPlSql,
+          timeout: timeout,
+        );
       } catch (_) {
         // Bind preparation failed after we drained the previous call's
         // temp-LOB free list (above). Without this restore, those server-side
@@ -577,8 +603,11 @@ class Transport {
     }
 
     await sendData(requestData);
-    final payload = await _receiveDataWithTimeout(timeout,
-        expectedColumns: expectedColumns, bindMetadata: bindMetadata);
+    final payload = await _receiveDataWithTimeout(
+      timeout,
+      expectedColumns: expectedColumns,
+      bindMetadata: bindMetadata,
+    );
 
     final response = decodeExecuteResponse(
       payload,
@@ -588,6 +617,8 @@ class Transport {
       expectedColumns: expectedColumns,
       bindMetadata: bindMetadata,
       preserveTimestampTimeZone: preserveTimestampTimeZone,
+      supportsNationalCharset: supportsNationalCharset,
+      nationalCharset: nationalCharset,
     );
 
     // sendExecute returns only the FIRST batch. The FETCH drain loop (and its
@@ -603,8 +634,9 @@ class Transport {
     // original cursor stays open, so the usable fetch cursor falls back to the
     // request's own id. The returned response carries that effective id when
     // more rows remain, so the caller's fetch loop can continue.
-    final effectiveCursorId =
-        response.cursorId != 0 ? response.cursorId : cursorId;
+    final effectiveCursorId = response.cursorId != 0
+        ? response.cursorId
+        : cursorId;
     if (isQuery &&
         response.isSuccess &&
         effectiveCursorId != 0 &&
@@ -625,12 +657,19 @@ class Transport {
       // `requiresDefine = true` for CLOB/BLOB/JSON query columns.
       if (fetchColumns != null &&
           response.rows.isEmpty &&
-          fetchColumns.any((c) =>
-              c.oracleType == oraTypeClob ||
-              c.oracleType == oraTypeBlob ||
-              c.oracleType == oraTypeJson)) {
+          fetchColumns.any(
+            (c) =>
+                c.oracleType == oraTypeClob ||
+                c.oracleType == oraTypeBlob ||
+                c.oracleType == oraTypeJson,
+          )) {
         final defineResponse = await _sendLobDefines(
-            sql, effectiveCursorId, fetchColumns, prefetchRows, timeout);
+          sql,
+          effectiveCursorId,
+          fetchColumns,
+          prefetchRows,
+          timeout,
+        );
         return ExecuteResponse(
           isSuccess: true,
           cursorId: effectiveCursorId,
@@ -662,9 +701,11 @@ class Transport {
         response.moreRowsToFetch) {
       // The server signalled more rows pending, but neither the response nor
       // the request carries a usable cursor id, so the fetch loop cannot run.
-      _log.warning('Server reports more rows pending but no usable cursor id '
-          'is available to continue fetching; result is reported incomplete '
-          '(moreRowsToFetch=true)');
+      _log.warning(
+        'Server reports more rows pending but no usable cursor id '
+        'is available to continue fetching; result is reported incomplete '
+        '(moreRowsToFetch=true)',
+      );
     }
 
     // Single-batch / non-query / no-usable-cursor: return the first response
@@ -717,8 +758,11 @@ class Transport {
     List<BindMetadata>? bindMetadata,
     Duration? timeout = const Duration(minutes: 2),
   }) {
-    return _materializeLobValues(response,
-        bindMetadata: bindMetadata, timeout: timeout);
+    return _materializeLobValues(
+      response,
+      bindMetadata: bindMetadata,
+      timeout: timeout,
+    );
   }
 
   /// Builds a close-cursor piggyback TTC message (prepended to another message).
@@ -749,7 +793,9 @@ class Transport {
   /// locator bytes. Like close-cursor, it only ever rides another message —
   /// there is no standalone free-temp round trip.
   Uint8List _buildFreeTempLobsPiggyback(
-      List<Uint8List> locators, int totalSize) {
+    List<Uint8List> locators,
+    int totalSize,
+  ) {
     final buf = WriteBuffer();
     buf.writeUint8(ttcMsgTypePiggyback);
     buf.writeUint8(ttcLobOp);
@@ -881,11 +927,17 @@ class Transport {
           raw.oraType == oraTypeClob &&
           raw.value is String) {
         final value = raw.value as String;
+        // NCLOB (isNChar) creates an NCHAR-charset temp LOB so the value is
+        // stored as UTF-16BE; plain CLOB stays UTF-8 (ttcCsfrmImplicit).
+        final csfrm = raw.isNChar ? ttcCsfrmNChar : ttcCsfrmImplicit;
         replacement = BindVariable(
-          value: value.isEmpty ? null : await _createTempClob(value, timeout),
+          value: value.isEmpty
+              ? null
+              : await _createTempClob(value, timeout, csfrm: csfrm),
           oraType: oraTypeClob,
           maxSize: raw.maxSize,
           dir: raw.dir,
+          isNChar: raw.isNChar,
         );
       } else if (raw is BindVariable &&
           raw.oraType == oraTypeBlob &&
@@ -900,12 +952,13 @@ class Transport {
         final String? value = raw is String
             ? raw
             : (raw is BindVariable &&
-                    raw.dir == BindDir.input &&
-                    raw.oraType == oraTypeVarchar &&
-                    raw.value is String
-                ? raw.value as String
-                : null);
-        if (value != null && utf8.encode(value).length > ttcMaxVarcharBindBytes) {
+                      raw.dir == BindDir.input &&
+                      raw.oraType == oraTypeVarchar &&
+                      raw.value is String
+                  ? raw.value as String
+                  : null);
+        if (value != null &&
+            utf8.encode(value).length > ttcMaxVarcharBindBytes) {
           replacement = BindVariable(
             value: await _createTempClob(value, timeout),
             oraType: oraTypeClob,
@@ -921,11 +974,11 @@ class Transport {
           final Uint8List? bytes = raw is Uint8List
               ? raw
               : (raw is BindVariable &&
-                      raw.dir == BindDir.input &&
-                      raw.oraType == oraTypeRaw &&
-                      raw.value is Uint8List
-                  ? raw.value as Uint8List
-                  : null);
+                        raw.dir == BindDir.input &&
+                        raw.oraType == oraTypeRaw &&
+                        raw.value is Uint8List
+                    ? raw.value as Uint8List
+                    : null);
           if (bytes != null && bytes.length > ttcMaxRawBindBytes) {
             replacement = BindVariable(
               value: await _createTempBlob(bytes, timeout),
@@ -951,11 +1004,18 @@ class Transport {
   /// ships the UTF-8 bytes at 1-based offset 1. The locator is queued for the
   /// free-temp piggyback on the NEXT execute even if the write fails, so a
   /// failed bind cannot leak the server-side temp LOB past the next RPC.
-  Future<LobLocator> _createTempClob(String value, Duration? timeout) async {
+  Future<LobLocator> _createTempClob(
+    String value,
+    Duration? timeout, {
+    int csfrm = ttcCsfrmImplicit,
+  }) async {
+    // The charset form rides the CREATE_TEMP source offset: ttcCsfrmImplicit
+    // makes a CLOB (UTF-8 storage), ttcCsfrmNChar makes an NCLOB (UTF-16BE
+    // storage). The WRITE below encodes the value per the same [csfrm].
     final created = await sendLobOp(
       operation: tnsLobOpCreateTemp,
       sourceLocator: Uint8List(tnsLobLocatorBufferSize),
-      sourceOffset: ttcCsfrmImplicit,
+      sourceOffset: csfrm,
       destOffset: oraTypeClob,
       destLength: tnsDurationSession,
       timeout: timeout,
@@ -968,15 +1028,20 @@ class Transport {
       );
     }
     try {
-      // The created locator's charset flag dictates the write encoding:
-      // variable-length-charset locators take UTF-16BE data, others UTF-8
-      // (node-oracledb lobOp.js encode checks getCsfrm() the same way).
+      // The write encoding follows node-oracledb lobOp.js getCsfrm(): an NCLOB
+      // (declared NCHAR form) takes UTF-16BE outright, and a plain CLOB takes
+      // UTF-16BE only when the server marked its locator variable-length
+      // charset; everything else is UTF-8. The server does not reliably set the
+      // flag bit on a freshly created NCLOB locator, so the known NCHAR form is
+      // the authoritative signal here.
       final probe = LobLocator(
-          locator: locator,
-          oracleType: oraTypeClob,
-          length: 0,
-          chunkSize: 0);
-      final data = probe.usesVarLengthCharset
+        locator: locator,
+        oracleType: oraTypeClob,
+        length: 0,
+        chunkSize: 0,
+        isNChar: csfrm == ttcCsfrmNChar,
+      );
+      final data = (probe.isNChar || probe.usesVarLengthCharset)
           ? encodeUtf16Be(value)
           : Uint8List.fromList(utf8.encode(value));
       final written = await sendLobOp(
@@ -1002,6 +1067,7 @@ class Transport {
       oracleType: oraTypeClob,
       length: value.length,
       chunkSize: 0,
+      isNChar: csfrm == ttcCsfrmNChar,
     );
   }
 
@@ -1082,7 +1148,8 @@ class Transport {
     if (valueIndex >= outBindIndices.length) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'OUT bind index misalignment: OUT value $valueIndex has no '
+        message:
+            'OUT bind index misalignment: OUT value $valueIndex has no '
             'entry in outBindIndices (${outBindIndices.length} entries) — '
             'cannot apply the OUT-bind maxSize guard',
       );
@@ -1091,7 +1158,8 @@ class Transport {
     if (bindIdx < 0 || bindIdx >= bindMetadata.length) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'OUT bind index misalignment: outBindIndices[$valueIndex] '
+        message:
+            'OUT bind index misalignment: outBindIndices[$valueIndex] '
             'is $bindIdx but only ${bindMetadata.length} bind metadata '
             'entries were declared — cannot apply the OUT-bind maxSize guard',
       );
@@ -1110,10 +1178,11 @@ class Transport {
     if (received == locatorLength) return;
     throw OracleException(
       errorCode: oraProtocolError,
-      message: 'BLOB read returned $received bytes but the locator reports '
+      message:
+          'BLOB read returned $received bytes but the locator reports '
           '$locatorLength${received < locatorLength ? ' — the value may '
-              'exceed the single round-trip read limit; values this large '
-              'are not yet supported' : ''}',
+                    'exceed the single round-trip read limit; values this large '
+                    'are not yet supported' : ''}',
     );
   }
 
@@ -1131,8 +1200,9 @@ class Transport {
     Duration? timeout,
   }) async {
     if (!response.isSuccess) return response;
-    final hasRowLob =
-        response.rows.any((row) => row.any((v) => v is LobLocator));
+    final hasRowLob = response.rows.any(
+      (row) => row.any((v) => v is LobLocator),
+    );
     final hasOutLob = response.outBindValues.any((v) => v is LobLocator);
     if (!hasRowLob && !hasOutLob) return response;
 
@@ -1141,8 +1211,8 @@ class Transport {
     final materialized = <LobLocator, Object>{};
     Future<Object> readLocator(LobLocator locator) async =>
         materialized[locator] ??= locator.oracleType == oraTypeBlob
-            ? await _readBlobAsBytes(locator, timeout)
-            : await _readClobAsString(locator, timeout);
+        ? await _readBlobAsBytes(locator, timeout)
+        : await _readClobAsString(locator, timeout);
 
     var rows = response.rows;
     if (hasRowLob) {
@@ -1181,7 +1251,8 @@ class Transport {
           final isBlob = value.oracleType == oraTypeBlob;
           throw OracleException(
             errorCode: oraBindTypeError,
-            message: '${isBlob ? 'BLOB' : 'CLOB'} OUT bind returned '
+            message:
+                '${isBlob ? 'BLOB' : 'CLOB'} OUT bind returned '
                 '${value.length} ${isBlob ? 'bytes' : 'characters'} but '
                 'OracleBind maxSize is $maxSize — increase maxSize to at '
                 'least the largest value the block can return',
@@ -1224,12 +1295,19 @@ class Transport {
   /// reconstructing a character offset from a decoded String's length, which
   /// counts UTF-16 code units and desynced from Oracle's character offsets on
   /// astral text.
-  Future<String> _readClobAsString(LobLocator locator, Duration? timeout) async {
+  Future<String> _readClobAsString(
+    LobLocator locator,
+    Duration? timeout,
+  ) async {
     if (locator.length == 0) return ''; // EMPTY_CLOB()
-    // PL/SQL-created and temporary CLOB locators carry the variable-length
-    // charset flag: their data travels as UTF-16BE instead of the negotiated
-    // UTF-8 (node-oracledb lob.js getCsfrm / lobOp.js swap16 handling).
-    final isUtf16 = locator.usesVarLengthCharset;
+    // A locator's data travels as UTF-16BE instead of the negotiated UTF-8
+    // when it is national-charset. node-oracledb `lob.js getCsfrm()` decides
+    // this two ways: an NCLOB's declared NCHAR form is national outright, and a
+    // plain CLOB is national only if its locator carries the variable-length
+    // charset flag (Oracle sets that bit on PL/SQL-created and temporary CLOBs,
+    // whose data is stored as UCS-2). Server-created NCLOB locators do NOT
+    // always set the flag bit, so the declared NCHAR form must be honored too.
+    final isUtf16 = locator.isNChar || locator.usesVarLengthCharset;
     final response = await sendLobOp(
       operation: tnsLobOpRead,
       sourceLocator: locator.locator,
@@ -1242,7 +1320,8 @@ class Transport {
     if (bytes == null || bytes.isEmpty) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'CLOB read returned no data '
+        message:
+            'CLOB read returned no data '
             '(expected ${locator.length} chars)',
       );
     }
@@ -1255,7 +1334,8 @@ class Transport {
     } on FormatException catch (e) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'CLOB read returned malformed '
+        message:
+            'CLOB read returned malformed '
             '${isUtf16 ? 'UTF-16' : 'UTF-8'} data',
         cause: e,
       );
@@ -1267,7 +1347,8 @@ class Transport {
     if (text.length != locator.length) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'CLOB read length mismatch: locator reports '
+        message:
+            'CLOB read length mismatch: locator reports '
             '${locator.length} chars but ${text.length} were received',
       );
     }
@@ -1285,7 +1366,9 @@ class Transport {
   /// character set conversion of any kind (node-oracledb lobOp.js
   /// processMessage keeps BLOB data as a raw Buffer).
   Future<Uint8List> _readBlobAsBytes(
-      LobLocator locator, Duration? timeout) async {
+    LobLocator locator,
+    Duration? timeout,
+  ) async {
     if (locator.length == 0) {
       return Uint8List(0); // EMPTY_BLOB() — no LOB_DATA round trip needed
     }
@@ -1301,7 +1384,8 @@ class Transport {
     if (bytes == null || bytes.isEmpty) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'BLOB read returned no data '
+        message:
+            'BLOB read returned no data '
             '(expected ${locator.length} bytes)',
       );
     }
@@ -1313,8 +1397,9 @@ class Transport {
   ///
   /// [timeout] bounds how long to wait for Oracle's commit acknowledgement.
   /// Throws [OracleException] if the commit fails, times out, or the connection is broken.
-  Future<void> sendCommit(
-      {Duration timeout = const Duration(seconds: 30)}) async {
+  Future<void> sendCommit({
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
     final buf = WriteBuffer();
     buf.writeUint8(ttcMsgTypeFunction);
     buf.writeUint8(ttcFuncCommit);
@@ -1324,10 +1409,12 @@ class Transport {
     }
     await sendData(buf.toBytes());
     final payload = await _receiveDataWithTimeout(timeout, operation: 'Commit');
-    final response = decodeExecuteResponse(payload,
-        isQuery: false,
-        ttcFieldVersion: _ttcFieldVersion,
-        endOfRequestSupport: _supportsEndOfRequest);
+    final response = decodeExecuteResponse(
+      payload,
+      isQuery: false,
+      ttcFieldVersion: _ttcFieldVersion,
+      endOfRequestSupport: _supportsEndOfRequest,
+    );
     if (!response.isSuccess) {
       throw OracleException(
         errorCode: response.errorCode ?? oraProtocolError,
@@ -1340,8 +1427,9 @@ class Transport {
   ///
   /// [timeout] bounds how long to wait for Oracle's rollback acknowledgement.
   /// Throws [OracleException] if the rollback fails, times out, or the connection is broken.
-  Future<void> sendRollback(
-      {Duration timeout = const Duration(seconds: 30)}) async {
+  Future<void> sendRollback({
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
     final buf = WriteBuffer();
     buf.writeUint8(ttcMsgTypeFunction);
     buf.writeUint8(ttcFuncRollback);
@@ -1350,12 +1438,16 @@ class Transport {
       buf.writeUB8(0);
     }
     await sendData(buf.toBytes());
-    final payload =
-        await _receiveDataWithTimeout(timeout, operation: 'Rollback');
-    final response = decodeExecuteResponse(payload,
-        isQuery: false,
-        ttcFieldVersion: _ttcFieldVersion,
-        endOfRequestSupport: _supportsEndOfRequest);
+    final payload = await _receiveDataWithTimeout(
+      timeout,
+      operation: 'Rollback',
+    );
+    final response = decodeExecuteResponse(
+      payload,
+      isQuery: false,
+      ttcFieldVersion: _ttcFieldVersion,
+      endOfRequestSupport: _supportsEndOfRequest,
+    );
     if (!response.isSuccess) {
       throw OracleException(
         errorCode: response.errorCode ?? oraProtocolError,
@@ -1372,8 +1464,13 @@ class Transport {
   /// (up to [prefetchRows] rows) in the prefetch shape, so the caller must
   /// treat it as the authoritative first batch. Mirrors node-oracledb
   /// `connection._handleDefines`.
-  Future<ExecuteResponse> _sendLobDefines(String sql, int cursorId,
-      List<ColumnMetadata> columns, int prefetchRows, Duration? timeout) async {
+  Future<ExecuteResponse> _sendLobDefines(
+    String sql,
+    int cursorId,
+    List<ColumnMetadata> columns,
+    int prefetchRows,
+    Duration? timeout,
+  ) async {
     final request = ExecuteRequest(
       sql: sql,
       isQuery: true,
@@ -1384,14 +1481,19 @@ class Transport {
       sequence: nextSequence(),
     );
     await sendData(request.toBytes());
-    final payload = await _receiveDataWithTimeout(timeout,
-        operation: 'Define', expectedColumns: columns);
+    final payload = await _receiveDataWithTimeout(
+      timeout,
+      operation: 'Define',
+      expectedColumns: columns,
+    );
     final response = decodeExecuteResponse(
       payload,
       isQuery: true,
       ttcFieldVersion: _ttcFieldVersion,
       endOfRequestSupport: _supportsEndOfRequest,
       expectedColumns: columns,
+      supportsNationalCharset: supportsNationalCharset,
+      nationalCharset: nationalCharset,
     );
     if (!response.isSuccess) {
       throw OracleException(
@@ -1403,10 +1505,13 @@ class Transport {
   }
 
   Future<ExecuteResponse> _sendFetch(
-      int cursorId, int numRows, Duration? timeout,
-      {List<ColumnMetadata>? expectedColumns,
-      bool preserveTimestampTimeZone = false,
-      List<Object?>? previousRoundLastRow}) async {
+    int cursorId,
+    int numRows,
+    Duration? timeout, {
+    List<ColumnMetadata>? expectedColumns,
+    bool preserveTimestampTimeZone = false,
+    List<Object?>? previousRoundLastRow,
+  }) async {
     final fetch = FetchRequest(
       cursorId: cursorId,
       numRows: numRows,
@@ -1414,8 +1519,10 @@ class Transport {
       sequence: nextSequence(),
     );
     await sendData(fetch.toBytes());
-    final payload = await _receiveDataWithTimeout(timeout,
-        expectedColumns: expectedColumns);
+    final payload = await _receiveDataWithTimeout(
+      timeout,
+      expectedColumns: expectedColumns,
+    );
     return decodeExecuteResponse(
       payload,
       isQuery: true,
@@ -1423,20 +1530,25 @@ class Transport {
       endOfRequestSupport: _supportsEndOfRequest,
       expectedColumns: expectedColumns,
       preserveTimestampTimeZone: preserveTimestampTimeZone,
+      supportsNationalCharset: supportsNationalCharset,
+      nationalCharset: nationalCharset,
       previousRoundLastRow: previousRoundLastRow,
     );
   }
 
-  Future<Uint8List> _receiveDataWithTimeout(Duration? timeout,
-      {String operation = 'Query',
-      List<ColumnMetadata>? expectedColumns,
-      List<BindMetadata>? bindMetadata,
-      bool Function(Uint8List accumulated)? completionProbe}) async {
+  Future<Uint8List> _receiveDataWithTimeout(
+    Duration? timeout, {
+    String operation = 'Query',
+    List<ColumnMetadata>? expectedColumns,
+    List<BindMetadata>? bindMetadata,
+    bool Function(Uint8List accumulated)? completionProbe,
+  }) async {
     _ensureUsable();
     final future = _receiveAllTtcData(
-        expectedColumns: expectedColumns,
-        bindMetadata: bindMetadata,
-        completionProbe: completionProbe);
+      expectedColumns: expectedColumns,
+      bindMetadata: bindMetadata,
+      completionProbe: completionProbe,
+    );
     if (timeout == null) return future;
     return future.timeout(
       timeout,
@@ -1450,7 +1562,8 @@ class Transport {
         _poison();
         throw OracleException(
           errorCode: oraConnectTimeout,
-          message: '$operation timed out after ${timeout.inMilliseconds}ms; '
+          message:
+              '$operation timed out after ${timeout.inMilliseconds}ms; '
               'transport poisoned — no further RPCs are permitted on this '
               'connection',
         );
@@ -1473,10 +1586,11 @@ class Transport {
   ///     and keep reading more packets if the response is incomplete. This
   ///     matches node-oracledb thin (`packet.js waitForPackets`), which only
   ///     batches packets for `endOfRequestSupport == true`.
-  Future<Uint8List> _receiveAllTtcData(
-      {List<ColumnMetadata>? expectedColumns,
-      List<BindMetadata>? bindMetadata,
-      bool Function(Uint8List accumulated)? completionProbe}) async {
+  Future<Uint8List> _receiveAllTtcData({
+    List<ColumnMetadata>? expectedColumns,
+    List<BindMetadata>? bindMetadata,
+    bool Function(Uint8List accumulated)? completionProbe,
+  }) async {
     // The completion probe decides whether the accumulated TTC bytes form a
     // complete response. EXECUTE-shaped responses (the default) use
     // [ttcStreamIsComplete]; LOB operations substitute [lobOpStreamIsComplete]
@@ -1497,16 +1611,19 @@ class Transport {
       try {
         return completionProbe != null
             ? completionProbe(accumulated)
-            : ttcStreamIsComplete(accumulated,
+            : ttcStreamIsComplete(
+                accumulated,
                 ttcFieldVersion: _ttcFieldVersion,
                 endOfRequestSupport: _supportsEndOfRequest,
                 expectedColumns: expectedColumns,
-                bindMetadata: bindMetadata);
+                bindMetadata: bindMetadata,
+              );
       } on OracleException catch (e) {
         _poison();
         throw OracleException(
           errorCode: e.errorCode,
-          message: '${e.message}. Transport poisoned — close this connection '
+          message:
+              '${e.message}. Transport poisoned — close this connection '
               'and open a new one.',
           cause: e,
         );
@@ -1518,6 +1635,7 @@ class Transport {
         rethrow;
       }
     }
+
     final chunks = <Uint8List>[];
     var packetsRead = 0;
     while (true) {
@@ -1529,7 +1647,8 @@ class Transport {
         _poison();
         throw OracleException(
           errorCode: oraProtocolError,
-          message: 'Protocol receive-loop exhaustion: read $_maxReceivePackets '
+          message:
+              'Protocol receive-loop exhaustion: read $_maxReceivePackets '
               'TNS packets without a complete TTC response; the server stream '
               'is not terminating. Transport poisoned — close this connection '
               'and open a new one.',
@@ -1687,7 +1806,8 @@ class Transport {
     }
     return OracleException(
       errorCode: oraProtocolError,
-      message: 'Server refused the request mid-session '
+      message:
+          'Server refused the request mid-session '
           '(REFUSE userReason=0x${userReason.toRadixString(16)}, '
           'systemReason=0x${systemReason.toRadixString(16)}): $detail',
     );
@@ -1720,10 +1840,12 @@ class Transport {
     // `_receiveDataWithTimeout` poisons the transport on timeout, so a ping that
     // never replies still fails fast and cannot corrupt a later RPC.
     final response = await _receiveDataWithTimeout(timeout, operation: 'Ping');
-    final decoded = decodeExecuteResponse(response,
-        isQuery: false,
-        ttcFieldVersion: _ttcFieldVersion,
-        endOfRequestSupport: _supportsEndOfRequest);
+    final decoded = decodeExecuteResponse(
+      response,
+      isQuery: false,
+      ttcFieldVersion: _ttcFieldVersion,
+      endOfRequestSupport: _supportsEndOfRequest,
+    );
     if (!decoded.isSuccess) {
       throw OracleException(
         errorCode: decoded.errorCode ?? oraProtocolError,
@@ -1771,10 +1893,12 @@ class Transport {
           _supportsEndOfRequest = acceptInfo.supportsEndOfRequest;
           _supportsFastAuth = acceptInfo.supportsFastAuth;
           if (acceptInfo.sdu > 0) _sdu = acceptInfo.sdu;
-          _log.info('Negotiated version=${acceptInfo.version}, '
-              'sdu=${acceptInfo.sdu}, largeSdu=$_useLargeSdu, '
-              'endOfRequest=$_supportsEndOfRequest, '
-              'supportsFastAuth=$_supportsFastAuth');
+          _log.info(
+            'Negotiated version=${acceptInfo.version}, '
+            'sdu=${acceptInfo.sdu}, largeSdu=$_useLargeSdu, '
+            'endOfRequest=$_supportsEndOfRequest, '
+            'supportsFastAuth=$_supportsFastAuth',
+          );
 
           return response;
 
@@ -1803,7 +1927,8 @@ class Transport {
             );
           }
           _log.fine(
-              'Server requested resend (attempt $resendCount/$_maxResendRetries)');
+            'Server requested resend (attempt $resendCount/$_maxResendRetries)',
+          );
           await send(connectPacket);
           continue; // Loop to receive next response
 
@@ -1864,14 +1989,18 @@ class Transport {
     // Receive protocol response
     final ttcData = await receiveData();
     final protocolResponse = ProtocolResponse.decode(ttcData);
-    _log.info('Protocol negotiation complete: '
-        'serverVersion=${protocolResponse.serverVersion}');
+    _log.info(
+      'Protocol negotiation complete: '
+      'serverVersion=${protocolResponse.serverVersion}',
+    );
 
     // Store server major version for subsequent flag decisions.
     _serverMajorVersion =
         _extractMajorVersion(protocolResponse.serverBanner) ?? 23;
-    _log.fine('Server major version: $_serverMajorVersion '
-        '(banner: ${protocolResponse.serverBanner})');
+    _log.fine(
+      'Server major version: $_serverMajorVersion '
+      '(banner: ${protocolResponse.serverBanner})',
+    );
 
     // Adjust ttcFieldVersion based on server compile caps
     _adjustFieldVersion(protocolResponse.compileCaps);
@@ -1885,8 +2014,10 @@ class Transport {
   /// Sends a standalone AUTH_PHASE_ONE message and returns the raw TTC
   /// response data. Used by the classical (pre-23) authentication path, after
   /// [sendProtocolNegotiation] has completed.
-  Future<Uint8List> sendAuthPhaseOne(AuthPhaseOneRequest request,
-      {Duration? timeout}) async {
+  Future<Uint8List> sendAuthPhaseOne(
+    AuthPhaseOneRequest request, {
+    Duration? timeout,
+  }) async {
     final bytes = request.toBytes();
     await sendData(bytes, dataFlags: 0x0000);
     final future = receiveData();
@@ -1894,14 +2025,17 @@ class Transport {
     // Mirror the timeout-poisoning contract of _receiveDataWithTimeout: on
     // timeout the in-flight socket read is not cancelled, so destroy the socket
     // to guarantee the orphaned response cannot be misread as a later reply.
-    return future.timeout(timeout, onTimeout: () {
-      _poison();
-      throw OracleException(
-        errorCode: oraConnectTimeout,
-        message:
-            'AUTH_PHASE_ONE timed out after ${timeout.inMilliseconds}ms; transport poisoned',
-      );
-    });
+    return future.timeout(
+      timeout,
+      onTimeout: () {
+        _poison();
+        throw OracleException(
+          errorCode: oraConnectTimeout,
+          message:
+              'AUTH_PHASE_ONE timed out after ${timeout.inMilliseconds}ms; transport poisoned',
+        );
+      },
+    );
   }
 
   /// Sends FAST_AUTH message containing protocol negotiation, data types
@@ -1944,14 +2078,18 @@ class Transport {
 
     // Parse Protocol response (first message, type 1)
     final protocolResponse = ProtocolResponse.decode(responseData);
-    _log.info('Protocol negotiation complete: '
-        'serverVersion=${protocolResponse.serverVersion}');
+    _log.info(
+      'Protocol negotiation complete: '
+      'serverVersion=${protocolResponse.serverVersion}',
+    );
 
     // Store server major version now that the response is available.
     _serverMajorVersion =
         _extractMajorVersion(protocolResponse.serverBanner) ?? 23;
-    _log.fine('Server major version: $_serverMajorVersion '
-        '(banner: ${protocolResponse.serverBanner})');
+    _log.fine(
+      'Server major version: $_serverMajorVersion '
+      '(banner: ${protocolResponse.serverBanner})',
+    );
 
     // Adjust ttcFieldVersion based on server compile caps
     _adjustFieldVersion(protocolResponse.compileCaps);
@@ -1987,14 +2125,16 @@ class Transport {
 
     final protocolEndPos = tempBuffer.position;
     _log.fine(
-        'DEBUG: protocolEndPos=$protocolEndPos, total responseData=${responseData.length} bytes');
+      'DEBUG: protocolEndPos=$protocolEndPos, total responseData=${responseData.length} bytes',
+    );
 
     // Parse DataTypes response from remaining bytes
     int dataTypesEndPos = protocolEndPos;
     if (protocolEndPos < responseData.length) {
       final dataTypesData = Uint8List.sublistView(responseData, protocolEndPos);
       _log.fine(
-          'DEBUG: dataTypesData starts at byte $protocolEndPos, first byte: ${dataTypesData[0]}');
+        'DEBUG: dataTypesData starts at byte $protocolEndPos, first byte: ${dataTypesData[0]}',
+      );
       DataTypesResponse.decode(dataTypesData);
       _log.info('Data types negotiation complete');
 
@@ -2004,8 +2144,9 @@ class Transport {
 
       // Skip charset fields (4 bytes) + encoding flags (1 byte)
       if (dtBuffer.remaining >= 5) {
-        dtBuffer
-            .skip(5); // charset (2 bytes) + nCharset (2 bytes) + flags (1 byte)
+        dtBuffer.skip(
+          5,
+        ); // charset (2 bytes) + nCharset (2 bytes) + flags (1 byte)
       }
 
       // Skip compile caps (length-prefixed)
@@ -2045,7 +2186,8 @@ class Transport {
           // Found AUTH message start - back up one byte
           dataTypesEndPos = protocolEndPos + currentPos;
           _log.fine(
-              'DEBUG: Found AUTH parameter message at byte $currentPos (absolute: $dataTypesEndPos)');
+            'DEBUG: Found AUTH parameter message at byte $currentPos (absolute: $dataTypesEndPos)',
+          );
           break;
         }
 
@@ -2060,17 +2202,22 @@ class Transport {
         dataTypesEndPos = protocolEndPos + dtBuffer.position;
       }
       _log.fine(
-          'DEBUG: dataTypesEndPos=$dataTypesEndPos, dtBuffer.position=${dtBuffer.position}');
+        'DEBUG: dataTypesEndPos=$dataTypesEndPos, dtBuffer.position=${dtBuffer.position}',
+      );
     }
 
     // Buffer the AUTH response (remaining bytes) for next receiveData() call
     if (dataTypesEndPos < responseData.length) {
-      _bufferedAuthResponse =
-          Uint8List.sublistView(responseData, dataTypesEndPos);
+      _bufferedAuthResponse = Uint8List.sublistView(
+        responseData,
+        dataTypesEndPos,
+      );
       _log.fine(
-          'Buffered AUTH response: ${_bufferedAuthResponse!.length} bytes, starts with byte: ${_bufferedAuthResponse![0]}');
+        'Buffered AUTH response: ${_bufferedAuthResponse!.length} bytes, starts with byte: ${_bufferedAuthResponse![0]}',
+      );
       _log.fine(
-          'First 32 bytes of AUTH response: ${_bufferedAuthResponse!.sublist(0, _bufferedAuthResponse!.length > 32 ? 32 : _bufferedAuthResponse!.length).map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
+        'First 32 bytes of AUTH response: ${_bufferedAuthResponse!.sublist(0, _bufferedAuthResponse!.length > 32 ? 32 : _bufferedAuthResponse!.length).map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}',
+      );
     }
 
     // Auth response will be handled by auth module via receiveData()
@@ -2080,9 +2227,11 @@ class Transport {
   /// Legacy method - deprecated in favor of sendFastAuth.
   @Deprecated('Use sendFastAuth for Oracle 23ai compatibility')
   Future<ProtocolResponse> sendBatchedProtocolAndAuth(
-      Uint8List authPhaseOneBytes) async {
+    Uint8List authPhaseOneBytes,
+  ) async {
     throw UnsupportedError(
-        'Manual batching is deprecated. Use sendFastAuth instead.');
+      'Manual batching is deprecated. Use sendFastAuth instead.',
+    );
   }
 
   /// Builds the data types negotiation TTC message without sending it.
@@ -2093,11 +2242,15 @@ class Transport {
       final serverFieldVersion = serverCompileCaps[_ccapFieldVersion];
       if (serverFieldVersion < _ttcFieldVersion) {
         _ttcFieldVersion = serverFieldVersion;
-        _log.fine('Adjusted ttcFieldVersion to $serverFieldVersion '
-            '(server limit)');
+        _log.fine(
+          'Adjusted ttcFieldVersion to $serverFieldVersion '
+          '(server limit)',
+        );
       } else {
-        _log.fine('ttcFieldVersion remains $_ttcFieldVersion '
-            '(server supports $serverFieldVersion)');
+        _log.fine(
+          'ttcFieldVersion remains $_ttcFieldVersion '
+          '(server supports $serverFieldVersion)',
+        );
       }
     }
   }
@@ -2117,8 +2270,10 @@ class Transport {
     // Receive protocol response
     final ttcData = await receiveData();
     final protocolResponse = ProtocolResponse.decode(ttcData);
-    _log.info('Protocol negotiation complete (minimal): '
-        'serverVersion=${protocolResponse.serverVersion}');
+    _log.info(
+      'Protocol negotiation complete (minimal): '
+      'serverVersion=${protocolResponse.serverVersion}',
+    );
 
     return protocolResponse;
   }
@@ -2165,8 +2320,8 @@ class Transport {
   /// Layout (matching node-oracledb `dataType.js` encode()):
   ///   - message type byte (`TNS_MSG_TYPE_DATA_TYPES` = 2)
   ///   - primary client charset, little-endian uint16 ([ttcCharsetUtf8])
-  ///   - national charset slot, little-endian uint16 (also [ttcCharsetUtf8]
-  ///     under the thin model; functional NCHAR/AL16UTF16 support is Story 10.4)
+  ///   - national charset slot, little-endian uint16 (also [ttcCharsetUtf8] —
+  ///     national types are marked by the per-column csfrm byte, not this slot)
   ///   - encoding flags byte (MULTI_BYTE | CONV_LENGTH)
   ///   - length-prefixed compile caps, then length-prefixed runtime caps
   ///   - data type mappings (each 4×uint16BE), then a uint16BE terminator
@@ -2176,16 +2331,22 @@ class Transport {
   /// always [ttcCharsetUtf8] (AL32UTF8/UTF-8); the server converts to/from its
   /// database charset and no client-side codec is selected.
   @visibleForTesting
-  Uint8List encodeDataTypesMessage(Uint8List compileCaps, Uint8List runtimeCaps) {
+  Uint8List encodeDataTypesMessage(
+    Uint8List compileCaps,
+    Uint8List runtimeCaps,
+  ) {
     final buffer = WriteBuffer();
 
     // Message type (TNS_MSG_TYPE_DATA_TYPES; named constant is ambiguous in
     // this library, so the literal matches the rest of the negotiation code).
     buffer.writeUint8(2);
 
-    // Primary client charset (and national charset slot) — both UTF-8.
+    // Both charset slots are UTF-8 (node-oracledb dataType.js parity). The
+    // national charset slot stays UTF-8: NCHAR/NVARCHAR2/NCLOB are marked by
+    // the per-column csfrm byte (ttcCsfrmNChar), and their values travel
+    // UTF-16BE — writing AL16UTF16 (2000) here would break negotiation.
     buffer.writeUint16LE(ttcCharsetUtf8); // primary client charset
-    buffer.writeUint16LE(ttcCharsetUtf8); // national charset slot (Story 10.4)
+    buffer.writeUint16LE(ttcCharsetUtf8); // national charset slot
 
     // Encoding flags
     buffer.writeUint8(0x01 | 0x02); // MULTI_BYTE | CONV_LENGTH
@@ -2728,8 +2889,7 @@ class Transport {
       payload[0] = (flags >> 8) & 0xFF; // Data flags high byte (BE)
       payload[1] = flags & 0xFF; // Data flags low byte (BE)
       if (chunkLen > 0) {
-        payload.setRange(
-            2, payload.length, ttcData, offset);
+        payload.setRange(2, payload.length, ttcData, offset);
       }
       await send(TnsPacket(type: tnsPacketData, payload: payload));
       offset += chunkLen;
@@ -2770,7 +2930,8 @@ class Transport {
     // Simply skip them and read the next packet
     while (response.type == tnsPacketMarker) {
       _log.fine(
-          'Received MARKER packet (${response.payload.length} bytes), reading next packet');
+        'Received MARKER packet (${response.payload.length} bytes), reading next packet',
+      );
       response = await receive();
     }
 

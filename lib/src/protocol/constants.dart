@@ -383,9 +383,30 @@ const int ttcCsfrmNChar = 2;
 /// negotiation charset fields and the AUTH_PHASE_TWO `SESSION_CLIENT_CHARSET`
 /// session attribute are written from this constant.
 ///
-/// National character set (NCHAR/NVARCHAR2/NCLOB, AL16UTF16) support is a
-/// separate concern owned by Story 10.4 — see [ttcCsfrmNChar].
+/// The national character set form ([ttcCsfrmNChar]) — not a distinct wire
+/// charset id — is what marks `NCHAR`/`NVARCHAR2`/`NCLOB` values; both
+/// negotiation slots and every column charset field stay [ttcCharsetUtf8].
+/// See [ttcCharsetAl16Utf16] and [ttcCsfrmNChar].
 const int ttcCharsetUtf8 = 873;
+
+/// Wire id for Oracle's `AL16UTF16` national character set (UTF-16), the only
+/// national charset the thin driver round-trips for `NCHAR`/`NVARCHAR2`/
+/// `NCLOB`. Equals node-oracledb's `TNS_CHARSET_UTF16`.
+///
+/// IMPORTANT — this id is deliberately NOT written into the DataTypes
+/// negotiation message or per-column bind/define metadata. node-oracledb
+/// (`dataType.js`, `withData.js writeColumnMetadata`) advertises
+/// [ttcCharsetUtf8] in *both* the primary and national charset slots and in
+/// every character column's charset field; a column/bind is marked national
+/// purely by its [ttcCsfrmNChar] character set form byte, and the value itself
+/// then travels as UTF-16BE. Writing `2000` into the DataTypes national slot
+/// instead corrupts the FAST_AUTH handshake (the server returns a malformed
+/// AUTH_SESSKEY). This constant therefore documents the national charset id
+/// the driver assumes — the value a supported server reports for
+/// `NLS_NCHAR_CHARACTERSET` — while the actual fail-loud guard against an
+/// unsupported national charset lives in
+/// [OracleCharsetInfo.supportsNationalCharacterSet], detected at connect time.
+const int ttcCharsetAl16Utf16 = 2000;
 
 // ============================================================================
 // TTC Length / Limits

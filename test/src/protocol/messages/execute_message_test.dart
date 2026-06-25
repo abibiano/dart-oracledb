@@ -1985,25 +1985,182 @@ void main() {
       expect(ttcStreamIsComplete(payload), isTrue);
     });
 
-    test('NCLOB column (csfrm NCHAR) fails loud in the strict pass', () {
+    // NCLOB (csfrm == NChar) is now decodable (Story 10.4): it returns a
+    // LobLocator just like CLOB. The locator carries Oracle's
+    // variable-length-charset flag, which the transport honors to materialize
+    // the value as UTF-16BE — so the decoder needs no separate NCLOB branch.
+    List<List<int>> nclobColumn() => [
+      _columnInfo(name: 'N', oraType: oraTypeClob, maxSize: 4000, csfrm: 2),
+    ];
+
+    test(
+      'NCLOB column decodes to a LobLocator when AL16UTF16 is supported',
+      () {
+        final payload = _buildPayload([
+          _describeInfo(nclobColumn()),
+          _rowHeader(),
+          [ttcMsgTypeRowData, ...clobValue()],
+          _errorMessage(errorNum: 1403),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        // supportsNationalCharset defaults to true.
+        final r = decodeExecuteResponse(payload, isQuery: true);
+        expect(r.isSuccess, isTrue);
+        final value = r.rows.single.single;
+        expect(value, isA<LobLocator>());
+        final loc = value! as LobLocator;
+        expect(loc.oracleType, equals(oraTypeClob));
+        expect(loc.locator, equals(locatorBytes));
+        expect(r.columnMetadata.single.csfrm, equals(ttcCsfrmNChar));
+      },
+    );
+
+    test(
+      'NCLOB column fails loud when the national charset is unsupported',
+      () {
+        final payload = _buildPayload([
+          _describeInfo(nclobColumn()),
+          _rowHeader(),
+          [ttcMsgTypeRowData, ...clobValue()],
+          _errorMessage(errorNum: 1403),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        expect(
+          () => decodeExecuteResponse(
+            payload,
+            isQuery: true,
+            supportsNationalCharset: false,
+            nationalCharset: 'UTF8',
+          ),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+                .having((e) => e.message, 'message', contains('NCLOB'))
+                .having((e) => e.message, 'message', contains('UTF8')),
+          ),
+        );
+        // The lenient completion probe still finds the terminal STATUS message
+        // regardless of national-charset support.
+        expect(ttcStreamIsComplete(payload), isTrue);
+      },
+    );
+  });
+
+  // NCHAR / NVARCHAR2 column decode (Story 10.4): a character column whose
+  // csfrm == NChar carries UTF-16BE (AL16UTF16) bytes, not UTF-8. The value is
+  // length-prefixed exactly like VARCHAR2; only the codec differs.
+  group('NCHAR / NVARCHAR2 column decode (Story 10.4)', () {
+    // 'café' as UTF-16BE: U+0063 U+0061 U+0066 U+00E9.
+    final cafeUtf16Be = [
+      0x00, 0x63, 0x00, 0x61, 0x00, 0x66, 0x00, 0xE9, //
+    ];
+
+    List<List<int>> ncharColumn() => [
+      _columnInfo(name: 'N', oraType: oraTypeVarchar, maxSize: 100, csfrm: 2),
+    ];
+
+    test('NVARCHAR2 column decodes UTF-16BE bytes to a Dart String', () {
       final payload = _buildPayload([
-        _describeInfo([
-          _columnInfo(name: 'N', oraType: oraTypeClob, maxSize: 4000, csfrm: 2),
-        ]),
+        _describeInfo(ncharColumn()),
         _rowHeader(),
-        [ttcMsgTypeRowData, ...clobValue()],
+        [ttcMsgTypeRowData, ..._bytesWithLength(cafeUtf16Be)],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.rows.single.single, equals('café'));
+    });
+
+    test('NULL NVARCHAR2 (zero length) decodes to null', () {
+      final payload = _buildPayload([
+        _describeInfo(ncharColumn()),
+        _rowHeader(),
+        [ttcMsgTypeRowData, ..._bytesWithLength(const [])],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.rows.single.single, isNull);
+    });
+
+    test(
+      'NULL NVARCHAR2 still fails loud when national charset is unsupported',
+      () {
+        final payload = _buildPayload([
+          _describeInfo(ncharColumn()),
+          _rowHeader(),
+          [ttcMsgTypeRowData, ..._bytesWithLength(const [])],
+          _errorMessage(errorNum: 1403),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        expect(
+          () => decodeExecuteResponse(
+            payload,
+            isQuery: true,
+            supportsNationalCharset: false,
+            nationalCharset: 'UTF8',
+          ),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('NCHAR/NVARCHAR2'),
+                )
+                .having((e) => e.message, 'message', contains('UTF8')),
+          ),
+        );
+      },
+    );
+
+    test('NVARCHAR2 fails loud when the national charset is unsupported', () {
+      final payload = _buildPayload([
+        _describeInfo(ncharColumn()),
+        _rowHeader(),
+        [ttcMsgTypeRowData, ..._bytesWithLength(cafeUtf16Be)],
         _errorMessage(errorNum: 1403),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
       expect(
-        () => decodeExecuteResponse(payload, isQuery: true),
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          supportsNationalCharset: false,
+          nationalCharset: 'UTF8',
+        ),
         throwsA(
           isA<OracleException>()
               .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-              .having((e) => e.message, 'message', contains('NCLOB')),
+              .having((e) => e.message, 'message', contains('NCHAR/NVARCHAR2'))
+              .having((e) => e.message, 'message', contains('UTF8')),
         ),
       );
+      // The lenient completion probe still locates the terminal STATUS.
       expect(ttcStreamIsComplete(payload), isTrue);
+    });
+
+    test('a plain VARCHAR2 column (csfrm 1) still decodes as UTF-8', () {
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(
+            name: 'V',
+            oraType: oraTypeVarchar,
+            maxSize: 100,
+            csfrm: 1,
+          ),
+        ]),
+        _rowHeader(),
+        // 'café' UTF-8: 0x63 0x61 0x66 0xC3 0xA9.
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(const [0x63, 0x61, 0x66, 0xC3, 0xA9]),
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.rows.single.single, equals('café'));
     });
   });
 
@@ -2575,6 +2732,102 @@ void main() {
         bytes.sublist(bytes.length - 4),
         equals([3, 0x61, 0x62, 0x63]),
         reason: 'PL/SQL writes values in bind order — abc is last',
+      );
+    });
+  });
+
+  // NVARCHAR2 / NCHAR bind encode (Story 10.4): VARCHAR wire type marked
+  // national by the csfrm byte (== 2). The charset field itself stays UTF-8
+  // (873) — node-oracledb parity; the value is encoded UTF-16BE and maxSize is
+  // doubled for the 2-byte code units.
+  group('NVARCHAR2 bind encode', () {
+    test(
+      'NVARCHAR2 OUT bind metadata: csfrm 2, charset 873 (UTF-8), maxSize×2',
+      () {
+        final req = ExecuteRequest(
+          sql: 'BEGIN p(:1); END;',
+          isQuery: false,
+          isPlSql: true,
+          bindValues: [
+            BindVariable(
+              value: null,
+              oraType: oraTypeVarchar,
+              maxSize: 50,
+              dir: BindDir.output,
+              isNChar: true,
+            ),
+          ],
+        );
+        final bytes = req.toBytes();
+        // Charset field is 873 (UTF-8) → UB2 [2, 0x03, 0x69] even for NCHAR;
+        // the csfrm byte (2) is the national marker. maxSize 50 code units →
+        // 100 bytes.
+        final expectedMetadata = [
+          oraTypeVarchar, ttcBindUseIndicators, 0, 0,
+          1, 100, // UB4 maxSize = 50 × 2 bytes
+          0, // UB4 max num elements
+          0, // UB4 contFlag (not a LOB/JSON bind)
+          0, // UB4 OID
+          0, // UB2 version
+          2, 0x03, 0x69, // UB2 charset = 873 (UTF-8), even for NCHAR
+          ttcCsfrmNChar, // csfrm = 2 — the national marker
+          0, // UB4 lob prefetch length
+          0, // UB4 oaccolid
+        ];
+        expect(
+          _indexOfSub(bytes, expectedMetadata),
+          greaterThanOrEqualTo(0),
+          reason: 'NVARCHAR2 bind metadata block not found in encoded request',
+        );
+      },
+    );
+
+    test('NVARCHAR2 IN OUT value is written as length-prefixed UTF-16BE', () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: 'Aé', // U+0041, U+00E9
+            oraType: oraTypeVarchar,
+            maxSize: 50,
+            dir: BindDir.inputOutput,
+            isNChar: true,
+          ),
+        ],
+      );
+      final bytes = req.toBytes();
+      // 'Aé' → UTF-16BE [0x00,0x41,0x00,0xE9], length-prefixed by 4.
+      final expectedValue = [4, 0x00, 0x41, 0x00, 0xE9];
+      expect(
+        _indexOfSub(bytes, expectedValue),
+        greaterThanOrEqualTo(0),
+        reason: 'NVARCHAR2 value must be encoded UTF-16BE, not UTF-8',
+      );
+    });
+
+    test('a plain (non-national) VARCHAR bind stays UTF-8 with csfrm 1', () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: 'Aé',
+            oraType: oraTypeVarchar,
+            maxSize: 50,
+            dir: BindDir.inputOutput,
+          ),
+        ],
+      );
+      final bytes = req.toBytes();
+      // 'é' is UTF-8 [0xC3, 0xA9]; the value is 3 bytes long, csfrm stays 1.
+      final expectedValue = [3, 0x41, 0xC3, 0xA9];
+      expect(
+        _indexOfSub(bytes, expectedValue),
+        greaterThanOrEqualTo(0),
+        reason: 'plain VARCHAR must remain UTF-8',
       );
     });
   });
@@ -3228,42 +3481,42 @@ void main() {
     // OUT bind decode therefore yields a DecodedCursorResult whose describe
     // includes the nested CURSOR(102) column; the rows (and each row's nested
     // cursor) are materialized lazily on FETCH, not in the execute response.
-    test(
-      'a nested cursor column inside a REF CURSOR OUT bind decodes to a '
-      'DecodedCursorResult (no longer fails loud)',
-      () {
-        final payload = _buildPayload([
-          _ioVector([16]),
-          [
-            ttcMsgTypeRowData,
-            ..._cursorOutBindValue([
-              _columnInfo(name: 'ID', oraType: oraTypeNumber, maxSize: 0),
-              _columnInfo(name: 'NC', oraType: oraTypeCursor, maxSize: 0),
-            ], 42),
-            ..._ub4(0),
-          ],
-          _errorMessage(errorNum: 0),
-          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-        ]);
-        final r = decodeExecuteResponse(
-          payload,
-          isQuery: false,
-          bindMetadata: const [
-            BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
-          ],
-        );
-        final decoded = r.outBindValues.single;
-        expect(decoded, isA<DecodedCursorResult>());
-        final cursor = decoded! as DecodedCursorResult;
-        expect(cursor.cursorId, equals(42));
-        expect(cursor.columns.map((c) => c.name), equals(['ID', 'NC']));
-        expect(cursor.columns[1].oracleType, equals(oraTypeCursor),
-            reason: 'the nested CURSOR(102) column is kept in the describe');
-        // Rows (and the nested cursor) are materialized lazily on FETCH, not
-        // eagerly in the execute response.
-        expect(r.rows, isEmpty);
-      },
-    );
+    test('a nested cursor column inside a REF CURSOR OUT bind decodes to a '
+        'DecodedCursorResult (no longer fails loud)', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          ..._cursorOutBindValue([
+            _columnInfo(name: 'ID', oraType: oraTypeNumber, maxSize: 0),
+            _columnInfo(name: 'NC', oraType: oraTypeCursor, maxSize: 0),
+          ], 42),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeCursor, dir: BindDir.output),
+        ],
+      );
+      final decoded = r.outBindValues.single;
+      expect(decoded, isA<DecodedCursorResult>());
+      final cursor = decoded! as DecodedCursorResult;
+      expect(cursor.cursorId, equals(42));
+      expect(cursor.columns.map((c) => c.name), equals(['ID', 'NC']));
+      expect(
+        cursor.columns[1].oracleType,
+        equals(oraTypeCursor),
+        reason: 'the nested CURSOR(102) column is kept in the describe',
+      );
+      // Rows (and the nested cursor) are materialized lazily on FETCH, not
+      // eagerly in the execute response.
+      expect(r.rows, isEmpty);
+    });
   });
 
   // Implicit result sets (Story 9.3): a PL/SQL block that calls
@@ -3421,33 +3674,30 @@ void main() {
       );
     });
 
-    test(
-      'unsupported embedded column type fails loud, carries own id',
-      () {
-        final payload = _buildPayload([
-          _implicitResultSet([
-            (
-              columns: [
-                _columnInfo(name: 'L', oraType: oraTypeLong, maxSize: 4000),
-              ],
-              cursorId: 601,
-            ),
-          ]),
-          _errorMessage(errorNum: 0),
-          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-        ]);
-        // Fail-loud preserved AND the failing descriptor's id (601) reaped.
-        expect(
-          () => decodeExecuteResponse(payload, isQuery: false),
-          throwsA(
-            isA<ImplicitResultDecodeException>()
-                .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-                .having((e) => e.message, 'message', contains('column type 8'))
-                .having((e) => e.cursorIds, 'cursorIds', [601]),
+    test('unsupported embedded column type fails loud, carries own id', () {
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (
+            columns: [
+              _columnInfo(name: 'L', oraType: oraTypeLong, maxSize: 4000),
+            ],
+            cursorId: 601,
           ),
-        );
-      },
-    );
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      // Fail-loud preserved AND the failing descriptor's id (601) reaped.
+      expect(
+        () => decodeExecuteResponse(payload, isQuery: false),
+        throwsA(
+          isA<ImplicitResultDecodeException>()
+              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+              .having((e) => e.message, 'message', contains('column type 8'))
+              .having((e) => e.cursorIds, 'cursorIds', [601]),
+        ),
+      );
+    });
 
     test(
       'a bad descriptor after a good one carries BOTH ids (prior + current)',
@@ -3481,11 +3731,7 @@ void main() {
           throwsA(
             isA<ImplicitResultDecodeException>()
                 .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-                .having(
-                  (e) => e.message,
-                  'message',
-                  contains('column type 8'),
-                )
+                .having((e) => e.message, 'message', contains('column type 8'))
                 .having((e) => e.cursorIds, 'cursorIds', [701, 702]),
           ),
         );
@@ -3572,10 +3818,16 @@ void main() {
       final descriptor = r.implicitResults.single;
       expect(descriptor.cursorId, equals(701));
       expect(descriptor.columns.map((c) => c.name), equals(['ID', 'NC']));
-      expect(descriptor.columns[1].oracleType, equals(oraTypeCursor),
-          reason: 'the nested CURSOR(102) column is kept in the describe');
-      expect(cursorColumnIndicesOf(descriptor.columns), equals([1]),
-          reason: 'the cursor column is flagged for FETCH-time materialization');
+      expect(
+        descriptor.columns[1].oracleType,
+        equals(oraTypeCursor),
+        reason: 'the nested CURSOR(102) column is kept in the describe',
+      );
+      expect(
+        cursorColumnIndicesOf(descriptor.columns),
+        equals([1]),
+        reason: 'the cursor column is flagged for FETCH-time materialization',
+      );
     });
   });
 

@@ -24,10 +24,7 @@ void main() {
         final data = Uint8List.fromList([0x42]);
         final buffer = ReadBuffer(data);
         buffer.readUint8();
-        expect(
-          () => buffer.readUint8(),
-          throwsA(isA<BufferException>()),
-        );
+        expect(() => buffer.readUint8(), throwsA(isA<BufferException>()));
       });
     });
 
@@ -47,10 +44,7 @@ void main() {
       test('throws on insufficient bytes', () {
         final data = Uint8List.fromList([0x01]);
         final buffer = ReadBuffer(data);
-        expect(
-          () => buffer.readUint16BE(),
-          throwsA(isA<BufferException>()),
-        );
+        expect(() => buffer.readUint16BE(), throwsA(isA<BufferException>()));
       });
     });
 
@@ -84,10 +78,7 @@ void main() {
       test('throws on insufficient bytes', () {
         final data = Uint8List.fromList([0x01, 0x02, 0x03]);
         final buffer = ReadBuffer(data);
-        expect(
-          () => buffer.readUint32BE(),
-          throwsA(isA<BufferException>()),
-        );
+        expect(() => buffer.readUint32BE(), throwsA(isA<BufferException>()));
       });
     });
 
@@ -111,10 +102,7 @@ void main() {
       test('reads remaining bytes when requested exceeds available', () {
         final data = Uint8List.fromList([0x01, 0x02]);
         final buffer = ReadBuffer(data);
-        expect(
-          () => buffer.readBytes(5),
-          throwsA(isA<BufferException>()),
-        );
+        expect(() => buffer.readBytes(5), throwsA(isA<BufferException>()));
       });
 
       test('returns empty list for zero length', () {
@@ -175,10 +163,7 @@ void main() {
       test('throws when skipping past end', () {
         final data = Uint8List.fromList([0x01, 0x02]);
         final buffer = ReadBuffer(data);
-        expect(
-          () => buffer.skip(5),
-          throwsA(isA<BufferException>()),
-        );
+        expect(() => buffer.skip(5), throwsA(isA<BufferException>()));
       });
     });
 
@@ -203,30 +188,46 @@ void main() {
       test('signed reads still decode a genuine negative value', () {
         // 0x81 = sign bit + 1 value byte; value byte 0x05 → -5.
         expect(
-            ReadBuffer(Uint8List.fromList([0x81, 0x05])).readSB2(), equals(-5));
+          ReadBuffer(Uint8List.fromList([0x81, 0x05])).readSB2(),
+          equals(-5),
+        );
       });
 
-      test('readUB2 rejects a sign-bit size byte (0x81) with BufferException',
-          () {
-        expect(() => ReadBuffer(Uint8List.fromList([0x81, 0x05])).readUB2(),
-            throwsA(isA<BufferException>()));
-      });
+      test(
+        'readUB2 rejects a sign-bit size byte (0x81) with BufferException',
+        () {
+          expect(
+            () => ReadBuffer(Uint8List.fromList([0x81, 0x05])).readUB2(),
+            throwsA(isA<BufferException>()),
+          );
+        },
+      );
 
-      test('readUB4 rejects a sign-bit size byte (0x81) with BufferException',
-          () {
-        expect(() => ReadBuffer(Uint8List.fromList([0x81, 0x05])).readUB4(),
-            throwsA(isA<BufferException>()));
-      });
+      test(
+        'readUB4 rejects a sign-bit size byte (0x81) with BufferException',
+        () {
+          expect(
+            () => ReadBuffer(Uint8List.fromList([0x81, 0x05])).readUB4(),
+            throwsA(isA<BufferException>()),
+          );
+        },
+      );
 
-      test('readUB8 rejects a sign-bit size byte (0x81) with BufferException',
-          () {
-        expect(() => ReadBuffer(Uint8List.fromList([0x81, 0x05])).readUB8(),
-            throwsA(isA<BufferException>()));
-      });
+      test(
+        'readUB8 rejects a sign-bit size byte (0x81) with BufferException',
+        () {
+          expect(
+            () => ReadBuffer(Uint8List.fromList([0x81, 0x05])).readUB8(),
+            throwsA(isA<BufferException>()),
+          );
+        },
+      );
 
       test('readUB4 rejects the bare 0x80 sentinel too', () {
-        expect(() => ReadBuffer(Uint8List.fromList([0x80])).readUB4(),
-            throwsA(isA<BufferException>()));
+        expect(
+          () => ReadBuffer(Uint8List.fromList([0x80])).readUB4(),
+          throwsA(isA<BufferException>()),
+        );
       });
     });
 
@@ -237,15 +238,33 @@ void main() {
     group('readUB8 native-safe values', () {
       test('reads an 8-byte value below the 2^53 web-precision boundary', () {
         // 0x000FFFFFFFFFFFFF = 2^52 - 1, representable on web AND native.
-        final data = Uint8List.fromList(
-            [8, 0x00, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        final data = Uint8List.fromList([
+          8,
+          0x00,
+          0x0F,
+          0xFF,
+          0xFF,
+          0xFF,
+          0xFF,
+          0xFF,
+          0xFF,
+        ]);
         expect(ReadBuffer(data).readUB8(), equals(0x000FFFFFFFFFFFFF));
       });
 
       test('reads a large 8-byte value exactly on the native VM', () {
         // 0x0123456789ABCDEF exceeds 2^53; exact only on a 64-bit native int.
-        final data = Uint8List.fromList(
-            [8, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]);
+        final data = Uint8List.fromList([
+          8,
+          0x01,
+          0x23,
+          0x45,
+          0x67,
+          0x89,
+          0xAB,
+          0xCD,
+          0xEF,
+        ]);
         expect(ReadBuffer(data).readUB8(), equals(0x0123456789ABCDEF));
       });
 
@@ -272,27 +291,32 @@ void main() {
             expected = (expected << 8) | b;
           }
           expect(
-              ReadBuffer(Uint8List.fromList([width, ...magnitude])).readSB8(),
-              equals(expected),
-              reason: 'width $width');
+            ReadBuffer(Uint8List.fromList([width, ...magnitude])).readSB8(),
+            equals(expected),
+            reason: 'width $width',
+          );
         }
       });
 
-      test('decodes negative values (sign bit 0x80 set) at every width 1-8',
-          () {
-        for (var width = 1; width <= 8; width++) {
-          final magnitude = List<int>.generate(width, (i) => i + 1);
-          var expected = 0;
-          for (final b in magnitude) {
-            expected = (expected << 8) | b;
-          }
-          expect(
-              ReadBuffer(Uint8List.fromList([0x80 | width, ...magnitude]))
-                  .readSB8(),
+      test(
+        'decodes negative values (sign bit 0x80 set) at every width 1-8',
+        () {
+          for (var width = 1; width <= 8; width++) {
+            final magnitude = List<int>.generate(width, (i) => i + 1);
+            var expected = 0;
+            for (final b in magnitude) {
+              expected = (expected << 8) | b;
+            }
+            expect(
+              ReadBuffer(
+                Uint8List.fromList([0x80 | width, ...magnitude]),
+              ).readSB8(),
               equals(-expected),
-              reason: 'width $width');
-        }
-      });
+              reason: 'width $width',
+            );
+          }
+        },
+      );
 
       test('decodes the 0x80 negative-zero sentinel as 0', () {
         expect(ReadBuffer(Uint8List.fromList([0x80])).readSB8(), equals(0));
@@ -302,25 +326,36 @@ void main() {
         expect(ReadBuffer(Uint8List.fromList([0])).readSB8(), equals(0));
       });
 
-      test('decodes magnitudes beyond 4 bytes exactly (native 64-bit ints)',
-          () {
-        // 0x0123456789ABCDEF exceeds 2^53; exact only on a 64-bit native int.
-        final magnitude = [0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF];
-        expect(ReadBuffer(Uint8List.fromList([8, ...magnitude])).readSB8(),
-            equals(0x0123456789ABCDEF));
-        expect(
+      test(
+        'decodes magnitudes beyond 4 bytes exactly (native 64-bit ints)',
+        () {
+          // 0x0123456789ABCDEF exceeds 2^53; exact only on a 64-bit native int.
+          final magnitude = [0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF];
+          expect(
+            ReadBuffer(Uint8List.fromList([8, ...magnitude])).readSB8(),
+            equals(0x0123456789ABCDEF),
+          );
+          expect(
             ReadBuffer(Uint8List.fromList([0x88, ...magnitude])).readSB8(),
-            equals(-0x0123456789ABCDEF));
-      });
+            equals(-0x0123456789ABCDEF),
+          );
+        },
+      );
 
       test('rejects a size beyond 8 bytes with BufferException', () {
         final data = Uint8List.fromList([9, ...List<int>.filled(9, 0x01)]);
-        expect(() => ReadBuffer(data).readSB8(),
-            throwsA(isA<BufferException>()));
-        final negative =
-            Uint8List.fromList([0x80 | 9, ...List<int>.filled(9, 0x01)]);
-        expect(() => ReadBuffer(negative).readSB8(),
-            throwsA(isA<BufferException>()));
+        expect(
+          () => ReadBuffer(data).readSB8(),
+          throwsA(isA<BufferException>()),
+        );
+        final negative = Uint8List.fromList([
+          0x80 | 9,
+          ...List<int>.filled(9, 0x01),
+        ]);
+        expect(
+          () => ReadBuffer(negative).readSB8(),
+          throwsA(isA<BufferException>()),
+        );
       });
     });
 
@@ -332,65 +367,88 @@ void main() {
     group('underflow vs malformation subtype contract', () {
       test('readBytes past the end throws BufferUnderflowException', () {
         final buffer = ReadBuffer(Uint8List.fromList([0x01, 0x02]));
-        expect(() => buffer.readBytes(5),
-            throwsA(isA<BufferUnderflowException>()));
+        expect(
+          () => buffer.readBytes(5),
+          throwsA(isA<BufferUnderflowException>()),
+        );
       });
 
       test('BufferUnderflowException IS a BufferException', () {
-        expect(() => ReadBuffer(Uint8List.fromList([0x01])).readUint32BE(),
-            throwsA(isA<BufferUnderflowException>()));
-        expect(() => ReadBuffer(Uint8List.fromList([0x01])).readUint32BE(),
-            throwsA(isA<BufferException>()),
-            reason: 'real-decoder catch sites that catch the parent type '
-                'must still cover underflow');
+        expect(
+          () => ReadBuffer(Uint8List.fromList([0x01])).readUint32BE(),
+          throwsA(isA<BufferUnderflowException>()),
+        );
+        expect(
+          () => ReadBuffer(Uint8List.fromList([0x01])).readUint32BE(),
+          throwsA(isA<BufferException>()),
+          reason:
+              'real-decoder catch sites that catch the parent type '
+              'must still cover underflow',
+        );
       });
 
       test('skip past the end throws BufferUnderflowException', () {
         final buffer = ReadBuffer(Uint8List.fromList([0x01, 0x02]));
-        expect(
-            () => buffer.skip(3), throwsA(isA<BufferUnderflowException>()));
+        expect(() => buffer.skip(3), throwsA(isA<BufferUnderflowException>()));
       });
 
       test('a variable-length integer cut mid-value underflows', () {
         // Size byte promises 2 value bytes; only 1 is present.
         final buffer = ReadBuffer(Uint8List.fromList([2, 0x01]));
         expect(
-            () => buffer.readUB2(), throwsA(isA<BufferUnderflowException>()));
+          () => buffer.readUB2(),
+          throwsA(isA<BufferUnderflowException>()),
+        );
       });
 
-      test('"integer too large" is a BufferException but NOT an underflow',
-          () {
+      test('"integer too large" is a BufferException but NOT an underflow', () {
         // UB2 size byte 4 > maxSize 2 — malformed on its face; the value
         // bytes are all present, so this is NOT an out-of-bytes condition.
         final data = Uint8List.fromList([4, 0xAA, 0xBB, 0xCC, 0xDD]);
-        expect(() => ReadBuffer(data).readUB2(),
-            throwsA(isA<BufferException>()));
-        expect(() => ReadBuffer(data).readUB2(),
-            throwsA(isNot(isA<BufferUnderflowException>())));
+        expect(
+          () => ReadBuffer(data).readUB2(),
+          throwsA(isA<BufferException>()),
+        );
+        expect(
+          () => ReadBuffer(data).readUB2(),
+          throwsA(isNot(isA<BufferUnderflowException>())),
+        );
       });
 
       test('sign bit on an unsigned read is NOT an underflow', () {
         final bare = Uint8List.fromList([0x80]);
-        expect(() => ReadBuffer(bare).readUB4(),
-            throwsA(isA<BufferException>()));
-        expect(() => ReadBuffer(bare).readUB4(),
-            throwsA(isNot(isA<BufferUnderflowException>())));
+        expect(
+          () => ReadBuffer(bare).readUB4(),
+          throwsA(isA<BufferException>()),
+        );
+        expect(
+          () => ReadBuffer(bare).readUB4(),
+          throwsA(isNot(isA<BufferUnderflowException>())),
+        );
 
         final withValue = Uint8List.fromList([0x81, 0x05]);
-        expect(() => ReadBuffer(withValue).readUB2(),
-            throwsA(isA<BufferException>()));
-        expect(() => ReadBuffer(withValue).readUB2(),
-            throwsA(isNot(isA<BufferUnderflowException>())));
+        expect(
+          () => ReadBuffer(withValue).readUB2(),
+          throwsA(isA<BufferException>()),
+        );
+        expect(
+          () => ReadBuffer(withValue).readUB2(),
+          throwsA(isNot(isA<BufferUnderflowException>())),
+        );
       });
 
       test('invalid seek is NOT an underflow', () {
         final buffer = ReadBuffer(Uint8List.fromList([0x01, 0x02]));
         expect(() => buffer.seek(3), throwsA(isA<BufferException>()));
-        expect(() => buffer.seek(3),
-            throwsA(isNot(isA<BufferUnderflowException>())));
+        expect(
+          () => buffer.seek(3),
+          throwsA(isNot(isA<BufferUnderflowException>())),
+        );
         expect(() => buffer.seek(-1), throwsA(isA<BufferException>()));
-        expect(() => buffer.seek(-1),
-            throwsA(isNot(isA<BufferUnderflowException>())));
+        expect(
+          () => buffer.seek(-1),
+          throwsA(isNot(isA<BufferUnderflowException>())),
+        );
       });
     });
   });
@@ -519,6 +577,82 @@ void main() {
       expect(readBuffer.readUint16BE(), equals(0x1234));
       expect(readBuffer.readUint32LE(), equals(0xDEADBEEF));
       expect(readBuffer.readString(4), equals('Test'));
+    });
+  });
+
+  group('UTF-16BE national-charset codec (writeNString / readNString)', () {
+    test('writeNString emits big-endian code units with no length prefix', () {
+      final buffer = WriteBuffer();
+      buffer.writeNString('A€'); // U+0041, U+20AC
+      expect(
+        buffer.toBytes(),
+        equals([0x00, 0x41, 0x20, 0xAC]),
+        reason: 'each code unit is 2 bytes, high byte first',
+      );
+    });
+
+    test('writeNString of the empty string writes nothing', () {
+      final buffer = WriteBuffer();
+      buffer.writeNString('');
+      expect(buffer.toBytes(), isEmpty);
+    });
+
+    test('readNString of zero length returns the empty string', () {
+      final buffer = ReadBuffer(Uint8List.fromList([0x00, 0x41]));
+      expect(buffer.readNString(0), equals(''));
+      // Position is not advanced.
+      expect(buffer.position, equals(0));
+    });
+
+    test('readNString decodes a known big-endian byte sequence', () {
+      // 'Z' = U+005A, '中' = U+4E2D
+      final buffer = ReadBuffer(Uint8List.fromList([0x00, 0x5A, 0x4E, 0x2D]));
+      expect(buffer.readNString(4), equals('Z中'));
+      expect(buffer.remaining, equals(0));
+    });
+
+    test('readNString rejects odd byte counts as malformed', () {
+      final buffer = ReadBuffer(Uint8List.fromList([0x00, 0x41, 0xFF]));
+      expect(
+        () => buffer.readNString(3),
+        throwsA(
+          isA<BufferException>().having(
+            (e) => e.message,
+            'message',
+            contains('odd byte count'),
+          ),
+        ),
+      );
+    });
+
+    // AC2: BMP characters and supplementary-plane characters round-trip.
+    for (final entry in <String, String>{
+      'ASCII': 'Hello, world!',
+      'accented Latin': 'café crème déjà vu',
+      'CJK': '中文日本語한국어',
+      'supplementary-plane (emoji)': '😀🎉𝄞', // each is a surrogate pair
+      'mixed BMP + supplementary': 'a😀b中c',
+    }.entries) {
+      test('round-trips ${entry.key}', () {
+        final writeBuffer = WriteBuffer()..writeNString(entry.value);
+        final bytes = writeBuffer.toBytes();
+        // UTF-16 is always an even number of bytes (2 per code unit).
+        expect(bytes.length.isEven, isTrue);
+        expect(bytes.length, equals(entry.value.codeUnits.length * 2));
+
+        final readBuffer = ReadBuffer(bytes);
+        expect(readBuffer.readNString(bytes.length), equals(entry.value));
+        expect(readBuffer.remaining, equals(0));
+      });
+    }
+
+    test('reads only the requested byte length, leaving the rest', () {
+      final writeBuffer = WriteBuffer()
+        ..writeNString('AB') // 4 bytes
+        ..writeUint8(0xFF); // trailing sentinel
+      final readBuffer = ReadBuffer(writeBuffer.toBytes());
+      expect(readBuffer.readNString(4), equals('AB'));
+      expect(readBuffer.readUint8(), equals(0xFF));
     });
   });
 }

@@ -96,7 +96,8 @@ class ReadBuffer {
   /// Reads a 32-bit unsigned integer in big-endian byte order.
   int readUint32BE() {
     _checkAvailable(4);
-    final value = (_data[_position] << 24) |
+    final value =
+        (_data[_position] << 24) |
         (_data[_position + 1] << 16) |
         (_data[_position + 2] << 8) |
         _data[_position + 3];
@@ -107,7 +108,8 @@ class ReadBuffer {
   /// Reads a 32-bit unsigned integer in little-endian byte order.
   int readUint32LE() {
     _checkAvailable(4);
-    final value = _data[_position] |
+    final value =
+        _data[_position] |
         (_data[_position + 1] << 8) |
         (_data[_position + 2] << 16) |
         (_data[_position + 3] << 24);
@@ -130,6 +132,31 @@ class ReadBuffer {
   String readString(int length) {
     final bytes = readBytes(length);
     return utf8.decode(bytes);
+  }
+
+  /// Reads [byteLength] bytes and decodes them as big-endian UTF-16
+  /// (Oracle's AL16UTF16 national character set).
+  ///
+  /// Each pair of bytes is one UTF-16 code unit, high byte first. Surrogate
+  /// pairs pass through as their two code units, so both BMP and
+  /// supplementary-plane (e.g. emoji) characters round-trip with
+  /// [WriteBuffer.writeNString]. A zero [byteLength] yields the empty string;
+  /// callers handle SQL NULL separately. An odd [byteLength] is malformed
+  /// because UTF-16BE requires complete 2-byte code units.
+  String readNString(int byteLength) {
+    final bytes = readBytes(byteLength);
+    if (bytes.isEmpty) return '';
+    if (bytes.length.isOdd) {
+      throw BufferException(
+        'UTF-16 national character data has an odd byte count: '
+        '${bytes.length}',
+      );
+    }
+    final units = Uint16List(bytes.length ~/ 2);
+    for (var i = 0; i < units.length; i++) {
+      units[i] = (bytes[i * 2] << 8) | bytes[i * 2 + 1];
+    }
+    return String.fromCharCodes(units);
   }
 
   /// Skips the specified number of bytes.
@@ -355,6 +382,20 @@ class WriteBuffer {
     _data.add(utf8.encode(value));
   }
 
+  /// Writes [value] as big-endian UTF-16 (Oracle's AL16UTF16 national
+  /// character set): each UTF-16 code unit is emitted as a 2-byte big-endian
+  /// pair, high byte first.
+  ///
+  /// No length prefix is written — this mirrors the contract of [writeString].
+  /// Supplementary-plane characters are written as their two surrogate code
+  /// units, so they round-trip through [ReadBuffer.readNString].
+  void writeNString(String value) {
+    for (final unit in value.codeUnits) {
+      _data.addByte((unit >> 8) & 0xFF);
+      _data.addByte(unit & 0xFF);
+    }
+  }
+
   /// Writes an Oracle UB4 (variable-length unsigned 4-byte integer).
   ///
   /// The encoding uses a length prefix:
@@ -428,8 +469,9 @@ class WriteBuffer {
       writeUint8(254); // Long length indicator
       var offset = 0;
       while (offset < numBytes) {
-        final chunkSize =
-            (numBytes - offset > 65535) ? 65535 : numBytes - offset;
+        final chunkSize = (numBytes - offset > 65535)
+            ? 65535
+            : numBytes - offset;
         writeUB4(chunkSize);
         writeBytes(Uint8List.sublistView(bytes, offset, offset + chunkSize));
         offset += chunkSize;

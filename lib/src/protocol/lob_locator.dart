@@ -21,6 +21,7 @@ class LobLocator {
     required this.oracleType,
     required this.length,
     required this.chunkSize,
+    this.isNChar = false,
   });
 
   /// Raw locator bytes as sent by the server (typically 40 bytes). For
@@ -44,6 +45,18 @@ class LobLocator {
   /// full-length LOB READ (node-oracledb `getData` parity), so this no
   /// longer sizes reads.
   final int chunkSize;
+
+  /// Whether this locator references a national-charset LOB (an `NCLOB`,
+  /// `csfrm == ttcCsfrmNChar`), known from the column or bind metadata rather
+  /// than the locator bytes.
+  ///
+  /// node-oracledb `lob.js getCsfrm()` treats an NCLOB as national outright —
+  /// its declared NCHAR character set form — and only falls back to the
+  /// locator's [usesVarLengthCharset] flag for plain CLOBs. Server-created
+  /// NCLOB locators do not reliably set that flag bit, so this declared form is
+  /// the authoritative national signal; both together drive the UTF-16BE
+  /// materialization path.
+  final bool isNChar;
 
   /// Whether the locator flags report a variable-length character set.
   ///

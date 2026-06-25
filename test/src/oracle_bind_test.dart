@@ -23,6 +23,24 @@ void main() {
       final inOut = OracleBind.inOut(value: 1, type: OracleDbType.number);
       expect(inOut.direction.toString().contains('inputOutput'), isTrue);
     });
+
+    test(
+      'OracleDbType new values append without shifting existing indexes',
+      () {
+        expect(OracleDbType.number.index, equals(0));
+        expect(OracleDbType.varchar.index, equals(1));
+        expect(OracleDbType.date.index, equals(2));
+        expect(OracleDbType.timestamp.index, equals(3));
+        expect(OracleDbType.timestampTz.index, equals(4));
+        expect(OracleDbType.raw.index, equals(5));
+        expect(OracleDbType.clob.index, equals(6));
+        expect(OracleDbType.blob.index, equals(7));
+        expect(OracleDbType.json.index, equals(8));
+        expect(OracleDbType.cursor.index, equals(9));
+        expect(OracleDbType.nVarchar.index, equals(10));
+        expect(OracleDbType.nClob.index, equals(11));
+      },
+    );
   });
 
   group('OracleBind.out', () {
@@ -35,8 +53,13 @@ void main() {
     test('VARCHAR OUT bind requires maxSize', () {
       expect(
         () => OracleBind.out(type: OracleDbType.varchar),
-        throwsA(isA<OracleException>().having((e) => e.errorCode, 'errorCode',
-            equals(6502 /* oraBindTypeError */))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(6502 /* oraBindTypeError */),
+          ),
+        ),
       );
     });
 
@@ -78,8 +101,13 @@ void main() {
     test('VARCHAR IN OUT requires maxSize', () {
       expect(
         () => OracleBind.inOut(value: 'abc', type: OracleDbType.varchar),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(6502))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(6502),
+          ),
+        ),
       );
     });
 
@@ -93,7 +121,10 @@ void main() {
     test('IN OUT bind rejects non-positive maxSize', () {
       expect(
         () => OracleBind.inOut(
-            value: 'a', type: OracleDbType.varchar, maxSize: 0),
+          value: 'a',
+          type: OracleDbType.varchar,
+          maxSize: 0,
+        ),
         throwsA(isA<OracleException>()),
       );
     });
@@ -108,7 +139,10 @@ void main() {
 
     test('VARCHAR IN OUT with maxSize: VARCHAR maxSize is honored', () {
       final b = OracleBind.inOut(
-          value: 'hi', type: OracleDbType.varchar, maxSize: 100);
+        value: 'hi',
+        type: OracleDbType.varchar,
+        maxSize: 100,
+      );
       expect(b.maxSize, equals(100));
     });
   });
@@ -117,17 +151,24 @@ void main() {
     test('CLOB OUT bind requires maxSize', () {
       expect(
         () => OracleBind.out(type: OracleDbType.clob),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(6502))
-            .having((e) => e.message, 'message', contains('maxSize'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(6502))
+              .having((e) => e.message, 'message', contains('maxSize')),
+        ),
       );
     });
 
     test('CLOB IN OUT bind requires maxSize', () {
       expect(
         () => OracleBind.inOut(value: 'text', type: OracleDbType.clob),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(6502))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(6502),
+          ),
+        ),
       );
     });
 
@@ -141,19 +182,28 @@ void main() {
 
     test('CLOB IN OUT accepts String and null values only', () {
       final s = OracleBind.inOut(
-          value: 'hello', type: OracleDbType.clob, maxSize: 4000);
+        value: 'hello',
+        type: OracleDbType.clob,
+        maxSize: 4000,
+      );
       expect(s.value, equals('hello'));
       final n = OracleBind.inOut(
-          value: null, type: OracleDbType.clob, maxSize: 4000);
+        value: null,
+        type: OracleDbType.clob,
+        maxSize: 4000,
+      );
       expect(n.value, isNull);
       expect(
-        () => OracleBind.inOut(
-            value: 42, type: OracleDbType.clob, maxSize: 4000),
+        () =>
+            OracleBind.inOut(value: 42, type: OracleDbType.clob, maxSize: 4000),
         throwsA(isA<ArgumentError>()),
       );
       expect(
         () => OracleBind.inOut(
-            value: Uint8List(3), type: OracleDbType.clob, maxSize: 4000),
+          value: Uint8List(3),
+          type: OracleDbType.clob,
+          maxSize: 4000,
+        ),
         throwsA(isA<ArgumentError>()),
       );
     });
@@ -166,22 +216,99 @@ void main() {
     });
   });
 
+  group('OracleDbType.nVarchar / nClob validation (Story 10.4)', () {
+    test('NVARCHAR OUT bind requires maxSize', () {
+      expect(
+        () => OracleBind.out(type: OracleDbType.nVarchar),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(6502))
+              .having((e) => e.message, 'message', contains('maxSize')),
+        ),
+      );
+    });
+
+    test('NCLOB OUT bind requires maxSize', () {
+      expect(
+        () => OracleBind.out(type: OracleDbType.nClob),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(6502))
+              .having((e) => e.message, 'message', contains('maxSize')),
+        ),
+      );
+    });
+
+    test('NVARCHAR maps to the VARCHAR wire type (1)', () {
+      final b = OracleBind.out(type: OracleDbType.nVarchar, maxSize: 50);
+      expect(b.type, equals(OracleDbType.nVarchar));
+      expect(b.maxSize, equals(50));
+      expect(b.oracleTypeCode, equals(1) /* oraTypeVarchar */);
+    });
+
+    test('NCLOB maps to the CLOB wire type (112)', () {
+      final b = OracleBind.out(type: OracleDbType.nClob, maxSize: 100000);
+      expect(b.type, equals(OracleDbType.nClob));
+      expect(b.oracleTypeCode, equals(112) /* oraTypeClob */);
+    });
+
+    test('NVARCHAR / NCLOB IN OUT accept String and null only', () {
+      final s = OracleBind.inOut(
+        value: 'café',
+        type: OracleDbType.nVarchar,
+        maxSize: 50,
+      );
+      expect(s.value, equals('café'));
+      final n = OracleBind.inOut(
+        value: null,
+        type: OracleDbType.nClob,
+        maxSize: 4000,
+      );
+      expect(n.value, isNull);
+      expect(
+        () => OracleBind.inOut(
+          value: 42,
+          type: OracleDbType.nVarchar,
+          maxSize: 50,
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(
+        () => OracleBind.inOut(
+          value: Uint8List(2),
+          type: OracleDbType.nClob,
+          maxSize: 50,
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+  });
+
   group('OracleDbType.blob validation', () {
     test('BLOB OUT bind requires maxSize', () {
       expect(
         () => OracleBind.out(type: OracleDbType.blob),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(6502))
-            .having((e) => e.message, 'message', contains('maxSize'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(6502))
+              .having((e) => e.message, 'message', contains('maxSize')),
+        ),
       );
     });
 
     test('BLOB IN OUT bind requires maxSize', () {
       expect(
         () => OracleBind.inOut(
-            value: Uint8List.fromList([1, 2]), type: OracleDbType.blob),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(6502))),
+          value: Uint8List.fromList([1, 2]),
+          type: OracleDbType.blob,
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(6502),
+          ),
+        ),
       );
     });
 
@@ -196,21 +323,33 @@ void main() {
     test('BLOB IN OUT accepts Uint8List and null values only', () {
       final bytes = Uint8List.fromList([0, 1, 254, 255]);
       final u = OracleBind.inOut(
-          value: bytes, type: OracleDbType.blob, maxSize: 4000);
+        value: bytes,
+        type: OracleDbType.blob,
+        maxSize: 4000,
+      );
       expect(u.value, same(bytes));
       final n = OracleBind.inOut(
-          value: null, type: OracleDbType.blob, maxSize: 4000);
+        value: null,
+        type: OracleDbType.blob,
+        maxSize: 4000,
+      );
       expect(n.value, isNull);
       // String and plain List<int> are binary-looking but not Uint8List —
       // reject at construction so the failure surfaces at the call site.
       expect(
         () => OracleBind.inOut(
-            value: 'bytes', type: OracleDbType.blob, maxSize: 4000),
+          value: 'bytes',
+          type: OracleDbType.blob,
+          maxSize: 4000,
+        ),
         throwsA(isA<ArgumentError>()),
       );
       expect(
         () => OracleBind.inOut(
-            value: <int>[1, 2, 3], type: OracleDbType.blob, maxSize: 4000),
+          value: <int>[1, 2, 3],
+          type: OracleDbType.blob,
+          maxSize: 4000,
+        ),
         throwsA(isA<ArgumentError>()),
       );
     });
@@ -227,23 +366,31 @@ void main() {
     test('JSON OUT bind requires maxSize', () {
       expect(
         () => OracleBind.out(type: OracleDbType.json),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(6502))
-            .having((e) => e.message, 'message', contains('maxSize'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', equals(6502))
+              .having((e) => e.message, 'message', contains('maxSize')),
+        ),
       );
     });
 
     test('JSON IN OUT bind requires maxSize', () {
       expect(
         () => OracleBind.inOut(
-            value: <String, Object?>{'a': 1}, type: OracleDbType.json),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(6502))),
+          value: <String, Object?>{'a': 1},
+          type: OracleDbType.json,
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(6502),
+          ),
+        ),
       );
     });
 
-    test('JSON OUT bind constructs with maxSize and reports type code 119',
-        () {
+    test('JSON OUT bind constructs with maxSize and reports type code 119', () {
       final b = OracleBind.out(type: OracleDbType.json, maxSize: 100000);
       expect(b.type, equals(OracleDbType.json));
       expect(b.maxSize, equals(100000));
@@ -264,24 +411,31 @@ void main() {
 
     test('JSON IN OUT accepts Map, List, and null values', () {
       final m = OracleBind.inOut(
-          value: <String, Object?>{
-            'name': 'x',
-            'n': 1,
-            'd': 1.5,
-            'b': true,
-            'nul': null,
-            'nested': <String, Object?>{'list': <Object?>[1, 'two', false]},
+        value: <String, Object?>{
+          'name': 'x',
+          'n': 1,
+          'd': 1.5,
+          'b': true,
+          'nul': null,
+          'nested': <String, Object?>{
+            'list': <Object?>[1, 'two', false],
           },
-          type: OracleDbType.json,
-          maxSize: 4000);
+        },
+        type: OracleDbType.json,
+        maxSize: 4000,
+      );
       expect(m.value, isA<Map<String, Object?>>());
       final l = OracleBind.inOut(
-          value: <Object?>[1, 'a', null, <String, Object?>{}],
-          type: OracleDbType.json,
-          maxSize: 4000);
+        value: <Object?>[1, 'a', null, <String, Object?>{}],
+        type: OracleDbType.json,
+        maxSize: 4000,
+      );
       expect(l.value, isA<List<Object?>>());
       final n = OracleBind.inOut(
-          value: null, type: OracleDbType.json, maxSize: 4000);
+        value: null,
+        type: OracleDbType.json,
+        maxSize: 4000,
+      );
       expect(n.value, isNull);
     });
 
@@ -297,7 +451,10 @@ void main() {
       ]) {
         expect(
           () => OracleBind.inOut(
-              value: bad, type: OracleDbType.json, maxSize: 4000),
+            value: bad,
+            type: OracleDbType.json,
+            maxSize: 4000,
+          ),
           throwsA(isA<ArgumentError>()),
           reason: 'expected rejection for ${bad.runtimeType}',
         );
@@ -310,12 +467,21 @@ void main() {
         <String, Object?>{'bytes': Uint8List(2)},
         <Object?>[double.nan],
         <Object?>[double.infinity],
-        <String, Object?>{'deep': <Object?>[<String, Object?>{'s': <int>{1}}]},
+        <String, Object?>{
+          'deep': <Object?>[
+            <String, Object?>{
+              's': <int>{1},
+            },
+          ],
+        },
         <Object, Object?>{1: 'non-string key'},
       ]) {
         expect(
           () => OracleBind.inOut(
-              value: bad, type: OracleDbType.json, maxSize: 4000),
+            value: bad,
+            type: OracleDbType.json,
+            maxSize: 4000,
+          ),
           throwsA(isA<ArgumentError>()),
           reason: 'expected rejection for $bad',
         );
@@ -336,10 +502,7 @@ void main() {
     });
 
     test('named lookup is case-insensitive', () {
-      final out = OracleOutBinds(
-        values: [42],
-        names: {'ret': 0},
-      );
+      final out = OracleOutBinds(values: [42], names: {'ret': 0});
       expect(out['ret'], equals(42));
       expect(out['RET'], equals(42));
       expect(out['Ret'], equals(42));
@@ -377,26 +540,29 @@ void main() {
       expect(out.toMap(), isEmpty);
     });
 
-    test('multiple named OUT binds — all values accessible by name and index',
-        () {
-      final out = OracleOutBinds(
-        values: ['Smith', 8000, null],
-        names: {'name': 0, 'salary': 1, 'bonus': 2},
-      );
-      expect(out['name'], equals('Smith'));
-      expect(out['salary'], equals(8000));
-      expect(out['bonus'], isNull);
-      // Positional access also works in returned-output order.
-      expect(out[0], equals('Smith'));
-      expect(out[1], equals(8000));
-      expect(out[2], isNull);
-      expect(out.length, equals(3));
-      expect(out.toMap(),
-          equals({'name': 'Smith', 'salary': 8000, 'bonus': null}));
-    });
-
     test(
-        'multiple positional OUT binds — values are in returned-output order, '
+      'multiple named OUT binds — all values accessible by name and index',
+      () {
+        final out = OracleOutBinds(
+          values: ['Smith', 8000, null],
+          names: {'name': 0, 'salary': 1, 'bonus': 2},
+        );
+        expect(out['name'], equals('Smith'));
+        expect(out['salary'], equals(8000));
+        expect(out['bonus'], isNull);
+        // Positional access also works in returned-output order.
+        expect(out[0], equals('Smith'));
+        expect(out[1], equals(8000));
+        expect(out[2], isNull);
+        expect(out.length, equals(3));
+        expect(
+          out.toMap(),
+          equals({'name': 'Smith', 'salary': 8000, 'bonus': null}),
+        );
+      },
+    );
+
+    test('multiple positional OUT binds — values are in returned-output order, '
         'not original bind index', () {
       // Simulates a mixed [IN, OUT, IN OUT] positional call: only the two
       // outputs land in OracleOutBinds, and the index space is over outputs.
@@ -418,8 +584,7 @@ void main() {
   });
 
   group('OracleBind value/type validation', () {
-    test(
-        'inOut(value: DateTime, type: number) throws '
+    test('inOut(value: DateTime, type: number) throws '
         'ArgumentError at construction', () {
       // Value's runtime type (DateTime) does not match the declared Oracle
       // type (number). This must surface as an
@@ -427,7 +592,9 @@ void main() {
       // ClassCastError deep inside wire encoding.
       expect(
         () => OracleBind.inOut(
-            value: DateTime(2026, 5, 22), type: OracleDbType.number),
+          value: DateTime(2026, 5, 22),
+          type: OracleDbType.number,
+        ),
         throwsA(isA<ArgumentError>()),
       );
     });
@@ -471,16 +638,20 @@ void main() {
 
     test('raw type accepts a Uint8List value', () {
       final spec = OracleBind.inOut(
-          value: Uint8List.fromList([1, 2, 3]),
-          type: OracleDbType.raw,
-          maxSize: 10);
+        value: Uint8List.fromList([1, 2, 3]),
+        type: OracleDbType.raw,
+        maxSize: 10,
+      );
       expect(spec.value, isA<Uint8List>());
       expect(spec.oracleTypeCode, equals(23) /* oraTypeRaw */);
     });
 
     test('raw type accepts a null IN OUT value with maxSize', () {
       final spec = OracleBind.inOut(
-          value: null, type: OracleDbType.raw, maxSize: 16);
+        value: null,
+        type: OracleDbType.raw,
+        maxSize: 16,
+      );
       expect(spec.value, isNull);
       expect(spec.type, equals(OracleDbType.raw));
     });
@@ -491,7 +662,10 @@ void main() {
       // wire encoding.
       expect(
         () => OracleBind.inOut(
-            value: <int>[1, 2, 3], type: OracleDbType.raw, maxSize: 10),
+          value: <int>[1, 2, 3],
+          type: OracleDbType.raw,
+          maxSize: 10,
+        ),
         throwsA(isA<ArgumentError>()),
       );
     });
@@ -510,14 +684,22 @@ void main() {
     test('null IN OUT values bypass the mismatch check', () {
       // Null carries no runtime type; type-mismatch validation must allow it
       // for every declared Oracle type.
-      expect(() => OracleBind.inOut(value: null, type: OracleDbType.number),
-          returnsNormally);
       expect(
-          () => OracleBind.inOut(
-              value: null, type: OracleDbType.varchar, maxSize: 10),
-          returnsNormally);
-      expect(() => OracleBind.inOut(value: null, type: OracleDbType.date),
-          returnsNormally);
+        () => OracleBind.inOut(value: null, type: OracleDbType.number),
+        returnsNormally,
+      );
+      expect(
+        () => OracleBind.inOut(
+          value: null,
+          type: OracleDbType.varchar,
+          maxSize: 10,
+        ),
+        returnsNormally,
+      );
+      expect(
+        () => OracleBind.inOut(value: null, type: OracleDbType.date),
+        returnsNormally,
+      );
     });
 
     test('Review patch — number type rejects NaN at construction', () {
@@ -539,25 +721,38 @@ void main() {
       );
       expect(
         () => OracleBind.inOut(
-            value: double.negativeInfinity, type: OracleDbType.number),
+          value: double.negativeInfinity,
+          type: OracleDbType.number,
+        ),
         throwsArgumentError,
       );
     });
 
     test('matching value/type pairs construct successfully', () {
       // Smoke-test the happy paths so the new validation does not over-reject.
-      expect(() => OracleBind.inOut(value: 42, type: OracleDbType.number),
-          returnsNormally);
-      expect(() => OracleBind.inOut(value: 1.5, type: OracleDbType.number),
-          returnsNormally);
       expect(
-          () => OracleBind.inOut(
-              value: 'hi', type: OracleDbType.varchar, maxSize: 10),
-          returnsNormally);
+        () => OracleBind.inOut(value: 42, type: OracleDbType.number),
+        returnsNormally,
+      );
       expect(
-          () => OracleBind.inOut(
-              value: DateTime(2026, 1, 1), type: OracleDbType.date),
-          returnsNormally);
+        () => OracleBind.inOut(value: 1.5, type: OracleDbType.number),
+        returnsNormally,
+      );
+      expect(
+        () => OracleBind.inOut(
+          value: 'hi',
+          type: OracleDbType.varchar,
+          maxSize: 10,
+        ),
+        returnsNormally,
+      );
+      expect(
+        () => OracleBind.inOut(
+          value: DateTime(2026, 1, 1),
+          type: OracleDbType.date,
+        ),
+        returnsNormally,
+      );
     });
   });
 
@@ -572,33 +767,42 @@ void main() {
 
     test('IN OUT accepts an OracleTimestampTz value', () {
       final value = OracleTimestampTz.fromHourMinute(
-          DateTime.utc(2024, 3, 15, 5, 0, 45), 5, 30);
+        DateTime.utc(2024, 3, 15, 5, 0, 45),
+        5,
+        30,
+      );
       expect(
-          () => OracleBind.inOut(value: value, type: OracleDbType.timestampTz),
-          returnsNormally);
+        () => OracleBind.inOut(value: value, type: OracleDbType.timestampTz),
+        returnsNormally,
+      );
     });
 
     test('IN OUT accepts a plain DateTime value', () {
       expect(
-          () => OracleBind.inOut(
-              value: DateTime.utc(2024, 3, 15), type: OracleDbType.timestampTz),
-          returnsNormally);
+        () => OracleBind.inOut(
+          value: DateTime.utc(2024, 3, 15),
+          type: OracleDbType.timestampTz,
+        ),
+        returnsNormally,
+      );
     });
 
     test('IN OUT accepts null with the explicit type', () {
       expect(
-          () => OracleBind.inOut(value: null, type: OracleDbType.timestampTz),
-          returnsNormally);
+        () => OracleBind.inOut(value: null, type: OracleDbType.timestampTz),
+        returnsNormally,
+      );
     });
 
     test('IN OUT rejects non-timestamp values', () {
       expect(
-          () => OracleBind.inOut(value: 42, type: OracleDbType.timestampTz),
-          throwsArgumentError);
+        () => OracleBind.inOut(value: 42, type: OracleDbType.timestampTz),
+        throwsArgumentError,
+      );
       expect(
-          () =>
-              OracleBind.inOut(value: 'now', type: OracleDbType.timestampTz),
-          throwsArgumentError);
+        () => OracleBind.inOut(value: 'now', type: OracleDbType.timestampTz),
+        throwsArgumentError,
+      );
     });
   });
 
@@ -628,10 +832,7 @@ void main() {
       // the value bound at the first SQL position. We construct the
       // container directly with the index map a real `BEGIN myproc(:v, :v)`
       // call would produce.
-      final out = OracleOutBinds(
-        values: ['firstOnly'],
-        names: {'v': 0},
-      );
+      final out = OracleOutBinds(values: ['firstOnly'], names: {'v': 0});
       expect(out['v'], equals('firstOnly'));
       // Case-insensitive lookup applies the same way.
       expect(out['V'], equals('firstOnly'));
@@ -650,8 +851,11 @@ void main() {
     test('cursor OUT bind maps to Oracle TTC wire type 102', () {
       final b = OracleBind.out(type: OracleDbType.cursor);
       expect(b.oracleTypeCode, equals(oraTypeCursor));
-      expect(oraTypeCursor, equals(102),
-          reason: 'AC1: OracleDbType.cursor maps to TTC data type 102');
+      expect(
+        oraTypeCursor,
+        equals(102),
+        reason: 'AC1: OracleDbType.cursor maps to TTC data type 102',
+      );
     });
 
     test('a passed maxSize on a cursor OUT bind is accepted and ignored', () {
@@ -665,17 +869,24 @@ void main() {
     test('cursor IN OUT bind is unsupported and fails loud (null value)', () {
       expect(
         () => OracleBind.inOut(value: null, type: OracleDbType.cursor),
-        throwsA(isA<OracleException>().having(
-            (e) => e.message, 'message', contains('not supported'))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('not supported'),
+          ),
+        ),
       );
     });
 
-    test('cursor IN OUT bind is unsupported and fails loud (non-null value)',
-        () {
-      expect(
-        () => OracleBind.inOut(value: 'anything', type: OracleDbType.cursor),
-        throwsA(isA<OracleException>()),
-      );
-    });
+    test(
+      'cursor IN OUT bind is unsupported and fails loud (non-null value)',
+      () {
+        expect(
+          () => OracleBind.inOut(value: 'anything', type: OracleDbType.cursor),
+          throwsA(isA<OracleException>()),
+        );
+      },
+    );
   });
 }

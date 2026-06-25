@@ -252,19 +252,21 @@ void main() {
       // Field layout (see fast_auth_message.dart _encodeDataTypesMessageContent):
       //   [+0]      message type byte
       //   [+1..+2]  primary client charset, little-endian uint16
-      //   [+3..+4]  national charset slot, little-endian uint16 (unchanged 10.2)
+      //   [+3..+4]  national charset slot, little-endian uint16 (also UTF-8)
       //   [+5]      encoding flags (MULTI_BYTE | CONV_LENGTH)
       //   [+6]      compile caps length byte
       //   [+7]      runtime caps length byte (compile caps trimmed to 0 here)
+      // Both charset slots stay UTF-8 (node-oracledb dataType.js parity);
+      // national types are marked by the per-column csfrm byte, not this slot.
       expect(bytes[dtIndex], equals(ttcMsgTypeDataTypes));
       expect(bytes[dtIndex + 1], equals(lo),
           reason: 'Primary charset low byte must be ttcCharsetUtf8 LE');
       expect(bytes[dtIndex + 2], equals(hi),
           reason: 'Primary charset high byte must be ttcCharsetUtf8 LE');
       expect(bytes[dtIndex + 3], equals(lo),
-          reason: 'National charset slot must stay UTF-8 (unchanged in 10.2)');
+          reason: 'National charset slot must also be UTF-8 LE');
       expect(bytes[dtIndex + 4], equals(hi),
-          reason: 'National charset slot must stay UTF-8 (unchanged in 10.2)');
+          reason: 'National charset slot must also be UTF-8 LE');
       expect(bytes[dtIndex + 5], equals(0x01 | 0x02),
           reason: 'Encoding flags must be MULTI_BYTE | CONV_LENGTH');
       // The default fixture supplies all-zero caps, which trim to length 0.

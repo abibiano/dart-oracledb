@@ -131,13 +131,16 @@ class OracleConnection {
   OracleConnection.forTesting({
     required this._transport,
     ConnectionInfo? connectionInfo,
+    OracleCharsetInfo? charsetInfo,
     int statementCacheSize = 30,
     this._preserveTimestampTimeZone = false,
   }) : _connectionInfo =
            connectionInfo ??
            const ConnectionInfo(host: 'test', port: 0, serviceName: 'test'),
        _cache = StatementCache(statementCacheSize),
-       _isClosed = false;
+       _isClosed = false {
+    _charsetInfo = charsetInfo;
+  }
 
   final Transport _transport;
   final ConnectionInfo _connectionInfo;
@@ -631,8 +634,7 @@ class OracleConnection {
       // nested CURSOR() columns, its FIRST fetch must be a full EXECUTE so
       // pre-23 (21c) ships the per-row nested describe inline (a plain OFETCH
       // would shear). Scalar/LOB implicit results stay on plain OFETCH.
-      requiresFullExecute:
-          cursorColumnIndicesOf(descriptor.columns).isNotEmpty,
+      requiresFullExecute: cursorColumnIndicesOf(descriptor.columns).isNotEmpty,
     );
     // maxRows (node-oracledb parity): a positive N caps this implicit result at
     // exactly N rows and stops fetching once N is reached; 0 = unlimited.
@@ -1077,12 +1079,17 @@ class OracleConnection {
       }
       _charsetInfo = OracleCharsetInfo.fromParameterRows(
         result.rows.map(
-          (row) => MapEntry(
-            row['PARAMETER'] as String,
-            row['VALUE'] as String?,
-          ),
+          (row) =>
+              MapEntry(row['PARAMETER'] as String, row['VALUE'] as String?),
         ),
       );
+      // Thread the national-charset capability into the transport so every
+      // subsequent execute/fetch decode can fail loud on an unsupported
+      // national charset instead of silently corrupting NCHAR/NVARCHAR2/NCLOB
+      // values (Story 10.4). Primary VARCHAR2/CHAR/CLOB decoding is unaffected.
+      _transport.supportsNationalCharset =
+          _charsetInfo!.supportsNationalCharacterSet;
+      _transport.nationalCharset = _charsetInfo!.nationalCharset;
       // The detection query is internal and pre-handover: erase its parse/reuse
       // footprint so post-connect instrumentation reflects only user work.
       _transport.resetExecuteInstrumentation();
@@ -1148,8 +1155,11 @@ class OracleConnection {
       'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
     );
 
-    final stmt = _prepareStatement(sql, bindValues,
-        forceUncacheable: forceUncacheable);
+    final stmt = _prepareStatement(
+      sql,
+      bindValues,
+      forceUncacheable: forceUncacheable,
+    );
 
     // Open the cursor: full parse / cached-cursor reuse, describe-mismatch
     // retry, and close-cursor piggyback flushing all happen here and yield the
@@ -1212,7 +1222,9 @@ class OracleConnection {
             moreRowsToFetch: cursor.incompleteDrain || cursor.maxRowsCapped,
           );
         }
-      } else if (stmt.isQuery && maxRows > 0 && response.rows.length > maxRows) {
+      } else if (stmt.isQuery &&
+          maxRows > 0 &&
+          response.rows.length > maxRows) {
         // The whole result already arrived in the first EXECUTE batch (no more
         // rows server-side) but it exceeds the cap: truncate to exactly N and
         // report rows remain, so a single-batch capped result behaves like a
@@ -1527,8 +1539,11 @@ class OracleConnection {
   /// Parses and validates [bindValues], classifies [sql], and builds the
   /// bind-signature-aware cache key — the side-effect-free prelude shared by
   /// eager [execute] and the [openResultSet] seam.
-  _PreparedStatement _prepareStatement(String sql, Object? bindValues,
-      {bool forceUncacheable = false}) {
+  _PreparedStatement _prepareStatement(
+    String sql,
+    Object? bindValues, {
+    bool forceUncacheable = false,
+  }) {
     // Validate and prepare bind values.
     List<dynamic>? bindList;
     List<String>? bindNames;
@@ -1606,17 +1621,40 @@ class OracleConnection {
           // for IN OUT binds. The execute encoder writes a 0-length null
           // indicator for null values and the encoded value otherwise — both
           // shapes are already correct for OUT and IN OUT respectively.
+          //
+          // National types (NVARCHAR2/NCHAR via nVarchar, NCLOB via nClob)
+          // share the VARCHAR/CLOB wire type; the NCHAR charset form
+          // (csfrm == ttcCsfrmNChar) is what marks them national on the wire
+          // and selects the UTF-16BE codec on both the encode and decode sides.
+          final isNChar =
+              raw.type == OracleDbType.nVarchar ||
+              raw.type == OracleDbType.nClob;
+          final charsetInfo = _charsetInfo;
+          if (isNChar &&
+              charsetInfo != null &&
+              !charsetInfo.supportsNationalCharacterSet) {
+            throw OracleException(
+              errorCode: oc.oraUnsupportedType,
+              message:
+                  'NCHAR/NVARCHAR2/NCLOB binds require the '
+                  '${OracleCharsetInfo.supportedNationalCharset} national '
+                  'character set; this connection negotiated '
+                  '${charsetInfo.nationalCharset}.',
+            );
+          }
           bindList[i] = BindVariable(
             value: raw.value,
             oraType: raw.oracleTypeCode,
             maxSize: raw.maxSize,
             dir: raw.direction,
+            isNChar: isNChar,
           );
           bindMetadata.add(
             BindMetadata(
               oraType: raw.oracleTypeCode,
               maxSize: raw.maxSize,
               dir: raw.direction,
+              csfrm: isNChar ? oc.ttcCsfrmNChar : 0,
             ),
           );
         } else {
@@ -1904,7 +1942,8 @@ class OracleConnection {
     if (effectiveCursorId == 0) {
       throw const OracleException(
         errorCode: oraProtocolError,
-        message: 'openResultSet received cursorId 0 from the server with no '
+        message:
+            'openResultSet received cursorId 0 from the server with no '
             'cached cursor to fall back to; cannot open a result set',
       );
     }

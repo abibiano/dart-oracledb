@@ -117,6 +117,31 @@ enum OracleDbType {
   /// The returned [OracleResultSet] must be closed when no longer needed to
   /// release the server cursor and make the connection reusable.
   cursor,
+
+  /// Oracle NVARCHAR2 / NCHAR (decoded as Dart `String`). Requires `maxSize`.
+  ///
+  /// `maxSize` is expressed in **characters** (UTF-16 code units — the same
+  /// counting as Dart's `String.length` and the CLOB convention) and bounds
+  /// the value the driver will accept for an OUT / IN OUT bind. National
+  /// character data travels the wire as UTF-16BE (Oracle's `AL16UTF16`
+  /// national character set), distinct from the UTF-8 [varchar] path. Only
+  /// usable on a connection whose national character set is `AL16UTF16`
+  /// (`connection.charsetInfo.supportsNationalCharacterSet`); otherwise a bind
+  /// or column with this form fails loud rather than risk silent corruption.
+  nVarchar,
+
+  /// Oracle NCLOB (decoded as Dart `String`). Requires `maxSize`.
+  ///
+  /// `maxSize` is expressed in **characters** (UTF-16 code units, the CLOB
+  /// convention) and bounds the value the driver will materialize for an
+  /// OUT / IN OUT bind. NCLOB stores its data in the national character set
+  /// (`AL16UTF16`): on the wire the bind is a LOB locator carrying Oracle's
+  /// variable-length-charset flag, so IN OUT `String` values travel through an
+  /// internal temporary NCLOB (UTF-16BE) and returned locators are read back
+  /// as UTF-16BE. Only usable on a connection whose national character set is
+  /// `AL16UTF16`; otherwise the bind/column fails loud. The empty string binds
+  /// as SQL NULL, consistent with Oracle's `'' IS NULL` semantics.
+  nClob,
 }
 
 /// Specification for an OUT or IN OUT bind variable.
@@ -147,8 +172,8 @@ class OracleBind {
   /// [maxSize] is required for [OracleDbType.varchar] and [OracleDbType.raw];
   /// numeric and date/timestamp binds use fixed protocol sizes.
   OracleBind.out({required this.type, this.maxSize})
-      : value = null,
-        direction = BindDir.output {
+    : value = null,
+      direction = BindDir.output {
     _validate(type, maxSize, null);
   }
 
@@ -164,15 +189,13 @@ class OracleBind {
   ///
   /// [OracleDbType.cursor] IN OUT binds are not supported; use
   /// [OracleBind.out] with `type: OracleDbType.cursor` instead.
-  OracleBind.inOut({
-    required this.value,
-    required this.type,
-    this.maxSize,
-  }) : direction = BindDir.inputOutput {
+  OracleBind.inOut({required this.value, required this.type, this.maxSize})
+    : direction = BindDir.inputOutput {
     if (type == OracleDbType.cursor) {
       throw const OracleException(
         errorCode: oraBindTypeError,
-        message: 'OracleBind.inOut(type: cursor) is not supported; '
+        message:
+            'OracleBind.inOut(type: cursor) is not supported; '
             'use OracleBind.out(type: OracleDbType.cursor) to receive a '
             'SYS_REFCURSOR OUT parameter',
       );
@@ -188,8 +211,10 @@ class OracleBind {
       );
     }
     if ((type == OracleDbType.varchar ||
+            type == OracleDbType.nVarchar ||
             type == OracleDbType.raw ||
             type == OracleDbType.clob ||
+            type == OracleDbType.nClob ||
             type == OracleDbType.blob ||
             type == OracleDbType.json) &&
         maxSize == null) {
@@ -208,53 +233,94 @@ class OracleBind {
     switch (type) {
       case OracleDbType.number:
         if (value is! num) {
-          throw ArgumentError.value(value, 'value',
-              'OracleBind(type: number) requires int, double, num, or null');
+          throw ArgumentError.value(
+            value,
+            'value',
+            'OracleBind(type: number) requires int, double, num, or null',
+          );
         }
         // Oracle NUMBER cannot represent NaN/±Infinity. Reject at
         // construction so the failure surfaces at the call site, not deep
         // inside `encodeNumber` during wire encoding.
         if (value is double && !value.isFinite) {
-          throw ArgumentError.value(value, 'value',
-              'OracleBind(type: number) cannot bind NaN or Infinity');
+          throw ArgumentError.value(
+            value,
+            'value',
+            'OracleBind(type: number) cannot bind NaN or Infinity',
+          );
         }
       case OracleDbType.varchar:
         if (value is! String) {
-          throw ArgumentError.value(value, 'value',
-              'OracleBind(type: varchar) requires String or null');
+          throw ArgumentError.value(
+            value,
+            'value',
+            'OracleBind(type: varchar) requires String or null',
+          );
+        }
+      case OracleDbType.nVarchar:
+        if (value is! String) {
+          throw ArgumentError.value(
+            value,
+            'value',
+            'OracleBind(type: nVarchar) requires String or null',
+          );
         }
       case OracleDbType.date:
         if (value is! DateTime) {
-          throw ArgumentError.value(value, 'value',
-              'OracleBind(type: date) requires DateTime or null');
+          throw ArgumentError.value(
+            value,
+            'value',
+            'OracleBind(type: date) requires DateTime or null',
+          );
         }
       case OracleDbType.timestamp:
         if (value is! DateTime) {
-          throw ArgumentError.value(value, 'value',
-              'OracleBind(type: timestamp) requires DateTime or null');
+          throw ArgumentError.value(
+            value,
+            'value',
+            'OracleBind(type: timestamp) requires DateTime or null',
+          );
         }
       case OracleDbType.timestampTz:
         if (value is! OracleTimestampTz && value is! DateTime) {
           throw ArgumentError.value(
-              value,
-              'value',
-              'OracleBind(type: timestampTz) requires OracleTimestampTz, '
-                  'DateTime, or null');
+            value,
+            'value',
+            'OracleBind(type: timestampTz) requires OracleTimestampTz, '
+                'DateTime, or null',
+          );
         }
       case OracleDbType.raw:
         if (value is! Uint8List) {
-          throw ArgumentError.value(value, 'value',
-              'OracleBind(type: raw) requires Uint8List or null');
+          throw ArgumentError.value(
+            value,
+            'value',
+            'OracleBind(type: raw) requires Uint8List or null',
+          );
         }
       case OracleDbType.clob:
         if (value is! String) {
-          throw ArgumentError.value(value, 'value',
-              'OracleBind(type: clob) requires String or null');
+          throw ArgumentError.value(
+            value,
+            'value',
+            'OracleBind(type: clob) requires String or null',
+          );
+        }
+      case OracleDbType.nClob:
+        if (value is! String) {
+          throw ArgumentError.value(
+            value,
+            'value',
+            'OracleBind(type: nClob) requires String or null',
+          );
         }
       case OracleDbType.blob:
         if (value is! Uint8List) {
-          throw ArgumentError.value(value, 'value',
-              'OracleBind(type: blob) requires Uint8List or null');
+          throw ArgumentError.value(
+            value,
+            'value',
+            'OracleBind(type: blob) requires Uint8List or null',
+          );
         }
       case OracleDbType.json:
         // Recursive structure check: rejects non-Map/List top-level values
@@ -267,7 +333,8 @@ class OracleBind {
         // earlier guard, which is an internal invariant violation.
         throw OracleException(
           errorCode: oraBindTypeError,
-          message: 'OracleBind(type: cursor) cannot have an input value '
+          message:
+              'OracleBind(type: cursor) cannot have an input value '
               '(got ${value.runtimeType}); cursor binds are OUT-only',
         );
     }
@@ -279,13 +346,14 @@ class OracleBind {
   /// The Oracle type expected on the wire.
   final OracleDbType type;
 
-  /// Maximum returned-value bound (required for varchar/raw/clob/blob/json).
+  /// Maximum returned-value bound (required for
+  /// varchar/nVarchar/raw/clob/nClob/blob/json).
   ///
   /// Units depend on the bind type: **bytes** for [OracleDbType.varchar],
   /// [OracleDbType.raw], and [OracleDbType.blob]; **characters** (UTF-16
   /// code units, the same counting as Dart's `String.length`) for
-  /// [OracleDbType.clob]; **OSON bytes** (the binary JSON wire encoding) for
-  /// [OracleDbType.json].
+  /// [OracleDbType.clob], [OracleDbType.nVarchar], and [OracleDbType.nClob];
+  /// **OSON bytes** (the binary JSON wire encoding) for [OracleDbType.json].
   final int? maxSize;
 
   /// Direction on the wire. Only [BindDir.output] and [BindDir.inputOutput]
@@ -300,6 +368,10 @@ class OracleBind {
         return oc.oraTypeNumber;
       case OracleDbType.varchar:
         return oc.oraTypeVarchar;
+      case OracleDbType.nVarchar:
+        // NVARCHAR2 / NCHAR share the VARCHAR wire type; the national charset
+        // form (csfrm == NChar) distinguishes them on the wire.
+        return oc.oraTypeVarchar;
       case OracleDbType.date:
         return oc.oraTypeDate;
       case OracleDbType.timestamp:
@@ -309,6 +381,9 @@ class OracleBind {
       case OracleDbType.raw:
         return oc.oraTypeRaw;
       case OracleDbType.clob:
+        return oc.oraTypeClob;
+      case OracleDbType.nClob:
+        // NCLOB shares the CLOB wire type; csfrm == NChar marks it national.
         return oc.oraTypeClob;
       case OracleDbType.blob:
         return oc.oraTypeBlob;
@@ -345,23 +420,19 @@ class OracleBind {
 /// occurrence.
 class OracleOutBinds {
   /// Creates an empty container (no OUT binds).
-  const OracleOutBinds.empty()
-      : _values = const [],
-        _nameToIndex = const {};
+  const OracleOutBinds.empty() : _values = const [], _nameToIndex = const {};
 
   /// Creates a container from ordered [values] and an optional
   /// `name → index` map. When [names] is null the binds are treated as
   /// positional only.
-  OracleOutBinds({
-    required List<Object?> values,
-    Map<String, int>? names,
-  })  : _values = List<Object?>.unmodifiable(values),
-        _nameToIndex = names == null
-            ? const {}
-            : Map<String, int>.unmodifiable({
-                for (final entry in names.entries)
-                  entry.key.toLowerCase(): entry.value,
-              }) {
+  OracleOutBinds({required List<Object?> values, Map<String, int>? names})
+    : _values = List<Object?>.unmodifiable(values),
+      _nameToIndex = names == null
+          ? const {}
+          : Map<String, int>.unmodifiable({
+              for (final entry in names.entries)
+                entry.key.toLowerCase(): entry.value,
+            }) {
     assert(
       names == null || names.values.every((i) => i >= 0 && i < values.length),
       'OracleOutBinds: names index out of range for values list',
@@ -397,10 +468,11 @@ class OracleOutBinds {
       return _values[idx];
     }
     throw ArgumentError.value(
-        key,
-        'key',
-        'OracleOutBinds keys must be int (index) or String (name); '
-            'got ${key.runtimeType}');
+      key,
+      'key',
+      'OracleOutBinds keys must be int (index) or String (name); '
+          'got ${key.runtimeType}',
+    );
   }
 
   /// Returns all values in bind order as an unmodifiable list.

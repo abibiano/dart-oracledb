@@ -115,10 +115,16 @@ class LobOpRequest extends Message {
       buffer.writeBytes(locator);
     }
     if (operation == tnsLobOpCreateTemp) {
-      // Implicit (database) charset only — node-oracledb writes UTF8 here
-      // for every non-NCHAR temp LOB, including BLOB; NCLOB is out of
-      // Stories 4.1/4.2 scope.
-      buffer.writeUB4(ttcCharsetUtf8);
+      // CREATE_TEMP charset id: AL16UTF16 for a national (NCLOB) temp LOB,
+      // UTF-8 for every other temp LOB (CLOB and BLOB). The character set form
+      // rides in [sourceOffset] for CREATE_TEMP (node-oracledb lob.js create()
+      // passes `sourceOffset: dbType._csfrm`), so the NCHAR form selects the
+      // UTF-16 charset here exactly as node-oracledb lobOp.js does. Without
+      // this an NCLOB temp LOB would be created as a UTF-8 CLOB and its
+      // UTF-16BE data would be corrupted.
+      buffer.writeUB4(sourceOffset == ttcCsfrmNChar
+          ? ttcCharsetAl16Utf16
+          : ttcCharsetUtf8);
     }
     final writeData = data;
     if (writeData != null) {

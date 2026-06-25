@@ -124,13 +124,14 @@ class FastAuthRequest extends Message {
     // Data types message type (included in FAST_AUTH embedding)
     buffer.writeUint8(ttcMsgTypeDataTypes); // 2
 
-    // Primary client charset: AL32UTF8/UTF-8 (ttcCharsetUtf8). Both fields are
-    // little-endian uint16. The second field is the national charset slot; the
-    // thin model advertises it as UTF-8 too and relies on server-side
-    // conversion. Functional national-type (NCHAR/AL16UTF16) support belongs
-    // to Story 10.4 and must not be wired in here.
+    // Both charset slots are AL32UTF8/UTF-8 (ttcCharsetUtf8), little-endian
+    // uint16. The second slot is the national charset slot: node-oracledb
+    // (dataType.js) advertises UTF-8 here too — NCHAR/NVARCHAR2/NCLOB are
+    // marked national by the per-column csfrm byte (ttcCsfrmNChar), not by this
+    // slot, and their values travel UTF-16BE. Writing AL16UTF16 (2000) here
+    // instead corrupts the FAST_AUTH handshake.
     buffer.writeUint16LE(ttcCharsetUtf8); // primary client charset
-    buffer.writeUint16LE(ttcCharsetUtf8); // national charset slot (Story 10.4)
+    buffer.writeUint16LE(ttcCharsetUtf8); // national charset slot
 
     // Encoding flags
     buffer.writeUint8(0x01 | 0x02); // MULTI_BYTE | CONV_LENGTH

@@ -1001,9 +1001,13 @@ void main() {
       expect(bytes[0], equals(2), reason: 'DataTypes message type byte');
       expect(bytes[1], equals(lo), reason: 'Primary charset LE low byte');
       expect(bytes[2], equals(hi), reason: 'Primary charset LE high byte');
+      // The national charset slot stays UTF-8 too (node-oracledb dataType.js):
+      // NCHAR/NVARCHAR2/NCLOB are marked by the per-column csfrm byte, not this
+      // slot — writing AL16UTF16 (2000) here corrupts the handshake.
       expect(bytes[3], equals(lo),
-          reason: 'National charset slot must also be UTF-8 (Story 10.2)');
-      expect(bytes[4], equals(hi));
+          reason: 'National charset slot must also be UTF-8 LE low byte');
+      expect(bytes[4], equals(hi),
+          reason: 'National charset slot must also be UTF-8 LE high byte');
       expect(bytes[5], equals(0x01 | 0x02),
           reason: 'Encoding flags must be MULTI_BYTE | CONV_LENGTH');
 
@@ -1076,6 +1080,16 @@ void main() {
           reason: 'Classical path primary charset must be ttcCharsetUtf8 LE');
       expect(fastCharset, equals(classicalCharset),
           reason: 'Both paths must advertise the same primary charset');
+
+      // Both paths must also advertise UTF-8 in the national charset slot
+      // (the two bytes immediately after the primary charset): national types
+      // are marked per-column by the csfrm byte, not by this negotiation slot.
+      final classicalNational = <int>[classical[3], classical[4]];
+      final fastNational = <int>[fastBytes[dt + 3], fastBytes[dt + 4]];
+      expect(classicalNational, equals(<int>[lo, hi]),
+          reason: 'Classical path national charset slot must be UTF-8 LE');
+      expect(fastNational, equals(<int>[lo, hi]),
+          reason: 'FAST_AUTH national charset slot must be UTF-8 LE');
     });
   });
 }

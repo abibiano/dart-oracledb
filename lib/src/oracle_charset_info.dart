@@ -74,9 +74,10 @@ class OracleCharsetInfo {
   ///
   /// This concerns NCHAR/NVARCHAR2/NCLOB support exclusively. It says nothing
   /// about normal VARCHAR2/CHAR/CLOB columns, which always work on the UTF-8
-  /// wire path regardless of this flag. Until Story 10.4 implements the
-  /// supported `AL16UTF16` national-type path, NCHAR/NCLOB remain hard-rejected
-  /// even when this returns `true`.
+  /// wire path regardless of this flag. When `true`, NCHAR/NVARCHAR2/NCLOB
+  /// values round-trip as UTF-16BE (Story 10.4); when `false`, the driver
+  /// fails loud on any national-charset column or bind rather than risk silent
+  /// corruption.
   bool get supportsNationalCharacterSet =>
       nationalCharset == supportedNationalCharset;
 

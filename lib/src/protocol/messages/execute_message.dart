@@ -50,6 +50,7 @@ class BindVariable {
     int? oraType,
     this.maxSize,
     this.dir = BindDir.input,
+    this.isNChar = false,
   }) : oraType = oraType ?? _inferType(value) {
     // JSON binds (inferred from a Map/List value or declared explicitly)
     // must hold a valid JSON structure. Validating at construction surfaces
@@ -73,6 +74,14 @@ class BindVariable {
   /// Direction (IN, OUT). IN is the default; OUT is used for PL/SQL return
   /// values such as `BEGIN :ret := func(...); END;`.
   final BindDir dir;
+
+  /// Whether this bind targets a national character set type — NVARCHAR2/NCHAR
+  /// (wire type [oraTypeVarchar]) or NCLOB (wire type [oraTypeClob]). National
+  /// binds carry `csfrm == ttcCsfrmNChar` in their metadata (the charset field
+  /// itself stays UTF-8, node-oracledb parity), and NVARCHAR2/NCHAR values
+  /// travel as UTF-16BE rather than UTF-8. Set from the public
+  /// `OracleDbType.nVarchar`/`nClob` binds.
+  final bool isNChar;
 
   /// Whether the server will return a value for this bind (OUT or IN OUT).
   bool get hasOutput => dir == BindDir.output || dir == BindDir.inputOutput;
@@ -388,7 +397,7 @@ class ExecuteRequest extends Message {
     for (final bind in binds) {
       final oraType = _wireTypeFor(bind);
       final maxSize = _maxSizeFor(bind);
-      final csfrm = _csfrmFor(oraType);
+      final csfrm = _csfrmFor(bind);
 
       buffer.writeUint8(oraType);
       buffer.writeUint8(ttcBindUseIndicators);
@@ -408,7 +417,7 @@ class ExecuteRequest extends Message {
       );
       buffer.writeUB4(0); // OID
       buffer.writeUB2(0); // version
-      buffer.writeUB2(csfrm != 0 ? ttcCharsetUtf8 : 0);
+      buffer.writeUB2(_charsetFieldFor(csfrm));
       buffer.writeUint8(csfrm);
       // Max chars (LOB prefetch length): TNS_JSON_MAX_LENGTH for JSON
       // (node-oracledb sets lobPrefetchLength = maxSize = 32 MB), 0 otherwise.
@@ -445,7 +454,7 @@ class ExecuteRequest extends Message {
       );
       buffer.writeUB4(0); // OID
       buffer.writeUB2(0); // version
-      buffer.writeUB2(col.csfrm != 0 ? ttcCharsetUtf8 : 0);
+      buffer.writeUB2(_charsetFieldFor(col.csfrm));
       buffer.writeUint8(col.csfrm);
       // Max chars (LOB prefetch length): mirrors bind metadata — JSON
       // defines declare the 32 MB document bound.
@@ -521,6 +530,15 @@ class ExecuteRequest extends Message {
         return;
       case oraTypeVarchar:
       case oraTypeString:
+        if (bind.isNChar) {
+          // NVARCHAR2 / NCHAR IN (and IN OUT) values travel as UTF-16BE
+          // (AL16UTF16), length-prefixed — mirroring the UTF-8 path but with
+          // the national codec. The declared maxSize accounts for the 2×
+          // byte expansion (see _maxSizeFor).
+          final nbuf = WriteBuffer()..writeNString(value as String);
+          buffer.writeBytesWithLength(nbuf.toBytes());
+          return;
+        }
         buffer.writeBytesWithLength(
           Uint8List.fromList(utf8.encode(value as String)),
         );
@@ -636,6 +654,20 @@ class ExecuteRequest extends Message {
       // node-oracledb DB_TYPE_CURSOR bufferSizeFactor = 4.
       return 4;
     }
+    if (bind.isNChar && wireType == oraTypeVarchar) {
+      // NVARCHAR2 / NCHAR travels UTF-16BE: 2 wire bytes per UTF-16 code unit.
+      // The user declares maxSize in code units (the CLOB-style character
+      // convention), so double it for the server's byte buffer. Without an
+      // explicit maxSize (e.g. an IN OUT value carrying a String), size from
+      // the value's code-unit length.
+      if (bind.maxSize != null) return bind.maxSize! * 2;
+      final v = bind.value;
+      if (v is String) {
+        final units = v.codeUnits.length;
+        return units <= 0 ? 2 : units * 2;
+      }
+      return 2;
+    }
     if (bind.maxSize != null) return bind.maxSize!;
     final v = bind.value;
     switch (_wireTypeFor(bind)) {
@@ -664,16 +696,29 @@ class ExecuteRequest extends Message {
     }
   }
 
-  int _csfrmFor(int oraType) {
-    switch (oraType) {
+  /// Character set form for a bind's metadata. Character types
+  /// (VARCHAR2/CHAR/STRING and CLOB) carry [ttcCsfrmNChar] when the bind is a
+  /// national type (NVARCHAR2/NCHAR/NCLOB) and [ttcCsfrmImplicit] otherwise;
+  /// non-character types carry 0.
+  int _csfrmFor(BindVariable bind) {
+    switch (_wireTypeFor(bind)) {
       case oraTypeVarchar:
       case oraTypeString:
       case oraTypeClob:
-        return ttcCsfrmImplicit;
+        return bind.isNChar ? ttcCsfrmNChar : ttcCsfrmImplicit;
       default:
         return 0;
     }
   }
+
+  /// The charset id written into bind/define metadata for a given [csfrm]:
+  /// [ttcCharsetUtf8] for ANY non-zero character form — implicit *and* NCHAR —
+  /// and 0 for non-character types. node-oracledb `writeColumnMetadata`
+  /// advertises UTF-8 for NCHAR columns too; the [ttcCsfrmNChar] csfrm byte
+  /// (written separately) is the sole national marker, and the value itself
+  /// then travels UTF-16BE. Writing [ttcCharsetAl16Utf16] here would break the
+  /// metadata the server expects.
+  static int _charsetFieldFor(int csfrm) => csfrm != 0 ? ttcCharsetUtf8 : 0;
 }
 
 /// TTC FETCH request — used to read more rows from an open cursor.
@@ -758,7 +803,12 @@ class BindMetadata {
   /// silently defaulting to [BindDir.input] for an OUT/IN OUT bind would
   /// produce a spurious "client declared IN" protocol error at decode time.
   /// All call sites must pass the actual direction explicitly.
-  const BindMetadata({required this.oraType, required this.dir, this.maxSize});
+  const BindMetadata({
+    required this.oraType,
+    required this.dir,
+    this.maxSize,
+    this.csfrm = 0,
+  });
 
   /// Oracle wire-protocol type indicator.
   final int oraType;
@@ -768,6 +818,12 @@ class BindMetadata {
 
   /// Requested direction (IN or OUT) as declared by the client.
   final BindDir dir;
+
+  /// Character set form declared for this bind: [ttcCsfrmNChar] for
+  /// NVARCHAR2/NCHAR/NCLOB binds, 0 otherwise. The OUT-bind decode path uses
+  /// it to select the UTF-16BE codec for national-charset returns (the public
+  /// `OracleDbType.nVarchar` / `OracleDbType.nClob` binds).
+  final int csfrm;
 }
 
 /// Intermediate result of decoding a `SYS_REFCURSOR` OUT bind value.
@@ -1027,6 +1083,8 @@ ExecuteResponse decodeExecuteResponse(
   List<ColumnMetadata>? expectedColumns,
   List<BindMetadata>? bindMetadata,
   bool preserveTimestampTimeZone = false,
+  bool supportsNationalCharset = true,
+  String nationalCharset = 'AL16UTF16',
   List<Object?>? previousRoundLastRow,
 }) {
   final buffer = ReadBuffer(data);
@@ -1039,6 +1097,8 @@ ExecuteResponse decodeExecuteResponse(
     bindMetadata: bindMetadata ?? const [],
     endOfRequestSupport: endOfRequestSupport,
     preserveTimestampTimeZone: preserveTimestampTimeZone,
+    supportsNationalCharset: supportsNationalCharset,
+    nationalCharset: nationalCharset,
     previousRoundLastRow: previousRoundLastRow,
   );
 
@@ -1092,11 +1152,25 @@ class _DecodeState {
     this.endOfRequestSupport = true,
     this.strictTypes = true,
     this.preserveTimestampTimeZone = false,
+    this.supportsNationalCharset = true,
+    this.nationalCharset = 'AL16UTF16',
     this.previousRoundLastRow,
   }) : cursorColumnIndices = cursorColumnIndicesOf(columns);
 
   final bool isQuery;
   final int ttcFieldVersion;
+
+  /// The connection's national-charset capability
+  /// ([OracleCharsetInfo.supportsNationalCharacterSet]). Threaded into
+  /// [_decodeValueByOraType] so NCHAR/NVARCHAR2/NCLOB values fail loud on an
+  /// unsupported national charset instead of being decoded with the wrong
+  /// codec. Defaults to `true`; the completion probe leaves it at the default
+  /// because it never decodes values strictly.
+  final bool supportsNationalCharset;
+
+  /// The national charset name detected at connection startup. Used only in
+  /// fail-loud diagnostics when [supportsNationalCharset] is false.
+  final String nationalCharset;
 
   /// Opt-in: when true, `TIMESTAMP WITH TIME ZONE` columns
   /// decode to `OracleTimestampTz` instead of a UTC `DateTime`. Byte
@@ -1313,8 +1387,8 @@ ColumnMetadata _processColumnInfo(ReadBuffer buf, int ttcFieldVersion) {
     maxLength: dataType == oraTypeRaw
         ? maxSize
         : dataType == oraTypeCursor
-            ? 4
-            : size,
+        ? 4
+        : size,
     precision: precision > 0 ? precision : null,
     scale: scale > 0 ? scale : null,
     csfrm: csfrm,
@@ -1360,6 +1434,9 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
           meta.oraType,
           strict: s.strictTypes,
           preserveTimestampTimeZone: s.preserveTimestampTimeZone,
+          csfrm: meta.csfrm,
+          supportsNationalCharset: s.supportsNationalCharset,
+          nationalCharset: s.nationalCharset,
           outMaxSize: meta.maxSize,
           ttcFieldVersion: s.ttcFieldVersion,
         );
@@ -1422,6 +1499,8 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
         col,
         strict: s.strictTypes,
         preserveTimestampTimeZone: s.preserveTimestampTimeZone,
+        supportsNationalCharset: s.supportsNationalCharset,
+        nationalCharset: s.nationalCharset,
         ttcFieldVersion: s.ttcFieldVersion,
       ),
     );
@@ -1445,10 +1524,22 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
 /// fixed-scale-forces-double contract — they keep the int-vs-double
 /// heuristic (documented limitation).
 ///
-/// [csfrm] is the character set form when decoding a SELECT column (used to
-/// reject NCLOB, which shares the CLOB type indicator). The OUT-bind path
-/// passes 0: the public bind API cannot declare NCHAR types, and the
-/// locator-level variable-length-charset flag is re-checked at read time.
+/// [csfrm] is the character set form for the value being decoded — a SELECT
+/// column's `csfrm`, or an OUT/IN OUT bind's declared form. When it is
+/// [ttcCsfrmNChar] the value is national-charset (NCHAR/NVARCHAR2/NCLOB): the
+/// scalar character branch decodes UTF-16BE instead of UTF-8, and the LOB
+/// branch lets the NCLOB locator through (its variable-length-charset flag
+/// drives UTF-16BE materialization in the transport).
+///
+/// [supportsNationalCharset] is the connection's national-charset capability
+/// ([OracleCharsetInfo.supportsNationalCharacterSet]). When `false` and a
+/// national-charset value ([ttcCsfrmNChar]) is encountered, decoding fails
+/// loud with [oraUnsupportedType] rather than risk silent corruption by
+/// decoding with the wrong codec. Defaults to `true` so unit-test decode paths
+/// (which never exercise the unsupported branch) are unaffected.
+///
+/// [nationalCharset] is the detected `NLS_NCHAR_CHARACTERSET` value, used in
+/// the unsupported-national-charset error message.
 ///
 /// [outMaxSize] is the OUT/IN OUT bind's declared `maxSize`, supplied only by
 /// the OUT-bind decode path. Used by JSON (type 119) to enforce the declared
@@ -1461,6 +1552,8 @@ Object? _decodeValueByOraType(
   int? scale,
   bool preserveTimestampTimeZone = false,
   int csfrm = 0,
+  bool supportsNationalCharset = true,
+  String nationalCharset = 'AL16UTF16',
   int? outMaxSize,
   int ttcFieldVersion = 24,
   bool isColumnCursor = false,
@@ -1491,6 +1584,22 @@ Object? _decodeValueByOraType(
     case oraTypeString:
     case oraTypeChar:
       final bytes = buf.readBytesWithLength();
+      if (csfrm == ttcCsfrmNChar) {
+        // NCHAR / NVARCHAR2: the value travels as UTF-16BE (AL16UTF16), never
+        // UTF-8. The probe pass only needs the bytes consumed (done above).
+        if (!strict) return null;
+        if (!supportsNationalCharset) {
+          throw OracleException(
+            errorCode: oraUnsupportedType,
+            message:
+                'NCHAR/NVARCHAR2 columns require the AL16UTF16 national '
+                'character set; this connection negotiated $nationalCharset, '
+                'so the value cannot be decoded safely.',
+          );
+        }
+        if (bytes.isEmpty) return null;
+        return ReadBuffer(bytes).readNString(bytes.length);
+      }
       if (bytes.isEmpty) return null;
       return utf8.decode(bytes, allowMalformed: true);
     case oraTypeRaw:
@@ -1541,10 +1650,10 @@ Object? _decodeValueByOraType(
       // (node-oracledb withData.js processColumnData): UB4 locator length
       // (0 ⇒ SQL NULL and nothing follows), then — except for BFILE — a UB8
       // LOB length (characters for CLOB, bytes for BLOB) and UB4 chunk
-      // size, then the locator as length-prefixed bytes. CLOB and BLOB are
-      // supported; BFILE/NCLOB fail loud rather than decode
-      // silently. The lenient completion probe consumes the identical
-      // bytes so the terminal message stays locatable.
+      // size, then the locator as length-prefixed bytes. CLOB, NCLOB, and
+      // BLOB are supported; BFILE fails loud rather than decode silently. The
+      // lenient completion probe consumes the identical bytes so the terminal
+      // message stays locatable.
       if (strict && oraType == oraTypeBfile) {
         throw OracleException(
           errorCode: oraUnsupportedType,
@@ -1553,13 +1662,19 @@ Object? _decodeValueByOraType(
               '$oraType). Stories 4.1/4.2 implement CLOB and BLOB only.',
         );
       }
-      if (strict && csfrm == ttcCsfrmNChar) {
+      // NCLOB shares the CLOB type indicator (csfrm == NChar). It needs no
+      // separate decode here — the returned locator carries Oracle's
+      // variable-length-charset flag, so the transport's `_readClobAsString`
+      // materializes it as UTF-16BE automatically. The only gate is fail-loud
+      // when the connection's national charset is unsupported, so a wrong
+      // codec can never silently corrupt the value.
+      if (strict && csfrm == ttcCsfrmNChar && !supportsNationalCharset) {
         throw OracleException(
           errorCode: oraUnsupportedType,
           message:
-              'NCLOB columns are not supported yet (Oracle type '
-              '$oraType, NCHAR charset form). Stories 4.1/4.2 implement '
-              'CLOB and BLOB only.',
+              'NCLOB columns require the AL16UTF16 national character set; '
+              'this connection negotiated $nationalCharset, so the value '
+              'cannot be decoded safely.',
         );
       }
       final locatorLen = buf.readUB4();
@@ -1579,6 +1694,9 @@ Object? _decodeValueByOraType(
         oracleType: oraType,
         length: lobLength,
         chunkSize: chunkSize,
+        // NCLOB (csfrm == NChar) is national-charset: the transport reads it
+        // as UTF-16BE even when the locator bytes omit the var-length flag.
+        isNChar: csfrm == ttcCsfrmNChar,
       );
     case oraTypeJson:
       // Native JSON wire shape (node-oracledb packet.js readOson): the
@@ -1846,7 +1964,10 @@ bool _isSupportedRefCursorColumn(ColumnMetadata col) {
     case oraTypeJson:
       return true;
     case oraTypeClob:
-      return col.csfrm != ttcCsfrmNChar;
+      // CLOB and NCLOB (csfrm == NChar) are both fetchable: the locator's
+      // variable-length-charset flag drives UTF-16BE materialization for
+      // NCLOB, and an unsupported national charset fails loud at decode time.
+      return true;
     // A nested CURSOR(SELECT ...) column inside an embedded cursor describe
     // (REF CURSOR OUT bind OR implicit result) IS supported. The per-row cursor
     // value carries a full INLINE describe followed by the server cursor id on
@@ -1880,6 +2001,8 @@ Object? _decodeColumnValue(
   ColumnMetadata col, {
   required bool strict,
   bool preserveTimestampTimeZone = false,
+  bool supportsNationalCharset = true,
+  String nationalCharset = 'AL16UTF16',
   int ttcFieldVersion = 24,
 }) => _decodeValueByOraType(
   buf,
@@ -1888,6 +2011,8 @@ Object? _decodeColumnValue(
   scale: col.scale,
   preserveTimestampTimeZone: preserveTimestampTimeZone,
   csfrm: col.csfrm,
+  supportsNationalCharset: supportsNationalCharset,
+  nationalCharset: nationalCharset,
   // Forward the negotiated TTC field version so a cursor column's embedded
   // describe (`_readEmbeddedCursorDescribe` → `_processColumnInfo`) reads only
   // the version-gated fields the server actually sent. Defaulting to 24 here
