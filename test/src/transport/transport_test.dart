@@ -1136,6 +1136,47 @@ void main() {
       expect(bytes[bytes.length - 1], equals(0));
     });
 
+    test('compile-caps field-version slot carries the default ttcFieldVersion',
+        () {
+      // Index 7 (TNS_CCAP_FIELD_VERSION) must reflect the client maximum when
+      // no clamp has occurred. node-oracledb capabilities.js `_init` writes
+      // compileCaps[TNS_CCAP_FIELD_VERSION] = this.ttcFieldVersion, whose
+      // default is TNS_CCAP_FIELD_VERSION_MAX = 24.
+      const fieldVersionIndex = 7;
+      final transport = Transport();
+      final compileCaps = transport.debugBuildCompileCapabilities();
+      expect(compileCaps[fieldVersionIndex], equals(24),
+          reason: 'Default field-version slot must be FIELD_VERSION_MAX (24)');
+    });
+
+    test('compile-caps field-version slot tracks a clamp to a lower value', () {
+      // Pins the fix for the deferred-work finding: the field-version slot must
+      // emit the NEGOTIATED _ttcFieldVersion, not a hard-coded literal 24.
+      // _adjustFieldVersion clamps _ttcFieldVersion DOWN to a server's lower
+      // advertised value; the caps subsequently rebuilt (e.g. the classical
+      // path's DataTypes message) must carry the clamped value so the client
+      // never advertises a field version higher than what was negotiated.
+      //
+      // node-oracledb parity (lib/thin/protocol/capabilities.js):
+      //   adjustForServerCompileCaps:
+      //     this.ttcFieldVersion = serverCaps[TNS_CCAP_FIELD_VERSION];
+      //     this.compileCaps[TNS_CCAP_FIELD_VERSION] = this.ttcFieldVersion;
+      //
+      // Proven-to-fail before the fix: with a literal 24 the slot stayed 24
+      // even after the clamp drove _ttcFieldVersion to 17.
+      const fieldVersionIndex = 7;
+      const clampedFieldVersion = 17; // TNS_CCAP_FIELD_VERSION_23_1 (< 24)
+      final transport = Transport();
+      transport.debugTtcFieldVersion = clampedFieldVersion;
+
+      final compileCaps = transport.debugBuildCompileCapabilities();
+      expect(compileCaps[fieldVersionIndex], equals(clampedFieldVersion),
+          reason: 'Field-version slot must emit the clamped _ttcFieldVersion, '
+              'not the hard-coded client maximum');
+      expect(transport.ttcFieldVersion, equals(clampedFieldVersion),
+          reason: 'Sanity: the seam set the negotiated field version');
+    });
+
     test('throws (not truncates) when compile caps exceed the 1-byte prefix',
         () {
       // WITHOUT the guard, writeUint8(256) wraps to 0: the length prefix would

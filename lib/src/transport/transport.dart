@@ -2868,8 +2868,14 @@ class Transport {
     // CTB feature backport (index 5) - implicit pool + oauth msg on err
     caps[_ccapCtbFeatureBackport] = 0x08 | 0x10; // = 0x18
 
-    // Field version (index 7) - Oracle 23.4 max
-    caps[_ccapFieldVersion] = 24; // TNS_CCAP_FIELD_VERSION_MAX
+    // Field version (index 7) - the NEGOTIATED field version, not a literal.
+    // Defaults to TNS_CCAP_FIELD_VERSION_MAX (24) but is clamped DOWN by
+    // [_adjustFieldVersion] when the server advertises a lower value. Emitting
+    // the clamped [_ttcFieldVersion] keeps the byte the client sends in sync
+    // with what was negotiated, matching node-oracledb's capabilities.js
+    // (`_init`: compileCaps[TNS_CCAP_FIELD_VERSION] = this.ttcFieldVersion, and
+    // `adjustForServerCompileCaps` re-writes the same slot to the clamped value).
+    caps[_ccapFieldVersion] = _ttcFieldVersion;
 
     // Server define conv (index 8)
     caps[_ccapServerDefineConv] = 1;
