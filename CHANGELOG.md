@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.2.0
+
+Non-`AL32UTF8` database character set compatibility. The driver always
+negotiates UTF-8 (`AL32UTF8`) on the wire and lets the Oracle server convert to
+and from the database's own character set — so `VARCHAR2`/`CHAR`/`CLOB` text
+round-trips correctly on single-byte and other non-`AL32UTF8` databases, not
+just `AL32UTF8`. All additive — no breaking changes — and validated against
+Oracle 23ai and Oracle 21c, with the non-`AL32UTF8` round-trip proven
+end-to-end against a `WE8MSWIN1252` database.
+
+### Features
+
+- **Non-`AL32UTF8` database character sets** (`VARCHAR2` / `CHAR` / `CLOB`):
+  primary character data round-trips through Oracle's server-side conversion
+  while the client always negotiates UTF-8, so the database character set is
+  transparent to your code. Validated end-to-end against `WE8MSWIN1252`
+  (Windows-1252 Western European) using code-page-specific characters — euro
+  sign, smart quotes, en/em dashes, ellipsis, bullet — so the round-trip proves
+  real UTF-8 ⇆ server conversion rather than a byte-identity accident.
+- **National character types** (`NCHAR` / `NVARCHAR2` / `NCLOB`): supported when
+  the database's national character set is `AL16UTF16` (the standard,
+  non-deprecated national charset used by both validated server lines). Values
+  travel the wire as UTF-16BE and map to Dart `String`; bind with
+  `OracleDbType.nVarchar` or `OracleDbType.nClob`.
+- **Character-set diagnostics** (`connection.charsetInfo`): exposes the detected
+  `databaseCharset` / `nationalCharset` and `supportsNationalCharacterSet`
+  (`OracleCharsetInfo`).
+- **Fail-loud on unsupported national character sets**: a connection whose
+  national charset is not `AL16UTF16` (e.g. the deprecated `UTF8` national
+  charset) raises an `OracleException` on any `NCHAR` / `NVARCHAR2` / `NCLOB`
+  bind or column instead of silently producing mojibake. Ordinary
+  `VARCHAR2` / `CHAR` / `CLOB` columns are unaffected and keep working over the
+  UTF-8 wire path.
+
+### Bug Fixes
+
+- **DataTypes capability length prefix is overflow-safe**: the compile-caps
+  length prefix is guarded against single-byte overflow during the DataTypes
+  negotiation, hardening the classical (pre-23ai) handshake path.
+- **Negotiated TTC field version is emitted in the compile-caps slot**: the
+  transport now writes the negotiated `_ttcFieldVersion` into the compile-caps
+  slot, keeping the capability exchange consistent across supported server
+  versions.
+
 ## 1.1.0
 
 Server-side cursor support: queries can now be streamed instead of fully
