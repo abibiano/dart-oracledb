@@ -70,5 +70,61 @@ services:
       retries: 10
       start_period: 300s
 
+  # OPTIONAL local-only fixture for Story 10.3: a 23ai Free database whose
+  # *database* character set is the single-byte Western WE8MSWIN1252 instead of
+  # the default AL32UTF8. It proves that VARCHAR2/CHAR/CLOB primary text
+  # round-trips through Oracle's server-side conversion while the driver keeps
+  # negotiating UTF-8 on the wire (the node-oracledb thin model). It does NOT
+  # run on `docker compose up` (gated behind the `non-al32utf8` profile) and is
+  # NOT wired into CI - CI fixture hardening and the README support matrix
+  # remain Story 10.5.
+  #
+  # HOW THE non-AL32UTF8 CHARSET IS OBTAINED: every readily available Oracle
+  # 23ai/26ai Free image (the official `container-registry.oracle.com/database/
+  # free` AND all gvenzl/oracle-free tags - slim, faststart, and regular) ships
+  # a PREBUILT AL32UTF8 database and ignores ORACLE_CHARACTERSET, so there is no
+  # image-level knob for the database character set (all four were verified to
+  # stay AL32UTF8). A no-op AL32UTF8 fixture is exactly what AC1's guard rejects.
+  #
+  # Instead, the init script `non_al32utf8_setup.sql` (bind-mounted below into
+  # gvenzl's /container-entrypoint-initdb.d, where *.sql runs as SYSDBA in the
+  # CDB root on first boot) creates a fresh pluggable database `we8pdb1` and
+  # migrates it - while still empty - down to WE8MSWIN1252 via the CSALTER
+  # bypass. So the standard FREEPDB1 stays AL32UTF8 and the we8pdb1 service is
+  # the single-byte fixture. The gvenzl image is multi-arch (native ARM64), so
+  # this runs on Docker Desktop. No named oradata volume on purpose: the fixture
+  # is disposable and a reused volume would skip the one-time init script.
+  #
+  #   docker context use desktop-linux
+  #   docker compose --profile non-al32utf8 up -d oracle-non-al32   # wait healthy
+  #
+  # The defaults in test/integration/test_helper.dart already match this service
+  # (port 1523, service we8pdb1), so the focused suite needs only its flag:
+  #
+  #   RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
+  #     dart test test/integration/charset_non_al32utf8_integration_test.dart
+  #
+  # Name the service explicitly in `up` for the same reason as oracle21c above.
+  oracle-non-al32:
+    image: gvenzl/oracle-free:latest
+    container_name: oracle-non-al32
+    profiles:
+      - non-al32utf8
+    ports:
+      - "1523:1521"
+    environment:
+      - ORACLE_PASSWORD=testpassword
+    volumes:
+      # Mounted read-only into the first-boot init dir; creates+migrates we8pdb1.
+      - ./test/integration/fixtures/non_al32utf8_setup.sql:/container-entrypoint-initdb.d/01_we8mswin1252_pdb.sql:ro
+    # Healthy only once the migrated WE8MSWIN1252 PDB (we8pdb1) is openable, so
+    # the suite never starts before the fixture exists.
+    healthcheck:
+      test: ["CMD", "sqlplus", "-L", "system/testpassword@//localhost:1521/we8pdb1", "@/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 600s
+
 volumes:
   oracle-data:

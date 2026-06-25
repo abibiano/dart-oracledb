@@ -38,6 +38,70 @@ String get testConnectString => '$testHost:$testPort/$testService';
 bool get integrationEnabled =>
     Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
 
+// ---------------------------------------------------------------------------
+// Non-AL32UTF8 fixture (Story 10.3)
+//
+// A SECOND, optional fixture whose *database* character set is a single-byte
+// Western charset (e.g. WE8MSWIN1252) rather than AL32UTF8. It proves that
+// VARCHAR2/CHAR/CLOB primary text round-trips through Oracle's server-side
+// charset conversion while the driver keeps negotiating UTF-8 on the wire.
+//
+// It is entirely env-driven and gated behind its OWN flag so the standard
+// suites are unaffected: the standard 23ai/21c fixtures above are AL32UTF8 and
+// would (correctly) fail the non-AL32UTF8 suite's charset guard. Defaults match
+// the optional `non-al32utf8` docker-compose profile (port 1523, we8pdb1). See
+// `charset_non_al32utf8_integration_test.dart` for the validated charset and
+// exact run command.
+// ---------------------------------------------------------------------------
+
+/// Gate for the non-AL32UTF8 suite. Run only when `RUN_NON_AL32UTF8_TESTS` is
+/// the literal string `'true'`; otherwise the suite skips with a clear reason.
+bool get nonAl32Enabled =>
+    Platform.environment['RUN_NON_AL32UTF8_TESTS'] == 'true';
+
+/// Non-AL32UTF8 fixture host. Override with `ORACLE_NON_AL32UTF8_HOST`.
+String get nonAl32Host =>
+    Platform.environment['ORACLE_NON_AL32UTF8_HOST'] ?? 'localhost';
+
+/// Non-AL32UTF8 fixture port. Override with `ORACLE_NON_AL32UTF8_PORT`.
+int get nonAl32Port =>
+    int.tryParse(Platform.environment['ORACLE_NON_AL32UTF8_PORT'] ?? '') ??
+    1523;
+
+/// Non-AL32UTF8 fixture service name. Override with
+/// `ORACLE_NON_AL32UTF8_SERVICE`. The default `we8pdb1` matches the pluggable
+/// database created (and migrated to WE8MSWIN1252) by the optional
+/// `non-al32utf8` docker-compose profile's init script.
+String get nonAl32Service =>
+    Platform.environment['ORACLE_NON_AL32UTF8_SERVICE'] ?? 'we8pdb1';
+
+/// Non-AL32UTF8 fixture username. Override with `ORACLE_NON_AL32UTF8_USER`.
+String get nonAl32User =>
+    Platform.environment['ORACLE_NON_AL32UTF8_USER'] ?? 'system';
+
+/// Non-AL32UTF8 fixture password. Override with `ORACLE_NON_AL32UTF8_PASSWORD`.
+String get nonAl32Password =>
+    Platform.environment['ORACLE_NON_AL32UTF8_PASSWORD'] ?? 'testpassword';
+
+/// Connection string for the non-AL32UTF8 fixture in `host:port/service` form.
+String get nonAl32ConnectString => '$nonAl32Host:$nonAl32Port/$nonAl32Service';
+
+/// Opens a connection to the non-AL32UTF8 fixture with the same fail-fast
+/// timeout policy as [connectForTest]. All parameters come from the
+/// `ORACLE_NON_AL32UTF8_*` getters above - never hardcode them in a test.
+Future<OracleConnection> connectForNonAl32Test({
+  Duration timeout = const Duration(seconds: 5),
+  int statementCacheSize = 30,
+}) {
+  return OracleConnection.connect(
+    nonAl32ConnectString,
+    user: nonAl32User,
+    password: nonAl32Password,
+    timeout: timeout,
+    statementCacheSize: statementCacheSize,
+  );
+}
+
 final Logger _log = Logger('oracledb.test_helper');
 
 /// Opens a connection with a fail-fast timeout.
