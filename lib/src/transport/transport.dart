@@ -2005,8 +2005,13 @@ class Transport {
     // Adjust ttcFieldVersion based on server compile caps
     _adjustFieldVersion(protocolResponse.compileCaps);
 
-    // Step 2: Send data types negotiation (required before auth)
-    await _sendDataTypesNegotiation(protocolResponse);
+    // Step 2: Send data types negotiation (required before auth). The
+    // server's advertised compile-cap vector has already been folded into the
+    // client state above via _adjustFieldVersion (node-oracledb parity:
+    // protocol.js processProtocolInfo -> adjustForServerCompileCaps mutates the
+    // shared caps object BEFORE dataType.js encode runs), so the DataTypes
+    // message needs no further reference to the protocol response.
+    await _sendDataTypesNegotiation();
 
     return protocolResponse;
   }
@@ -2279,7 +2284,18 @@ class Transport {
   }
 
   /// Sends the data types negotiation message.
-  Future<void> _sendDataTypesNegotiation(ProtocolResponse protoResponse) async {
+  ///
+  /// Takes no protocol-response argument by design. The DataTypes capabilities
+  /// the client sends are a FIXED client vector ([_buildCompileCapabilities] /
+  /// [_buildRuntimeCapabilities]); they are NOT gated on the server's
+  /// advertised compile-cap vector at this site. This matches node-oracledb's
+  /// thin client exactly: `dataType.js` `DataTypeMessage.encode` writes
+  /// `buf.caps.compileCaps`/`runtimeCaps` verbatim, and the only server-vector
+  /// adjustment (ttcFieldVersion clamp) happens earlier in the Protocol-message
+  /// handler (`protocol.js` `adjustForServerCompileCaps`). The Dart equivalent
+  /// of that clamp ([_adjustFieldVersion]) runs in [sendProtocolNegotiation]
+  /// BEFORE this call, so the caps built here already reflect any server limit.
+  Future<void> _sendDataTypesNegotiation() async {
     _log.info('Starting data types negotiation');
 
     // Build client capabilities
