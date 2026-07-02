@@ -87,6 +87,7 @@ class _NestedCursorTransport extends Transport {
     List<ColumnMetadata>? expectedColumns,
     List<int> cursorsToClose = const <int>[],
     bool preserveTimestampTimeZone = false,
+    List<List<Object?>>? bulkRows,
   }) async {
     sentCursorsToClose.add(cursorsToClose);
     return firstBatch;

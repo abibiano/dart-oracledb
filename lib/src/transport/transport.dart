@@ -552,10 +552,12 @@ class Transport {
     List<ColumnMetadata>? expectedColumns,
     List<int> cursorsToClose = const [],
     bool preserveTimestampTimeZone = false,
+    List<List<Object?>>? bulkRows,
   }) async {
     _log.fine(
       'Sending execute request (isQuery=$isQuery, isPlSql=$isPlSql, '
-      'cursorId=$cursorId)...',
+      'cursorId=$cursorId'
+      '${bulkRows != null ? ', bulkRows=${bulkRows.length}' : ''})...',
     );
 
     // Record whether this execute reuses a cached server cursor (parse bit
@@ -611,6 +613,7 @@ class Transport {
       ttcFieldVersion: _ttcFieldVersion,
       sequence: nextSequence(),
       cursorId: cursorId,
+      bulkRows: bulkRows,
     );
 
     // Prepend piggybacks: close-cursor (LRU evictions) and free-temp-LOBs

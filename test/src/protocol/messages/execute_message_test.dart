@@ -7,6 +7,7 @@
 /// `test/integration/query_integration_test.dart`.
 library;
 
+import 'dart:convert' show utf8;
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
@@ -14,6 +15,7 @@ import 'package:test/test.dart';
 import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
+import 'package:oracledb/src/protocol/data_types.dart' show encodeNumber;
 import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/protocol/oson.dart' show encodeOson;
@@ -4585,6 +4587,347 @@ void main() {
       );
     });
   });
+
+  group('bulk DML (executeMany) ExecuteRequest encoding', () {
+    // Wire shape mirrors node-oracledb thin executeMany (execute.js encode():
+    // numExecs in al8i4[1], one TNS_MSG_TYPE_ROW_DATA + writeBindParamsRow per
+    // iteration). Bind metadata stays the plain scalar shape — node-oracledb
+    // reserves TNS_BIND_ARRAY / maxArraySize for PL/SQL array binds
+    // (lib/connection.js: "get max array size (for array binds, not possible
+    // in executeMany())"; the executeMany normalizer sets isArray = false).
+    const sql = 'INSERT INTO t (id, name) VALUES (:1, :2)';
+    List<Object?> slots({int nameMax = 5}) => [
+      BindVariable(value: null, oraType: oraTypeNumber),
+      BindVariable(value: null, oraType: oraTypeVarchar, maxSize: nameMax),
+    ];
+
+    test('writes execution count N in al8i4[1] and keeps prefetch at 1', () {
+      final req = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        bindValues: slots(),
+        bulkRows: [
+          [1, 'Alice'],
+          [2, 'Bob'],
+          [3, null],
+        ],
+      );
+      final parsed = _openDmlExecuteForRead(req.toBytes());
+      expect(parsed.executionCount, equals(3));
+      expect(
+        parsed.prefetchNumRows,
+        equals(1),
+        reason:
+            'node-oracledb writeExecuteMessage keeps numIters = 1 for '
+            'non-query statements; only al8i4[1] carries the row count',
+      );
+      expect(parsed.numParams, equals(2));
+    });
+
+    test(
+      'bind metadata keeps scalar shape: USE_INDICATORS only, max elements 0',
+      () {
+        final req = ExecuteRequest(
+          sql: sql,
+          isQuery: false,
+          bindValues: slots(nameMax: 3),
+          bulkRows: [
+            [1, 'a'],
+            [2, 'abc'],
+          ],
+        );
+        final parsed = _openDmlExecuteForRead(req.toBytes());
+        final meta = _readBindMetadata(parsed.buf, parsed.numParams);
+        expect(meta, hasLength(2));
+        for (final m in meta) {
+          expect(m.flags, equals(ttcBindUseIndicators));
+          expect(
+            m.flags & ttcBindArray,
+            equals(0),
+            reason:
+                'TNS_BIND_ARRAY is PL/SQL-array-bind-only in node-oracledb; '
+                'array DML metadata must stay scalar-shaped',
+          );
+          expect(
+            m.maxNumElements,
+            equals(0),
+            reason: 'max element count is only written for PL/SQL array binds',
+          );
+        }
+        expect(meta[0].oraType, equals(oraTypeNumber));
+        expect(meta[1].oraType, equals(oraTypeVarchar));
+        expect(
+          meta[1].maxSize,
+          equals(3),
+          reason: 'string slot declares the max byte length across all rows',
+        );
+      },
+    );
+
+    test('writes one ROW_DATA payload per row with per-row values', () {
+      final req = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        bindValues: slots(),
+        bulkRows: [
+          [1, 'Alice'],
+          [2, null],
+          [3, 'Bob'],
+        ],
+      );
+      final parsed = _openDmlExecuteForRead(req.toBytes());
+      _readBindMetadata(parsed.buf, parsed.numParams);
+      final buf = parsed.buf;
+
+      // Row 0: NUMBER 1, 'Alice'.
+      expect(buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(buf.readBytesWithLength(), equals(encodeNumber(1)));
+      expect(buf.readBytesWithLength(), equals(utf8.encode('Alice')));
+      // Row 1: NUMBER 2, NULL (single zero-length indicator byte).
+      expect(buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(buf.readBytesWithLength(), equals(encodeNumber(2)));
+      expect(buf.readBytesWithLengthOrNull(), isNull);
+      // Row 2: NUMBER 3, 'Bob'.
+      expect(buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(buf.readBytesWithLength(), equals(encodeNumber(3)));
+      expect(buf.readBytesWithLength(), equals(utf8.encode('Bob')));
+      expect(
+        buf.hasRemaining,
+        isFalse,
+        reason: 'exactly numExecs ROW_DATA payloads must be written',
+      );
+    });
+
+    test('bulk of one row encodes byte-identically to the scalar path', () {
+      // Regression guard for AC3: routing a 1-row executeMany through the
+      // bulk path must not change a single byte relative to execute() with
+      // the same values (same metadata, same single ROW_DATA payload).
+      final scalar = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        bindValues: [1, 'Alice'],
+      ).toBytes();
+      final bulk = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        bindValues: slots(),
+        bulkRows: [
+          [1, 'Alice'],
+        ],
+      ).toBytes();
+      expect(bulk, equals(scalar));
+    });
+
+    test('long string slots defer to the end of EACH row payload', () {
+      // Oracle long-data ordering (node-oracledb writeBindParamsRow
+      // `foundLong`) applies per iteration: within every ROW_DATA message the
+      // >32767-byte slot's value is written after all other slots.
+      final longValue = 'x' * 40000;
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t (big, id) VALUES (:1, :2)',
+        isQuery: false,
+        bindValues: [
+          BindVariable(value: null, oraType: oraTypeVarchar, maxSize: 40000),
+          BindVariable(value: null, oraType: oraTypeNumber),
+        ],
+        bulkRows: [
+          [longValue, 1],
+          [longValue, 2],
+        ],
+      );
+      final parsed = _openDmlExecuteForRead(req.toBytes());
+      _readBindMetadata(parsed.buf, parsed.numParams);
+      final buf = parsed.buf;
+      for (final expectedId in [1, 2]) {
+        expect(buf.readUint8(), equals(ttcMsgTypeRowData));
+        // NUMBER (slot 2) first — the long VARCHAR (slot 1) is deferred.
+        expect(buf.readBytesWithLength(), equals(encodeNumber(expectedId)));
+        expect(
+          buf.readBytesWithLength(),
+          equals(utf8.encode(longValue)),
+          reason: 'deferred long value must close out its own row',
+        );
+      }
+      expect(buf.hasRemaining, isFalse);
+    });
+
+    test('a row whose length mismatches the slot count fails encoding', () {
+      final req = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        bindValues: slots(),
+        bulkRows: [
+          [1],
+        ],
+      );
+      expect(
+        req.toBytes,
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraBindMismatch,
+          ),
+        ),
+      );
+    });
+
+    test('bulkRows asserts on query, PL/SQL, empty, and bind-free shapes', () {
+      expect(
+        () => ExecuteRequest(
+          sql: 'SELECT 1 FROM dual',
+          isQuery: true,
+          bindValues: slots(),
+          bulkRows: [
+            [1, 'a'],
+          ],
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+      expect(
+        () => ExecuteRequest(
+          sql: 'BEGIN NULL; END;',
+          isQuery: false,
+          isPlSql: true,
+          bindValues: slots(),
+          bulkRows: [
+            [1, 'a'],
+          ],
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+      expect(
+        () => ExecuteRequest(
+          sql: sql,
+          isQuery: false,
+          bindValues: slots(),
+          bulkRows: const [],
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+      expect(
+        () => ExecuteRequest(
+          sql: sql,
+          isQuery: false,
+          bulkRows: [
+            [1, 'a'],
+          ],
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+    });
+
+    test('scalar DML still writes execution count 1 and one ROW_DATA', () {
+      // Regression: the bulk extension must leave the scalar path unchanged.
+      final parsed = _openDmlExecuteForRead(
+        ExecuteRequest(
+          sql: sql,
+          isQuery: false,
+          bindValues: [7, 'Zoe'],
+        ).toBytes(),
+      );
+      expect(parsed.executionCount, equals(1));
+      expect(parsed.prefetchNumRows, equals(1));
+      _readBindMetadata(parsed.buf, parsed.numParams);
+      expect(parsed.buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(parsed.buf.readBytesWithLength(), equals(encodeNumber(7)));
+      expect(parsed.buf.readBytesWithLength(), equals(utf8.encode('Zoe')));
+      expect(parsed.buf.hasRemaining, isFalse);
+    });
+  });
+}
+
+/// Walks a freshly-parsed (cursorId == 0) DML EXECUTE request at the default
+/// ttcFieldVersion (24) up to — but not including — the bind metadata block,
+/// returning the prefetch-num-rows field, the al8i4[1] execution count, the
+/// declared bind count, and the [ReadBuffer] positioned at the first bind
+/// metadata byte for further reading.
+({int prefetchNumRows, int executionCount, int numParams, ReadBuffer buf})
+_openDmlExecuteForRead(Uint8List bytes) {
+  final buf = ReadBuffer(bytes);
+  buf.readUint8(); // msg type
+  buf.readUint8(); // func code
+  buf.readUint8(); // sequence
+  buf.skipUB8(); // token number (ttcFieldVersion >= 23.1 ext1)
+  buf.readUB4(); // options
+  buf.readUB4(); // cursor id
+  buf.readUint8(); // SQL pointer
+  buf.readUB4(); // SQL length
+  buf.readUint8(); // vector pointer
+  buf.readUB4(); // al8i4 array length (13)
+  buf.readUint8(); // al8o4
+  buf.readUint8(); // al8o4l
+  buf.readUint8(); // prefetch buffer size
+  final prefetchNumRows = buf.readUB4();
+  buf.readUB4(); // maximum long size
+  buf.readUint8(); // bind pointer
+  final numParams = buf.readUB4();
+  buf.readUint8(); // al8pp
+  buf.readUint8(); // al8txn
+  buf.readUint8(); // al8txl
+  buf.readUint8(); // al8kv
+  buf.readUint8(); // al8kvl
+  buf.readUint8(); // define pointer
+  buf.readUB4(); // define count
+  buf.readUB4(); // registration id
+  buf.readUint8(); // al8objlist
+  buf.readUint8(); // al8objlen
+  buf.readUint8(); // al8blv pointer
+  buf.readUB4(); // al8blv
+  buf.readUint8(); // al8dnam
+  buf.readUB4(); // al8dnaml
+  buf.readUB4(); // al8regid_msb
+  buf.readUint8(); // array dml row counts pointer
+  buf.readUB4(); // array dml row counts length
+  buf.readUint8(); // array dml row counts pointer 2
+  buf.readUint8(); // al8sqlsig pointer (12.2)
+  buf.readUB4(); // SQL signature length
+  buf.readUint8(); // SQL id pointer
+  buf.readUB4(); // allocated size of SQL id
+  buf.readUint8(); // length of SQL id pointer
+  buf.readUint8(); // chunk ids pointer (12.2 ext1)
+  buf.readUB4(); // number of chunk ids
+  buf.readBytesWithLength(); // SQL bytes
+  buf.readUB4(); // al8i4[0] parse
+  final executionCount = buf.readUB4(); // al8i4[1]
+  for (var i = 2; i <= 12; i++) {
+    buf.readUB4(); // al8i4[2..12]
+  }
+  return (
+    prefetchNumRows: prefetchNumRows,
+    executionCount: executionCount,
+    numParams: numParams,
+    buf: buf,
+  );
+}
+
+/// Reads [numParams] bind-metadata blocks (default ttcFieldVersion 24 layout)
+/// from [buf], leaving it positioned at the first ROW_DATA message byte.
+List<({int oraType, int flags, int maxSize, int maxNumElements})>
+_readBindMetadata(ReadBuffer buf, int numParams) {
+  final out = <({int oraType, int flags, int maxSize, int maxNumElements})>[];
+  for (var i = 0; i < numParams; i++) {
+    final oraType = buf.readUint8();
+    final flags = buf.readUint8();
+    buf.readUint8(); // precision
+    buf.readUint8(); // scale
+    final maxSize = buf.readUB4();
+    final maxNumElements = buf.readUB4();
+    buf.readUB4(); // cont flag (LOB prefetch)
+    buf.readUB4(); // OID
+    buf.readUB2(); // version
+    buf.readUB2(); // charset id
+    buf.readUint8(); // csfrm
+    buf.readUB4(); // max chars (LOB prefetch length)
+    buf.readUB4(); // oaccolid (12.2)
+    out.add((
+      oraType: oraType,
+      flags: flags,
+      maxSize: maxSize,
+      maxNumElements: maxNumElements,
+    ));
+  }
+  return out;
 }
 
 /// Returns the first index of [needle] within [haystack], or -1.

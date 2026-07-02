@@ -78,6 +78,7 @@ class _FakeCacheTransport extends Transport {
     List<ColumnMetadata>? expectedColumns,
     List<int> cursorsToClose = const <int>[],
     bool preserveTimestampTimeZone = false,
+    List<List<Object?>>? bulkRows,
   }) async {
     sendExecuteCalls++;
     sendExecuteCursorIds.add(cursorId);

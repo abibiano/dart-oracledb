@@ -72,6 +72,7 @@ class _FakeResultSetTransport extends Transport {
     List<ColumnMetadata>? expectedColumns,
     List<int> cursorsToClose = const <int>[],
     bool preserveTimestampTimeZone = false,
+    List<List<Object?>>? bulkRows,
   }) async {
     sendExecuteCalls++;
     lastExecutePrefetch = prefetchRows;

@@ -394,3 +394,57 @@ bool isCacheEligibleSql(String sql) {
   }
   return _cteVerbs.contains(r.verb);
 }
+
+/// Returns true when [sql] carries a DML `RETURNING ... INTO` clause — the
+/// OUT-bind form of INSERT/UPDATE/DELETE/MERGE.
+///
+/// Scans at paren-depth 0 and uses [_skipNonCode] so a `RETURNING` or `INTO`
+/// inside a subquery, string literal, quoted identifier, or comment is
+/// ignored. Requires `RETURNING` to appear before an `INTO` at depth 0, so the
+/// leading `INSERT INTO` cannot be mistaken for the clause (that `INTO`
+/// precedes any `RETURNING`). Both are Oracle reserved words, so a
+/// word-boundary match on non-literal text reliably identifies the clause.
+bool hasReturningIntoClause(String sql) {
+  final n = sql.length;
+  var pos = 0;
+  var depth = 0;
+  var sawReturning = false;
+  while (pos < n) {
+    final skipped = _skipNonCode(sql, pos);
+    if (skipped != pos) {
+      pos = skipped;
+      continue;
+    }
+    final c = sql.codeUnitAt(pos);
+    if (c == 0x28) {
+      depth++;
+      pos++;
+      continue;
+    }
+    if (c == 0x29) {
+      if (depth > 0) depth--;
+      pos++;
+      continue;
+    }
+    if (depth == 0 && _isIdentStart(c)) {
+      if (!sawReturning && matchesKeyword(sql, pos, 'RETURNING')) {
+        sawReturning = true;
+      } else if (sawReturning && matchesKeyword(sql, pos, 'INTO')) {
+        return true;
+      }
+      // Skip the rest of this identifier so we don't re-test mid-word.
+      pos++;
+      while (pos < n && _isIdentChar(sql.codeUnitAt(pos))) {
+        pos++;
+      }
+      continue;
+    }
+    // Explicit whitespace branch — see _findCteTerminalVerb.
+    if (_isWhitespace(c)) {
+      pos++;
+      continue;
+    }
+    pos++;
+  }
+  return false;
+}

@@ -191,6 +191,7 @@ class _CharsetFakeTransport extends Transport {
     List<ColumnMetadata>? expectedColumns,
     List<int> cursorsToClose = const <int>[],
     bool preserveTimestampTimeZone = false,
+    List<List<Object?>>? bulkRows,
   }) async {
     executeCalls++;
     return _response;

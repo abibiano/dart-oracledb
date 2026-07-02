@@ -119,6 +119,7 @@ class ExecuteRequest extends Message {
     this.numIters = 50,
     this.ttcFieldVersion = 24,
     this.defineColumns,
+    this.bulkRows,
     super.sequence = 1,
   }) : assert(
          !(isQuery && isPlSql),
@@ -128,6 +129,16 @@ class ExecuteRequest extends Message {
          defineColumns == null ||
              (isQuery && cursorId != 0 && bindValues == null),
          'define mode requires an open query cursor and carries no binds',
+       ),
+       assert(
+         bulkRows == null ||
+             (!isQuery &&
+                 !isPlSql &&
+                 defineColumns == null &&
+                 bindValues != null &&
+                 bulkRows.isNotEmpty),
+         'bulk DML requires a non-query, non-PL/SQL statement with bind slots '
+         'and at least one row',
        ),
        super(messageType: ttcMsgTypeFunction) {
     // OUT and IN OUT binds are only meaningful in PL/SQL. Refuse mid-build
@@ -179,8 +190,27 @@ class ExecuteRequest extends Message {
   /// on FETCH continuation rounds until defines are established.
   final List<ColumnMetadata>? defineColumns;
 
-  /// Number of execute iterations for DML (always 1 here; bulk DML deferred).
-  int get _numExecs => 1;
+  /// Bulk DML row data (`executeMany`): one inner list per execute iteration,
+  /// each holding exactly one raw value per bind slot, in bind order.
+  ///
+  /// When non-null, this request executes [sql] once per inner list in a
+  /// single round trip — the DML execution count (al8i4[1]) is the row count
+  /// and one [ttcMsgTypeRowData] payload travels per row, exactly like
+  /// node-oracledb thin's `executeMany` (execute.js `encode()` loops
+  /// `writeBindParamsRow` while `currentRow < numExecs`). The [bindValues]
+  /// entries then act as per-slot metadata templates: their
+  /// oraType/maxSize/csfrm — sized to the largest value across all rows —
+  /// are written once in the bind metadata block and each row's value is
+  /// encoded against its slot's template. Bind metadata stays the plain
+  /// scalar shape ([ttcBindUseIndicators], max elements 0): node-oracledb
+  /// reserves `TNS_BIND_ARRAY`/`maxArraySize` for PL/SQL array binds, which
+  /// are not part of array DML. Only valid for non-query, non-PL/SQL
+  /// statements with no OUT binds.
+  final List<List<Object?>>? bulkRows;
+
+  /// Number of execute iterations for DML: the bulk row count for array DML
+  /// ([bulkRows]), otherwise 1.
+  int get _numExecs => bulkRows?.length ?? 1;
 
   @override
   void encode(WriteBuffer buffer) {
@@ -204,7 +234,10 @@ class ExecuteRequest extends Message {
       );
     }
     final hasSql = cursorId == 0 || sqlBytes.isNotEmpty;
-    final effectiveNumIters = isQuery ? numIters : _numExecs;
+    // Prefetch num rows: node-oracledb writeExecuteMessage initializes
+    // `numIters = 1` and only queries change it — bulk DML keeps 1 here; the
+    // row count travels solely in the al8i4[1] execution-count slot below.
+    final effectiveNumIters = isQuery ? numIters : 1;
 
     // Execute options + DML options
     var options = 0;
@@ -357,30 +390,67 @@ class ExecuteRequest extends Message {
     }
     if (numParams > 0) {
       _writeBindMetadata(buffer, binds);
-      // Single ROW_DATA message containing all bind values for one iteration.
-      buffer.writeUint8(ttcMsgTypeRowData);
-      // SQL (non-PL/SQL) statements must write values whose declared size
-      // exceeds the 32767-byte string bind limit AFTER all other binds —
-      // Oracle's long-data ordering, mirrored from node-oracledb
-      // writeBindParamsRow (`foundLong`). PL/SQL never reaches this path:
-      // oversized PL/SQL strings are converted to temporary CLOBs before
-      // encoding.
-      final deferredLongBinds = <BindVariable>[];
-      for (final bind in binds) {
-        // JSON is excluded from the deferral despite its 32 MB metadata
-        // maxSize: node-oracledb classifies long binds by the variable's own
-        // (small) maxSize, so JSON values stay in bind order on the wire.
-        if (!isPlSql &&
-            _wireTypeFor(bind) != oraTypeJson &&
-            _maxSizeFor(bind) > ttcMaxVarcharBindBytes) {
-          deferredLongBinds.add(bind);
-          continue;
+      final rows = bulkRows;
+      if (rows == null) {
+        // Single ROW_DATA message containing all bind values for one
+        // iteration.
+        _writeRowData(buffer, binds);
+      } else {
+        // Bulk DML: one ROW_DATA message per iteration (node-oracledb
+        // execute.js encode() writes TNS_MSG_TYPE_ROW_DATA +
+        // writeBindParamsRow once per row while currentRow < numExecs).
+        // Each row's raw values are encoded against the slot templates in
+        // [binds] so type, declared max size, and charset form stay uniform
+        // across every iteration, matching the metadata written above.
+        for (final row in rows) {
+          if (row.length != binds.length) {
+            throw OracleException(
+              errorCode: oraBindMismatch,
+              message:
+                  'Internal: bulk DML row has ${row.length} values but '
+                  '${binds.length} bind slots',
+            );
+          }
+          _writeRowData(buffer, [
+            for (var i = 0; i < binds.length; i++)
+              BindVariable(
+                value: row[i],
+                oraType: binds[i].oraType,
+                maxSize: binds[i].maxSize,
+                isNChar: binds[i].isNChar,
+              ),
+          ]);
         }
-        _writeBindValue(buffer, bind);
       }
-      for (final bind in deferredLongBinds) {
-        _writeBindValue(buffer, bind);
+    }
+  }
+
+  /// Writes one [ttcMsgTypeRowData] message carrying [rowBinds] — the bind
+  /// values for a single execute iteration.
+  ///
+  /// SQL (non-PL/SQL) statements must write values whose declared size
+  /// exceeds the 32767-byte string bind limit AFTER all other binds —
+  /// Oracle's long-data ordering, mirrored from node-oracledb
+  /// writeBindParamsRow (`foundLong`). PL/SQL never reaches this path:
+  /// oversized PL/SQL strings are converted to temporary CLOBs before
+  /// encoding.
+  void _writeRowData(WriteBuffer buffer, List<BindVariable> rowBinds) {
+    buffer.writeUint8(ttcMsgTypeRowData);
+    final deferredLongBinds = <BindVariable>[];
+    for (final bind in rowBinds) {
+      // JSON is excluded from the deferral despite its 32 MB metadata
+      // maxSize: node-oracledb classifies long binds by the variable's own
+      // (small) maxSize, so JSON values stay in bind order on the wire.
+      if (!isPlSql &&
+          _wireTypeFor(bind) != oraTypeJson &&
+          _maxSizeFor(bind) > ttcMaxVarcharBindBytes) {
+        deferredLongBinds.add(bind);
+        continue;
       }
+      _writeBindValue(buffer, bind);
+    }
+    for (final bind in deferredLongBinds) {
+      _writeBindValue(buffer, bind);
     }
   }
 

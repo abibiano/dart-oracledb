@@ -523,4 +523,54 @@ void main() {
       expect(isQuerySql(sql), isTrue);
     });
   });
+
+  group('hasReturningIntoClause', () {
+    test('detects INSERT ... RETURNING ... INTO', () {
+      expect(
+        hasReturningIntoClause(
+          'INSERT INTO t (id) VALUES (:1) RETURNING id INTO :2',
+        ),
+        isTrue,
+      );
+    });
+
+    test('detects UPDATE ... RETURNING with a column list INTO binds', () {
+      expect(
+        hasReturningIntoClause(
+          'UPDATE t SET a = :1 WHERE id = :2 RETURNING a, b INTO :3, :4',
+        ),
+        isTrue,
+      );
+    });
+
+    test('is case-insensitive', () {
+      expect(
+        hasReturningIntoClause('delete from t where id=:1 returning id into :2'),
+        isTrue,
+      );
+    });
+
+    test('plain DML without a RETURNING clause is not flagged', () {
+      expect(hasReturningIntoClause('INSERT INTO t (id) VALUES (:1)'), isFalse);
+      expect(hasReturningIntoClause('UPDATE t SET a = :1 WHERE id = :2'),
+          isFalse);
+      // An INTO with no preceding RETURNING (e.g. PL/SQL SELECT INTO) must
+      // not match — the clause requires RETURNING first.
+      expect(hasReturningIntoClause('SELECT id INTO x FROM t'), isFalse);
+    });
+
+    test('RETURNING/INTO inside a string literal is ignored', () {
+      expect(
+        hasReturningIntoClause(
+          "INSERT INTO t (a) VALUES ('RETURNING x INTO y')",
+        ),
+        isFalse,
+      );
+    });
+
+    test('the leading INSERT INTO alone does not trip the clause', () {
+      // The INTO here precedes any RETURNING, so it must not match.
+      expect(hasReturningIntoClause('INSERT INTO t (a) VALUES (:1)'), isFalse);
+    });
+  });
 }

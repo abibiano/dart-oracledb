@@ -13,6 +13,7 @@ import 'protocol/bind_parser.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/data_types.dart' as dt;
 import 'protocol/messages/execute_message.dart';
+import 'protocol/oson.dart' show assertValidJsonBindValue;
 import 'protocol/result_set_cursor.dart';
 import 'result.dart';
 import 'result_set.dart';
@@ -991,6 +992,348 @@ class OracleConnection {
     }
   }
 
+  /// Executes one DML statement (INSERT, UPDATE, DELETE, or MERGE) once per
+  /// row of bind values in a **single wire round trip** — Oracle array DML.
+  ///
+  /// ```dart
+  /// final result = await connection.executeMany(
+  ///   'INSERT INTO emp (id, name) VALUES (:1, :2)',
+  ///   [
+  ///     [1, 'Alice'],
+  ///     [2, 'Bob'],
+  ///     [3, null], // NULL name
+  ///   ],
+  /// );
+  /// print('Inserted ${result.rowsAffected} rows'); // 3
+  /// ```
+  ///
+  /// [rows] must be non-empty and every element must match the SQL's bind
+  /// style:
+  /// - positional placeholders (`:1`, `:2`, ...) take `List<Object?>` rows.
+  ///   A row may be *shorter* than the placeholder count — missing trailing
+  ///   values bind SQL NULL; a longer row fails before any wire call.
+  /// - named placeholders (`:name`) take `Map<String, Object?>` rows. Omitted
+  ///   keys bind SQL NULL; keys with no matching placeholder fail before any
+  ///   wire call. A repeated `:name` placeholder reuses the same per-row
+  ///   value.
+  ///
+  /// Each slot's Oracle bind type is inferred from the first non-null value
+  /// and must stay consistent across all rows (`int` and `double` both bind
+  /// as NUMBER); string/RAW slots are sized to the largest value across all
+  /// rows. A slot whose values are all NULL binds as VARCHAR2 with size 1
+  /// (node-oracledb parity). All row-shape and type validation happens before
+  /// any wire round trip, and bind values are never included in error
+  /// messages or logs.
+  ///
+  /// Returns an [OracleResult] whose [OracleResult.rowsAffected] is the
+  /// **total** row count affected across all iterations. [OracleResult.rows],
+  /// [OracleResult.outBinds], and [OracleResult.implicitResults] are always
+  /// empty for array DML.
+  ///
+  /// ## Transaction behavior
+  ///
+  /// Iterations run inside the current transaction and are **not**
+  /// auto-committed — call `commit()` (or `rollback()`) exactly as after
+  /// [execute]. If an iteration fails, the error is thrown and the remaining
+  /// iterations are not applied; iterations that already executed remain
+  /// pending in the transaction (Oracle array-DML semantics without
+  /// `batchErrors`), so roll back if partial application is unacceptable.
+  ///
+  /// ## Scope
+  ///
+  /// This is array DML with IN binds only (node-oracledb `executeMany`
+  /// parity for the DML case). The following fail loudly:
+  /// - SELECT / `WITH ... SELECT` queries — use [execute], [executeStream],
+  ///   or [openResultSet] instead (queries have no array form).
+  /// - PL/SQL blocks and the bind-free `numIterations` form (planned:
+  ///   Epic 11 Story 11.2).
+  /// - [OracleBind] specs / OUT binds / DML RETURNING (planned: Epic 11
+  ///   Stories 11.2 and 11.4). Per-row `batchErrors` / `dmlRowCounts`
+  ///   result shapes are Story 11.3 scope and not implemented.
+  ///
+  /// The concurrency contract, statement caching, and connection lifecycle
+  /// behavior are identical to [execute].
+  Future<OracleResult> executeMany(String sql, List<Object> rows) async {
+    _ensureOpen();
+    _rejectConcurrentOperation();
+
+    // All validation and row normalization happens here, before any wire
+    // round trip: no cursor is opened or cached for a rejected call.
+    final bulk = _prepareExecuteMany(sql, rows);
+
+    _executeInProgress = true;
+    try {
+      return await _executeGuarded(sql, null, bulk: bulk);
+    } finally {
+      _executeInProgress = false;
+    }
+  }
+
+  /// Validates and normalizes an [executeMany] call — statement
+  /// classification, row shapes, per-slot type inference, and string/RAW
+  /// sizing — into a [_BulkDml] ready for the wire. Throws before any wire
+  /// round trip on any unsupported shape; never includes bind values in
+  /// error messages.
+  _BulkDml _prepareExecuteMany(String sql, List<Object> rows) {
+    if (rows.isEmpty) {
+      throw ArgumentError.value(
+        rows,
+        'rows',
+        'must not be empty: executeMany() needs at least one row of bind '
+            'values',
+      );
+    }
+    if (isQuerySql(sql)) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'executeMany() cannot be used with queries (SELECT / '
+            'WITH ... SELECT); use execute(), executeStream(), or '
+            'openResultSet() instead. [SQL: ${_truncateSql(sql)}]',
+        sql: sql,
+      );
+    }
+    if (isPlSqlSql(sql)) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'executeMany() for PL/SQL blocks (bulk PL/SQL array binds) is '
+            'not supported yet — planned for Epic 11 Story 11.2. Use '
+            'execute() per call for now. [SQL: ${_truncateSql(sql)}]',
+        sql: sql,
+      );
+    }
+    if (hasReturningIntoClause(sql)) {
+      // A RETURNING ... INTO placeholder is an OUT bind. Without this guard it
+      // would slip past the OracleBind check below (a plain caller value in
+      // that slot looks like an ordinary IN bind) and be sent as array-DML IN
+      // data, producing an obscure server error instead of a clean rejection.
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'executeMany() does not support DML RETURNING ... INTO yet '
+            '(array OUT binds) — planned for Epic 11 Story 11.4. Use '
+            'execute() for RETURNING statements. [SQL: ${_truncateSql(sql)}]',
+        sql: sql,
+      );
+    }
+
+    // Bind style comes from the SQL text (isNamedBinds throws on a mix of
+    // :name and :1 placeholders); every row must then match it.
+    final named = BindParser.isNamedBinds(sql);
+    final List<String> bindNames;
+    final int slotCount;
+    if (named) {
+      bindNames = BindParser.parseNamedBinds(sql);
+      slotCount = bindNames.length;
+    } else {
+      bindNames = const [];
+      // Validates positional placeholders are sequential from :1.
+      slotCount = BindParser.parsePositionalBinds(sql);
+    }
+    if (slotCount == 0) {
+      throw const OracleException(
+        errorCode: oraBindMismatch,
+        message:
+            'executeMany() requires at least one bind placeholder in the '
+            'SQL; iterating a bind-free statement (the numIterations form) '
+            'is not supported yet — planned for Epic 11 Story 11.2.',
+      );
+    }
+    final distinctNames = named ? bindNames.toSet() : const <String>{};
+
+    // Normalize every row into a slot-ordered value list (one slot per SQL
+    // placeholder occurrence; repeated names reuse the row's value).
+    final normalized = <List<Object?>>[];
+    for (var r = 0; r < rows.length; r++) {
+      final row = rows[r];
+      if (named) {
+        if (row is! Map) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'executeMany() row $r is ${row.runtimeType}, but the SQL '
+                'uses named binds (:name) so every row must be a '
+                'Map<String, Object?>.',
+          );
+        }
+        final rowValues = <String, Object?>{};
+        for (final entry in row.entries) {
+          final key = entry.key;
+          if (key is! String) {
+            throw OracleException(
+              errorCode: oraBindTypeError,
+              message:
+                  'executeMany() row $r has a bind key of type '
+                  '${key.runtimeType}; named rows must be '
+                  'Map<String, Object?>.',
+            );
+          }
+          if (!distinctNames.contains(key)) {
+            throw OracleException(
+              errorCode: oraBindMismatch,
+              message:
+                  'executeMany() row $r contains bind key ":$key" with no '
+                  'matching placeholder in the SQL. Placeholders: '
+                  '${distinctNames.map((n) => ':$n').join(', ')}.',
+            );
+          }
+          rowValues[key] = entry.value;
+        }
+        // Omitted keys bind SQL NULL (rowValues[name] is null for them).
+        normalized.add([for (final name in bindNames) rowValues[name]]);
+      } else {
+        if (row is Map) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message:
+                'executeMany() row $r is a Map, but the SQL uses positional '
+                'binds (:1, :2, ...) so every row must be a List<Object?>. '
+                'Use :name placeholders for Map rows.',
+          );
+        }
+        if (row is! List || row is Uint8List) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'executeMany() row $r is ${row.runtimeType}; positional '
+                'rows must be List<Object?>.',
+          );
+        }
+        if (row.length > slotCount) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message:
+                'executeMany() row $r has ${row.length} values but the SQL '
+                'has only $slotCount positional placeholder'
+                '${slotCount == 1 ? '' : 's'}.',
+          );
+        }
+        // Rows shorter than the placeholder count bind SQL NULL for the
+        // missing trailing slots.
+        normalized.add([
+          for (var s = 0; s < slotCount; s++) s < row.length ? row[s] : null,
+        ]);
+      }
+    }
+
+    // Infer one uniform Oracle wire type per slot from the first non-null
+    // value across rows, enforce cross-row consistency, and track the
+    // largest string/RAW byte length so the single bind-metadata block can
+    // declare a size covering every iteration.
+    final slotTypes = List<int?>.filled(slotCount, null);
+    final slotMaxBytes = List<int>.filled(slotCount, 0);
+    for (var r = 0; r < normalized.length; r++) {
+      final row = normalized[r];
+      for (var s = 0; s < slotCount; s++) {
+        final value = row[s];
+        if (value == null) continue;
+        final slotLabel = named ? 'bind ":${bindNames[s]}"' : 'bind :${s + 1}';
+        if (value is OracleBind) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'executeMany() does not support OracleBind specs '
+                '(row $r, $slotLabel): OUT/IN OUT binds and DML RETURNING '
+                'are planned for Epic 11 Stories 11.2 and 11.4.',
+          );
+        }
+        final oraType = dt.inferOraTypeForValue(value);
+        if (oraType == null) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'Unsupported bind value type ${value.runtimeType} in '
+                'executeMany() row $r, $slotLabel. Supported types: String, '
+                'int, double, DateTime, OracleTimestampTz, Uint8List, Map, '
+                'List, null',
+          );
+        }
+        if (value is double && !value.isFinite) {
+          // NaN / ±Infinity infer as NUMBER but only fail deep inside
+          // encodeNumber (which interpolates the value). Reject here so the
+          // "validated before any wire round trip" contract holds and no bind
+          // value leaks into the message.
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'Non-finite NUMBER value (NaN or Infinity) in executeMany() '
+                'row $r, $slotLabel; Oracle NUMBER can only bind finite '
+                'values.',
+          );
+        }
+        final existing = slotTypes[s];
+        if (existing == null) {
+          slotTypes[s] = oraType;
+        } else if (existing != oraType) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'Inconsistent bind value types across executeMany() rows '
+                'for $slotLabel: row $r has ${value.runtimeType}, which '
+                'binds a different Oracle type than earlier rows. All '
+                'non-null values of one bind must share a type.',
+          );
+        }
+        if (oraType == oc.oraTypeJson) {
+          // Fail on invalid nested JSON members here — before any wire
+          // work — rather than mid-encode. Re-wrap the ArgumentError: its
+          // .toString() stringifies the offending bind value, and executeMany
+          // promises bind values never appear in error messages. The .message
+          // text already names the invalid member's path and runtimeType.
+          try {
+            assertValidJsonBindValue(value, 'rows[$r]');
+          } on ArgumentError catch (e) {
+            throw OracleException(
+              errorCode: oraBindTypeError,
+              message:
+                  'Invalid JSON bind value in executeMany() row $r, '
+                  '$slotLabel: ${e.message}',
+            );
+          }
+        } else if (value is String) {
+          final len = utf8.encode(value).length;
+          if (len > slotMaxBytes[s]) slotMaxBytes[s] = len;
+        } else if (value is Uint8List) {
+          if (value.length > slotMaxBytes[s]) slotMaxBytes[s] = value.length;
+        }
+      }
+    }
+
+    // Build the per-slot metadata templates. A slot whose values are all
+    // NULL binds as VARCHAR2 with max size 1 (node-oracledb documented
+    // behavior); string/RAW slots declare the largest value's byte length.
+    final slots = <BindVariable>[];
+    final bindMetadata = <BindMetadata>[];
+    for (var s = 0; s < slotCount; s++) {
+      final oraType = slotTypes[s] ?? oc.oraTypeVarchar;
+      int? maxSize;
+      if (oraType == oc.oraTypeVarchar || oraType == oc.oraTypeRaw) {
+        maxSize = slotMaxBytes[s] > 0 ? slotMaxBytes[s] : 1;
+      }
+      slots.add(BindVariable(value: null, oraType: oraType, maxSize: maxSize));
+      // Metadata maxSize stays null (like scalar inferred IN binds) so the
+      // statement-cache key is stable across batches whose value lengths
+      // differ: the fresh max size travels in every execute's bind-metadata
+      // block, so cursor reuse never depends on it.
+      bindMetadata.add(BindMetadata(oraType: oraType, dir: BindDir.input));
+    }
+
+    return _BulkDml(
+      stmt: _PreparedStatement(
+        bindList: slots,
+        bindNames: named ? bindNames : null,
+        outBindNameIndex: null,
+        bindMetadata: bindMetadata,
+        isQuery: false,
+        isPlSql: false,
+        eligible: isCacheEligibleSql(sql),
+        cacheKey: StatementCacheKey(sql, _bindSignature(bindMetadata)),
+      ),
+      rows: normalized,
+    );
+  }
+
   /// Throws the concurrent-operation [OracleException] when this connection is
   /// already running a wire round trip or holding an [OracleResultSet] open.
   ///
@@ -1159,21 +1502,23 @@ class OracleConnection {
     int implicitPrefetchRows = _defaultPrefetchRows,
     int maxRows = 0,
     bool forceUncacheable = false,
+    _BulkDml? bulk,
   }) async {
     _log.fine(
       'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
     );
 
-    final stmt = _prepareStatement(
-      sql,
-      bindValues,
-      forceUncacheable: forceUncacheable,
-    );
+    // Bulk DML (executeMany) arrives pre-validated and pre-normalized with
+    // its own prepared statement; everything downstream — cursor open, cache
+    // disposition, piggybacks, error handling — is the shared path.
+    final stmt =
+        bulk?.stmt ??
+        _prepareStatement(sql, bindValues, forceUncacheable: forceUncacheable);
 
     // Open the cursor: full parse / cached-cursor reuse, describe-mismatch
     // retry, and close-cursor piggyback flushing all happen here and yield the
     // FIRST batch. The cache entry (if any) is still held (inUse) on return.
-    final open = await _openCursor(sql, stmt);
+    final open = await _openCursor(sql, stmt, bulkRows: bulk?.rows);
     StatementCacheEntry? cacheEntry = open.cacheEntry;
     var unhandledCursorId = open.response.cursorId;
 
@@ -1410,7 +1755,11 @@ class OracleConnection {
   /// response; an unrecoverable server error throws [OracleException]. The
   /// caller owns the returned cache entry and must release/store it (eager) or
   /// hold it for the result set's lifetime (lazy).
-  Future<_CursorOpen> _openCursor(String sql, _PreparedStatement stmt) async {
+  Future<_CursorOpen> _openCursor(
+    String sql,
+    _PreparedStatement stmt, {
+    List<List<Object?>>? bulkRows,
+  }) async {
     // Try to acquire a cached cursor.
     StatementCacheEntry? cacheEntry;
     int cursorId = 0;
@@ -1467,6 +1816,7 @@ class OracleConnection {
           expectedColumns: expectedColumns,
           cursorsToClose: cursorsToClose,
           preserveTimestampTimeZone: _preserveTimestampTimeZone,
+          bulkRows: bulkRows,
         );
 
         if (!response.isSuccess) {
@@ -2566,4 +2916,15 @@ class _CursorOpen {
 
   final ExecuteResponse response;
   final StatementCacheEntry? cacheEntry;
+}
+
+/// A validated, normalized `executeMany()` call: the prepared statement
+/// (per-slot bind templates, decoder metadata, cache key) plus the
+/// slot-ordered row values — one inner list per execute iteration. Built by
+/// [OracleConnection._prepareExecuteMany] entirely before any wire round trip.
+class _BulkDml {
+  _BulkDml({required this.stmt, required this.rows});
+
+  final _PreparedStatement stmt;
+  final List<List<Object?>> rows;
 }
