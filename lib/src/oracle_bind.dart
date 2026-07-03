@@ -362,35 +362,159 @@ class OracleBind {
   final BindDir direction;
 
   /// The Oracle wire-protocol type indicator for [type].
-  int get oracleTypeCode {
-    switch (type) {
-      case OracleDbType.number:
-        return oc.oraTypeNumber;
-      case OracleDbType.varchar:
-        return oc.oraTypeVarchar;
-      case OracleDbType.nVarchar:
-        // NVARCHAR2 / NCHAR share the VARCHAR wire type; the national charset
-        // form (csfrm == NChar) distinguishes them on the wire.
-        return oc.oraTypeVarchar;
-      case OracleDbType.date:
-        return oc.oraTypeDate;
-      case OracleDbType.timestamp:
-        return oc.oraTypeTimestamp;
-      case OracleDbType.timestampTz:
-        return oc.oraTypeTimestampTz;
-      case OracleDbType.raw:
-        return oc.oraTypeRaw;
-      case OracleDbType.clob:
-        return oc.oraTypeClob;
-      case OracleDbType.nClob:
-        // NCLOB shares the CLOB wire type; csfrm == NChar marks it national.
-        return oc.oraTypeClob;
-      case OracleDbType.blob:
-        return oc.oraTypeBlob;
-      case OracleDbType.json:
-        return oc.oraTypeJson;
-      case OracleDbType.cursor:
-        return oc.oraTypeCursor;
+  int get oracleTypeCode => oracleTypeCodeFor(type);
+}
+
+/// Maps a public [OracleDbType] to its Oracle wire-protocol type indicator.
+///
+/// Shared by [OracleBind.oracleTypeCode] and [OracleBindDef.oracleTypeCode]
+/// so the two public bind spec types cannot drift. National types
+/// (NVARCHAR2/NCHAR, NCLOB) share the VARCHAR/CLOB wire type; the NCHAR
+/// charset form (`csfrm == ttcCsfrmNChar`) is what marks them national on the
+/// wire. Package-internal: not exported from `lib/oracledb.dart`.
+int oracleTypeCodeFor(OracleDbType type) {
+  switch (type) {
+    case OracleDbType.number:
+      return oc.oraTypeNumber;
+    case OracleDbType.varchar:
+      return oc.oraTypeVarchar;
+    case OracleDbType.nVarchar:
+      // NVARCHAR2 / NCHAR share the VARCHAR wire type; the national charset
+      // form (csfrm == NChar) distinguishes them on the wire.
+      return oc.oraTypeVarchar;
+    case OracleDbType.date:
+      return oc.oraTypeDate;
+    case OracleDbType.timestamp:
+      return oc.oraTypeTimestamp;
+    case OracleDbType.timestampTz:
+      return oc.oraTypeTimestampTz;
+    case OracleDbType.raw:
+      return oc.oraTypeRaw;
+    case OracleDbType.clob:
+      return oc.oraTypeClob;
+    case OracleDbType.nClob:
+      // NCLOB shares the CLOB wire type; csfrm == NChar marks it national.
+      return oc.oraTypeClob;
+    case OracleDbType.blob:
+      return oc.oraTypeBlob;
+    case OracleDbType.json:
+      return oc.oraTypeJson;
+    case OracleDbType.cursor:
+      return oc.oraTypeCursor;
+  }
+}
+
+/// Metadata-only bind definition for `OracleConnection.executeMany()`.
+///
+/// Unlike [OracleBind] — which carries a per-call input *value* for a single
+/// `execute()` — an [OracleBindDef] declares only the Oracle type, direction,
+/// and buffer sizing of one bind placeholder, shared by **every** iteration
+/// of an `executeMany()` call. Input values still travel inside the rows
+/// list; OUT-only binds need no per-row entries at all:
+///
+/// ```dart
+/// final result = await connection.executeMany(
+///   'BEGIN story_double(:1, :2); END;',
+///   [
+///     [10], // one entry per IN / IN OUT bind; trailing OUT slots omitted
+///     [20],
+///   ],
+///   OracleExecuteManyOptions(bindDefs: [
+///     OracleBindDef.input(type: OracleDbType.number),
+///     OracleBindDef.output(type: OracleDbType.number),
+///   ]),
+/// );
+/// // result.outBinds.toList() => [[20], [40]]  (row-major, one per iteration)
+/// ```
+///
+/// [maxSize] follows the same unit conventions as [OracleBind.maxSize]:
+/// **bytes** for [OracleDbType.varchar], [OracleDbType.raw], and
+/// [OracleDbType.blob]; **characters** (UTF-16 code units) for
+/// [OracleDbType.nVarchar], [OracleDbType.clob], and [OracleDbType.nClob];
+/// **OSON bytes** for [OracleDbType.json]. It is required for those sized
+/// types whenever the direction returns a value ([OracleBindDef.output] /
+/// [OracleBindDef.inputOutput]); for [OracleBindDef.input] it is optional —
+/// the driver sizes input slots from the largest value across the rows.
+///
+/// [OracleDbType.cursor] is rejected: SYS_REFCURSOR binds are not supported
+/// under `executeMany()` (a connection owns a single lazy cursor handle);
+/// use `execute()` with `OracleBind.out(type: OracleDbType.cursor)` instead.
+class OracleBindDef {
+  /// Declares an IN-only bind: each row supplies one input value for it.
+  OracleBindDef.input({required this.type, this.maxSize})
+    : direction = BindDir.input {
+    _validate();
+  }
+
+  /// Declares an OUT-only bind: rows carry no value for it and each
+  /// iteration returns one output value.
+  OracleBindDef.output({required this.type, this.maxSize})
+    : direction = BindDir.output {
+    _validate();
+  }
+
+  /// Declares an IN OUT bind: each row supplies one input value and each
+  /// iteration returns one (possibly modified) output value.
+  OracleBindDef.inputOutput({required this.type, this.maxSize})
+    : direction = BindDir.inputOutput {
+    _validate();
+  }
+
+  /// The Oracle type expected on the wire.
+  final OracleDbType type;
+
+  /// Maximum returned-value bound. See the class docs for units and when it
+  /// is required.
+  final int? maxSize;
+
+  /// Direction on the wire, set by the named constructor used.
+  final BindDir direction;
+
+  /// Whether the server returns a value for this bind (OUT or IN OUT).
+  bool get hasOutput => direction != BindDir.input;
+
+  /// Whether this definition targets a national character set type
+  /// (NVARCHAR2/NCHAR or NCLOB).
+  bool get isNChar =>
+      type == OracleDbType.nVarchar || type == OracleDbType.nClob;
+
+  /// The Oracle wire-protocol type indicator for [type].
+  int get oracleTypeCode => oracleTypeCodeFor(type);
+
+  void _validate() {
+    if (type == OracleDbType.cursor) {
+      throw const OracleException(
+        errorCode: oraBindTypeError,
+        message:
+            'SYS_REFCURSOR binds are not supported with executeMany(); use '
+            'execute() with OracleBind.out(type: OracleDbType.cursor) for a '
+            'single call instead.',
+      );
+    }
+    if (maxSize != null && maxSize! <= 0) {
+      throw OracleException(
+        errorCode: oraBindTypeError,
+        message: 'OracleBindDef maxSize must be > 0 (got $maxSize)',
+      );
+    }
+    // Returned values need a declared buffer / materialization bound before
+    // any wire round trip (same required-maxSize type set as OracleBind).
+    if (hasOutput &&
+        maxSize == null &&
+        (type == OracleDbType.varchar ||
+            type == OracleDbType.nVarchar ||
+            type == OracleDbType.raw ||
+            type == OracleDbType.clob ||
+            type == OracleDbType.nClob ||
+            type == OracleDbType.blob ||
+            type == OracleDbType.json)) {
+      throw OracleException(
+        errorCode: oraBindTypeError,
+        message:
+            'OracleBindDef(type: $type) with direction '
+            '${direction == BindDir.output ? 'output' : 'inputOutput'} '
+            'requires maxSize',
+      );
     }
   }
 }
@@ -418,6 +542,17 @@ class OracleBind {
 /// an `IN OUT` declaration on `:v` round-trips through the first
 /// placeholder; `outBinds['v']` returns the value bound to that
 /// occurrence.
+///
+/// ## `executeMany()` results are row-major
+///
+/// After a PL/SQL `OracleConnection.executeMany()` call, this container
+/// holds **one entry per iteration** (node-oracledb parity), not one entry
+/// per bind. [toList] returns the per-iteration entries in execution order:
+/// for positional SQL each entry is a `List<Object?>` of that iteration's
+/// OUT / IN OUT values in bind order; for named SQL each entry is a
+/// `Map<String, Object?>` keyed by bind name. Indexed access (`outBinds[i]`)
+/// returns iteration `i`'s entry; named lookup at the top level is not used
+/// in this shape — look names up inside each iteration's map instead.
 class OracleOutBinds {
   /// Creates an empty container (no OUT binds).
   const OracleOutBinds.empty() : _values = const [], _nameToIndex = const {};

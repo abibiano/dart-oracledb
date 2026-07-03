@@ -70,13 +70,19 @@ void main() {
       );
     });
 
-    test('rejects PL/SQL blocks pointing at Story 11.2 scope', () async {
-      await expectRejectedBeforeWire(
-        () => conn.executeMany('BEGIN p(:1); END;', [
-          [1],
-        ]),
-        ['PL/SQL', '11.2'],
-      );
+    test('accepts a PL/SQL block and routes it as executeMany', () async {
+      final result = await conn.executeMany('BEGIN p(:1); END;', [
+        [1],
+        [2],
+      ]);
+      expect(transport.executeCalls, equals(1));
+      expect(transport.lastIsPlSql, isTrue);
+      expect(transport.lastBulkRows, [
+        [1],
+        [2],
+      ]);
+      expect(transport.lastExecuteManyIters, equals(2));
+      expect(result.rowsAffected, isNull, reason: 'PL/SQL has no row count');
     });
 
     test('rejects DML RETURNING ... INTO pointing at Story 11.4 scope',
@@ -104,12 +110,19 @@ void main() {
       expect(transport.executeCalls, equals(1));
     });
 
-    test('rejects bind-free SQL (the numIterations form)', () async {
+    test('rejects a rows-list call against bind-free SQL', () async {
       await expectRejectedBeforeWire(
         () => conn.executeMany('DELETE FROM t', [
           <Object?>[],
         ]),
-        ['numIterations', '11.2'],
+        ['at least one bind placeholder', 'numIterations'],
+      );
+    });
+
+    test('rejects the numIterations form for non-PL/SQL statements', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany('DELETE FROM t', 3),
+        ['numIterations form', 'PL/SQL'],
       );
     });
 
@@ -343,12 +356,12 @@ void main() {
       );
     });
 
-    test('OracleBind specs fail before wire pointing at later stories', () async {
+    test('OracleBind specs fail before wire pointing at Story 11.4', () async {
       await expectRejectedBeforeWire(
         () => conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
           [OracleBind.out(type: OracleDbType.number)],
         ]),
-        ['OracleBind', '11.2', '11.4'],
+        ['OracleBind', '11.4'],
       );
     });
 
@@ -467,6 +480,527 @@ void main() {
       );
     });
   });
+
+  group('executeMany() PL/SQL routing and bind definitions', () {
+    const sql = 'BEGIN story_double(:1, :2); END;';
+    OracleExecuteManyOptions defs() => OracleExecuteManyOptions(
+      bindDefs: [
+        OracleBindDef.input(type: OracleDbType.number),
+        OracleBindDef.output(type: OracleDbType.number),
+      ],
+    );
+
+    test('positional rows omit trailing OUT-only slots', () async {
+      await conn.executeMany(
+        sql,
+        [
+          [10],
+          [20],
+        ],
+        defs(),
+      );
+      expect(transport.lastIsPlSql, isTrue);
+      expect(transport.lastExecuteManyIters, equals(2));
+      expect(transport.lastBulkRows, [
+        [10, null],
+        [20, null],
+      ]);
+      final slots = transport.lastBindValues!.cast<BindVariable>();
+      expect(slots[0].dir, equals(BindDir.input));
+      expect(slots[1].dir, equals(BindDir.output));
+      final meta = transport.lastBindMetadata!;
+      expect(meta[0].dir, equals(BindDir.input));
+      expect(meta[1].dir, equals(BindDir.output));
+      expect(meta[1].maxSize, isNull, reason: 'number OUT needs no maxSize');
+    });
+
+    test('named rows omit OUT-only names and follow SQL order', () async {
+      await conn.executeMany(
+        'BEGIN story_double(:src, :dst); END;',
+        [
+          {'src': 1},
+          {'src': 2},
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: {
+            'src': OracleBindDef.input(type: OracleDbType.number),
+            'dst': OracleBindDef.output(type: OracleDbType.number),
+          },
+        ),
+      );
+      expect(transport.lastBindNames, ['src', 'dst']);
+      expect(transport.lastBulkRows, [
+        [1, null],
+        [2, null],
+      ]);
+    });
+
+    test('IN OUT slots take one input value per iteration', () async {
+      await conn.executeMany(
+        'BEGIN story_incr(:1); END;',
+        [
+          [5],
+          [null], // SQL NULL input is a legitimate per-iteration value
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [OracleBindDef.inputOutput(type: OracleDbType.number)],
+        ),
+      );
+      expect(transport.lastBulkRows, [
+        [5],
+        [null],
+      ]);
+      final slots = transport.lastBindValues!.cast<BindVariable>();
+      expect(slots[0].dir, equals(BindDir.inputOutput));
+    });
+
+    test('a non-null value in an OUT-only slot fails before wire', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          sql,
+          [
+            [10, 99],
+          ],
+          defs(),
+        ),
+        ['row 0 supplies a value for OUT-only bind :2'],
+      );
+    });
+
+    test('a non-null value under an OUT-only name fails before wire',
+        () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'BEGIN story_double(:src, :dst); END;',
+          [
+            {'src': 1, 'dst': 99},
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: {
+              'src': OracleBindDef.input(type: OracleDbType.number),
+              'dst': OracleBindDef.output(type: OracleDbType.number),
+            },
+          ),
+        ),
+        ['row 0 supplies a value for OUT-only bind ":dst"'],
+      );
+    });
+
+    test('bindDefs count mismatch fails before wire (positional)', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          sql,
+          [
+            [10],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [OracleBindDef.input(type: OracleDbType.number)],
+          ),
+        ),
+        ['bindDefs has 1 definition', '2 positional placeholders'],
+      );
+    });
+
+    test('bindDefs missing a named placeholder fails before wire', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'BEGIN story_double(:src, :dst); END;',
+          [
+            {'src': 1},
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: {
+              'src': OracleBindDef.input(type: OracleDbType.number),
+            },
+          ),
+        ),
+        ['missing a definition for ":dst"'],
+      );
+    });
+
+    test('bindDefs with an unknown name fails before wire', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'BEGIN story_incr(:v); END;',
+          [
+            {'v': 1},
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: {
+              'v': OracleBindDef.inputOutput(type: OracleDbType.number),
+              'typo': OracleBindDef.output(type: OracleDbType.number),
+            },
+          ),
+        ),
+        ['bindDefs contains ":typo"'],
+      );
+    });
+
+    test('bindDefs shape must match the SQL bind style', () async {
+      // Map defs against positional SQL.
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          sql,
+          [
+            [1],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: {
+              'a': OracleBindDef.input(type: OracleDbType.number),
+            },
+          ),
+        ),
+        ['must be a List<OracleBindDef> for positional-bind SQL'],
+      );
+      // List defs against named SQL.
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'BEGIN story_incr(:v); END;',
+          [
+            {'v': 1},
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [OracleBindDef.input(type: OracleDbType.number)],
+          ),
+        ),
+        ['must be a Map<String, OracleBindDef> for named-bind SQL'],
+      );
+    });
+
+    test('a value mismatching its declared def type fails before wire '
+        'without leaking the value', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          sql,
+          [
+            ['not-a-number-9876'],
+          ],
+          defs(),
+        ),
+        ['declared OracleDbType.number', 'String'],
+      );
+      // The offending value never appears in the message.
+      try {
+        await conn.executeMany(
+          sql,
+          [
+            ['not-a-number-9876'],
+          ],
+          defs(),
+        );
+        fail('expected OracleException');
+      } on OracleException catch (e) {
+        expect(e.message, isNot(contains('9876')));
+      }
+    });
+
+    test('non-finite doubles under a NUMBER def fail before wire', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          sql,
+          [
+            [double.nan],
+          ],
+          defs(),
+        ),
+        ['Non-finite'],
+      );
+    });
+
+    test('OracleBind values inside PL/SQL rows fail pointing at bindDefs',
+        () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany('BEGIN story_incr(:1); END;', [
+          [OracleBind.inOut(value: 1, type: OracleDbType.number)],
+        ]),
+        ['OracleBind', 'bindDefs', 'OracleBindDef'],
+      );
+    });
+
+    test('a >32767-byte string in an inferred PL/SQL slot fails with the '
+        'CLOB guidance', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany('BEGIN story_take(:1); END;', [
+          ['x' * 40000],
+        ]),
+        ['32767', 'OracleDbType.clob'],
+      );
+    });
+
+    test('bindDefs against a DML statement fail pointing at Story 11.4',
+        () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'INSERT INTO t (a) VALUES (:1)',
+          [
+            [1],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [OracleBindDef.input(type: OracleDbType.number)],
+          ),
+        ),
+        ['bindDefs', 'PL/SQL', '11.4'],
+      );
+    });
+
+    test('OracleBindDef construction rejects cursor and missing OUT maxSize',
+        () {
+      expect(
+        () => OracleBindDef.output(type: OracleDbType.cursor),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('SYS_REFCURSOR'),
+          ),
+        ),
+      );
+      for (final type in [
+        OracleDbType.varchar,
+        OracleDbType.nVarchar,
+        OracleDbType.raw,
+        OracleDbType.clob,
+        OracleDbType.nClob,
+        OracleDbType.blob,
+        OracleDbType.json,
+      ]) {
+        expect(
+          () => OracleBindDef.output(type: type),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              contains('requires maxSize'),
+            ),
+          ),
+          reason: 'OUT $type without maxSize must fail at construction',
+        );
+        expect(
+          () => OracleBindDef.inputOutput(type: type),
+          throwsA(isA<OracleException>()),
+        );
+        // Input direction does not require maxSize (sized from values).
+        expect(() => OracleBindDef.input(type: type), returnsNormally);
+      }
+    });
+
+    test('PL/SQL executeMany is not stored in the statement cache', () async {
+      await conn.executeMany(
+        sql,
+        [
+          [1],
+        ],
+        defs(),
+      );
+      expect(conn.debugCacheSize, equals(0));
+    });
+  });
+
+  group('executeMany() numIterations form', () {
+    test('bind-free PL/SQL sends the count with no rows', () async {
+      final result = await conn.executeMany('BEGIN story_bump; END;', 5);
+      expect(transport.executeCalls, equals(1));
+      expect(transport.lastIsPlSql, isTrue);
+      expect(transport.lastBulkRows, isNull);
+      expect(transport.lastBindValues, isNull);
+      expect(transport.lastExecuteManyIters, equals(5));
+      expect(result.rowsAffected, isNull);
+      expect(result.outBinds.isEmpty, isTrue);
+    });
+
+    test('all-OUT bind definitions send one null row per iteration',
+        () async {
+      await conn.executeMany(
+        'BEGIN :o := story_next; END;',
+        3,
+        OracleExecuteManyOptions(
+          bindDefs: {'o': OracleBindDef.output(type: OracleDbType.number)},
+        ),
+      );
+      expect(transport.lastExecuteManyIters, equals(3));
+      expect(transport.lastBulkRows, [
+        [null],
+        [null],
+        [null],
+      ]);
+    });
+
+    test('zero and negative iteration counts fail before wire', () async {
+      for (final bad in [0, -1]) {
+        await expectLater(
+          () => conn.executeMany('BEGIN story_bump; END;', bad),
+          throwsA(isA<ArgumentError>()),
+        );
+      }
+      expect(transport.executeCalls, equals(0));
+    });
+
+    test('a non-integer, non-List argument fails before wire', () async {
+      await expectLater(
+        () => conn.executeMany('BEGIN story_bump; END;', 2.5),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(transport.executeCalls, equals(0));
+    });
+
+    test('numIterations with input or IN OUT definitions fails before wire',
+        () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'BEGIN story_incr(:v); END;',
+          4,
+          OracleExecuteManyOptions(
+            bindDefs: {
+              'v': OracleBindDef.inputOutput(type: OracleDbType.number),
+            },
+          ),
+        ),
+        ['numIterations form supports bind-free or all-OUT'],
+      );
+    });
+
+    test('numIterations with placeholders but no definitions fails before '
+        'wire', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany('BEGIN story_incr(:v); END;', 4),
+        ['no bind definitions'],
+      );
+    });
+  });
+
+  group('executeMany() PL/SQL row-major OUT results', () {
+    test('positional OUT values expose one ordered list per iteration',
+        () async {
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindIndices: const [1],
+          outBindRows: const [
+            [20],
+            [40],
+          ],
+        ),
+      );
+      final result = await conn.executeMany(
+        'BEGIN story_double(:1, :2); END;',
+        [
+          [10],
+          [20],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.number),
+            OracleBindDef.output(type: OracleDbType.number),
+          ],
+        ),
+      );
+      expect(result.rowsAffected, isNull);
+      expect(result.outBinds.length, equals(2));
+      expect(result.outBinds.toList(), [
+        [20],
+        [40],
+      ]);
+      expect(result.outBinds[0], equals([20]));
+      expect(result.outBinds[1], equals([40]));
+    });
+
+    test('named OUT values expose one name-keyed map per iteration',
+        () async {
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindIndices: const [1, 2],
+          outBindRows: const [
+            [2, 'two'],
+            [4, 'four'],
+          ],
+        ),
+      );
+      final result = await conn.executeMany(
+        'BEGIN story_multi(:src, :dbl, :label); END;',
+        [
+          {'src': 1},
+          {'src': 2},
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: {
+            'src': OracleBindDef.input(type: OracleDbType.number),
+            'dbl': OracleBindDef.output(type: OracleDbType.number),
+            'label': OracleBindDef.output(
+              type: OracleDbType.varchar,
+              maxSize: 20,
+            ),
+          },
+        ),
+      );
+      expect(result.outBinds.toList(), [
+        {'dbl': 2, 'label': 'two'},
+        {'dbl': 4, 'label': 'four'},
+      ]);
+    });
+
+    test('single-execute out-bind lookup contract is unchanged', () async {
+      // Regression: execute() with an OUT bind keeps the flat named lookup.
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindIndices: const [0],
+          outBindValues: const [42],
+        ),
+      );
+      final result = await conn.execute('BEGIN :ret := story_next; END;', {
+        'ret': OracleBind.out(type: OracleDbType.number),
+      });
+      expect(result.outBinds['ret'], equals(42));
+      expect(result.outBinds[0], equals(42));
+    });
+  });
+
+  group('executeMany() PL/SQL cursor lifecycle', () {
+    test('an N>1 PL/SQL executeMany queues its kept-alive cursor for close',
+        () async {
+      // For iterations > 1 the first EXECUTE sets NO_IMPL_REL so the server
+      // keeps the parsed cursor alive for the follow-up REEXECUTE. PL/SQL is
+      // never cache-eligible, so that cursor must be handed to the close-cursor
+      // piggyback on the next round trip — otherwise it leaks server-side and a
+      // pooled / long-lived connection eventually hits ORA-01000.
+      transport.nextResponses.add(
+        ExecuteResponse(isSuccess: true, cursorId: 4242),
+      );
+      await conn.executeMany('BEGIN p(:1); END;', [
+        [1],
+        [2],
+      ]);
+      // The next operation must carry the kept-alive cursor id.
+      transport.nextResponses.add(
+        ExecuteResponse(isSuccess: true, rowsAffected: 1),
+      );
+      await conn.executeMany('INSERT INTO t (id) VALUES (:1)', [
+        [9],
+      ]);
+      expect(transport.lastCursorsToClose, contains(4242));
+    });
+
+    test('an N==1 PL/SQL executeMany does not queue a cursor for close',
+        () async {
+      // A single iteration sends no NO_IMPL_REL (the server releases the cursor
+      // implicitly, exactly like single-execute PL/SQL), so closing it would
+      // target an already-released cursor. Nothing must be queued.
+      transport.nextResponses.add(
+        ExecuteResponse(isSuccess: true, cursorId: 4243),
+      );
+      await conn.executeMany('BEGIN p(:1); END;', [
+        [1],
+      ]);
+      transport.nextResponses.add(
+        ExecuteResponse(isSuccess: true, rowsAffected: 1),
+      );
+      await conn.executeMany('INSERT INTO t (id) VALUES (:1)', [
+        [9],
+      ]);
+      expect(transport.lastCursorsToClose, isEmpty);
+    });
+  });
 }
 
 /// Minimal in-process [Transport] stand-in recording the bulk-DML arguments
@@ -481,9 +1015,13 @@ class _BulkFakeTransport extends Transport {
 
   int executeCalls = 0;
   int lastCursorId = -1;
+  bool lastIsPlSql = false;
   List<Object?>? lastBindValues;
   List<String>? lastBindNames;
+  List<BindMetadata>? lastBindMetadata;
   List<List<Object?>>? lastBulkRows;
+  int? lastExecuteManyIters;
+  List<int> lastCursorsToClose = const <int>[];
 
   void releaseGate() {
     _heldGate?.complete();
@@ -514,12 +1052,17 @@ class _BulkFakeTransport extends Transport {
     List<int> cursorsToClose = const <int>[],
     bool preserveTimestampTimeZone = false,
     List<List<Object?>>? bulkRows,
+    int? executeManyIters,
   }) async {
     executeCalls++;
     lastCursorId = cursorId;
+    lastIsPlSql = isPlSql;
     lastBindValues = bindValues;
     lastBindNames = bindNames;
+    lastBindMetadata = bindMetadata;
     lastBulkRows = bulkRows;
+    lastExecuteManyIters = executeManyIters;
+    lastCursorsToClose = cursorsToClose;
     final gate = executeGate;
     if (gate != null) {
       executeGate = null; // only the first call parks

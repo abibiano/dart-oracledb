@@ -192,6 +192,7 @@ class _CharsetFakeTransport extends Transport {
     List<int> cursorsToClose = const <int>[],
     bool preserveTimestampTimeZone = false,
     List<List<Object?>>? bulkRows,
+    int? executeManyIters,
   }) async {
     executeCalls++;
     return _response;

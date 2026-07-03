@@ -553,12 +553,20 @@ class Transport {
     List<int> cursorsToClose = const [],
     bool preserveTimestampTimeZone = false,
     List<List<Object?>>? bulkRows,
+    int? executeManyIters,
   }) async {
     _log.fine(
       'Sending execute request (isQuery=$isQuery, isPlSql=$isPlSql, '
       'cursorId=$cursorId'
-      '${bulkRows != null ? ', bulkRows=${bulkRows.length}' : ''})...',
+      '${bulkRows != null ? ', bulkRows=${bulkRows.length}' : ''}'
+      '${executeManyIters != null ? ', executeManyIters=$executeManyIters' : ''}'
+      ')...',
     );
+
+    // PL/SQL executeMany responses ship one OUT-bind ROW_DATA per iteration;
+    // both the completion probe and the real decode pass must know to consume
+    // every one of them (single-execute PL/SQL stops after the first).
+    final plSqlExecuteMany = isPlSql && executeManyIters != null;
 
     // Record whether this execute reuses a cached server cursor (parse bit
     // cleared) or performs a full parse. The cursorId sent on the wire is the
@@ -582,6 +590,7 @@ class Transport {
     // temporary-LOB locators, created here via LOB operations on this same
     // connection before the execute.
     final List<Object?>? effectiveBinds;
+    List<List<Object?>>? effectiveBulkRows = bulkRows;
     if (bindValues == null) {
       effectiveBinds = null;
     } else {
@@ -591,18 +600,36 @@ class Transport {
           isPlSql: isPlSql,
           timeout: timeout,
         );
+        // executeMany rows carry the per-iteration values; CLOB/BLOB-typed
+        // slots need each row's String / Uint8List converted to a
+        // temporary-LOB locator, exactly like the scalar bind path above.
+        effectiveBulkRows = await _prepareBulkRowLobs(
+          bindValues,
+          bulkRows,
+          timeout,
+        );
       } catch (_) {
         // Bind preparation failed after we drained the previous call's
         // temp-LOB free list (above). Without this restore, those server-side
         // temp LOBs would be orphaned: this execute never sends its
         // free-temp piggyback, and the next one drains an empty list. Put the
-        // drained locators back so the next execute frees them.
+        // drained locators back so the next execute frees them. (Temp LOBs
+        // already created by THIS call queued themselves in the create
+        // helpers' finally blocks, so they ride the same restored list.)
         _tempLobsToClose.insertAll(0, lobsToFree);
         _tempLobsTotalSize += lobsToFreeSize;
         rethrow;
       }
     }
 
+    // PL/SQL executeMany runs as TWO RPCs, mirroring node-oracledb thin
+    // (connection.js _execute): a full EXECUTE with numExecs = 1 — one
+    // iteration only, letting the server determine the block's actual bind
+    // directions — followed by a REEXECUTE (function 4) that runs the
+    // remaining iterations against the now-open cursor (see
+    // _reExecutePlSqlBatch). Sending numExecs = N with OUT binds on the first
+    // parse draws ORA-03106 (live-verified against 23ai). Array DML keeps its
+    // single-RPC shape.
     final request = ExecuteRequest(
       sql: sql,
       bindValues: effectiveBinds,
@@ -613,7 +640,12 @@ class Transport {
       ttcFieldVersion: _ttcFieldVersion,
       sequence: nextSequence(),
       cursorId: cursorId,
-      bulkRows: bulkRows,
+      bulkRows: plSqlExecuteMany && effectiveBulkRows != null
+          ? [effectiveBulkRows[0]]
+          : effectiveBulkRows,
+      executeManyIters: plSqlExecuteMany ? 1 : executeManyIters,
+      // Keep the cursor alive for the follow-up REEXECUTE iterations.
+      noImplicitRelease: plSqlExecuteMany && executeManyIters > 1,
     );
 
     // Prepend piggybacks: close-cursor (LRU evictions) and free-temp-LOBs
@@ -641,6 +673,7 @@ class Transport {
       timeout,
       expectedColumns: expectedColumns,
       bindMetadata: bindMetadata,
+      plSqlExecuteMany: plSqlExecuteMany,
     );
 
     final response = decodeExecuteResponse(
@@ -653,7 +686,24 @@ class Transport {
       preserveTimestampTimeZone: preserveTimestampTimeZone,
       supportsNationalCharset: supportsNationalCharset,
       nationalCharset: nationalCharset,
+      plSqlExecuteMany: plSqlExecuteMany,
     );
+
+    // PL/SQL executeMany, second RPC: run iterations 2..N via REEXECUTE
+    // against the cursor the first execution opened, then merge the
+    // per-iteration OUT rows. A failed first iteration skips this — its
+    // error propagates through the normal path below.
+    if (plSqlExecuteMany && executeManyIters > 1 && response.isSuccess) {
+      return _reExecutePlSqlBatch(
+        firstResponse: response,
+        binds: effectiveBinds,
+        rows: effectiveBulkRows,
+        numIters: executeManyIters,
+        bindMetadata: bindMetadata,
+        preserveTimestampTimeZone: preserveTimestampTimeZone,
+        timeout: timeout,
+      );
+    }
 
     // sendExecute returns only the FIRST batch. The FETCH drain loop (and its
     // safety cap) now lives in the lazy cursor engine
@@ -746,6 +796,102 @@ class Transport {
     // unchanged (raw, not materialized). The caller materializes via
     // [materializeLobs].
     return response;
+  }
+
+  /// Runs iterations 2..N of a PL/SQL executeMany via a TTC REEXECUTE and
+  /// merges the per-iteration OUT rows with the first execution's.
+  ///
+  /// node-oracledb parity (thin/connection.js `_execute`, execute.js
+  /// `writeReExecuteMessage`): the REEXECUTE rows carry values for the
+  /// **non-OUT** binds only, and its response ships the remaining OUT
+  /// ROW_DATA payloads **without** a fresh IO_VECTOR — the OUT bind order is
+  /// seeded from the first response. The merged response reports the first
+  /// execution's cursor id and the full N-row [ExecuteResponse.outBindRows].
+  Future<ExecuteResponse> _reExecutePlSqlBatch({
+    required ExecuteResponse firstResponse,
+    required List<Object?>? binds,
+    required List<List<Object?>>? rows,
+    required int numIters,
+    required List<BindMetadata>? bindMetadata,
+    required bool preserveTimestampTimeZone,
+    required Duration? timeout,
+  }) async {
+    final reExecCursorId = firstResponse.cursorId;
+    if (reExecCursorId == 0) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'PL/SQL executeMany: the first execution returned no usable '
+            'server cursor (cursor id = 0), so the remaining iterations '
+            'cannot be re-executed',
+      );
+    }
+
+    // Exclude OUT-only slots entirely from the re-execute rows; IN and
+    // IN OUT slots keep their per-iteration values. The first execution's
+    // IO_VECTOR check already enforced server directions match the declared
+    // ones, so the client-declared direction is authoritative here.
+    List<Object?>? reBinds;
+    List<List<Object?>>? reRows;
+    if (binds != null && rows != null) {
+      final inSlots = <int>[
+        for (var i = 0; i < binds.length; i++)
+          if (!(binds[i] is BindVariable &&
+              (binds[i]! as BindVariable).dir == BindDir.output))
+            i,
+      ];
+      if (inSlots.isNotEmpty) {
+        reBinds = [for (final i in inSlots) binds[i]];
+        reRows = [
+          for (var r = 1; r < rows.length; r++)
+            [for (final i in inSlots) rows[r][i]],
+        ];
+      }
+    }
+
+    final request = ReExecuteRequest(
+      cursorId: reExecCursorId,
+      numIters: numIters - 1,
+      bindValues: reBinds,
+      bulkRows: reRows,
+      ttcFieldVersion: _ttcFieldVersion,
+      sequence: nextSequence(),
+    );
+    await sendData(request.toBytes());
+    final payload = await _receiveDataWithTimeout(
+      timeout,
+      bindMetadata: bindMetadata,
+      plSqlExecuteMany: true,
+      presetOutBindIndices: firstResponse.outBindIndices,
+    );
+    final response = decodeExecuteResponse(
+      payload,
+      isQuery: false,
+      ttcFieldVersion: _ttcFieldVersion,
+      endOfRequestSupport: _supportsEndOfRequest,
+      bindMetadata: bindMetadata,
+      preserveTimestampTimeZone: preserveTimestampTimeZone,
+      supportsNationalCharset: supportsNationalCharset,
+      nationalCharset: nationalCharset,
+      plSqlExecuteMany: true,
+      presetOutBindIndices: firstResponse.outBindIndices,
+    );
+
+    // A failed iteration surfaces the server error exactly like the
+    // single-RPC path; iterations that already ran remain pending in the
+    // transaction (Oracle array semantics without batchErrors).
+    if (!response.isSuccess) return response;
+
+    return ExecuteResponse(
+      isSuccess: true,
+      cursorId: reExecCursorId,
+      outBindIndices: firstResponse.outBindIndices,
+      outBindRows: [...firstResponse.outBindRows, ...response.outBindRows],
+      implicitResults: [
+        ...firstResponse.implicitResults,
+        ...response.implicitResults,
+      ],
+    );
   }
 
   /// Fetches one more batch of rows from an open server cursor and returns the
@@ -1030,6 +1176,56 @@ class Transport {
     return converted ?? binds;
   }
 
+  /// Converts LOB-destined per-iteration values in executeMany [bulkRows]
+  /// into temporary-LOB locators, mirroring [_prepareLobBinds] for the
+  /// scalar bind list.
+  ///
+  /// [binds] are the executeMany slot templates ([BindVariable]s whose
+  /// values are null); [bulkRows] carry the actual per-iteration values. For
+  /// every CLOB-typed slot, each row's `String` becomes a temporary CLOB
+  /// (empty string → SQL NULL, the CLOB convention; NCLOB slots create
+  /// NCHAR-form temp LOBs); for every BLOB-typed slot, each row's `Uint8List`
+  /// becomes a temporary BLOB (empty bytes → empty BLOB, preserving the
+  /// empty-vs-NULL distinction). Rows are copied, never mutated in place.
+  /// Returns [bulkRows] unchanged when no slot is LOB-typed.
+  Future<List<List<Object?>>?> _prepareBulkRowLobs(
+    List<Object?> binds,
+    List<List<Object?>>? bulkRows,
+    Duration? timeout,
+  ) async {
+    if (bulkRows == null) return null;
+    List<int>? lobSlots;
+    for (var i = 0; i < binds.length; i++) {
+      final b = binds[i];
+      if (b is BindVariable &&
+          (b.oraType == oraTypeClob || b.oraType == oraTypeBlob)) {
+        (lobSlots ??= <int>[]).add(i);
+      }
+    }
+    if (lobSlots == null) return bulkRows;
+    final newRows = <List<Object?>>[];
+    for (final row in bulkRows) {
+      final newRow = List<Object?>.of(row);
+      for (final i in lobSlots) {
+        final bind = binds[i] as BindVariable;
+        final value = newRow[i];
+        if (bind.oraType == oraTypeClob && value is String) {
+          newRow[i] = value.isEmpty
+              ? null
+              : await _createTempClob(
+                  value,
+                  timeout,
+                  csfrm: bind.isNChar ? ttcCsfrmNChar : ttcCsfrmImplicit,
+                );
+        } else if (bind.oraType == oraTypeBlob && value is Uint8List) {
+          newRow[i] = await _createTempBlob(value, timeout);
+        }
+      }
+      newRows.add(newRow);
+    }
+    return newRows;
+  }
+
   /// Creates a temporary CLOB on the server and writes [value] into it.
   ///
   /// Mirrors node-oracledb `lob.js create()` + `write()`: CREATE_TEMP carries
@@ -1238,7 +1434,10 @@ class Transport {
       (row) => row.any((v) => v is LobLocator),
     );
     final hasOutLob = response.outBindValues.any((v) => v is LobLocator);
-    if (!hasRowLob && !hasOutLob) return response;
+    final hasBatchOutLob = response.outBindRows.any(
+      (row) => row.any((v) => v is LobLocator),
+    );
+    if (!hasRowLob && !hasOutLob && !hasBatchOutLob) return response;
 
     // Oracle's duplicate-column optimization can alias one LobLocator
     // instance into several rows; read each distinct locator once.
@@ -1297,6 +1496,43 @@ class Transport {
       outBindValues = newOut;
     }
 
+    var outBindRows = response.outBindRows;
+    if (hasBatchOutLob) {
+      // PL/SQL executeMany: materialize OUT LOB locators inside every
+      // iteration's row, enforcing the declared maxSize per value exactly
+      // like the single-execute OUT path above. Position j of each row maps
+      // to bindMetadata[outBindIndices[j]], so the guard resolution is
+      // shared with the flat path.
+      final newRows = <List<Object?>>[];
+      for (final row in response.outBindRows) {
+        final newRow = List<Object?>.of(row);
+        for (var j = 0; j < newRow.length; j++) {
+          final value = newRow[j];
+          if (value is! LobLocator) continue;
+          final maxSize = resolveOutBindMaxSize(
+            valueIndex: j,
+            outBindIndices: response.outBindIndices,
+            bindMetadata: bindMetadata,
+          );
+          if (maxSize != null && value.length > maxSize) {
+            final isBlob = value.oracleType == oraTypeBlob;
+            throw OracleException(
+              errorCode: oraBindTypeError,
+              message:
+                  '${isBlob ? 'BLOB' : 'CLOB'} OUT bind returned '
+                  '${value.length} ${isBlob ? 'bytes' : 'characters'} in an '
+                  'executeMany iteration but OracleBindDef maxSize is '
+                  '$maxSize — increase maxSize to at least the largest value '
+                  'the block can return',
+            );
+          }
+          newRow[j] = await readLocator(value);
+        }
+        newRows.add(newRow);
+      }
+      outBindRows = newRows;
+    }
+
     return ExecuteResponse(
       isSuccess: true,
       cursorId: response.cursorId,
@@ -1304,6 +1540,7 @@ class Transport {
       rows: rows,
       outBindValues: outBindValues,
       outBindIndices: response.outBindIndices,
+      outBindRows: outBindRows,
       // PL/SQL with both an OUT LOB bind and implicit results reaches here;
       // preserve the decoded implicit cursor descriptors through the rebuild.
       implicitResults: response.implicitResults,
@@ -1576,12 +1813,16 @@ class Transport {
     List<ColumnMetadata>? expectedColumns,
     List<BindMetadata>? bindMetadata,
     bool Function(Uint8List accumulated)? completionProbe,
+    bool plSqlExecuteMany = false,
+    List<int>? presetOutBindIndices,
   }) async {
     _ensureUsable();
     final future = _receiveAllTtcData(
       expectedColumns: expectedColumns,
       bindMetadata: bindMetadata,
       completionProbe: completionProbe,
+      plSqlExecuteMany: plSqlExecuteMany,
+      presetOutBindIndices: presetOutBindIndices,
     );
     if (timeout == null) return future;
     return future.timeout(
@@ -1624,6 +1865,8 @@ class Transport {
     List<ColumnMetadata>? expectedColumns,
     List<BindMetadata>? bindMetadata,
     bool Function(Uint8List accumulated)? completionProbe,
+    bool plSqlExecuteMany = false,
+    List<int>? presetOutBindIndices,
   }) async {
     // The completion probe decides whether the accumulated TTC bytes form a
     // complete response. EXECUTE-shaped responses (the default) use
@@ -1651,6 +1894,8 @@ class Transport {
                 endOfRequestSupport: _supportsEndOfRequest,
                 expectedColumns: expectedColumns,
                 bindMetadata: bindMetadata,
+                plSqlExecuteMany: plSqlExecuteMany,
+                presetOutBindIndices: presetOutBindIndices,
               );
       } on OracleException catch (e) {
         _poison();

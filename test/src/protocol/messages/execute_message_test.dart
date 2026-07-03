@@ -4772,23 +4772,13 @@ void main() {
       );
     });
 
-    test('bulkRows asserts on query, PL/SQL, empty, and bind-free shapes', () {
+    test('bulkRows asserts on query, empty, and bind-free shapes', () {
+      // PL/SQL bulkRows became a VALID shape in Story 11.2 (repeated PL/SQL
+      // execution); only query, empty-rows, and bind-free stay assertions.
       expect(
         () => ExecuteRequest(
           sql: 'SELECT 1 FROM dual',
           isQuery: true,
-          bindValues: slots(),
-          bulkRows: [
-            [1, 'a'],
-          ],
-        ),
-        throwsA(isA<AssertionError>()),
-      );
-      expect(
-        () => ExecuteRequest(
-          sql: 'BEGIN NULL; END;',
-          isQuery: false,
-          isPlSql: true,
           bindValues: slots(),
           bulkRows: [
             [1, 'a'],
@@ -4835,14 +4825,518 @@ void main() {
       expect(parsed.buf.hasRemaining, isFalse);
     });
   });
+
+  group('PL/SQL executeMany ExecuteRequest encoding', () {
+    // Wire parity target (validated byte-for-byte against a live
+    // node-oracledb capture on 23ai): PL/SQL executeMany is TWO messages.
+    // The first is a full EXECUTE with numExecs = 1 carrying only the first
+    // iteration's row (OUT-only slots as null-indicator placeholders) and
+    // the NO_IMPL_REL exec-flag so the cursor survives; the remaining
+    // iterations ride a REEXECUTE (function 4) whose rows exclude OUT-only
+    // slots entirely. Sending numExecs = N with OUT binds on the first parse
+    // draws ORA-03106 from the server.
+    const sql = 'BEGIN story_double(:1, :2); END;';
+    List<Object?> plsqlSlots() => [
+      BindVariable(value: null, oraType: oraTypeNumber, dir: BindDir.input),
+      BindVariable(
+        value: null,
+        oraType: oraTypeNumber,
+        maxSize: 22,
+        dir: BindDir.output,
+      ),
+    ];
+
+    test('first execution writes count 1, NO_IMPL_REL, and one ROW_DATA '
+        'with the OUT placeholder', () {
+      final bytes = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        isPlSql: true,
+        bindValues: plsqlSlots(),
+        bulkRows: [
+          [10, null],
+        ],
+        executeManyIters: 1,
+        noImplicitRelease: true,
+      ).toBytes();
+      final parsed = _openDmlExecuteForRead(bytes);
+      expect(parsed.executionCount, equals(1));
+      expect(parsed.prefetchNumRows, equals(1));
+      expect(parsed.numParams, equals(2));
+      expect(
+        parsed.dmlOptions & ttcExecOptionNoImplicitRelease,
+        equals(ttcExecOptionNoImplicitRelease),
+        reason:
+            'the first executeMany execution must keep the cursor alive for '
+            'the follow-up REEXECUTE',
+      );
+      _readBindMetadata(parsed.buf, parsed.numParams);
+      final buf = parsed.buf;
+      expect(buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(buf.readBytesWithLength(), equals(encodeNumber(10)));
+      expect(
+        buf.readBytesWithLengthOrNull(),
+        isNull,
+        reason:
+            'the OUT slot must encode as the null-indicator placeholder in '
+            'the first iteration row',
+      );
+      expect(buf.hasRemaining, isFalse);
+    });
+
+    test('scalar PL/SQL execute leaves NO_IMPL_REL clear', () {
+      final parsed = _openDmlExecuteForRead(
+        ExecuteRequest(
+          sql: sql,
+          isQuery: false,
+          isPlSql: true,
+          bindValues: plsqlSlots(),
+        ).toBytes(),
+      );
+      expect(parsed.dmlOptions & ttcExecOptionNoImplicitRelease, equals(0));
+    });
+
+    test('sets PLSQL_BIND and BIND options and clears NOT_PLSQL', () {
+      final options = _readExecuteOptionsWord(
+        ExecuteRequest(
+          sql: sql,
+          isQuery: false,
+          isPlSql: true,
+          bindValues: plsqlSlots(),
+          bulkRows: [
+            [10, null],
+          ],
+          executeManyIters: 1,
+        ).toBytes(),
+      );
+      expect(options & ttcExecOptionPlSqlBind, equals(ttcExecOptionPlSqlBind));
+      expect(options & ttcExecOptionBind, equals(ttcExecOptionBind));
+      expect(options & ttcExecOptionNotPlSql, equals(0));
+      expect(options & ttcExecOptionFetch, equals(0));
+    });
+
+    test('bind metadata keeps scalar shape — no TNS_BIND_ARRAY, '
+        'max elements 0', () {
+      final req = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        isPlSql: true,
+        bindValues: plsqlSlots(),
+        bulkRows: [
+          [10, null],
+        ],
+        executeManyIters: 1,
+      );
+      final parsed = _openDmlExecuteForRead(req.toBytes());
+      final meta = _readBindMetadata(parsed.buf, parsed.numParams);
+      for (final m in meta) {
+        expect(
+          m.flags,
+          equals(ttcBindUseIndicators),
+          reason:
+              'PL/SQL executeMany iteration is NOT a collection bind; '
+              'TNS_BIND_ARRAY is reserved for PL/SQL associative arrays '
+              '(out of scope)',
+        );
+        expect(m.flags & ttcBindArray, equals(0));
+        expect(m.maxNumElements, equals(0));
+      }
+    });
+
+    test('REEXECUTE encodes byte-exactly to the node-oracledb capture', () {
+      // Live capture (node-oracledb thin vs Oracle 23ai, 2026-07-03):
+      // executeMany('BEGIN story112_probe(:1, :2, :3); END;',
+      //             [[1],[2],[3]], bindDefs [IN number, OUT number,
+      //             OUT varchar(30)]) sends its second RPC as
+      //   03 04 04 00 | 01 02 | 01 02 | 00 | 00 | 07 02 c1 03 | 07 02 c1 04
+      // = FUNCTION, REEXECUTE(4), seq 4, token 0, cursor 2, numIters 2,
+      //   exec flags 0/0, then per-iteration ROW_DATA carrying ONLY the IN
+      //   value (OUT slots excluded entirely).
+      final bytes = ReExecuteRequest(
+        cursorId: 2,
+        numIters: 2,
+        bindValues: [
+          BindVariable(value: null, oraType: oraTypeNumber, dir: BindDir.input),
+        ],
+        bulkRows: [
+          [2],
+          [3],
+        ],
+        sequence: 4,
+      ).toBytes();
+      expect(
+        bytes,
+        equals(
+          Uint8List.fromList([
+            0x03, 0x04, 0x04, 0x00, // FUNCTION, REEXECUTE, seq, token
+            0x01, 0x02, // cursor id UB4 = 2
+            0x01, 0x02, // numIters UB4 = 2
+            0x00, 0x00, // exec flag words
+            0x07, 0x02, 0xc1, 0x03, // ROW_DATA, NUMBER 2
+            0x07, 0x02, 0xc1, 0x04, // ROW_DATA, NUMBER 3
+          ]),
+        ),
+      );
+    });
+
+    test('bind-free REEXECUTE writes only the count (no ROW_DATA)', () {
+      final bytes = ReExecuteRequest(
+        cursorId: 7,
+        numIters: 4,
+        sequence: 2,
+      ).toBytes();
+      expect(
+        bytes,
+        equals(
+          Uint8List.fromList([
+            0x03, 0x04, 0x02, 0x00, // FUNCTION, REEXECUTE, seq, token
+            0x01, 0x07, // cursor id UB4 = 7
+            0x01, 0x04, // numIters UB4 = 4
+            0x00, 0x00, // exec flag words
+          ]),
+        ),
+      );
+    });
+
+    test('pre-23.1 REEXECUTE omits the token number (21c shape)', () {
+      final bytes = ReExecuteRequest(
+        cursorId: 7,
+        numIters: 4,
+        ttcFieldVersion: ttcCcapFieldVersion12_2,
+        sequence: 2,
+      ).toBytes();
+      expect(
+        bytes,
+        equals(
+          Uint8List.fromList([
+            0x03, 0x04, 0x02, // FUNCTION, REEXECUTE, seq — no token UB8
+            0x01, 0x07,
+            0x01, 0x04,
+            0x00, 0x00,
+          ]),
+        ),
+      );
+    });
+
+    test('ReExecuteRequest asserts on closed cursor, zero iterations, and '
+        'row-count mismatch', () {
+      expect(
+        () => ReExecuteRequest(cursorId: 0, numIters: 1),
+        throwsA(isA<AssertionError>()),
+      );
+      expect(
+        () => ReExecuteRequest(cursorId: 5, numIters: 0),
+        throwsA(isA<AssertionError>()),
+      );
+      expect(
+        () => ReExecuteRequest(
+          cursorId: 5,
+          numIters: 3,
+          bindValues: [BindVariable(value: null, oraType: oraTypeNumber)],
+          bulkRows: [
+            [1],
+            [2],
+          ],
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+    });
+
+    test('executeManyIters asserts on query, non-positive, and row-count '
+        'mismatch', () {
+      expect(
+        () => ExecuteRequest(
+          sql: 'SELECT 1 FROM dual',
+          isQuery: true,
+          executeManyIters: 2,
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+      expect(
+        () => ExecuteRequest(
+          sql: 'BEGIN NULL; END;',
+          isQuery: false,
+          isPlSql: true,
+          executeManyIters: 0,
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+      expect(
+        () => ExecuteRequest(
+          sql: sql,
+          isQuery: false,
+          isPlSql: true,
+          bindValues: plsqlSlots(),
+          bulkRows: [
+            [10, null],
+            [20, null],
+          ],
+          executeManyIters: 3,
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+    });
+
+    test('scalar PL/SQL execute still writes execution count 1 and one '
+        'ROW_DATA', () {
+      // Regression: the executeMany extension must leave the single-execute
+      // PL/SQL byte shape unchanged.
+      final parsed = _openDmlExecuteForRead(
+        ExecuteRequest(
+          sql: sql,
+          isQuery: false,
+          isPlSql: true,
+          bindValues: [
+            BindVariable(value: 10, oraType: oraTypeNumber),
+            BindVariable(
+              value: null,
+              oraType: oraTypeNumber,
+              maxSize: 22,
+              dir: BindDir.output,
+            ),
+          ],
+        ).toBytes(),
+      );
+      expect(parsed.executionCount, equals(1));
+      expect(parsed.prefetchNumRows, equals(1));
+      _readBindMetadata(parsed.buf, parsed.numParams);
+      expect(parsed.buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(parsed.buf.readBytesWithLength(), equals(encodeNumber(10)));
+      expect(parsed.buf.readBytesWithLengthOrNull(), isNull);
+      expect(parsed.buf.hasRemaining, isFalse);
+    });
+  });
+
+  group('PL/SQL executeMany OUT decode (multi ROW_DATA)', () {
+    test('decodes one outBindRows entry per iteration ROW_DATA', () {
+      // Directions: bind 0 IN (32), bind 1 OUT (16). Three iterations, each
+      // shipping one ROW_DATA with the OUT NUMBER value 5 / 5 / NULL.
+      final payload = _buildPayload([
+        _ioVector([32, 16]),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._ub4(0),
+        ],
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._ub4(0),
+        ],
+        [
+          ttcMsgTypeRowData,
+          0, // length 0 (SQL NULL)
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      const bindMetadata = [
+        BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
+        BindMetadata(oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+      ];
+
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: bindMetadata,
+        plSqlExecuteMany: true,
+      );
+      expect(r.isSuccess, isTrue);
+      expect(r.outBindIndices, equals([1]));
+      expect(
+        r.outBindRows,
+        equals([
+          [5],
+          [5],
+          [null],
+        ]),
+      );
+      expect(
+        r.outBindValues,
+        isEmpty,
+        reason: 'executeMany OUT values live in outBindRows, not the flat '
+            'single-execute container',
+      );
+
+      // The completion probe must consume every iteration ROW_DATA to stay
+      // byte-accurate on pre-23.4 servers.
+      expect(
+        ttcStreamIsComplete(
+          payload,
+          bindMetadata: bindMetadata,
+          plSqlExecuteMany: true,
+        ),
+        isTrue,
+      );
+    });
+
+    test('mixed IN OUT and OUT positions decode per iteration in order', () {
+      // Directions: bind 0 IN (32), bind 1 IN OUT (48), bind 2 OUT (16).
+      // Two iterations; each ROW_DATA ships [IN OUT value, OUT value].
+      final payload = _buildPayload([
+        _ioVector([32, 48, 16]),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._ub4(0),
+          ..._bytesWithLength('one'.codeUnits),
+          ..._ub4(0),
+        ],
+        [
+          ttcMsgTypeRowData,
+          0, // IN OUT returned SQL NULL
+          ..._ub4(0),
+          ..._bytesWithLength('two'.codeUnits),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
+          BindMetadata(
+            oraType: oraTypeNumber,
+            maxSize: 22,
+            dir: BindDir.inputOutput,
+          ),
+          BindMetadata(
+            oraType: oraTypeVarchar,
+            maxSize: 40,
+            dir: BindDir.output,
+          ),
+        ],
+        plSqlExecuteMany: true,
+      );
+      expect(r.outBindIndices, equals([1, 2]));
+      expect(
+        r.outBindRows,
+        equals([
+          [5, 'one'],
+          [null, 'two'],
+        ]),
+      );
+    });
+
+    test('REEXECUTE response (no IO_VECTOR) decodes via preset OUT bind '
+        'indices', () {
+      // Live-capture shape: the REEXECUTE response ships the remaining
+      // iterations' ROW_DATA payloads directly — no fresh IO_VECTOR — so the
+      // OUT bind order is seeded from the first execution's response.
+      final payload = _buildPayload([
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._ub4(0),
+          ..._bytesWithLength('two'.codeUnits),
+          ..._ub4(0),
+        ],
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._ub4(0),
+          ..._bytesWithLength('three'.codeUnits),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      const bindMetadata = [
+        BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
+        BindMetadata(oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+        BindMetadata(
+          oraType: oraTypeVarchar,
+          maxSize: 40,
+          dir: BindDir.output,
+        ),
+      ];
+
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: bindMetadata,
+        plSqlExecuteMany: true,
+        presetOutBindIndices: const [1, 2],
+      );
+      expect(r.isSuccess, isTrue);
+      expect(
+        r.outBindRows,
+        equals([
+          [5, 'two'],
+          [5, 'three'],
+        ]),
+      );
+
+      // The completion probe needs the same seeding to consume each
+      // ROW_DATA byte-accurately (pre-23.4 termination detection).
+      expect(
+        ttcStreamIsComplete(
+          payload,
+          bindMetadata: bindMetadata,
+          plSqlExecuteMany: true,
+          presetOutBindIndices: const [1, 2],
+        ),
+        isTrue,
+      );
+    });
+
+    test('single-execute decode is unchanged: one ROW_DATA fills '
+        'outBindValues and outBindRows stays empty', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(
+            oraType: oraTypeNumber,
+            maxSize: 22,
+            dir: BindDir.output,
+          ),
+        ],
+      );
+      expect(r.outBindValues, equals([5]));
+      expect(r.outBindRows, isEmpty);
+    });
+  });
+}
+
+/// Reads only the execute-options word (the UB4 right after the function
+/// header) from an encoded EXECUTE request at the default ttcFieldVersion.
+int _readExecuteOptionsWord(Uint8List bytes) {
+  final buf = ReadBuffer(bytes);
+  buf.readUint8(); // msg type
+  buf.readUint8(); // func code
+  buf.readUint8(); // sequence
+  buf.skipUB8(); // token number (ttcFieldVersion >= 23.1 ext1)
+  return buf.readUB4();
 }
 
 /// Walks a freshly-parsed (cursorId == 0) DML EXECUTE request at the default
 /// ttcFieldVersion (24) up to — but not including — the bind metadata block,
 /// returning the prefetch-num-rows field, the al8i4[1] execution count, the
-/// declared bind count, and the [ReadBuffer] positioned at the first bind
-/// metadata byte for further reading.
-({int prefetchNumRows, int executionCount, int numParams, ReadBuffer buf})
+/// al8i4[9] exec-flags word (dmlOptions), the declared bind count, and the
+/// [ReadBuffer] positioned at the first bind metadata byte for further
+/// reading.
+({
+  int prefetchNumRows,
+  int executionCount,
+  int dmlOptions,
+  int numParams,
+  ReadBuffer buf,
+})
 _openDmlExecuteForRead(Uint8List bytes) {
   final buf = ReadBuffer(bytes);
   buf.readUint8(); // msg type
@@ -4890,12 +5384,17 @@ _openDmlExecuteForRead(Uint8List bytes) {
   buf.readBytesWithLength(); // SQL bytes
   buf.readUB4(); // al8i4[0] parse
   final executionCount = buf.readUB4(); // al8i4[1]
-  for (var i = 2; i <= 12; i++) {
-    buf.readUB4(); // al8i4[2..12]
+  for (var i = 2; i <= 8; i++) {
+    buf.readUB4(); // al8i4[2..8]
+  }
+  final dmlOptions = buf.readUB4(); // al8i4[9] exec flags
+  for (var i = 10; i <= 12; i++) {
+    buf.readUB4(); // al8i4[10..12]
   }
   return (
     prefetchNumRows: prefetchNumRows,
     executionCount: executionCount,
+    dmlOptions: dmlOptions,
     numParams: numParams,
     buf: buf,
   );

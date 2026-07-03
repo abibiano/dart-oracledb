@@ -120,6 +120,8 @@ class ExecuteRequest extends Message {
     this.ttcFieldVersion = 24,
     this.defineColumns,
     this.bulkRows,
+    this.executeManyIters,
+    this.noImplicitRelease = false,
     super.sequence = 1,
   }) : assert(
          !(isQuery && isPlSql),
@@ -133,12 +135,19 @@ class ExecuteRequest extends Message {
        assert(
          bulkRows == null ||
              (!isQuery &&
-                 !isPlSql &&
                  defineColumns == null &&
                  bindValues != null &&
                  bulkRows.isNotEmpty),
-         'bulk DML requires a non-query, non-PL/SQL statement with bind slots '
+         'executeMany rows require a non-query statement with bind slots '
          'and at least one row',
+       ),
+       assert(
+         executeManyIters == null ||
+             (!isQuery &&
+                 executeManyIters > 0 &&
+                 (bulkRows == null || bulkRows.length == executeManyIters)),
+         'executeManyIters must be positive, non-query, and match bulkRows '
+         'when rows are present',
        ),
        super(messageType: ttcMsgTypeFunction) {
     // OUT and IN OUT binds are only meaningful in PL/SQL. Refuse mid-build
@@ -190,27 +199,45 @@ class ExecuteRequest extends Message {
   /// on FETCH continuation rounds until defines are established.
   final List<ColumnMetadata>? defineColumns;
 
-  /// Bulk DML row data (`executeMany`): one inner list per execute iteration,
-  /// each holding exactly one raw value per bind slot, in bind order.
+  /// executeMany row data: one inner list per execute iteration, each holding
+  /// exactly one raw value per bind slot, in bind order (array DML **and**
+  /// repeated PL/SQL execution).
   ///
   /// When non-null, this request executes [sql] once per inner list in a
-  /// single round trip — the DML execution count (al8i4[1]) is the row count
-  /// and one [ttcMsgTypeRowData] payload travels per row, exactly like
+  /// single round trip — the DML/PL-SQL execution count (al8i4[1]) is the row
+  /// count and one [ttcMsgTypeRowData] payload travels per row, exactly like
   /// node-oracledb thin's `executeMany` (execute.js `encode()` loops
   /// `writeBindParamsRow` while `currentRow < numExecs`). The [bindValues]
   /// entries then act as per-slot metadata templates: their
-  /// oraType/maxSize/csfrm — sized to the largest value across all rows —
-  /// are written once in the bind metadata block and each row's value is
-  /// encoded against its slot's template. Bind metadata stays the plain
+  /// oraType/maxSize/csfrm — sized to the largest value across all rows for
+  /// inferred IN slots — are written once in the bind metadata block and each
+  /// row's value is encoded against its slot's template. OUT-only slots carry
+  /// `null` in every row and encode as the null-indicator placeholder, the
+  /// same shape single-execute OUT binds use. Bind metadata stays the plain
   /// scalar shape ([ttcBindUseIndicators], max elements 0): node-oracledb
-  /// reserves `TNS_BIND_ARRAY`/`maxArraySize` for PL/SQL array binds, which
-  /// are not part of array DML. Only valid for non-query, non-PL/SQL
-  /// statements with no OUT binds.
+  /// reserves `TNS_BIND_ARRAY`/`maxArraySize` for PL/SQL *collection*
+  /// (associative array) binds, which are a different feature from
+  /// executeMany iteration and stay out of scope. Only valid for non-query
+  /// statements; OUT bind slots additionally require [isPlSql].
   final List<List<Object?>>? bulkRows;
 
-  /// Number of execute iterations for DML: the bulk row count for array DML
-  /// ([bulkRows]), otherwise 1.
-  int get _numExecs => bulkRows?.length ?? 1;
+  /// Explicit executeMany iteration count. Required for the bind-free /
+  /// all-OUT PL/SQL `numIterations` form (where no [bulkRows] travel); when
+  /// [bulkRows] are present it must equal their length. Null for single
+  /// execution.
+  final int? executeManyIters;
+
+  /// Keeps the server cursor alive after execution (node-oracledb
+  /// `noImplicitRelease` → `TNS_EXEC_OPTION_NO_IMPL_REL` in the exec-flags
+  /// field). Set on the FIRST execution of a PL/SQL executeMany so the
+  /// follow-up [ReExecuteRequest] can run the remaining iterations against
+  /// the same cursor.
+  final bool noImplicitRelease;
+
+  /// Number of execute iterations for DML / PL/SQL: the explicit executeMany
+  /// count when set, else the bulk row count, else 1 (node-oracledb
+  /// execute.js writes `numExecs` into al8i4[1] for every non-query).
+  int get _numExecs => executeManyIters ?? bulkRows?.length ?? 1;
 
   @override
   void encode(WriteBuffer buffer) {
@@ -242,6 +269,11 @@ class ExecuteRequest extends Message {
     // Execute options + DML options
     var options = 0;
     var dmlOptions = 0;
+    if (noImplicitRelease) {
+      // node-oracledb writeExecuteMessage: execFlags |= NO_IMPL_REL before
+      // any other flag — keeps the cursor alive for the follow-up REEXECUTE.
+      dmlOptions |= ttcExecOptionNoImplicitRelease;
+    }
     final defines = defineColumns;
     if (defines != null) {
       // Define mode (node-oracledb execute.js `requiresDefine`): DEFINE
@@ -394,14 +426,17 @@ class ExecuteRequest extends Message {
       if (rows == null) {
         // Single ROW_DATA message containing all bind values for one
         // iteration.
-        _writeRowData(buffer, binds);
+        _writeRowData(buffer, binds, isPlSql: isPlSql);
       } else {
-        // Bulk DML: one ROW_DATA message per iteration (node-oracledb
-        // execute.js encode() writes TNS_MSG_TYPE_ROW_DATA +
-        // writeBindParamsRow once per row while currentRow < numExecs).
-        // Each row's raw values are encoded against the slot templates in
-        // [binds] so type, declared max size, and charset form stay uniform
-        // across every iteration, matching the metadata written above.
+        // executeMany (array DML and PL/SQL iteration): one ROW_DATA message
+        // per iteration (node-oracledb execute.js encode() writes
+        // TNS_MSG_TYPE_ROW_DATA + writeBindParamsRow once per row while
+        // currentRow < numExecs). Each row's raw values are encoded against
+        // the slot templates in [binds] so type, declared max size, and
+        // charset form stay uniform across every iteration, matching the
+        // metadata written above. OUT-only slots hold null in every row and
+        // encode as the null-indicator placeholder (node writes
+        // `variable.values[pos]` for OUT binds too — undefined → null byte).
         for (final row in rows) {
           if (row.length != binds.length) {
             throw OracleException(
@@ -419,7 +454,7 @@ class ExecuteRequest extends Message {
                 maxSize: binds[i].maxSize,
                 isNChar: binds[i].isNChar,
               ),
-          ]);
+          ], isPlSql: isPlSql);
         }
       }
     }
@@ -434,7 +469,14 @@ class ExecuteRequest extends Message {
   /// writeBindParamsRow (`foundLong`). PL/SQL never reaches this path:
   /// oversized PL/SQL strings are converted to temporary CLOBs before
   /// encoding.
-  void _writeRowData(WriteBuffer buffer, List<BindVariable> rowBinds) {
+  ///
+  /// Static (library-shared): [ReExecuteRequest] writes its per-iteration
+  /// rows through the same function so the two messages cannot drift.
+  static void _writeRowData(
+    WriteBuffer buffer,
+    List<BindVariable> rowBinds, {
+    required bool isPlSql,
+  }) {
     buffer.writeUint8(ttcMsgTypeRowData);
     final deferredLongBinds = <BindVariable>[];
     for (final bind in rowBinds) {
@@ -570,7 +612,7 @@ class ExecuteRequest extends Message {
     }
   }
 
-  void _writeBindValue(WriteBuffer buffer, BindVariable bind) {
+  static void _writeBindValue(WriteBuffer buffer, BindVariable bind) {
     final value = bind.value;
     final oraType = _wireTypeFor(bind);
     if (oraType == oraTypeJson) {
@@ -696,7 +738,7 @@ class ExecuteRequest extends Message {
     buffer.writeBytesWithLength(oson);
   }
 
-  int _wireTypeFor(BindVariable bind) {
+  static int _wireTypeFor(BindVariable bind) {
     // Normalize VARCHAR2 (9) to VARCHAR (1) for wire (Oracle accepts both but
     // node-oracledb sends type 1 / DB_TYPE_VARCHAR).
     if (bind.oraType == oraTypeVarchar2) return oraTypeVarchar;
@@ -709,7 +751,7 @@ class ExecuteRequest extends Message {
   /// materialized value length client-side and never reaches the wire.
   static const int _lobLocatorBindBufferSize = 112;
 
-  int _maxSizeFor(BindVariable bind) {
+  static int _maxSizeFor(BindVariable bind) {
     final wireType = _wireTypeFor(bind);
     if (wireType == oraTypeClob || wireType == oraTypeBlob) {
       return _lobLocatorBindBufferSize;
@@ -770,7 +812,7 @@ class ExecuteRequest extends Message {
   /// (VARCHAR2/CHAR/STRING and CLOB) carry [ttcCsfrmNChar] when the bind is a
   /// national type (NVARCHAR2/NCHAR/NCLOB) and [ttcCsfrmImplicit] otherwise;
   /// non-character types carry 0.
-  int _csfrmFor(BindVariable bind) {
+  static int _csfrmFor(BindVariable bind) {
     switch (_wireTypeFor(bind)) {
       case oraTypeVarchar:
       case oraTypeString:
@@ -789,6 +831,104 @@ class ExecuteRequest extends Message {
   /// then travels UTF-16BE. Writing [ttcCharsetAl16Utf16] here would break the
   /// metadata the server expects.
   static int _charsetFieldFor(int csfrm) => csfrm != 0 ? ttcCharsetUtf8 : 0;
+}
+
+/// TTC REEXECUTE (RPC function 4) request — runs [numIters] additional
+/// iterations of an already-parsed statement against its open server cursor.
+///
+/// Used for PL/SQL `executeMany()`: the first iteration runs as a full
+/// [ExecuteRequest] with `numExecs = 1` (letting the server determine the
+/// block's actual bind directions), then this message executes the remaining
+/// iterations (node-oracledb thin/connection.js `_execute` +
+/// execute.js `writeReExecuteMessage`, validated byte-for-byte against a live
+/// capture). Its per-iteration ROW_DATA payloads carry values for the
+/// **non-OUT** binds only — OUT-only slots are excluded entirely, unlike the
+/// full execute's null placeholders (writeReExecuteMessage filters
+/// `bindDir !== TNS_BIND_DIR_OUTPUT`).
+class ReExecuteRequest extends Message {
+  /// Creates a REEXECUTE request.
+  ///
+  /// [bindValues] are the slot templates for the values in [bulkRows] — the
+  /// non-OUT subset of the original bind list, in original SQL order. Both
+  /// are null for a bind-free (or all-OUT) statement, where only the
+  /// iteration count travels.
+  ReExecuteRequest({
+    required this.cursorId,
+    required this.numIters,
+    this.bindValues,
+    this.bulkRows,
+    this.ttcFieldVersion = 24,
+    super.sequence = 1,
+  }) : assert(cursorId != 0, 'REEXECUTE requires an open server cursor'),
+       assert(numIters > 0, 'REEXECUTE needs at least one iteration'),
+       assert(
+         bulkRows == null ||
+             (bindValues != null &&
+                 bulkRows.isNotEmpty &&
+                 bulkRows.length == numIters),
+         'REEXECUTE rows require slot templates and one row per iteration',
+       ),
+       super(messageType: ttcMsgTypeFunction);
+
+  /// The open server cursor from the first execution.
+  final int cursorId;
+
+  /// Number of additional iterations to run.
+  final int numIters;
+
+  /// Slot templates (non-OUT subset, original order) for [bulkRows] values.
+  final List<Object?>? bindValues;
+
+  /// Per-iteration values for the non-OUT slots: one inner list per
+  /// iteration, aligned with [bindValues].
+  final List<List<Object?>>? bulkRows;
+
+  /// Negotiated TTC field version from protocol negotiation.
+  final int ttcFieldVersion;
+
+  @override
+  void encode(WriteBuffer buffer) {
+    buffer.writeUint8(messageType); // TNS_MSG_TYPE_FUNCTION (3)
+    buffer.writeUint8(ttcFuncReExecute); // 4
+    buffer.writeUint8(sequence & 0xFF);
+    if (ttcFieldVersion >= ttcCcapFieldVersion23_1Ext1) {
+      buffer.writeUB8(0); // token number
+    }
+    buffer.writeUB4(cursorId);
+    buffer.writeUB4(numIters);
+    // Exec flag words: the EXECUTE bit rides flag 1 only for
+    // REEXECUTE_AND_FETCH (queries); COMMIT_REEXECUTE rides flag 2 only for
+    // auto-commit. Neither applies here.
+    buffer.writeUB4(0);
+    buffer.writeUB4(0);
+    final rows = bulkRows;
+    if (rows == null) return;
+    final templates = [
+      for (final v in bindValues!)
+        if (v is BindVariable) v else BindVariable(value: v),
+    ];
+    for (final row in rows) {
+      if (row.length != templates.length) {
+        throw OracleException(
+          errorCode: oraBindMismatch,
+          message:
+              'Internal: REEXECUTE row has ${row.length} values but '
+              '${templates.length} bind slots',
+        );
+      }
+      // Same per-row shape (and shared writer) as the full execute; only the
+      // slot subset differs. PL/SQL row rules apply: no long-data deferral.
+      ExecuteRequest._writeRowData(buffer, [
+        for (var i = 0; i < templates.length; i++)
+          BindVariable(
+            value: row[i],
+            oraType: templates[i].oraType,
+            maxSize: templates[i].maxSize,
+            isNChar: templates[i].isNChar,
+          ),
+      ], isPlSql: true);
+    }
+  }
 }
 
 /// TTC FETCH request — used to read more rows from an open cursor.
@@ -1008,6 +1148,7 @@ class ExecuteResponse {
     List<List<Object?>> rows = const [],
     List<Object?> outBindValues = const [],
     List<int> outBindIndices = const [],
+    List<List<Object?>> outBindRows = const [],
     List<DecodedCursorResult> implicitResults = const [],
     this.rowsAffected,
     this.moreRowsToFetch = false,
@@ -1026,6 +1167,9 @@ class ExecuteResponse {
        outBindIndices = outBindIndices.isEmpty
            ? const <int>[]
            : List<int>.unmodifiable(outBindIndices),
+       outBindRows = outBindRows.isEmpty
+           ? const <List<Object?>>[]
+           : List<List<Object?>>.unmodifiable(outBindRows),
        implicitResults = implicitResults.isEmpty
            ? const <DecodedCursorResult>[]
            : List<DecodedCursorResult>.unmodifiable(implicitResults);
@@ -1051,6 +1195,14 @@ class ExecuteResponse {
   /// [outBindValues]. Lets higher layers map decoded values back to the
   /// original bind name or position. Unmodifiable.
   final List<int> outBindIndices;
+
+  /// Per-iteration OUT bind values from a PL/SQL executeMany response: one
+  /// inner list per iteration, each holding one decoded value per OUT bind
+  /// in [outBindIndices] order. Populated only when the decoder ran with
+  /// `plSqlExecuteMany: true` (the server ships one ROW_DATA per iteration);
+  /// single-execute PL/SQL keeps its values in [outBindValues] and leaves
+  /// this empty. Unmodifiable.
+  final List<List<Object?>> outBindRows;
 
   /// Implicit result-set cursor descriptors returned by a PL/SQL block that
   /// called `DBMS_SQL.RETURN_RESULT` (TTC message type 27). Each entry carries
@@ -1096,6 +1248,8 @@ bool ttcStreamIsComplete(
   bool endOfRequestSupport = true,
   List<ColumnMetadata>? expectedColumns,
   List<BindMetadata>? bindMetadata,
+  bool plSqlExecuteMany = false,
+  List<int>? presetOutBindIndices,
 }) {
   final buffer = ReadBuffer(data);
   final state = _DecodeState(
@@ -1110,7 +1264,16 @@ bool ttcStreamIsComplete(
     // types leniently here so an unsupported LONG column cannot make the probe
     // throw (the real decode pass raises the clear error).
     strictTypes: false,
+    // Byte accuracy requires the probe to consume EVERY per-iteration OUT
+    // ROW_DATA on a PL/SQL executeMany response, not just the first.
+    plSqlExecuteMany: plSqlExecuteMany,
   );
+  // A REEXECUTE response ships no IO_VECTOR (live-capture verified): the OUT
+  // bind order carries over from the first execution's response. Seed it so
+  // the probe consumes each ROW_DATA byte-accurately.
+  if (presetOutBindIndices != null) {
+    state.outBindIndices.addAll(presetOutBindIndices);
+  }
   try {
     while (buffer.hasRemaining && !state.endOfResponse) {
       final msgType = buffer.readUint8();
@@ -1156,6 +1319,8 @@ ExecuteResponse decodeExecuteResponse(
   bool supportsNationalCharset = true,
   String nationalCharset = 'AL16UTF16',
   List<Object?>? previousRoundLastRow,
+  bool plSqlExecuteMany = false,
+  List<int>? presetOutBindIndices,
 }) {
   final buffer = ReadBuffer(data);
   final state = _DecodeState(
@@ -1170,7 +1335,15 @@ ExecuteResponse decodeExecuteResponse(
     supportsNationalCharset: supportsNationalCharset,
     nationalCharset: nationalCharset,
     previousRoundLastRow: previousRoundLastRow,
+    plSqlExecuteMany: plSqlExecuteMany,
   );
+  // A REEXECUTE response ships no IO_VECTOR (live-capture verified): seed the
+  // OUT bind order from the first execution's response so each per-iteration
+  // ROW_DATA decodes into a row of outBindRows. An IO_VECTOR, if one does
+  // arrive, rebuilds the list exactly as usual.
+  if (presetOutBindIndices != null) {
+    state.outBindIndices.addAll(presetOutBindIndices);
+  }
 
   try {
     while (buffer.hasRemaining && !state.endOfResponse) {
@@ -1204,6 +1377,7 @@ ExecuteResponse decodeExecuteResponse(
     rows: state.rows,
     outBindValues: state.outBindValues,
     outBindIndices: state.outBindIndices,
+    outBindRows: state.outBindRows,
     implicitResults: state.implicitResults,
     rowsAffected: state.rowsAffected,
     moreRowsToFetch: state.moreRowsToFetch,
@@ -1225,6 +1399,7 @@ class _DecodeState {
     this.supportsNationalCharset = true,
     this.nationalCharset = 'AL16UTF16',
     this.previousRoundLastRow,
+    this.plSqlExecuteMany = false,
   }) : cursorColumnIndices = cursorColumnIndicesOf(columns);
 
   final bool isQuery;
@@ -1270,8 +1445,21 @@ class _DecodeState {
   /// all-null first ROW_DATA does not re-enable decoding on a subsequent
   /// ROW_DATA packet. Each decode pass owns its own `_DecodeState`, so this
   /// flag resets naturally between `ttcStreamIsComplete` and
-  /// `decodeExecuteResponse`.
+  /// `decodeExecuteResponse`. Only consulted for single execution — a
+  /// PL/SQL executeMany pass ([plSqlExecuteMany]) decodes EVERY ROW_DATA.
   bool outBindsDecoded = false;
+
+  /// Whether this response belongs to a PL/SQL executeMany request: the
+  /// server ships one OUT-bind ROW_DATA per iteration, each decoded into a
+  /// row of [outBindRows] (node-oracledb processRowData increments rowIndex
+  /// per ROW_DATA and stores per-variable `values[rowIndex]`).
+  final bool plSqlExecuteMany;
+
+  /// Per-iteration OUT bind value rows accumulated when [plSqlExecuteMany]
+  /// is set. Deliberately NOT cleared by the IO_VECTOR reset (node-oracledb
+  /// keeps `variable.values` across a re-sent IO_VECTOR); each decode pass
+  /// owns a fresh `_DecodeState`, so no cross-pass leak is possible.
+  final List<List<Object?>> outBindRows = [];
 
   /// Server-side TNS_CCAP_END_OF_REQUEST capability. On pre-23.4 servers
   /// (false), an ERROR TTC message terminates the response — no STATUS or
@@ -1484,37 +1672,20 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
   // SELECT responses use ROW_DATA after DESCRIBE_INFO + ROW_HEADER to ship
   // result rows. The two never mix on the same statement.
   if (!s.isQuery && s.outBindIndices.isNotEmpty) {
+    if (s.plSqlExecuteMany) {
+      // PL/SQL executeMany: the server ships one ROW_DATA per iteration;
+      // each is decoded as its own row of OUT values (node-oracledb
+      // processRowData stores per-variable values[rowIndex] and increments
+      // rowIndex on every ROW_DATA).
+      s.outBindRows.add(_decodeOutBindRow(buf, s));
+      return;
+    }
     // A single PL/SQL execution produces exactly one ROW_DATA with all
     // OUT bind values. `outBindsDecoded` is the authoritative guard against
     // re-decoding — relying on `outBindValues.isEmpty` would re-enable
     // decode whenever every OUT bind decoded to NULL.
     if (!s.outBindsDecoded) {
-      for (final bindIdx in s.outBindIndices) {
-        if (bindIdx >= s.bindMetadata.length) {
-          // Server returned more OUT slots than the client declared binds.
-          // Consume bytes conservatively so the stream stays aligned.
-          buf.readBytesWithLength();
-          buf.skipSB4();
-          s.outBindValues.add(null);
-          continue;
-        }
-        final meta = s.bindMetadata[bindIdx];
-        final value = _decodeValueByOraType(
-          buf,
-          meta.oraType,
-          strict: s.strictTypes,
-          preserveTimestampTimeZone: s.preserveTimestampTimeZone,
-          csfrm: meta.csfrm,
-          supportsNationalCharset: s.supportsNationalCharset,
-          nationalCharset: s.nationalCharset,
-          outMaxSize: meta.maxSize,
-          ttcFieldVersion: s.ttcFieldVersion,
-        );
-        // After the value bytes, an OUT bind carries an SB4 "actual num bytes"
-        // trailer (matches node-oracledb processColumnData !inFetch path).
-        buf.skipSB4();
-        s.outBindValues.add(value);
-      }
+      s.outBindValues.addAll(_decodeOutBindRow(buf, s));
       s.outBindsDecoded = true;
     }
     return;
@@ -1582,6 +1753,45 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
   // `this.bitVector = null` at the end of processRowData). A stale vector
   // here would skip wire bytes and shear every later column in the batch.
   s.bitVector = null;
+}
+
+/// Decodes one ROW_DATA payload's OUT bind values — one value per entry of
+/// `s.outBindIndices`, in server order — and returns them as a row.
+///
+/// Shared by the single-execute PL/SQL OUT path (exactly one row per
+/// response) and the PL/SQL executeMany path (one row per iteration) so the
+/// two cannot drift. Each value is followed on the wire by an SB4 "actual num
+/// bytes" trailer (node-oracledb processColumnData `!inFetch` path), which is
+/// skipped here.
+List<Object?> _decodeOutBindRow(ReadBuffer buf, _DecodeState s) {
+  final row = <Object?>[];
+  for (final bindIdx in s.outBindIndices) {
+    if (bindIdx >= s.bindMetadata.length) {
+      // Server returned more OUT slots than the client declared binds.
+      // Consume bytes conservatively so the stream stays aligned.
+      buf.readBytesWithLength();
+      buf.skipSB4();
+      row.add(null);
+      continue;
+    }
+    final meta = s.bindMetadata[bindIdx];
+    final value = _decodeValueByOraType(
+      buf,
+      meta.oraType,
+      strict: s.strictTypes,
+      preserveTimestampTimeZone: s.preserveTimestampTimeZone,
+      csfrm: meta.csfrm,
+      supportsNationalCharset: s.supportsNationalCharset,
+      nationalCharset: s.nationalCharset,
+      outMaxSize: meta.maxSize,
+      ttcFieldVersion: s.ttcFieldVersion,
+    );
+    // After the value bytes, an OUT bind carries an SB4 "actual num bytes"
+    // trailer (matches node-oracledb processColumnData !inFetch path).
+    buf.skipSB4();
+    row.add(value);
+  }
+  return row;
 }
 
 /// Decodes one length-prefixed value from [buf] using the Oracle type indicator

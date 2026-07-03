@@ -9,6 +9,7 @@ import 'crypto/auth.dart';
 import 'errors.dart';
 import 'oracle_bind.dart';
 import 'oracle_charset_info.dart';
+import 'oracle_timestamp_tz.dart';
 import 'protocol/bind_parser.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/data_types.dart' as dt;
@@ -94,6 +95,43 @@ class OracleExecuteOptions {
   /// DML / OUT binds (there is no row set to cap). A negative value throws
   /// [ArgumentError] before any wire round trip.
   final int maxRows;
+}
+
+/// Per-call options for [OracleConnection.executeMany].
+///
+/// Pass as the third (optional positional) argument to [executeMany]:
+/// ```dart
+/// final result = await connection.executeMany(
+///   'BEGIN story_double(:1, :2); END;',
+///   [
+///     [10],
+///     [20],
+///   ],
+///   OracleExecuteManyOptions(bindDefs: [
+///     OracleBindDef.input(type: OracleDbType.number),
+///     OracleBindDef.output(type: OracleDbType.number),
+///   ]),
+/// );
+/// ```
+class OracleExecuteManyOptions {
+  const OracleExecuteManyOptions({this.bindDefs});
+
+  /// Metadata-only bind definitions for the statement's placeholders
+  /// (node-oracledb `bindDefs` parity). Only supported for PL/SQL blocks in
+  /// this driver; array DML infers its IN bind shapes from the row values.
+  ///
+  /// Shape must match the SQL's bind style:
+  /// - positional SQL (`:1`, `:2`, ...) takes a `List<OracleBindDef>` with
+  ///   exactly one definition per placeholder, in placeholder order;
+  /// - named SQL (`:name`) takes a `Map<String, OracleBindDef>` with exactly
+  ///   one definition per distinct placeholder name.
+  ///
+  /// When provided, the definitions are authoritative: every placeholder must
+  /// be defined, input values are validated against the declared types, and
+  /// OUT-only binds need no per-row entries. When omitted, all placeholders
+  /// are inferred as IN binds from the row values (Story 11.1 rules). Any
+  /// other object shape fails loud before a wire round trip.
+  final Object? bindDefs;
 }
 
 /// A connection to an Oracle database.
@@ -412,6 +450,45 @@ class OracleConnection {
       }
     }
     return OracleOutBinds(values: values, names: names);
+  }
+
+  /// Builds the row-major [OracleOutBinds] for a PL/SQL `executeMany()`
+  /// result: one entry per iteration (node-oracledb parity), where each entry
+  /// is the iteration's ordered OUT/IN OUT values (positional SQL —
+  /// `List<Object?>` in bind order) or its named values (named SQL —
+  /// `Map<String, Object?>` keyed by bind name, repeated names mapped to
+  /// their first SQL occurrence exactly like single execution).
+  static OracleOutBinds _buildExecuteManyOutBinds({
+    required List<int> outBindIndices,
+    required List<List<Object?>> outBindRows,
+    required Map<String, int>? outBindNameIndex,
+  }) {
+    if (outBindRows.isEmpty || outBindIndices.isEmpty) {
+      return const OracleOutBinds.empty();
+    }
+    if (outBindNameIndex == null) {
+      return OracleOutBinds(
+        values: [
+          for (final row in outBindRows) List<Object?>.unmodifiable(row),
+        ],
+      );
+    }
+    // Map original bind index → name (first occurrence wins, mirroring the
+    // single-execute name resolution).
+    final indexToName = <int, String>{};
+    outBindNameIndex.forEach((name, idx) {
+      indexToName[idx] = name;
+    });
+    return OracleOutBinds(
+      values: [
+        for (final row in outBindRows)
+          Map<String, Object?>.unmodifiable(<String, Object?>{
+            for (var j = 0; j < outBindIndices.length; j++)
+              if (indexToName[outBindIndices[j]] != null)
+                indexToName[outBindIndices[j]]!: row[j],
+          }),
+      ],
+    );
   }
 
   /// Wraps a decoded `SYS_REFCURSOR` OUT bind ([DecodedCursorResult]) into a
@@ -992,10 +1069,13 @@ class OracleConnection {
     }
   }
 
-  /// Executes one DML statement (INSERT, UPDATE, DELETE, or MERGE) once per
-  /// row of bind values in a **single wire round trip** — Oracle array DML.
+  /// Executes one statement multiple times in a **single wire round trip**:
+  /// Oracle array DML for INSERT/UPDATE/DELETE/MERGE, and repeated PL/SQL
+  /// execution with per-iteration IN, OUT, and IN OUT binds (node-oracledb
+  /// `executeMany` parity).
   ///
   /// ```dart
+  /// // Array DML: one INSERT executed once per row.
   /// final result = await connection.executeMany(
   ///   'INSERT INTO emp (id, name) VALUES (:1, :2)',
   ///   [
@@ -1007,28 +1087,78 @@ class OracleConnection {
   /// print('Inserted ${result.rowsAffected} rows'); // 3
   /// ```
   ///
-  /// [rows] must be non-empty and every element must match the SQL's bind
-  /// style:
+  /// [rowsOrNumIterations] is either a non-empty rows list (one entry per
+  /// iteration) or — for PL/SQL blocks with no IN bind values — a positive
+  /// `int` iteration count (the node-oracledb `numIterations` form). Every
+  /// row must match the SQL's bind style:
   /// - positional placeholders (`:1`, `:2`, ...) take `List<Object?>` rows.
   ///   A row may be *shorter* than the placeholder count — missing trailing
-  ///   values bind SQL NULL; a longer row fails before any wire call.
+  ///   values bind SQL NULL (and trailing OUT-only slots are simply
+  ///   omitted); a longer row fails before any wire call.
   /// - named placeholders (`:name`) take `Map<String, Object?>` rows. Omitted
   ///   keys bind SQL NULL; keys with no matching placeholder fail before any
   ///   wire call. A repeated `:name` placeholder reuses the same per-row
-  ///   value.
+  ///   value (in a PL/SQL block it is a single bind variable, Oracle's PL/SQL
+  ///   bind-by-name rule). OUT-only names need no per-row entries.
   ///
-  /// Each slot's Oracle bind type is inferred from the first non-null value
-  /// and must stay consistent across all rows (`int` and `double` both bind
-  /// as NUMBER); string/RAW slots are sized to the largest value across all
-  /// rows. A slot whose values are all NULL binds as VARCHAR2 with size 1
-  /// (node-oracledb parity). All row-shape and type validation happens before
-  /// any wire round trip, and bind values are never included in error
-  /// messages or logs.
+  /// For array DML, each slot's Oracle bind type is inferred from the first
+  /// non-null value and must stay consistent across all rows (`int` and
+  /// `double` both bind as NUMBER); string/RAW slots are sized to the largest
+  /// value across all rows. A slot whose values are all NULL binds as
+  /// VARCHAR2 with size 1 (node-oracledb parity). All row-shape and type
+  /// validation happens before any wire round trip, and bind values are never
+  /// included in error messages or logs.
   ///
-  /// Returns an [OracleResult] whose [OracleResult.rowsAffected] is the
-  /// **total** row count affected across all iterations. [OracleResult.rows],
-  /// [OracleResult.outBinds], and [OracleResult.implicitResults] are always
-  /// empty for array DML.
+  /// ## PL/SQL blocks
+  ///
+  /// A `BEGIN` / `DECLARE` / `CALL` statement executes once per row (or
+  /// [numIterations] times). OUT and IN OUT placeholders are declared once,
+  /// via metadata-only [OracleBindDef] definitions in
+  /// [OracleExecuteManyOptions.bindDefs] — never repeated inside each row:
+  ///
+  /// ```dart
+  /// final result = await connection.executeMany(
+  ///   'BEGIN story_double(:1, :2); END;',
+  ///   [
+  ///     [10],
+  ///     [20],
+  ///   ],
+  ///   OracleExecuteManyOptions(bindDefs: [
+  ///     OracleBindDef.input(type: OracleDbType.number),
+  ///     OracleBindDef.output(type: OracleDbType.number),
+  ///   ]),
+  /// );
+  /// print(result.outBinds.toList()); // [[20], [40]] — one entry per iteration
+  /// ```
+  ///
+  /// When bind definitions are provided they must cover **every**
+  /// placeholder, and input values are validated against the declared types
+  /// before any wire round trip. IN OUT binds take one input value per
+  /// iteration (an omitted key / short row binds SQL NULL) and return one
+  /// output value per iteration. Without definitions, all placeholders are
+  /// inferred as IN binds from the row values.
+  ///
+  /// PL/SQL OUT results are **row-major** (node-oracledb parity):
+  /// `result.outBinds.toList()` holds one entry per iteration — a
+  /// `List<Object?>` of the iteration's OUT/IN OUT values in bind order for
+  /// positional SQL, or a `Map<String, Object?>` keyed by bind name for named
+  /// SQL. [OracleResult.rowsAffected] is `null` for PL/SQL.
+  ///
+  /// The positive-int `numIterations` form runs a PL/SQL block that needs no
+  /// per-iteration input — bind-free, or all-OUT bind definitions:
+  ///
+  /// ```dart
+  /// final result = await connection.executeMany(
+  ///   'BEGIN :seq := story_next_value(); END;',
+  ///   3,
+  ///   OracleExecuteManyOptions(bindDefs: {
+  ///     'seq': OracleBindDef.output(type: OracleDbType.number),
+  ///   }),
+  /// );
+  /// ```
+  ///
+  /// Zero, negative, or non-integer iteration counts — and the numeric form
+  /// on non-PL/SQL statements — fail before any wire round trip.
   ///
   /// ## Transaction behavior
   ///
@@ -1036,30 +1166,36 @@ class OracleConnection {
   /// auto-committed — call `commit()` (or `rollback()`) exactly as after
   /// [execute]. If an iteration fails, the error is thrown and the remaining
   /// iterations are not applied; iterations that already executed remain
-  /// pending in the transaction (Oracle array-DML semantics without
+  /// pending in the transaction (Oracle array semantics without
   /// `batchErrors`), so roll back if partial application is unacceptable.
   ///
   /// ## Scope
   ///
-  /// This is array DML with IN binds only (node-oracledb `executeMany`
-  /// parity for the DML case). The following fail loudly:
+  /// The following fail loudly before any wire round trip:
   /// - SELECT / `WITH ... SELECT` queries — use [execute], [executeStream],
   ///   or [openResultSet] instead (queries have no array form).
-  /// - PL/SQL blocks and the bind-free `numIterations` form (planned:
-  ///   Epic 11 Story 11.2).
-  /// - [OracleBind] specs / OUT binds / DML RETURNING (planned: Epic 11
-  ///   Stories 11.2 and 11.4). Per-row `batchErrors` / `dmlRowCounts`
-  ///   result shapes are Story 11.3 scope and not implemented.
+  /// - DML `RETURNING ... INTO` (array OUT binds) — planned: Epic 11
+  ///   Story 11.4. Per-row `batchErrors` / `dmlRowCounts` result shapes are
+  ///   Story 11.3 scope and not implemented.
+  /// - [OracleBind] value specs inside rows — declare [OracleBindDef]
+  ///   definitions in [OracleExecuteManyOptions.bindDefs] instead.
+  /// - `SYS_REFCURSOR` OUT binds and PL/SQL collection (associative array)
+  ///   binds — unsupported under executeMany.
   ///
   /// The concurrency contract, statement caching, and connection lifecycle
-  /// behavior are identical to [execute].
-  Future<OracleResult> executeMany(String sql, List<Object> rows) async {
+  /// behavior are identical to [execute] (PL/SQL blocks are never
+  /// statement-cached, exactly as with [execute]).
+  Future<OracleResult> executeMany(
+    String sql,
+    Object rowsOrNumIterations, [
+    OracleExecuteManyOptions? options,
+  ]) async {
     _ensureOpen();
     _rejectConcurrentOperation();
 
     // All validation and row normalization happens here, before any wire
     // round trip: no cursor is opened or cached for a rejected call.
-    final bulk = _prepareExecuteMany(sql, rows);
+    final bulk = _prepareExecuteMany(sql, rowsOrNumIterations, options);
 
     _executeInProgress = true;
     try {
@@ -1069,20 +1205,49 @@ class OracleConnection {
     }
   }
 
-  /// Validates and normalizes an [executeMany] call — statement
-  /// classification, row shapes, per-slot type inference, and string/RAW
-  /// sizing — into a [_BulkDml] ready for the wire. Throws before any wire
-  /// round trip on any unsupported shape; never includes bind values in
-  /// error messages.
-  _BulkDml _prepareExecuteMany(String sql, List<Object> rows) {
-    if (rows.isEmpty) {
+  /// Validates and normalizes an [executeMany] call — call-form resolution
+  /// (rows list vs `numIterations`), statement classification, row shapes,
+  /// bind definitions, per-slot type inference, and string/RAW sizing — into
+  /// an [_ExecuteManyCall] ready for the wire. Throws before any wire round
+  /// trip on any unsupported shape; never includes bind values in error
+  /// messages.
+  _ExecuteManyCall _prepareExecuteMany(
+    String sql,
+    Object rowsOrNumIterations,
+    OracleExecuteManyOptions? options,
+  ) {
+    // Resolve the call form first: a rows list or a positive iteration count.
+    List<Object?>? rows;
+    int? numIterations;
+    final rowsOrN = rowsOrNumIterations;
+    if (rowsOrN is int) {
+      if (rowsOrN <= 0) {
+        throw ArgumentError.value(
+          rowsOrN,
+          'rowsOrNumIterations',
+          'numIterations must be a positive integer',
+        );
+      }
+      numIterations = rowsOrN;
+    } else if (rowsOrN is List && rowsOrN is! Uint8List) {
+      if (rowsOrN.isEmpty) {
+        throw ArgumentError.value(
+          rowsOrN,
+          'rows',
+          'must not be empty: executeMany() needs at least one row of bind '
+              'values',
+        );
+      }
+      rows = rowsOrN;
+    } else {
       throw ArgumentError.value(
-        rows,
-        'rows',
-        'must not be empty: executeMany() needs at least one row of bind '
-            'values',
+        rowsOrN,
+        'rowsOrNumIterations',
+        'must be a non-empty List of bind rows (a List or Map per row) or a '
+            'positive int iteration count (numIterations, PL/SQL only)',
       );
     }
+
     if (isQuerySql(sql)) {
       throw OracleException(
         errorCode: oraProtocolError,
@@ -1093,13 +1258,31 @@ class OracleConnection {
         sql: sql,
       );
     }
+
     if (isPlSqlSql(sql)) {
+      return _prepareBulkPlSql(sql, rows, numIterations, options);
+    }
+
+    // ---- SQL array DML path (Story 11.1 semantics, unchanged). ----
+    if (numIterations != null) {
       throw OracleException(
         errorCode: oraProtocolError,
         message:
-            'executeMany() for PL/SQL blocks (bulk PL/SQL array binds) is '
-            'not supported yet — planned for Epic 11 Story 11.2. Use '
-            'execute() per call for now. [SQL: ${_truncateSql(sql)}]',
+            'The numIterations form of executeMany() is only supported for '
+            'PL/SQL blocks (bind-free or all-OUT bind definitions); array '
+            'DML requires a non-empty rows list. '
+            '[SQL: ${_truncateSql(sql)}]',
+        sql: sql,
+      );
+    }
+    if (options?.bindDefs != null) {
+      throw OracleException(
+        errorCode: oraBindTypeError,
+        message:
+            'executeMany() bind definitions '
+            '(OracleExecuteManyOptions.bindDefs) are only supported for '
+            'PL/SQL blocks; DML OUT binds (RETURNING ... INTO) are planned '
+            'for Epic 11 Story 11.4. [SQL: ${_truncateSql(sql)}]',
         sql: sql,
       );
     }
@@ -1117,7 +1300,13 @@ class OracleConnection {
         sql: sql,
       );
     }
+    return _prepareBulkDml(sql, rows!);
+  }
 
+  /// Normalizes an array-DML [executeMany] call (Story 11.1 semantics):
+  /// row shapes, per-slot IN type inference, and string/RAW sizing. The SQL
+  /// is already classified as non-query, non-PL/SQL, RETURNING-free.
+  _ExecuteManyCall _prepareBulkDml(String sql, List<Object?> rows) {
     // Bind style comes from the SQL text (isNamedBinds throws on a mix of
     // :name and :1 placeholders); every row must then match it.
     final named = BindParser.isNamedBinds(sql);
@@ -1135,9 +1324,10 @@ class OracleConnection {
       throw const OracleException(
         errorCode: oraBindMismatch,
         message:
-            'executeMany() requires at least one bind placeholder in the '
-            'SQL; iterating a bind-free statement (the numIterations form) '
-            'is not supported yet — planned for Epic 11 Story 11.2.',
+            'executeMany() with a rows list requires at least one bind '
+            'placeholder in the SQL; the positive-int numIterations form '
+            'iterates bind-free statements, and is supported for PL/SQL '
+            'blocks only.',
       );
     }
     final distinctNames = named ? bindNames.toSet() : const <String>{};
@@ -1217,10 +1407,44 @@ class OracleConnection {
       }
     }
 
-    // Infer one uniform Oracle wire type per slot from the first non-null
-    // value across rows, enforce cross-row consistency, and track the
-    // largest string/RAW byte length so the single bind-metadata block can
-    // declare a size covering every iteration.
+    final (slots, bindMetadata) = _buildInferredSlots(
+      normalized,
+      slotCount: slotCount,
+      named: named,
+      bindNames: bindNames,
+      plSql: false,
+    );
+
+    return _ExecuteManyCall(
+      stmt: _PreparedStatement(
+        bindList: slots,
+        bindNames: named ? bindNames : null,
+        outBindNameIndex: null,
+        bindMetadata: bindMetadata,
+        isQuery: false,
+        isPlSql: false,
+        eligible: isCacheEligibleSql(sql),
+        cacheKey: StatementCacheKey(sql, _bindSignature(bindMetadata)),
+      ),
+      rows: normalized,
+      numIterations: normalized.length,
+    );
+  }
+
+  /// Infers one uniform Oracle wire type per slot from the first non-null
+  /// value across [normalized] rows, enforces cross-row consistency, and
+  /// tracks the largest string/RAW byte length so the single bind-metadata
+  /// block can declare a size covering every iteration — the Story 11.1
+  /// IN-bind inference, shared verbatim by array DML and by PL/SQL
+  /// executeMany without bind definitions ([plSql] adjusts only the
+  /// error-message guidance and adds the PL/SQL VARCHAR byte cap).
+  (List<BindVariable>, List<BindMetadata>) _buildInferredSlots(
+    List<List<Object?>> normalized, {
+    required int slotCount,
+    required bool named,
+    required List<String> bindNames,
+    required bool plSql,
+  }) {
     final slotTypes = List<int?>.filled(slotCount, null);
     final slotMaxBytes = List<int>.filled(slotCount, 0);
     for (var r = 0; r < normalized.length; r++) {
@@ -1232,10 +1456,15 @@ class OracleConnection {
         if (value is OracleBind) {
           throw OracleException(
             errorCode: oraBindTypeError,
-            message:
-                'executeMany() does not support OracleBind specs '
-                '(row $r, $slotLabel): OUT/IN OUT binds and DML RETURNING '
-                'are planned for Epic 11 Stories 11.2 and 11.4.',
+            message: plSql
+                ? 'executeMany() does not accept OracleBind values inside '
+                      'rows (row $r, $slotLabel): declare OUT/IN OUT binds '
+                      'once via OracleExecuteManyOptions(bindDefs: ...) '
+                      'using OracleBindDef instead.'
+                : 'executeMany() does not support OracleBind specs '
+                      '(row $r, $slotLabel): DML OUT binds '
+                      '(RETURNING ... INTO) are planned for Epic 11 '
+                      'Story 11.4.',
           );
         }
         final oraType = dt.inferOraTypeForValue(value);
@@ -1293,6 +1522,21 @@ class OracleConnection {
           }
         } else if (value is String) {
           final len = utf8.encode(value).length;
+          if (plSql && len > oc.ttcMaxVarcharBindBytes) {
+            // A PL/SQL VARCHAR bind caps at 32767 bytes. Scalar execute()
+            // silently converts oversized strings to temporary CLOBs, but an
+            // executeMany slot's inferred type must stay uniform across all
+            // iterations — fail loud with the working alternative instead.
+            throw OracleException(
+              errorCode: oraBindTypeError,
+              message:
+                  'String value in executeMany() row $r, $slotLabel exceeds '
+                  'the ${oc.ttcMaxVarcharBindBytes}-byte PL/SQL VARCHAR bind '
+                  'limit; declare an '
+                  'OracleBindDef.input(type: OracleDbType.clob, ...) for '
+                  'this bind instead.',
+            );
+          }
           if (len > slotMaxBytes[s]) slotMaxBytes[s] = len;
         } else if (value is Uint8List) {
           if (value.length > slotMaxBytes[s]) slotMaxBytes[s] = value.length;
@@ -1318,20 +1562,502 @@ class OracleConnection {
       // block, so cursor reuse never depends on it.
       bindMetadata.add(BindMetadata(oraType: oraType, dir: BindDir.input));
     }
+    return (slots, bindMetadata);
+  }
 
-    return _BulkDml(
+  /// Normalizes a PL/SQL [executeMany] call: bind-definition resolution, the
+  /// `numIterations` form (bind-free or all-OUT), row normalization with
+  /// omitted OUT-only slots, and per-slot template building. The SQL is
+  /// already classified as PL/SQL.
+  _ExecuteManyCall _prepareBulkPlSql(
+    String sql,
+    List<Object?>? rows,
+    int? numIterations,
+    OracleExecuteManyOptions? options,
+  ) {
+    // Bind style comes from the SQL text (isNamedBinds throws on a mix of
+    // :name and :1 placeholders).
+    final named = BindParser.isNamedBinds(sql);
+    final List<String> bindNames;
+    final int slotCount;
+    if (named) {
+      // PL/SQL binds by NAME: a repeated :name placeholder is a SINGLE bind
+      // variable, so the slot list holds each distinct name once, in
+      // first-occurrence order (node-oracledb statement.js _addBind skips
+      // duplicate names for PL/SQL; sending per-occurrence duplicate slots
+      // draws ORA-01006). SQL DML differs — there every occurrence is its
+      // own slot.
+      final occurrences = BindParser.parseNamedBinds(sql);
+      final seen = <String>{};
+      bindNames = [
+        for (final n in occurrences)
+          if (seen.add(n)) n,
+      ];
+      slotCount = bindNames.length;
+    } else {
+      bindNames = const [];
+      // Validates positional placeholders are sequential from :1.
+      slotCount = BindParser.parsePositionalBinds(sql);
+    }
+    final distinctNames = named ? bindNames.toSet() : const <String>{};
+
+    // Resolve bind definitions into one definition per slot occurrence, in
+    // SQL order (repeated named placeholders share their name's definition).
+    final defsRaw = options?.bindDefs;
+    List<OracleBindDef>? slotDefs;
+    if (defsRaw != null) {
+      if (slotCount == 0) {
+        throw const OracleException(
+          errorCode: oraBindMismatch,
+          message:
+              'executeMany() bindDefs were provided but the PL/SQL block has '
+              'no bind placeholders.',
+        );
+      }
+      if (named) {
+        if (defsRaw is! Map<String, OracleBindDef>) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'executeMany() bindDefs must be a Map<String, OracleBindDef> '
+                'for named-bind SQL (got ${defsRaw.runtimeType}).',
+          );
+        }
+        for (final key in defsRaw.keys) {
+          if (!distinctNames.contains(key)) {
+            throw OracleException(
+              errorCode: oraBindMismatch,
+              message:
+                  'executeMany() bindDefs contains ":$key" with no matching '
+                  'placeholder in the SQL. Placeholders: '
+                  '${distinctNames.map((n) => ':$n').join(', ')}.',
+            );
+          }
+        }
+        for (final name in distinctNames) {
+          if (!defsRaw.containsKey(name)) {
+            throw OracleException(
+              errorCode: oraBindMismatch,
+              message:
+                  'executeMany() bindDefs is missing a definition for '
+                  '":$name" — when bindDefs is provided it must define every '
+                  'placeholder.',
+            );
+          }
+        }
+        slotDefs = [for (final n in bindNames) defsRaw[n]!];
+      } else {
+        if (defsRaw is! List<OracleBindDef>) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'executeMany() bindDefs must be a List<OracleBindDef> for '
+                'positional-bind SQL (got ${defsRaw.runtimeType}).',
+          );
+        }
+        if (defsRaw.length != slotCount) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message:
+                'executeMany() bindDefs has ${defsRaw.length} definition'
+                '${defsRaw.length == 1 ? '' : 's'} but the SQL has $slotCount '
+                'positional placeholder${slotCount == 1 ? '' : 's'} — when '
+                'bindDefs is provided it must define every placeholder.',
+          );
+        }
+        slotDefs = defsRaw;
+      }
+    }
+
+    // Resolve the numIterations form (bind-free, or all-OUT definitions)
+    // into normalized rows; a rows-list call normalizes the caller's rows.
+    final List<List<Object?>> normalized;
+    if (numIterations != null) {
+      if (slotDefs == null && slotCount > 0) {
+        throw OracleException(
+          errorCode: oraBindMismatch,
+          message:
+              'executeMany() numIterations form: the PL/SQL block has '
+              '$slotCount bind placeholder${slotCount == 1 ? '' : 's'} but '
+              'no bind definitions; pass rows of input values, or declare '
+              'all-OUT OracleBindDef definitions via '
+              'OracleExecuteManyOptions(bindDefs: ...).',
+        );
+      }
+      if (slotDefs != null) {
+        for (var s = 0; s < slotDefs.length; s++) {
+          if (slotDefs[s].direction != BindDir.output) {
+            throw OracleException(
+              errorCode: oraBindMismatch,
+              message:
+                  'executeMany() numIterations form supports bind-free or '
+                  'all-OUT PL/SQL only; '
+                  '${named ? 'bind ":${bindNames[s]}"' : 'bind :${s + 1}'} '
+                  'is declared '
+                  '${slotDefs[s].direction == BindDir.input ? 'input' : 'inputOutput'}'
+                  ' — pass rows of input values instead.',
+            );
+          }
+        }
+      }
+      if (slotCount == 0) {
+        // Bind-free: no bind slots and no per-iteration ROW_DATA — the
+        // iteration count alone travels in the execution-count slot
+        // (al8i4[1]).
+        return _ExecuteManyCall(
+          stmt: _PreparedStatement(
+            bindList: null,
+            bindNames: null,
+            outBindNameIndex: null,
+            bindMetadata: null,
+            isQuery: false,
+            isPlSql: true,
+            eligible: isCacheEligibleSql(sql),
+            cacheKey: StatementCacheKey(sql, _bindSignature(null)),
+          ),
+          rows: null,
+          numIterations: numIterations,
+        );
+      }
+      // All-OUT: one all-null value row per iteration — each iteration's
+      // ROW_DATA carries only OUT placeholders (null indicators), matching
+      // node-oracledb's per-row encoding of value-less OUT variables.
+      normalized = List.generate(
+        numIterations,
+        (_) => List<Object?>.filled(slotCount, null),
+      );
+    } else {
+      normalized = _normalizePlSqlRows(
+        rows!,
+        named: named,
+        bindNames: bindNames,
+        slotCount: slotCount,
+        distinctNames: distinctNames,
+        slotDefs: slotDefs,
+      );
+    }
+
+    // Build the per-slot wire templates and decoder metadata: from declared
+    // definitions when provided (with input values validated against them),
+    // else via the shared Story 11.1 IN-bind inference.
+    final List<BindVariable> slots;
+    final List<BindMetadata> bindMetadata;
+    if (slotDefs != null) {
+      for (var r = 0; r < normalized.length; r++) {
+        for (var s = 0; s < slotCount; s++) {
+          _validateDefValue(
+            slotDefs[s],
+            normalized[r][s],
+            rowIndex: r,
+            slotLabel: named ? 'bind ":${bindNames[s]}"' : 'bind :${s + 1}',
+          );
+        }
+      }
+      slots = <BindVariable>[];
+      bindMetadata = <BindMetadata>[];
+      for (var s = 0; s < slotCount; s++) {
+        final def = slotDefs[s];
+        final isNChar = def.isNChar;
+        // National types need the AL16UTF16 national charset (same guard as
+        // the single-execute OracleBind path).
+        final charsetInfo = _charsetInfo;
+        if (isNChar &&
+            charsetInfo != null &&
+            !charsetInfo.supportsNationalCharacterSet) {
+          throw OracleException(
+            errorCode: oc.oraUnsupportedType,
+            message:
+                'NCHAR/NVARCHAR2/NCLOB binds require the '
+                '${OracleCharsetInfo.supportedNationalCharset} national '
+                'character set; this connection negotiated '
+                '${charsetInfo.nationalCharset}.',
+          );
+        }
+        // Input-only sized slots may omit maxSize: size them from the
+        // largest value across rows (Story 11.1 rule; minimum 1). Declared
+        // maxSize — required whenever the bind returns values — wins.
+        var maxSize = def.maxSize;
+        if (maxSize == null &&
+            (def.type == OracleDbType.varchar ||
+                def.type == OracleDbType.nVarchar ||
+                def.type == OracleDbType.raw)) {
+          var largest = 0;
+          for (final row in normalized) {
+            final v = row[s];
+            if (v is String) {
+              // nVarchar sizes in UTF-16 code units; varchar in UTF-8 bytes.
+              final len = def.type == OracleDbType.nVarchar
+                  ? v.length
+                  : utf8.encode(v).length;
+              if (len > largest) largest = len;
+            } else if (v is Uint8List && v.length > largest) {
+              largest = v.length;
+            }
+          }
+          maxSize = largest > 0 ? largest : 1;
+        }
+        slots.add(
+          BindVariable(
+            value: null,
+            oraType: def.oracleTypeCode,
+            maxSize: maxSize,
+            dir: def.direction,
+            isNChar: isNChar,
+          ),
+        );
+        bindMetadata.add(
+          BindMetadata(
+            oraType: def.oracleTypeCode,
+            maxSize: def.maxSize,
+            dir: def.direction,
+            csfrm: isNChar ? oc.ttcCsfrmNChar : 0,
+          ),
+        );
+      }
+    } else {
+      (slots, bindMetadata) = _buildInferredSlots(
+        normalized,
+        slotCount: slotCount,
+        named: named,
+        bindNames: bindNames,
+        plSql: true,
+      );
+    }
+
+    // First-occurrence position per name, so row-major named OUT results can
+    // be keyed by bind name (repeated names map to their first occurrence,
+    // mirroring the single-execute semantics).
+    Map<String, int>? outBindNameIndex;
+    if (named) {
+      outBindNameIndex = <String, int>{};
+      for (var i = 0; i < bindNames.length; i++) {
+        outBindNameIndex.putIfAbsent(bindNames[i], () => i);
+      }
+    }
+
+    return _ExecuteManyCall(
       stmt: _PreparedStatement(
         bindList: slots,
         bindNames: named ? bindNames : null,
-        outBindNameIndex: null,
+        outBindNameIndex: outBindNameIndex,
         bindMetadata: bindMetadata,
         isQuery: false,
-        isPlSql: false,
+        isPlSql: true,
+        // PL/SQL is never cache-eligible; the classifier owns that rule.
         eligible: isCacheEligibleSql(sql),
         cacheKey: StatementCacheKey(sql, _bindSignature(bindMetadata)),
       ),
       rows: normalized,
+      numIterations: normalized.length,
     );
+  }
+
+  /// Normalizes PL/SQL executeMany rows into slot-ordered value lists (one
+  /// slot per SQL placeholder occurrence). Reuses the Story 11.1 row-shape
+  /// rules — positional rows pad missing trailing values with SQL NULL,
+  /// named rows bind SQL NULL for omitted keys and reject unknown keys — and
+  /// additionally rejects a non-null value supplied for an OUT-only bind
+  /// (OUT binds return values; they take no per-iteration input).
+  List<List<Object?>> _normalizePlSqlRows(
+    List<Object?> rows, {
+    required bool named,
+    required List<String> bindNames,
+    required int slotCount,
+    required Set<String> distinctNames,
+    required List<OracleBindDef>? slotDefs,
+  }) {
+    if (slotCount == 0) {
+      throw const OracleException(
+        errorCode: oraBindMismatch,
+        message:
+            'executeMany() with a rows list requires at least one bind '
+            'placeholder in the SQL; use the positive-int numIterations form '
+            'to iterate a bind-free PL/SQL block.',
+      );
+    }
+    final normalized = <List<Object?>>[];
+    for (var r = 0; r < rows.length; r++) {
+      final row = rows[r];
+      if (named) {
+        if (row is! Map) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'executeMany() row $r is ${row.runtimeType}, but the SQL '
+                'uses named binds (:name) so every row must be a '
+                'Map<String, Object?>.',
+          );
+        }
+        final rowValues = <String, Object?>{};
+        for (final entry in row.entries) {
+          final key = entry.key;
+          if (key is! String) {
+            throw OracleException(
+              errorCode: oraBindTypeError,
+              message:
+                  'executeMany() row $r has a bind key of type '
+                  '${key.runtimeType}; named rows must be '
+                  'Map<String, Object?>.',
+            );
+          }
+          if (!distinctNames.contains(key)) {
+            throw OracleException(
+              errorCode: oraBindMismatch,
+              message:
+                  'executeMany() row $r contains bind key ":$key" with no '
+                  'matching placeholder in the SQL. Placeholders: '
+                  '${distinctNames.map((n) => ':$n').join(', ')}.',
+            );
+          }
+          rowValues[key] = entry.value;
+        }
+        if (slotDefs != null) {
+          for (var s = 0; s < slotCount; s++) {
+            if (slotDefs[s].direction == BindDir.output &&
+                rowValues[bindNames[s]] != null) {
+              throw OracleException(
+                errorCode: oraBindMismatch,
+                message:
+                    'executeMany() row $r supplies a value for OUT-only '
+                    'bind ":${bindNames[s]}"; OUT binds return values and '
+                    'take no per-iteration input — omit the key or pass '
+                    'null.',
+              );
+            }
+          }
+        }
+        // Omitted keys bind SQL NULL (rowValues[name] is null for them).
+        normalized.add([for (final name in bindNames) rowValues[name]]);
+      } else {
+        if (row is Map) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message:
+                'executeMany() row $r is a Map, but the SQL uses positional '
+                'binds (:1, :2, ...) so every row must be a List<Object?>. '
+                'Use :name placeholders for Map rows.',
+          );
+        }
+        if (row is! List || row is Uint8List) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'executeMany() row $r is ${row.runtimeType}; positional '
+                'rows must be List<Object?>.',
+          );
+        }
+        if (row.length > slotCount) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message:
+                'executeMany() row $r has ${row.length} values but the SQL '
+                'has only $slotCount positional placeholder'
+                '${slotCount == 1 ? '' : 's'}.',
+          );
+        }
+        // Rows shorter than the placeholder count bind SQL NULL for the
+        // missing trailing slots (which is how trailing OUT-only slots are
+        // omitted).
+        final values = <Object?>[
+          for (var s = 0; s < slotCount; s++) s < row.length ? row[s] : null,
+        ];
+        if (slotDefs != null) {
+          for (var s = 0; s < slotCount; s++) {
+            if (slotDefs[s].direction == BindDir.output &&
+                values[s] != null) {
+              throw OracleException(
+                errorCode: oraBindMismatch,
+                message:
+                    'executeMany() row $r supplies a value for OUT-only '
+                    'bind :${s + 1}; OUT binds return values and take no '
+                    'per-iteration input — omit trailing OUT slots or pass '
+                    'null.',
+              );
+            }
+          }
+        }
+        normalized.add(values);
+      }
+    }
+    return normalized;
+  }
+
+  /// Validates one row value against its slot's declared [OracleBindDef]
+  /// before any wire round trip, so a mismatched Dart runtime type fails at
+  /// the call site instead of as a cast error mid-encode. Never includes the
+  /// bind value in the error message. `null` is always valid (SQL NULL input
+  /// or an OUT placeholder).
+  void _validateDefValue(
+    OracleBindDef def,
+    Object? value, {
+    required int rowIndex,
+    required String slotLabel,
+  }) {
+    if (value == null) return;
+    Never mismatch(String expected) => throw OracleException(
+      errorCode: oraBindTypeError,
+      message:
+          'executeMany() row $rowIndex, $slotLabel is declared '
+          'OracleDbType.${def.type.name} but the value is '
+          '${value.runtimeType}; expected $expected or null.',
+    );
+    switch (def.type) {
+      case OracleDbType.number:
+        if (value is! num) mismatch('int or double');
+        if (value is double && !value.isFinite) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'Non-finite NUMBER value (NaN or Infinity) in executeMany() '
+                'row $rowIndex, $slotLabel; Oracle NUMBER can only bind '
+                'finite values.',
+          );
+        }
+      case OracleDbType.varchar:
+        if (value is! String) mismatch('String');
+        final len = utf8.encode(value).length;
+        if (len > oc.ttcMaxVarcharBindBytes) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'String value in executeMany() row $rowIndex, $slotLabel '
+                'exceeds the ${oc.ttcMaxVarcharBindBytes}-byte PL/SQL '
+                'VARCHAR bind limit; declare an '
+                'OracleBindDef with OracleDbType.clob for this bind '
+                'instead.',
+          );
+        }
+      case OracleDbType.nVarchar:
+      case OracleDbType.clob:
+      case OracleDbType.nClob:
+        if (value is! String) mismatch('String');
+      case OracleDbType.raw:
+      case OracleDbType.blob:
+        if (value is! Uint8List) mismatch('Uint8List');
+      case OracleDbType.date:
+      case OracleDbType.timestamp:
+        if (value is! DateTime) mismatch('DateTime');
+      case OracleDbType.timestampTz:
+        if (value is! OracleTimestampTz && value is! DateTime) {
+          mismatch('OracleTimestampTz or DateTime');
+        }
+      case OracleDbType.json:
+        try {
+          assertValidJsonBindValue(value, 'rows[$rowIndex]');
+        } on ArgumentError catch (e) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'Invalid JSON bind value in executeMany() row $rowIndex, '
+                '$slotLabel: ${e.message}',
+          );
+        }
+      case OracleDbType.cursor:
+        // Unreachable: OracleBindDef construction rejects the cursor type.
+        throw StateError(
+          'OracleBindDef with OracleDbType.cursor cannot be constructed',
+        );
+    }
   }
 
   /// Throws the concurrent-operation [OracleException] when this connection is
@@ -1502,15 +2228,16 @@ class OracleConnection {
     int implicitPrefetchRows = _defaultPrefetchRows,
     int maxRows = 0,
     bool forceUncacheable = false,
-    _BulkDml? bulk,
+    _ExecuteManyCall? bulk,
   }) async {
     _log.fine(
       'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
     );
 
-    // Bulk DML (executeMany) arrives pre-validated and pre-normalized with
-    // its own prepared statement; everything downstream — cursor open, cache
-    // disposition, piggybacks, error handling — is the shared path.
+    // executeMany (array DML or PL/SQL iteration) arrives pre-validated and
+    // pre-normalized with its own prepared statement; everything downstream —
+    // cursor open, cache disposition, piggybacks, error handling — is the
+    // shared path.
     final stmt =
         bulk?.stmt ??
         _prepareStatement(sql, bindValues, forceUncacheable: forceUncacheable);
@@ -1518,7 +2245,12 @@ class OracleConnection {
     // Open the cursor: full parse / cached-cursor reuse, describe-mismatch
     // retry, and close-cursor piggyback flushing all happen here and yield the
     // FIRST batch. The cache entry (if any) is still held (inUse) on return.
-    final open = await _openCursor(sql, stmt, bulkRows: bulk?.rows);
+    final open = await _openCursor(
+      sql,
+      stmt,
+      bulkRows: bulk?.rows,
+      executeManyIters: bulk?.numIterations,
+    );
     StatementCacheEntry? cacheEntry = open.cacheEntry;
     var unhandledCursorId = open.response.cursorId;
 
@@ -1664,6 +2396,19 @@ class OracleConnection {
           ),
         );
         unhandledCursorId = 0;
+      } else if (stmt.isPlSql &&
+          bulk != null &&
+          bulk.numIterations > 1 &&
+          unhandledCursorId != 0) {
+        // An N>1 PL/SQL executeMany kept its cursor alive across the two RPCs
+        // via NO_IMPL_REL (see Transport.sendExecute), and PL/SQL is never
+        // cache-eligible, so neither branch above closed it. Queue the cursor
+        // for the close-cursor piggyback on the next round trip — node-oracledb
+        // parity (returnStatement -> _addCursorToClose for returnToCache=false
+        // statements). Without this the server retains one cursor per call,
+        // eventually raising ORA-01000 on a pooled/long-lived connection.
+        _cache.requeueCursorsToClose([unhandledCursorId]);
+        unhandledCursorId = 0;
       }
 
       // A successful DDL can alter the result shape or invalidate server-side
@@ -1706,12 +2451,21 @@ class OracleConnection {
         columnMetadata: response.columnMetadata,
         rowData: response.rows,
         rowsAffected: stmt.isPlSql ? null : response.rowsAffected,
-        outBinds: _buildOutBinds(
-          outBindIndices: response.outBindIndices,
-          values: outBindValues,
-          bindNames: stmt.bindNames,
-          outBindNameIndex: stmt.outBindNameIndex,
-        ),
+        // executeMany exposes PL/SQL OUT values row-major (one entry per
+        // iteration, node-oracledb parity); single execution keeps the flat
+        // one-value-per-bind container.
+        outBinds: bulk != null
+            ? _buildExecuteManyOutBinds(
+                outBindIndices: response.outBindIndices,
+                outBindRows: response.outBindRows,
+                outBindNameIndex: stmt.outBindNameIndex,
+              )
+            : _buildOutBinds(
+                outBindIndices: response.outBindIndices,
+                values: outBindValues,
+                bindNames: stmt.bindNames,
+                outBindNameIndex: stmt.outBindNameIndex,
+              ),
         moreRowsAvailable: response.moreRowsToFetch,
         implicitResults: implicitResults,
       );
@@ -1759,6 +2513,7 @@ class OracleConnection {
     String sql,
     _PreparedStatement stmt, {
     List<List<Object?>>? bulkRows,
+    int? executeManyIters,
   }) async {
     // Try to acquire a cached cursor.
     StatementCacheEntry? cacheEntry;
@@ -1817,6 +2572,7 @@ class OracleConnection {
           cursorsToClose: cursorsToClose,
           preserveTimestampTimeZone: _preserveTimestampTimeZone,
           bulkRows: bulkRows,
+          executeManyIters: executeManyIters,
         );
 
         if (!response.isSuccess) {
@@ -1844,6 +2600,20 @@ class OracleConnection {
               '"${_truncateSql(sql)}"; re-executing once with a full parse',
             );
             continue;
+          }
+          // An N>1 PL/SQL executeMany opens its cursor with NO_IMPL_REL (kept
+          // alive for the follow-up REEXECUTE). If this FIRST execute fails
+          // after the server assigned a cursor, no later path closes it — this
+          // throw propagates out *before* _executeGuarded's try, so its catch
+          // never sees it. Queue the cursor for the close-cursor piggyback
+          // (node parity: returnStatement runs on the error path too). Gated on
+          // a non-zero id so a parse failure that opened no cursor is never
+          // spuriously closed.
+          if (stmt.isPlSql &&
+              executeManyIters != null &&
+              executeManyIters > 1 &&
+              response.cursorId != 0) {
+            _cache.requeueCursorsToClose([response.cursorId]);
           }
           final serverMessage =
               response.errorMessage ?? 'Query execution failed';
@@ -2920,11 +3690,22 @@ class _CursorOpen {
 
 /// A validated, normalized `executeMany()` call: the prepared statement
 /// (per-slot bind templates, decoder metadata, cache key) plus the
-/// slot-ordered row values — one inner list per execute iteration. Built by
-/// [OracleConnection._prepareExecuteMany] entirely before any wire round trip.
-class _BulkDml {
-  _BulkDml({required this.stmt, required this.rows});
+/// slot-ordered row values — one inner list per execute iteration — and the
+/// iteration count. [rows] is null only for the bind-free PL/SQL
+/// `numIterations` form, where [numIterations] alone travels in the
+/// execution-count slot. Built by [OracleConnection._prepareExecuteMany]
+/// entirely before any wire round trip.
+class _ExecuteManyCall {
+  _ExecuteManyCall({
+    required this.stmt,
+    required this.rows,
+    required this.numIterations,
+  }) : assert(
+         rows == null || rows.length == numIterations,
+         'numIterations must match the normalized row count',
+       );
 
   final _PreparedStatement stmt;
-  final List<List<Object?>> rows;
+  final List<List<Object?>>? rows;
+  final int numIterations;
 }

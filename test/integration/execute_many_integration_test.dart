@@ -1,6 +1,8 @@
 /// Integration tests for `OracleConnection.executeMany()` — Oracle array DML
 /// (Story 11.1): bulk INSERT/UPDATE/DELETE/MERGE with positional and named
-/// rows in a single wire round trip.
+/// rows in a single wire round trip — and bulk PL/SQL execution
+/// (Story 11.2): repeated PL/SQL blocks with IN / OUT / IN OUT bind
+/// definitions and row-major per-iteration OUT results.
 ///
 /// Must pass against both supported environments:
 ///
@@ -413,6 +415,353 @@ void main() {
       expect(await countRows(), equals(3));
       await conn.execute('ROLLBACK');
       expect(await countRows(), equals(0));
+    });
+  });
+
+  group('executeMany() PL/SQL bulk binds', () {
+    OracleConnection? connHandle;
+    late OracleConnection conn;
+    final testTable = uniqueTableName('s112_em');
+    // Fixed story-prefixed server object names (same convention as the
+    // story33_* PL/SQL fixtures); dropped in tearDown.
+    const procMulti = 'story112_multi';
+    const procInOut = 'story112_incr';
+    const procClob = 'story112_clob';
+    const pkg = 'story112_pkg';
+
+    setUp(() async {
+      connHandle = await connectForTest();
+      conn = connHandle!;
+      await _ignoreOraCodes(
+        () => conn.execute(
+          'CREATE TABLE $testTable (id NUMBER PRIMARY KEY, v VARCHAR2(100))',
+        ),
+        const [955], // ORA-00955: name already used
+      );
+      await conn.execute('TRUNCATE TABLE $testTable');
+      await conn.execute('''
+CREATE OR REPLACE PROCEDURE $procMulti(
+  p_id IN NUMBER, p_double OUT NUMBER, p_label OUT VARCHAR2) IS
+BEGIN
+  p_double := p_id * 2;
+  p_label := 'id-' || TO_CHAR(p_id);
+END;''');
+      await conn.execute('''
+CREATE OR REPLACE PROCEDURE $procInOut(
+  p_val IN OUT NUMBER, p_tag IN OUT VARCHAR2) IS
+BEGIN
+  p_val := NVL(p_val, 0) + 1;
+  p_tag := p_tag || '+';
+END;''');
+      await conn.execute('''
+CREATE OR REPLACE PROCEDURE $procClob(p_in IN CLOB, p_out OUT CLOB) IS
+BEGIN
+  p_out := p_in || '-out';
+END;''');
+      // Session-scoped package state: each test opens its own connection, so
+      // g_counter always starts at 0 for that test's session.
+      await conn.execute('''
+CREATE OR REPLACE PACKAGE $pkg AS
+  g_counter NUMBER := 0;
+  PROCEDURE bump;
+  PROCEDURE next_val(p_out OUT NUMBER);
+END;''');
+      await conn.execute('''
+CREATE OR REPLACE PACKAGE BODY $pkg AS
+  PROCEDURE bump IS
+  BEGIN
+    g_counter := g_counter + 1;
+  END;
+  PROCEDURE next_val(p_out OUT NUMBER) IS
+  BEGIN
+    g_counter := g_counter + 1;
+    p_out := g_counter;
+  END;
+END;''');
+    });
+
+    tearDown(() async {
+      final c = connHandle;
+      connHandle = null;
+      await cleanUpConnection(
+        c,
+        rollbackFirst: true,
+        dropStatements: [
+          'DROP TABLE $testTable PURGE',
+          'DROP PROCEDURE $procMulti',
+          'DROP PROCEDURE $procInOut',
+          'DROP PROCEDURE $procClob',
+          'DROP PACKAGE $pkg',
+        ],
+      );
+    });
+
+    Future<int> countRows() async {
+      final result = await conn.execute(
+        'SELECT COUNT(*) AS c FROM $testTable',
+      );
+      return result.rows.single['C'] as int;
+    }
+
+    test('positional IN + OUT number + OUT varchar returns row-major '
+        'results', () async {
+      final result = await conn.executeMany(
+        'BEGIN $procMulti(:1, :2, :3); END;',
+        [
+          [1],
+          [2],
+          [3],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.number),
+            OracleBindDef.output(type: OracleDbType.number),
+            OracleBindDef.output(type: OracleDbType.varchar, maxSize: 30),
+          ],
+        ),
+      );
+      expect(result.rowsAffected, isNull);
+      expect(result.rows, isEmpty);
+      expect(result.outBinds.length, equals(3));
+      expect(result.outBinds.toList(), [
+        [2, 'id-1'],
+        [4, 'id-2'],
+        [6, 'id-3'],
+      ]);
+      expect(result.outBinds[1], equals([4, 'id-2']));
+    });
+
+    test('named binds return one name-keyed map per iteration', () async {
+      final result = await conn.executeMany(
+        'BEGIN $procMulti(:id, :dbl, :label); END;',
+        [
+          {'id': 4},
+          {'id': 5},
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: {
+            'id': OracleBindDef.input(type: OracleDbType.number),
+            'dbl': OracleBindDef.output(type: OracleDbType.number),
+            'label': OracleBindDef.output(
+              type: OracleDbType.varchar,
+              maxSize: 30,
+            ),
+          },
+        ),
+      );
+      expect(result.outBinds.toList(), [
+        {'dbl': 8, 'label': 'id-4'},
+        {'dbl': 10, 'label': 'id-5'},
+      ]);
+    });
+
+    test('repeated named placeholders reuse the per-row value', () async {
+      // :v appears twice; in PL/SQL a repeated :name placeholder is a SINGLE
+      // bind variable (bind-by-name), so one per-row value serves every
+      // occurrence.
+      final result = await conn.executeMany(
+        'BEGIN :res := :v + :v; END;',
+        [
+          {'v': 10},
+          {'v': 25},
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: {
+            'res': OracleBindDef.output(type: OracleDbType.number),
+            'v': OracleBindDef.input(type: OracleDbType.number),
+          },
+        ),
+      );
+      expect(result.outBinds.toList(), [
+        {'res': 20},
+        {'res': 50},
+      ]);
+    });
+
+    test('IN OUT number and string values mutate across iterations',
+        () async {
+      final result = await conn.executeMany(
+        'BEGIN $procInOut(:1, :2); END;',
+        [
+          [10, 'a'],
+          [20, 'b'],
+          [null, 'c'], // SQL NULL input: NVL(p_val, 0) + 1 == 1
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.inputOutput(type: OracleDbType.number),
+            OracleBindDef.inputOutput(type: OracleDbType.varchar, maxSize: 40),
+          ],
+        ),
+      );
+      expect(result.outBinds.toList(), [
+        [11, 'a+'],
+        [21, 'b+'],
+        [1, 'c+'],
+      ]);
+    });
+
+    test('positive numIterations runs an all-OUT block once per iteration '
+        'in order', () async {
+      final result = await conn.executeMany(
+        'BEGIN $pkg.next_val(:1); END;',
+        4,
+        OracleExecuteManyOptions(
+          bindDefs: [OracleBindDef.output(type: OracleDbType.number)],
+        ),
+      );
+      expect(result.outBinds.toList(), [
+        [1],
+        [2],
+        [3],
+        [4],
+      ]);
+    });
+
+    test('positive numIterations runs a bind-free block exactly N times',
+        () async {
+      final result = await conn.executeMany('BEGIN $pkg.bump; END;', 5);
+      expect(result.rowsAffected, isNull);
+      expect(result.outBinds.isEmpty, isTrue);
+      final counter = await conn.execute('BEGIN :o := $pkg.g_counter; END;', {
+        'o': OracleBind.out(type: OracleDbType.number),
+      });
+      expect(counter.outBinds['o'], equals(5));
+    });
+
+    test('inferred IN binds (no definitions) execute a DML-in-PL/SQL block '
+        'per row', () async {
+      final base = nextTestId();
+      final result = await conn.executeMany(
+        'BEGIN INSERT INTO $testTable (id, v) VALUES (:1, :2); END;',
+        [
+          [base, 'one'],
+          [base + 1, 'two'],
+        ],
+      );
+      expect(result.rowsAffected, isNull);
+      expect(await countRows(), equals(2));
+      final rows = await conn.execute(
+        'SELECT v FROM $testTable ORDER BY id',
+      );
+      expect(rows.rows.map((r) => r['V']), ['one', 'two']);
+    });
+
+    test('CLOB IN and OUT binds travel as per-iteration LOB locators',
+        () async {
+      // The big value exceeds the 32767-byte VARCHAR bind cap, so it can only
+      // travel through a per-iteration temporary CLOB.
+      final big = 'y' * 40000;
+      final result = await conn.executeMany(
+        'BEGIN $procClob(:1, :2); END;',
+        [
+          ['alpha'],
+          [big],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.clob, maxSize: 50000),
+            OracleBindDef.output(type: OracleDbType.clob, maxSize: 50000),
+          ],
+        ),
+      );
+      final out = result.outBinds.toList();
+      expect(out[0], equals(['alpha-out']));
+      expect(out[1], equals(['$big-out']));
+    });
+
+    test('first error aborts the batch; rollback undoes applied '
+        'iterations', () async {
+      await conn.execute('COMMIT');
+      final base = nextTestId();
+      await expectLater(
+        () => conn.executeMany(
+          'BEGIN INSERT INTO $testTable (id) VALUES (:1); END;',
+          [
+            [base],
+            [base + 1],
+            [base], // duplicate PK -> ORA-00001 on the third iteration
+            [base + 2], // must never be applied
+          ],
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(1), // ORA-00001: unique constraint violated
+          ),
+        ),
+      );
+      // Iterations before the failing one remain pending in the transaction;
+      // the failing one and everything after are not applied.
+      expect(await countRows(), equals(2));
+      await conn.execute('ROLLBACK');
+      expect(
+        await countRows(),
+        equals(0),
+        reason: 'PL/SQL executeMany is transactional: rollback undoes every '
+            'iteration',
+      );
+    });
+
+    test('PL/SQL executeMany opens no cached cursor and leaves the '
+        'connection reusable', () async {
+      final cacheBefore = conn.debugCacheSize;
+      await conn.executeMany(
+        'BEGIN $procMulti(:1, :2, :3); END;',
+        [
+          [7],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.number),
+            OracleBindDef.output(type: OracleDbType.number),
+            OracleBindDef.output(type: OracleDbType.varchar, maxSize: 30),
+          ],
+        ),
+      );
+      expect(
+        conn.debugCacheSize,
+        equals(cacheBefore),
+        reason: 'PL/SQL blocks are never statement-cached',
+      );
+      final r = await conn.execute('SELECT 1 AS one FROM dual');
+      expect(r.rows.single['ONE'], equals(1));
+    });
+
+    test('validation failures reject before any wire round trip', () async {
+      final parseBefore = conn.debugFullParseExecutes;
+      final reuseBefore = conn.debugReuseExecutes;
+      // Zero iteration count.
+      await expectLater(
+        () => conn.executeMany('BEGIN $pkg.bump; END;', 0),
+        throwsA(isA<ArgumentError>()),
+      );
+      // A value supplied for an OUT-only slot.
+      await expectLater(
+        () => conn.executeMany(
+          'BEGIN $procMulti(:1, :2, :3); END;',
+          [
+            [1, 99],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [
+              OracleBindDef.input(type: OracleDbType.number),
+              OracleBindDef.output(type: OracleDbType.number),
+              OracleBindDef.output(type: OracleDbType.varchar, maxSize: 30),
+            ],
+          ),
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('OUT-only'),
+          ),
+        ),
+      );
+      expect(conn.debugFullParseExecutes, equals(parseBefore));
+      expect(conn.debugReuseExecutes, equals(reuseBefore));
     });
   });
 }

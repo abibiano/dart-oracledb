@@ -337,6 +337,13 @@ const int ttcExecOptionNotPlSql = 0x8000;
 /// different field from [ttcExecOptionNotPlSql] despite sharing the same value).
 const int ttcExecOptionImplicitResultset = 0x8000;
 
+/// Do not implicitly release the statement after execution (used in the
+/// `dmlOptions` / exec-flags field, node-oracledb
+/// `TNS_EXEC_OPTION_NO_IMPL_REL`). Set on the first EXECUTE of a PL/SQL
+/// executeMany so the server keeps the cursor alive for the follow-up
+/// REEXECUTE that runs the remaining iterations.
+const int ttcExecOptionNoImplicitRelease = 0x200000;
+
 /// PL/SQL bind variables.
 const int ttcExecOptionPlSqlBind = 0x400;
 

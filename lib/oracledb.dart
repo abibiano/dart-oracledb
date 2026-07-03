@@ -30,7 +30,8 @@ export 'src/protocol/constants.dart'
         oraDataTypeNotSupported;
 
 // Connection API
-export 'src/connection.dart' show OracleConnection, OracleExecuteOptions;
+export 'src/connection.dart'
+    show OracleConnection, OracleExecuteOptions, OracleExecuteManyOptions;
 
 // Charset capability detection (Story 10.1)
 export 'src/oracle_charset_info.dart' show OracleCharsetInfo;
@@ -44,7 +45,8 @@ export 'src/result_set.dart' show OracleResultSet;
 export 'src/protocol/messages/execute_message.dart' show ColumnMetadata;
 
 // Output bind API
-export 'src/oracle_bind.dart' show OracleBind, OracleDbType, OracleOutBinds;
+export 'src/oracle_bind.dart'
+    show OracleBind, OracleBindDef, OracleDbType, OracleOutBinds;
 
 // Time-zone-preserving TIMESTAMP WITH TIME ZONE wrapper
 export 'src/oracle_timestamp_tz.dart' show OracleTimestampTz;

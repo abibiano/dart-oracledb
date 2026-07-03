@@ -93,6 +93,7 @@ class _ImplicitTransport extends Transport {
     List<int> cursorsToClose = const <int>[],
     bool preserveTimestampTimeZone = false,
     List<List<Object?>>? bulkRows,
+    int? executeManyIters,
   }) async {
     sendExecuteCalls++;
     final err = throwOnExecute;
