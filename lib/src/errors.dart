@@ -122,3 +122,52 @@ class OracleException implements Exception {
     return buffer.toString();
   }
 }
+
+/// A single row-level error collected by `executeMany()` when called with
+/// `OracleExecuteManyOptions(batchErrors: true)`.
+///
+/// With `batchErrors` enabled, an array-DML `executeMany()` no longer throws on
+/// row-level data errors (duplicate key, foreign-key violation, ...). Instead
+/// the valid rows are applied and every failed row is reported as one
+/// [OracleBatchError] in [OracleResult.batchErrors]. Statement-level failures
+/// (parse errors, unsupported bind shapes, protocol errors, ...) still throw
+/// [OracleException] — they are never fabricated into batch errors.
+///
+/// [offset] is the **0-based index of the failed input row** in the rows list
+/// passed to `executeMany()`. It is deliberately a distinct concept from
+/// [OracleException.offset], which is a character offset into SQL text; a batch
+/// error is a row-position error, not a SQL-position error.
+class OracleBatchError {
+  /// Creates a batch error for the input row at [offset] with the Oracle
+  /// [errorCode] and server [message].
+  const OracleBatchError({
+    required this.errorCode,
+    required this.offset,
+    required this.message,
+  });
+
+  /// The Oracle error number for this row (e.g. 1 for ORA-00001 unique
+  /// constraint violated).
+  final int errorCode;
+
+  /// The 0-based index of the failed row in the input rows list passed to
+  /// `executeMany()`.
+  final int offset;
+
+  /// The server error message text for this row.
+  final String message;
+
+  /// Canonical Oracle error code formatted as `ORA-NNNNN` with five-digit
+  /// zero padding (e.g. `ORA-00001`), mirroring [OracleException.code]. A
+  /// negative code renders as `ORA-invalid(<code>)` and never throws.
+  String get code {
+    if (errorCode < 0) {
+      return 'ORA-invalid($errorCode)';
+    }
+    return 'ORA-${errorCode.toString().padLeft(5, '0')}';
+  }
+
+  @override
+  String toString() =>
+      'OracleBatchError(row $offset): $code: $message';
+}

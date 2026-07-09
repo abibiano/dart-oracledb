@@ -114,7 +114,37 @@ class OracleExecuteOptions {
 /// );
 /// ```
 class OracleExecuteManyOptions {
-  const OracleExecuteManyOptions({this.bindDefs});
+  const OracleExecuteManyOptions({
+    this.bindDefs,
+    this.batchErrors = false,
+    this.dmlRowCounts = false,
+  });
+
+  /// Collect row-level DML errors instead of throwing on the first one
+  /// (node-oracledb `batchErrors` parity). **DML only** (INSERT / UPDATE /
+  /// DELETE / MERGE) — passing `true` for a PL/SQL block or query fails loud
+  /// before any wire round trip.
+  ///
+  /// When `true`, an array-DML `executeMany()` applies every valid row and
+  /// reports each failed row's data error (duplicate key, foreign-key
+  /// violation, ...) as an [OracleBatchError] in [OracleResult.batchErrors]
+  /// rather than throwing. Statement-level failures (parse errors, unsupported
+  /// bind shapes, protocol errors, oversized buffers, ...) still throw
+  /// [OracleException] — they are never fabricated into batch errors. Applied
+  /// rows stay pending in the current transaction; the driver does not
+  /// auto-commit, so the caller inspects [OracleResult.batchErrors] and then
+  /// explicitly calls `commit()` or `rollback()`.
+  final bool batchErrors;
+
+  /// Return one affected-row count per input row (node-oracledb
+  /// `dmlRowCounts` parity). **DML only** — passing `true` for a PL/SQL block
+  /// or query fails loud before any wire round trip. Requires Oracle Database
+  /// 12 or later (all currently-tested targets).
+  ///
+  /// When `true`, [OracleResult.dmlRowCounts] holds one integer per input row,
+  /// in input order: UPDATE/DELETE/MERGE rows that match no records report
+  /// `0`, and a successful INSERT row normally reports `1`.
+  final bool dmlRowCounts;
 
   /// Metadata-only bind definitions for the statement's placeholders
   /// (node-oracledb `bindDefs` parity). Only supported for PL/SQL blocks in
@@ -1260,6 +1290,19 @@ class OracleConnection {
     }
 
     if (isPlSqlSql(sql)) {
+      // node-oracledb rejects batchErrors/dmlRowCounts for PL/SQL before the
+      // wire (connection.js ERR_EXEC_MODE_ONLY_FOR_DML): they are row-level DML
+      // reporting options with no meaning for a PL/SQL block.
+      if (options?.batchErrors == true || options?.dmlRowCounts == true) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'executeMany() options batchErrors and dmlRowCounts are only '
+              'permitted for DML statements (INSERT / UPDATE / DELETE / '
+              'MERGE), not for PL/SQL blocks. [SQL: ${_truncateSql(sql)}]',
+          sql: sql,
+        );
+      }
       return _prepareBulkPlSql(sql, rows, numIterations, options);
     }
 
@@ -1300,13 +1343,19 @@ class OracleConnection {
         sql: sql,
       );
     }
-    return _prepareBulkDml(sql, rows!);
+    return _prepareBulkDml(sql, rows!, options);
   }
 
   /// Normalizes an array-DML [executeMany] call (Story 11.1 semantics):
   /// row shapes, per-slot IN type inference, and string/RAW sizing. The SQL
-  /// is already classified as non-query, non-PL/SQL, RETURNING-free.
-  _ExecuteManyCall _prepareBulkDml(String sql, List<Object?> rows) {
+  /// is already classified as non-query, non-PL/SQL, RETURNING-free. The
+  /// Story 11.3 DML-only [OracleExecuteManyOptions.batchErrors] /
+  /// [OracleExecuteManyOptions.dmlRowCounts] flags ride through to the wire.
+  _ExecuteManyCall _prepareBulkDml(
+    String sql,
+    List<Object?> rows,
+    OracleExecuteManyOptions? options,
+  ) {
     // Bind style comes from the SQL text (isNamedBinds throws on a mix of
     // :name and :1 placeholders); every row must then match it.
     final named = BindParser.isNamedBinds(sql);
@@ -1428,6 +1477,8 @@ class OracleConnection {
       ),
       rows: normalized,
       numIterations: normalized.length,
+      batchErrors: options?.batchErrors ?? false,
+      dmlRowCounts: options?.dmlRowCounts ?? false,
     );
   }
 
@@ -2250,6 +2301,8 @@ class OracleConnection {
       stmt,
       bulkRows: bulk?.rows,
       executeManyIters: bulk?.numIterations,
+      batchErrors: bulk?.batchErrors ?? false,
+      dmlRowCounts: bulk?.dmlRowCounts ?? false,
     );
     StatementCacheEntry? cacheEntry = open.cacheEntry;
     var unhandledCursorId = open.response.cursorId;
@@ -2371,7 +2424,32 @@ class OracleConnection {
       }
 
       // Update the cache from the successful response.
-      if (stmt.eligible && cacheEntry != null) {
+      final hasBatchErrors = bulk != null && response.batchErrors.isNotEmpty;
+      if (hasBatchErrors) {
+        // A batch-error array-DML response is a SUCCESSFUL call returning
+        // row-level errors (see decodeExecuteResponse / _processError), but
+        // Oracle returns a statement-level ORA-24381. node-oracledb only
+        // clears the cursor and marks the statement not-returnable-to-cache
+        // when the response itself carries a nonzero cursor id
+        // (withData.js processErrorInfo: `errorInfo.cursorId !== 0` gates
+        // clearCursor + returnToCache = false) — a re-executed cached cursor
+        // typically echoes cursorId == 0 and stays cached, exactly like the
+        // non-batch-error branch below. Mirror that precisely so a cached,
+        // repeatedly-reused batch-DML statement is not evicted on every call
+        // that hits a single row-level error.
+        if (response.cursorId != 0) {
+          if (cacheEntry != null) {
+            _cache.invalidate(stmt.cacheKey);
+            cacheEntry = null;
+          } else {
+            _cache.requeueCursorsToClose([response.cursorId]);
+          }
+        } else if (cacheEntry != null) {
+          _cache.release(cacheEntry);
+          cacheEntry = null;
+        }
+        unhandledCursorId = 0;
+      } else if (stmt.eligible && cacheEntry != null) {
         // Re-executed a cached cursor. A successful re-execute often echoes
         // cursorId == 0 while the original cursor stays valid — only overwrite
         // on a non-zero id (node-oracledb withData.js processErrorInfo).
@@ -2468,6 +2546,12 @@ class OracleConnection {
               ),
         moreRowsAvailable: response.moreRowsToFetch,
         implicitResults: implicitResults,
+        // Story 11.3 array-DML row-level reporting. Both are empty unless the
+        // executeMany call requested them; the OracleResult factory keeps them
+        // as stable unmodifiable lists (empty-list default when not requested,
+        // and also when requested with no failures / no counts).
+        batchErrors: response.batchErrors,
+        dmlRowCounts: response.dmlRowCounts,
       );
     } catch (e) {
       // A drain / materialize failure leaves a held cached cursor in an unknown
@@ -2514,6 +2598,8 @@ class OracleConnection {
     _PreparedStatement stmt, {
     List<List<Object?>>? bulkRows,
     int? executeManyIters,
+    bool batchErrors = false,
+    bool dmlRowCounts = false,
   }) async {
     // Try to acquire a cached cursor.
     StatementCacheEntry? cacheEntry;
@@ -2573,6 +2659,8 @@ class OracleConnection {
           preserveTimestampTimeZone: _preserveTimestampTimeZone,
           bulkRows: bulkRows,
           executeManyIters: executeManyIters,
+          batchErrors: batchErrors,
+          dmlRowCounts: dmlRowCounts,
         );
 
         if (!response.isSuccess) {
@@ -3700,12 +3788,27 @@ class _ExecuteManyCall {
     required this.stmt,
     required this.rows,
     required this.numIterations,
+    this.batchErrors = false,
+    this.dmlRowCounts = false,
   }) : assert(
          rows == null || rows.length == numIterations,
          'numIterations must match the normalized row count',
+       ),
+       assert(
+         (!batchErrors && !dmlRowCounts) || (!stmt.isQuery && !stmt.isPlSql),
+         'batchErrors / dmlRowCounts are DML-only and must be rejected before '
+         'reaching the wire for queries and PL/SQL',
        );
 
   final _PreparedStatement stmt;
   final List<List<Object?>>? rows;
   final int numIterations;
+
+  /// Array-DML batch-error collection requested (DML-only). Threaded into the
+  /// EXECUTE request and mapped to [OracleResult.batchErrors].
+  final bool batchErrors;
+
+  /// Array-DML per-row DML row counts requested (DML-only). Threaded into the
+  /// EXECUTE request and mapped to [OracleResult.dmlRowCounts].
+  final bool dmlRowCounts;
 }

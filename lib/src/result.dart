@@ -6,6 +6,7 @@ library;
 
 import 'package:meta/meta.dart';
 
+import 'errors.dart';
 import 'oracle_bind.dart';
 import 'protocol/messages/execute_message.dart';
 import 'result_set.dart';
@@ -45,6 +46,8 @@ class OracleResult {
     bool moreRowsAvailable = false,
     OracleResultSet? resultSet,
     List<Object> implicitResults = const [],
+    List<OracleBatchError> batchErrors = const [],
+    List<int> dmlRowCounts = const [],
   }) {
     final nameToIndex = _buildNameMap(columnMetadata);
     final rows = rowData
@@ -64,6 +67,12 @@ class OracleResult {
       implicitResults: implicitResults.isEmpty
           ? const <Object>[]
           : List<Object>.unmodifiable(implicitResults),
+      batchErrors: batchErrors.isEmpty
+          ? const <OracleBatchError>[]
+          : List<OracleBatchError>.unmodifiable(batchErrors),
+      dmlRowCounts: dmlRowCounts.isEmpty
+          ? const <int>[]
+          : List<int>.unmodifiable(dmlRowCounts),
     );
   }
 
@@ -75,6 +84,8 @@ class OracleResult {
     this.moreRowsAvailable = false,
     this.resultSet,
     this.implicitResults = const [],
+    this.batchErrors = const [],
+    this.dmlRowCounts = const [],
   });
 
   final List<ColumnMetadata> _columnMetadata;
@@ -130,6 +141,30 @@ class OracleResult {
   /// results are present — top-level SELECT result sets and PL/SQL implicit
   /// results never coexist.
   final List<Object> implicitResults;
+
+  /// Row-level DML errors collected by `executeMany()` when called with
+  /// `OracleExecuteManyOptions(batchErrors: true)`.
+  ///
+  /// Each entry describes one failed input row (its 0-based [OracleBatchError.offset],
+  /// Oracle error code, and message). Valid rows in the same call were applied
+  /// and remain pending in the current transaction — inspect this list, then
+  /// explicitly `commit()` or `rollback()`.
+  ///
+  /// Always an unmodifiable list. It is empty when `batchErrors` was not
+  /// requested, and also empty (not `null`) when `batchErrors: true` but every
+  /// input row succeeded — a stable Dart API that never returns `null`.
+  final List<OracleBatchError> batchErrors;
+
+  /// Per-input-row affected-row counts collected by `executeMany()` when
+  /// called with `OracleExecuteManyOptions(dmlRowCounts: true)`.
+  ///
+  /// Holds one integer per input row, in input order (server-returned order):
+  /// UPDATE/DELETE/MERGE rows matching no records report `0`, successful INSERT
+  /// rows normally report `1`. [rowsAffected] remains the total DML row count;
+  /// per-row counts live only here.
+  ///
+  /// Always an unmodifiable list. Empty when `dmlRowCounts` was not requested.
+  final List<int> dmlRowCounts;
 
   /// Whether the driver stopped fetching while the server still had rows
   /// pending.

@@ -8,6 +8,7 @@ library;
 export 'src/errors.dart'
     show
         OracleException,
+        OracleBatchError,
         oraNetworkError,
         oraConnectTimeout,
         oraHostUnreachable,

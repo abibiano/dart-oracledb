@@ -1189,6 +1189,8 @@ class _FakeTransport extends Transport {
     bool preserveTimestampTimeZone = false,
     List<List<Object?>>? bulkRows,
     int? executeManyIters,
+    bool batchErrors = false,
+    bool dmlRowCounts = false,
   }) async {
     executeCalls++;
     lastCursorId = cursorId;

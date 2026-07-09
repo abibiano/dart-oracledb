@@ -554,6 +554,8 @@ class Transport {
     bool preserveTimestampTimeZone = false,
     List<List<Object?>>? bulkRows,
     int? executeManyIters,
+    bool batchErrors = false,
+    bool dmlRowCounts = false,
   }) async {
     _log.fine(
       'Sending execute request (isQuery=$isQuery, isPlSql=$isPlSql, '
@@ -646,6 +648,10 @@ class Transport {
       executeManyIters: plSqlExecuteMany ? 1 : executeManyIters,
       // Keep the cursor alive for the follow-up REEXECUTE iterations.
       noImplicitRelease: plSqlExecuteMany && executeManyIters > 1,
+      // Array-DML row-level reporting (DML-only; rejected for PL/SQL before the
+      // wire, so these are always false on the PL/SQL two-RPC path above).
+      batchErrors: batchErrors,
+      dmlRowCounts: dmlRowCounts,
     );
 
     // Prepend piggybacks: close-cursor (LRU evictions) and free-temp-LOBs
@@ -674,6 +680,7 @@ class Transport {
       expectedColumns: expectedColumns,
       bindMetadata: bindMetadata,
       plSqlExecuteMany: plSqlExecuteMany,
+      dmlRowCounts: dmlRowCounts,
     );
 
     final response = decodeExecuteResponse(
@@ -687,6 +694,7 @@ class Transport {
       supportsNationalCharset: supportsNationalCharset,
       nationalCharset: nationalCharset,
       plSqlExecuteMany: plSqlExecuteMany,
+      dmlRowCounts: dmlRowCounts,
     );
 
     // PL/SQL executeMany, second RPC: run iterations 2..N via REEXECUTE
@@ -1546,6 +1554,13 @@ class Transport {
       implicitResults: response.implicitResults,
       rowsAffected: response.rowsAffected,
       moreRowsToFetch: response.moreRowsToFetch,
+      // Preserve Story 11.3 array-DML row-level reporting through the
+      // rebuild. Currently unreachable for a batchErrors/dmlRowCounts call
+      // (DML RETURNING is rejected before wire, so there are no OUT binds or
+      // rows to materialize here), but Story 11.4 (DML RETURNING) will route
+      // through this exact path, so these must not be silently dropped.
+      batchErrors: response.batchErrors,
+      dmlRowCounts: response.dmlRowCounts,
     );
   }
 
@@ -1814,6 +1829,7 @@ class Transport {
     List<BindMetadata>? bindMetadata,
     bool Function(Uint8List accumulated)? completionProbe,
     bool plSqlExecuteMany = false,
+    bool dmlRowCounts = false,
     List<int>? presetOutBindIndices,
   }) async {
     _ensureUsable();
@@ -1822,6 +1838,7 @@ class Transport {
       bindMetadata: bindMetadata,
       completionProbe: completionProbe,
       plSqlExecuteMany: plSqlExecuteMany,
+      dmlRowCounts: dmlRowCounts,
       presetOutBindIndices: presetOutBindIndices,
     );
     if (timeout == null) return future;
@@ -1866,6 +1883,7 @@ class Transport {
     List<BindMetadata>? bindMetadata,
     bool Function(Uint8List accumulated)? completionProbe,
     bool plSqlExecuteMany = false,
+    bool dmlRowCounts = false,
     List<int>? presetOutBindIndices,
   }) async {
     // The completion probe decides whether the accumulated TTC bytes form a
@@ -1895,6 +1913,7 @@ class Transport {
                 expectedColumns: expectedColumns,
                 bindMetadata: bindMetadata,
                 plSqlExecuteMany: plSqlExecuteMany,
+                dmlRowCounts: dmlRowCounts,
                 presetOutBindIndices: presetOutBindIndices,
               );
       } on OracleException catch (e) {

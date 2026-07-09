@@ -764,6 +764,348 @@ END;''');
       expect(conn.debugReuseExecutes, equals(reuseBefore));
     });
   });
+
+  group('executeMany() batch errors and DML row counts (Story 11.3)', () {
+    OracleConnection? connHandle;
+    late OracleConnection conn;
+    final parent = uniqueTableName('s113p');
+    final child = uniqueTableName('s113c');
+
+    setUp(() async {
+      connHandle = await connectForTest();
+      conn = connHandle!;
+      await _ignoreOraCodes(
+        () => conn.execute('CREATE TABLE $parent (id NUMBER PRIMARY KEY)'),
+        const [955],
+      );
+      await _ignoreOraCodes(
+        () => conn.execute(
+          'CREATE TABLE $child ( '
+          'id NUMBER PRIMARY KEY, '
+          'pid NUMBER REFERENCES $parent(id), '
+          'v VARCHAR2(40))',
+        ),
+        const [955],
+      );
+      // Clean any leftover rows (child before parent for the FK) and seed two
+      // committed parent keys as a stable baseline for the FK tests.
+      await conn.execute('DELETE FROM $child');
+      await conn.execute('DELETE FROM $parent');
+      await conn.executeMany('INSERT INTO $parent (id) VALUES (:1)', [
+        [1],
+        [2],
+      ]);
+      await conn.commit();
+    });
+
+    tearDown(() async {
+      final c = connHandle;
+      connHandle = null;
+      await cleanUpConnection(
+        c,
+        rollbackFirst: true,
+        dropStatements: [
+          'DROP TABLE $child PURGE',
+          'DROP TABLE $parent PURGE',
+        ],
+      );
+    });
+
+    Future<int> childCount() async {
+      final r = await conn.execute('SELECT COUNT(*) AS c FROM $child');
+      return r.rows.single['C'] as int;
+    }
+
+    test('duplicate-key errors return 0-based offsets; valid rows apply',
+        () async {
+      // Commit one child row so rows 0 and 2 below collide on its PK.
+      await conn.execute(
+        'INSERT INTO $child (id, pid, v) VALUES (10, 1, :1)',
+        ['seed'],
+      );
+      await conn.commit();
+
+      final result = await conn.executeMany(
+        'INSERT INTO $child (id, pid, v) VALUES (:1, :2, :3)',
+        [
+          [10, 1, 'dup0'], // dup PK -> batch error offset 0
+          [20, 1, 'ok1'], // applied
+          [10, 2, 'dup2'], // dup PK -> batch error offset 2
+          [30, 2, 'ok3'], // applied
+        ],
+        const OracleExecuteManyOptions(batchErrors: true),
+      );
+
+      expect(result.batchErrors, hasLength(2));
+      expect(result.batchErrors.map((e) => e.offset), [0, 2]);
+      for (final e in result.batchErrors) {
+        expect(e.errorCode, 1); // ORA-00001 unique constraint
+        expect(e.code, 'ORA-00001');
+        expect(e.message, isNotEmpty);
+      }
+      // Two valid rows applied (plus the committed seed) — pending in the txn.
+      expect(await childCount(), 3);
+      await conn.rollback();
+    });
+
+    test('foreign-key errors identify the bad row offset', () async {
+      final result = await conn.executeMany(
+        'INSERT INTO $child (id, pid, v) VALUES (:1, :2, :3)',
+        [
+          [1, 1, 'ok0'], // parent 1 exists
+          [2, 999, 'bad1'], // parent 999 missing -> FK violation offset 1
+          [3, 2, 'ok2'], // parent 2 exists
+        ],
+        const OracleExecuteManyOptions(batchErrors: true),
+      );
+      expect(result.batchErrors, hasLength(1));
+      expect(result.batchErrors.single.offset, 1);
+      expect(
+        result.batchErrors.single.errorCode,
+        2291, // ORA-02291: parent key not found
+      );
+      expect(await childCount(), 2); // the two valid rows applied
+      await conn.rollback();
+    });
+
+    test('batchErrors: true with all rows valid returns an empty list',
+        () async {
+      final result = await conn.executeMany(
+        'INSERT INTO $child (id, pid, v) VALUES (:1, :2, :3)',
+        [
+          [1, 1, 'a'],
+          [2, 2, 'b'],
+          [3, 1, 'c'],
+        ],
+        const OracleExecuteManyOptions(batchErrors: true),
+      );
+      expect(result.batchErrors, isEmpty);
+      expect(result.rowsAffected, 3);
+      expect(await childCount(), 3);
+      await conn.rollback();
+    });
+
+    test('dmlRowCounts: true returns one count per row (mixed 1/0)', () async {
+      // Seed three child rows; the UPDATE targets two existing ids and one
+      // missing id, so the middle count must be 0.
+      await conn.executeMany(
+        'INSERT INTO $child (id, pid, v) VALUES (:1, :2, :3)',
+        [
+          [1, 1, 'a'],
+          [2, 2, 'b'],
+        ],
+      );
+      await conn.commit();
+
+      final result = await conn.executeMany(
+        'UPDATE $child SET v = :nv WHERE id = :cid',
+        [
+          {'cid': 1, 'nv': 'A'}, // matches 1
+          {'cid': 999, 'nv': 'X'}, // matches 0
+          {'cid': 2, 'nv': 'B'}, // matches 1
+        ],
+        const OracleExecuteManyOptions(dmlRowCounts: true),
+      );
+      expect(result.dmlRowCounts, [1, 0, 1]);
+      await conn.rollback();
+    });
+
+    test('both options together: offsets plus per-row counts', () async {
+      await conn.execute(
+        'INSERT INTO $child (id, pid, v) VALUES (100, 1, :1)',
+        ['seed'],
+      );
+      await conn.commit();
+
+      final result = await conn.executeMany(
+        'INSERT INTO $child (id, pid, v) VALUES (:1, :2, :3)',
+        [
+          [100, 1, 'dup0'], // dup PK -> error, count 0
+          [200, 1, 'ok1'], // applied, count 1
+          [100, 2, 'dup2'], // dup PK -> error, count 0
+        ],
+        const OracleExecuteManyOptions(batchErrors: true, dmlRowCounts: true),
+      );
+      expect(result.batchErrors.map((e) => e.offset), [0, 2]);
+      expect(result.dmlRowCounts, [0, 1, 0]);
+      await conn.rollback();
+    });
+
+    test('MERGE dmlRowCounts reports per-row insert-or-update semantics',
+        () async {
+      // AC1/AC7 explicitly list MERGE alongside INSERT/UPDATE/DELETE; MERGE's
+      // per-row insert-or-update branch is exercised across all three
+      // combinations a single executeMany call can hit: a successful UPDATE
+      // (count 1), a filtered UPDATE that matches no rows (count 0), and a
+      // successful INSERT (count 1).
+      await conn.execute(
+        'INSERT INTO $child (id, pid, v) VALUES (500, 1, :1)',
+        ['old-500'],
+      );
+      await conn.commit();
+
+      final result = await conn.executeMany(
+        'MERGE INTO $child t USING dual ON (t.id = :id) '
+        'WHEN MATCHED THEN UPDATE SET t.v = :v WHERE t.pid = :pid '
+        'WHEN NOT MATCHED THEN INSERT (id, pid, v) VALUES (:id, :pid, :v)',
+        [
+          {'id': 500, 'pid': 1, 'v': 'new-500'}, // matched, WHERE hits -> UPDATE
+          {'id': 500, 'pid': 2, 'v': 'new-500b'}, // matched, WHERE misses -> 0
+          {'id': 700, 'pid': 1, 'v': 'ok'}, // not matched -> INSERT applies
+        ],
+        const OracleExecuteManyOptions(dmlRowCounts: true),
+      );
+      expect(result.dmlRowCounts, [1, 0, 1]);
+
+      final rows = await conn.execute(
+        'SELECT id, v FROM $child WHERE id IN (500, 700) ORDER BY id',
+      );
+      expect(rows.rows.map((r) => r['V']), ['new-500', 'ok']);
+      await conn.rollback();
+    });
+
+    test('MERGE batchErrors identifies a failed INSERT-branch row offset',
+        () async {
+      // MERGE's INSERT branch (a not-matched row) can fail with a row-level
+      // data error exactly like a plain INSERT; this proves batchErrors
+      // reports it with the correct 0-based offset for MERGE specifically.
+      final result = await conn.executeMany(
+        'MERGE INTO $child t USING dual ON (t.id = :id) '
+        'WHEN NOT MATCHED THEN INSERT (id, pid, v) VALUES (:id, :pid, :v)',
+        [
+          {'id': 800, 'pid': 1, 'v': 'ok0'}, // not matched -> INSERT applies
+          {'id': 900, 'pid': 999, 'v': 'bad'}, // FK fails -> batch error
+          {'id': 950, 'pid': 2, 'v': 'ok2'}, // not matched -> INSERT applies
+        ],
+        const OracleExecuteManyOptions(batchErrors: true),
+      );
+      expect(result.batchErrors, hasLength(1));
+      expect(result.batchErrors.single.offset, 1);
+      expect(result.batchErrors.single.errorCode, 2291);
+
+      final rows = await conn.execute(
+        'SELECT id, v FROM $child WHERE id IN (800, 950) ORDER BY id',
+      );
+      expect(rows.rows.map((r) => r['V']), ['ok0', 'ok2']);
+      await conn.rollback();
+    });
+
+    test('explicit rollback after batch errors leaves no valid rows', () async {
+      await conn.execute(
+        'INSERT INTO $child (id, pid, v) VALUES (50, 1, :1)',
+        ['seed'],
+      );
+      await conn.commit();
+      final baseline = await childCount(); // 1 (committed seed)
+
+      final result = await conn.executeMany(
+        'INSERT INTO $child (id, pid, v) VALUES (:1, :2, :3)',
+        [
+          [50, 1, 'dup'], // dup -> batch error
+          [60, 1, 'ok'], // applied but uncommitted
+        ],
+        const OracleExecuteManyOptions(batchErrors: true),
+      );
+      expect(result.batchErrors, hasLength(1));
+      expect(await childCount(), baseline + 1); // valid row pending
+
+      await conn.rollback();
+      expect(
+        await childCount(),
+        baseline,
+        reason: 'rollback must undo the pending valid row',
+      );
+    });
+
+    test('explicit commit after batch errors persists the valid rows',
+        () async {
+      await conn.execute(
+        'INSERT INTO $child (id, pid, v) VALUES (70, 1, :1)',
+        ['seed'],
+      );
+      await conn.commit();
+
+      final result = await conn.executeMany(
+        'INSERT INTO $child (id, pid, v) VALUES (:1, :2, :3)',
+        [
+          [70, 1, 'dup'], // dup -> batch error
+          [80, 2, 'ok'], // applied
+        ],
+        const OracleExecuteManyOptions(batchErrors: true),
+      );
+      expect(result.batchErrors, hasLength(1));
+      await conn.commit();
+
+      // Re-read on a fresh connection to prove the valid row is durable.
+      final other = await connectForTest();
+      try {
+        final r = await other.execute(
+          'SELECT COUNT(*) AS c FROM $child WHERE id IN (70, 80)',
+        );
+        expect(r.rows.single['C'], 2);
+      } finally {
+        await other.close();
+      }
+    });
+
+    test('first-error behavior is unchanged when batchErrors is false',
+        () async {
+      await conn.execute(
+        'INSERT INTO $child (id, pid, v) VALUES (5, 1, :1)',
+        ['seed'],
+      );
+      await conn.commit();
+
+      // Without batchErrors the call throws on the first row-level error.
+      await expectLater(
+        () => conn.executeMany(
+          'INSERT INTO $child (id, pid, v) VALUES (:1, :2, :3)',
+          [
+            [6, 1, 'ok'], // applied
+            [5, 1, 'dup'], // dup PK -> throws here
+            [7, 1, 'never'], // never applied
+          ],
+        ),
+        throwsA(
+          isA<OracleException>().having((e) => e.errorCode, 'errorCode', 1),
+        ),
+      );
+      await conn.rollback();
+    });
+
+    test('batchErrors / dmlRowCounts reject before wire for SELECT and PL/SQL',
+        () async {
+      final parseBefore = conn.debugFullParseExecutes;
+      final reuseBefore = conn.debugReuseExecutes;
+      await expectLater(
+        () => conn.executeMany(
+          'SELECT id FROM $child WHERE id = :1',
+          [
+            [1],
+          ],
+          const OracleExecuteManyOptions(batchErrors: true),
+        ),
+        throwsA(isA<OracleException>()),
+      );
+      await expectLater(
+        () => conn.executeMany(
+          'BEGIN NULL; END;',
+          1,
+          const OracleExecuteManyOptions(dmlRowCounts: true),
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('DML statements'), contains('PL/SQL')),
+          ),
+        ),
+      );
+      // No wire round trip happened for either rejected call.
+      expect(conn.debugFullParseExecutes, parseBefore);
+      expect(conn.debugReuseExecutes, reuseBefore);
+    });
+  });
 }
 
 /// Runs [action], swallowing [OracleException]s whose code is in [codes].

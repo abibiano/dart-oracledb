@@ -954,6 +954,53 @@ void main() {
       expect(result.outBinds['ret'], equals(42));
       expect(result.outBinds[0], equals(42));
     });
+
+    test('N>1 (REEXECUTE) row-major OUT results and cursor lifecycle are '
+        'unaffected by the new batchErrors/dmlRowCounts options '
+        '(regression)', () async {
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          cursorId: 4244,
+          outBindIndices: const [1],
+          outBindRows: const [
+            [20],
+            [40],
+          ],
+        ),
+      );
+      final result = await conn.executeMany(
+        'BEGIN story_double(:1, :2); END;',
+        [
+          [10],
+          [20],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.number),
+            OracleBindDef.output(type: OracleDbType.number),
+          ],
+        ),
+      );
+      expect(result.outBinds.toList(), [
+        [20],
+        [40],
+      ]);
+      // Story 11.3's DML-only options must never reach the wire for PL/SQL,
+      // even through the N>1 split-RPC (EXECUTE + REEXECUTE) path.
+      expect(transport.lastBatchErrors, isFalse);
+      expect(transport.lastDmlRowCounts, isFalse);
+
+      // The kept-alive cursor from the N>1 split-RPC must still be queued
+      // for close on the next operation — unaffected by the new threading.
+      transport.nextResponses.add(
+        ExecuteResponse(isSuccess: true, rowsAffected: 1),
+      );
+      await conn.executeMany('INSERT INTO t (id) VALUES (:1)', [
+        [9],
+      ]);
+      expect(transport.lastCursorsToClose, contains(4244));
+    });
   });
 
   group('executeMany() PL/SQL cursor lifecycle', () {
@@ -1001,6 +1048,221 @@ void main() {
       expect(transport.lastCursorsToClose, isEmpty);
     });
   });
+
+  group('executeMany() batchErrors / dmlRowCounts (Story 11.3)', () {
+    const dml = 'INSERT INTO t (id, name) VALUES (:1, :2)';
+
+    test('options default to false and are not threaded to the wire',
+        () async {
+      await conn.executeMany(dml, [
+        [1, 'a'],
+      ]);
+      expect(transport.lastBatchErrors, isFalse);
+      expect(transport.lastDmlRowCounts, isFalse);
+    });
+
+    test('batchErrors: true threads only the batch-errors flag', () async {
+      await conn.executeMany(
+        dml,
+        [
+          [1, 'a'],
+        ],
+        const OracleExecuteManyOptions(batchErrors: true),
+      );
+      expect(transport.lastBatchErrors, isTrue);
+      expect(transport.lastDmlRowCounts, isFalse);
+    });
+
+    test('dmlRowCounts: true threads only the row-counts flag', () async {
+      await conn.executeMany(
+        dml,
+        [
+          [1, 'a'],
+        ],
+        const OracleExecuteManyOptions(dmlRowCounts: true),
+      );
+      expect(transport.lastDmlRowCounts, isTrue);
+      expect(transport.lastBatchErrors, isFalse);
+    });
+
+    test('both options thread together', () async {
+      await conn.executeMany(
+        dml,
+        [
+          [1, 'a'],
+        ],
+        const OracleExecuteManyOptions(batchErrors: true, dmlRowCounts: true),
+      );
+      expect(transport.lastBatchErrors, isTrue);
+      expect(transport.lastDmlRowCounts, isTrue);
+    });
+
+    test('response batchErrors surface on OracleResult without throwing',
+        () async {
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 2,
+          batchErrors: const [
+            OracleBatchError(errorCode: 1, offset: 0, message: 'ORA-00001: a'),
+            OracleBatchError(errorCode: 1, offset: 2, message: 'ORA-00001: b'),
+          ],
+        ),
+      );
+      final result = await conn.executeMany(
+        dml,
+        [
+          [1, 'a'],
+          [2, 'b'],
+          [1, 'c'],
+        ],
+        const OracleExecuteManyOptions(batchErrors: true),
+      );
+      expect(result.batchErrors, hasLength(2));
+      expect(result.batchErrors.map((e) => e.offset), [0, 2]);
+      expect(result.batchErrors.first.code, 'ORA-00001');
+      expect(result.rowsAffected, 2);
+    });
+
+    test('response dmlRowCounts surface on OracleResult in order', () async {
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 2,
+          dmlRowCounts: const [1, 0, 1],
+        ),
+      );
+      final result = await conn.executeMany(
+        'UPDATE t SET name = :nm WHERE id = :id',
+        [
+          {'id': 1, 'nm': 'a'},
+          {'id': 2, 'nm': 'b'},
+          {'id': 3, 'nm': 'c'},
+        ],
+        const OracleExecuteManyOptions(dmlRowCounts: true),
+      );
+      expect(result.dmlRowCounts, [1, 0, 1]);
+    });
+
+    test('batchErrors and dmlRowCounts default to empty unmodifiable lists',
+        () async {
+      final result = await conn.executeMany(dml, [
+        [1, 'a'],
+      ]);
+      expect(result.batchErrors, isEmpty);
+      expect(result.dmlRowCounts, isEmpty);
+      expect(
+        () => result.batchErrors.add(
+          const OracleBatchError(errorCode: 1, offset: 0, message: 'x'),
+        ),
+        throwsUnsupportedError,
+      );
+      expect(() => result.dmlRowCounts.add(1), throwsUnsupportedError);
+    });
+
+    test('batchErrors: true with no row errors yields an empty list',
+        () async {
+      transport.nextResponses.add(
+        ExecuteResponse(isSuccess: true, rowsAffected: 2),
+      );
+      final result = await conn.executeMany(
+        dml,
+        [
+          [1, 'a'],
+          [2, 'b'],
+        ],
+        const OracleExecuteManyOptions(batchErrors: true),
+      );
+      expect(result.batchErrors, isEmpty);
+    });
+
+    test('a batch-error response does not keep the cursor cached (node parity)',
+        () async {
+      // node-oracledb clears the cursor and marks the statement
+      // not-returnable-to-cache on a batch-error response, so this driver must
+      // NOT cache cursor 77 and must queue it for the close-cursor piggyback.
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          cursorId: 77,
+          rowsAffected: 1,
+          batchErrors: const [
+            OracleBatchError(errorCode: 1, offset: 0, message: 'ORA-00001'),
+          ],
+        ),
+      );
+      await conn.executeMany(
+        dml,
+        [
+          [1, 'a'],
+          [1, 'b'],
+        ],
+        const OracleExecuteManyOptions(batchErrors: true),
+      );
+      expect(
+        conn.debugCacheSize,
+        0,
+        reason: 'a batch-error array-DML cursor must not be cached',
+      );
+      transport.nextResponses.add(
+        ExecuteResponse(isSuccess: true, rowsAffected: 1),
+      );
+      await conn.executeMany(dml, [
+        [9, 'z'],
+      ]);
+      expect(transport.lastCursorsToClose, contains(77));
+    });
+
+    test('batchErrors / dmlRowCounts are rejected for PL/SQL before wire',
+        () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'BEGIN p(:1); END;',
+          [
+            [1],
+          ],
+          const OracleExecuteManyOptions(batchErrors: true),
+        ),
+        ['DML statements', 'PL/SQL'],
+      );
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'BEGIN p(:1); END;',
+          [
+            [1],
+          ],
+          const OracleExecuteManyOptions(dmlRowCounts: true),
+        ),
+        ['DML statements', 'PL/SQL'],
+      );
+    });
+
+    test('batchErrors is rejected for a SELECT via the query guard', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'SELECT * FROM t WHERE id = :1',
+          [
+            [1],
+          ],
+          const OracleExecuteManyOptions(batchErrors: true),
+        ),
+        ['cannot be used with queries'],
+      );
+    });
+
+    test('the new options do not bypass the DML RETURNING guard', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'INSERT INTO t (id) VALUES (:1) RETURNING id INTO :2',
+          [
+            [1],
+          ],
+          const OracleExecuteManyOptions(batchErrors: true, dmlRowCounts: true),
+        ),
+        ['RETURNING', 'Story 11.4'],
+      );
+    });
+  });
 }
 
 /// Minimal in-process [Transport] stand-in recording the bulk-DML arguments
@@ -1022,6 +1284,8 @@ class _BulkFakeTransport extends Transport {
   List<List<Object?>>? lastBulkRows;
   int? lastExecuteManyIters;
   List<int> lastCursorsToClose = const <int>[];
+  bool lastBatchErrors = false;
+  bool lastDmlRowCounts = false;
 
   void releaseGate() {
     _heldGate?.complete();
@@ -1053,6 +1317,8 @@ class _BulkFakeTransport extends Transport {
     bool preserveTimestampTimeZone = false,
     List<List<Object?>>? bulkRows,
     int? executeManyIters,
+    bool batchErrors = false,
+    bool dmlRowCounts = false,
   }) async {
     executeCalls++;
     lastCursorId = cursorId;
@@ -1063,6 +1329,8 @@ class _BulkFakeTransport extends Transport {
     lastBulkRows = bulkRows;
     lastExecuteManyIters = executeManyIters;
     lastCursorsToClose = cursorsToClose;
+    lastBatchErrors = batchErrors;
+    lastDmlRowCounts = dmlRowCounts;
     final gate = executeGate;
     if (gate != null) {
       executeGate = null; // only the first call parks

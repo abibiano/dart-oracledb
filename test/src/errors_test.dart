@@ -266,4 +266,64 @@ void main() {
       expect(oraProtocolError, equals(12547));
     });
   });
+
+  group('OracleBatchError (Story 11.3)', () {
+    test('exposes errorCode, 0-based row offset, and message', () {
+      const e = OracleBatchError(
+        errorCode: 1,
+        offset: 2,
+        message: 'ORA-00001: unique constraint violated',
+      );
+      expect(e.errorCode, 1);
+      expect(e.offset, 2);
+      expect(e.message, 'ORA-00001: unique constraint violated');
+    });
+
+    test('code renders ORA-NNNNN with five-digit zero padding', () {
+      expect(
+        const OracleBatchError(errorCode: 1, offset: 0, message: 'x').code,
+        'ORA-00001',
+      );
+      expect(
+        const OracleBatchError(errorCode: 2291, offset: 0, message: 'x').code,
+        'ORA-02291',
+      );
+    });
+
+    test('a negative code renders as the ORA-invalid sentinel, never throws',
+        () {
+      expect(
+        const OracleBatchError(errorCode: -1, offset: 0, message: 'x').code,
+        'ORA-invalid(-1)',
+      );
+    });
+
+    test('toString names the failed input row and the Oracle code', () {
+      const e = OracleBatchError(
+        errorCode: 1,
+        offset: 3,
+        message: 'ORA-00001: dup',
+      );
+      expect(e.toString(), contains('row 3'));
+      expect(e.toString(), contains('ORA-00001'));
+    });
+
+    test('row offset is a distinct concept from OracleException.offset', () {
+      // OracleException.offset is a SQL-character offset; OracleBatchError.offset
+      // is a 0-based input-row index. They must not be conflated: the same
+      // numeric value carries different meaning on each type.
+      const batch = OracleBatchError(errorCode: 1, offset: 5, message: 'm');
+      const exc = OracleException(
+        errorCode: 1,
+        message: 'm',
+        offset: 5,
+      );
+      // Both hold 5, but they answer different questions (row vs SQL char).
+      expect(batch.offset, 5);
+      expect(exc.offset, 5);
+      // The batch error is a value type, not an Exception.
+      expect(batch, isNot(isA<Exception>()));
+      expect(exc, isA<Exception>());
+    });
+  });
 }

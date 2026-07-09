@@ -122,10 +122,17 @@ class ExecuteRequest extends Message {
     this.bulkRows,
     this.executeManyIters,
     this.noImplicitRelease = false,
+    this.batchErrors = false,
+    this.dmlRowCounts = false,
     super.sequence = 1,
   }) : assert(
          !(isQuery && isPlSql),
          'a statement cannot be both query and PL/SQL',
+       ),
+       assert(
+         (!batchErrors && !dmlRowCounts) || (!isQuery && !isPlSql),
+         'batchErrors / dmlRowCounts are DML-only (node-oracledb rejects them '
+         'for queries and PL/SQL before the wire)',
        ),
        assert(
          defineColumns == null ||
@@ -234,6 +241,19 @@ class ExecuteRequest extends Message {
   /// the same cursor.
   final bool noImplicitRelease;
 
+  /// Request row-level batch error collection (node-oracledb `batchErrors`).
+  /// When true, sets `TNS_EXEC_OPTION_BATCH_ERRORS` in the execute options
+  /// word so Oracle applies valid rows and returns per-row data errors in the
+  /// ERROR body instead of aborting on the first. DML-only (see the
+  /// constructor assert).
+  final bool batchErrors;
+
+  /// Request per-input-row affected-row counts (node-oracledb
+  /// `arrayDmlRowCounts`). When true, sets `TNS_EXEC_OPTION_DML_ROWCOUNTS` in
+  /// the exec-flags word (al8i4[9]) and emits the array DML row-count pointer
+  /// block with the executeMany iteration count. DML-only.
+  final bool dmlRowCounts;
+
   /// Number of execute iterations for DML / PL/SQL: the explicit executeMany
   /// count when set, else the bulk row count, else 1 (node-oracledb
   /// execute.js writes `numExecs` into al8i4[1] for every non-query).
@@ -313,6 +333,18 @@ class ExecuteRequest extends Message {
       }
     }
 
+    // Array-DML row-level reporting (node-oracledb writeExecuteMessage, after
+    // the bind flags): batch errors ride the options word; DML row counts ride
+    // the exec-flags word (al8i4[9]). Both are DML-only — the constructor
+    // assert guarantees they are never combined with query/PL-SQL, so define
+    // mode never reaches here with them set.
+    if (batchErrors) {
+      options |= ttcExecOptionBatchErrors;
+    }
+    if (dmlRowCounts) {
+      dmlOptions |= ttcExecOptionDmlRowCounts;
+    }
+
     buffer.writeUB4(options);
     buffer.writeUB4(cursorId);
 
@@ -368,10 +400,19 @@ class ExecuteRequest extends Message {
     buffer.writeUB4(0); // al8dnaml
     buffer.writeUB4(0); // al8regid_msb
 
-    // array dml row counts (off)
-    buffer.writeUint8(0);
-    buffer.writeUB4(0);
-    buffer.writeUint8(0);
+    // array dml row counts: node-oracledb writeExecuteMessage emits the
+    // al8pidmlrc pointer + count block only when arrayDmlRowCounts is set. The
+    // count is the executeMany iteration count, so the server ships one UB8
+    // row count per iteration in the RETURN_PARAMETER response body.
+    if (dmlRowCounts) {
+      buffer.writeUint8(1); // pointer (al8pidmlrc)
+      buffer.writeUB4(_numExecs); // al8pidmlrcbl (number of row counts)
+      buffer.writeUint8(1); // pointer (al8pidmlrcl)
+    } else {
+      buffer.writeUint8(0);
+      buffer.writeUB4(0);
+      buffer.writeUint8(0);
+    }
 
     // 12.2 fields
     if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
@@ -1150,6 +1191,8 @@ class ExecuteResponse {
     List<int> outBindIndices = const [],
     List<List<Object?>> outBindRows = const [],
     List<DecodedCursorResult> implicitResults = const [],
+    List<OracleBatchError> batchErrors = const [],
+    List<int> dmlRowCounts = const [],
     this.rowsAffected,
     this.moreRowsToFetch = false,
     this.errorCode,
@@ -1172,7 +1215,13 @@ class ExecuteResponse {
            : List<List<Object?>>.unmodifiable(outBindRows),
        implicitResults = implicitResults.isEmpty
            ? const <DecodedCursorResult>[]
-           : List<DecodedCursorResult>.unmodifiable(implicitResults);
+           : List<DecodedCursorResult>.unmodifiable(implicitResults),
+       batchErrors = batchErrors.isEmpty
+           ? const <OracleBatchError>[]
+           : List<OracleBatchError>.unmodifiable(batchErrors),
+       dmlRowCounts = dmlRowCounts.isEmpty
+           ? const <int>[]
+           : List<int>.unmodifiable(dmlRowCounts);
 
   /// Whether the call succeeded (no Oracle error).
   final bool isSuccess;
@@ -1212,6 +1261,17 @@ class ExecuteResponse {
   /// Unmodifiable — the decoder's accumulation list is never aliased in.
   final List<DecodedCursorResult> implicitResults;
 
+  /// Row-level batch errors decoded from the ERROR body (array-DML
+  /// executeMany(batchErrors: true) with failing rows). Non-empty means the
+  /// call SUCCEEDED returning per-row errors as data. Empty otherwise.
+  /// Unmodifiable.
+  final List<OracleBatchError> batchErrors;
+
+  /// Per-input-row affected-row counts from the RETURN_PARAMETER body when
+  /// dmlRowCounts was requested (one UB8 per iteration, input order). Empty
+  /// otherwise. Unmodifiable.
+  final List<int> dmlRowCounts;
+
   /// Rows affected by DML (null for SELECT before FETCH end).
   final int? rowsAffected;
 
@@ -1249,6 +1309,7 @@ bool ttcStreamIsComplete(
   List<ColumnMetadata>? expectedColumns,
   List<BindMetadata>? bindMetadata,
   bool plSqlExecuteMany = false,
+  bool dmlRowCounts = false,
   List<int>? presetOutBindIndices,
 }) {
   final buffer = ReadBuffer(data);
@@ -1260,6 +1321,7 @@ bool ttcStreamIsComplete(
         : <ColumnMetadata>[],
     bindMetadata: bindMetadata ?? const [],
     endOfRequestSupport: endOfRequestSupport,
+    arrayDmlRowCounts: dmlRowCounts,
     // The probe only needs to locate the terminal message; decode unsupported
     // types leniently here so an unsupported LONG column cannot make the probe
     // throw (the real decode pass raises the clear error).
@@ -1320,6 +1382,7 @@ ExecuteResponse decodeExecuteResponse(
   String nationalCharset = 'AL16UTF16',
   List<Object?>? previousRoundLastRow,
   bool plSqlExecuteMany = false,
+  bool dmlRowCounts = false,
   List<int>? presetOutBindIndices,
 }) {
   final buffer = ReadBuffer(data);
@@ -1331,6 +1394,7 @@ ExecuteResponse decodeExecuteResponse(
         : <ColumnMetadata>[],
     bindMetadata: bindMetadata ?? const [],
     endOfRequestSupport: endOfRequestSupport,
+    arrayDmlRowCounts: dmlRowCounts,
     preserveTimestampTimeZone: preserveTimestampTimeZone,
     supportsNationalCharset: supportsNationalCharset,
     nationalCharset: nationalCharset,
@@ -1379,6 +1443,8 @@ ExecuteResponse decodeExecuteResponse(
     outBindIndices: state.outBindIndices,
     outBindRows: state.outBindRows,
     implicitResults: state.implicitResults,
+    batchErrors: state.batchErrors,
+    dmlRowCounts: state.dmlRowCounts,
     rowsAffected: state.rowsAffected,
     moreRowsToFetch: state.moreRowsToFetch,
     errorCode: isSuccess ? null : state.errorNum,
@@ -1400,10 +1466,26 @@ class _DecodeState {
     this.nationalCharset = 'AL16UTF16',
     this.previousRoundLastRow,
     this.plSqlExecuteMany = false,
+    this.arrayDmlRowCounts = false,
   }) : cursorColumnIndices = cursorColumnIndicesOf(columns);
 
   final bool isQuery;
   final int ttcFieldVersion;
+
+  /// Whether the request set `dmlRowCounts` (node-oracledb `arrayDmlRowCounts`).
+  /// When true, [_processReturnParameter] reads the trailing UB4 count + UB8
+  /// per-row counts appended to the RETURN_PARAMETER body. Threaded into BOTH
+  /// the completion probe and the real decode pass so the two consume the same
+  /// bytes.
+  final bool arrayDmlRowCounts;
+
+  /// Row-level batch errors captured from the ERROR body when the server
+  /// returned them (array-DML executeMany with failing rows). Empty otherwise.
+  List<OracleBatchError> batchErrors = const [];
+
+  /// Per-input-row affected-row counts accumulated from the RETURN_PARAMETER
+  /// body when [arrayDmlRowCounts] is set. One UB8 per executeMany iteration.
+  final List<int> dmlRowCounts = [];
 
   /// The connection's national-charset capability
   /// ([OracleCharsetInfo.supportsNationalCharacterSet]). Threaded into
@@ -1516,7 +1598,7 @@ void _dispatch(int msgType, ReadBuffer buf, _DecodeState s) {
       _processStatus(buf, s);
       return;
     case ttcMsgTypeParameter:
-      _processReturnParameter(buf);
+      _processReturnParameter(buf, s);
       return;
     case ttcMsgTypeServerSidePiggyback:
       processServerSidePiggybackBody(buf);
@@ -2432,6 +2514,7 @@ class TtcErrorInfo {
     this.offset,
     required this.cursorId,
     this.rowCount,
+    this.batchErrors = const [],
   });
 
   /// Oracle error number (0 = success / informational end-of-call).
@@ -2448,6 +2531,13 @@ class TtcErrorInfo {
 
   /// Row count from the extended error block (12.2+ servers only).
   final int? rowCount;
+
+  /// Row-level batch errors decoded from the ERROR body, when the server
+  /// returned them (array-DML `executeMany(batchErrors: true)` with failing
+  /// rows). Empty otherwise — a normal statement error carries no batch array.
+  /// The presence of entries here means the call is a *success* returning
+  /// per-row errors as data, not a thrown statement failure.
+  final List<OracleBatchError> batchErrors;
 }
 
 /// Walks the body of a TTC ERROR message (everything after the message-type
@@ -2488,34 +2578,54 @@ TtcErrorInfo decodeTtcErrorBody(
   buf.skipUB4(); // success iters
   final oerrddLen = buf.readUB4();
   if (oerrddLen > 0) buf.readBytesWithLength();
-  // batch error codes
+  // Batch error codes / offsets / messages (node-oracledb processErrorInfo).
+  // An array-DML executeMany(batchErrors: true) with failing rows returns one
+  // entry per failed input row across three parallel arrays: the Oracle error
+  // code, the 0-based input-row offset, then the message. A normal (non-batch)
+  // response encodes all three counts as 0, so these decode to empty lists and
+  // the byte walk is unchanged.
+  final batchCodes = <int>[];
   final numErrs = buf.readUB2();
   if (numErrs > 0) {
     final firstByte = buf.readUint8();
     for (var i = 0; i < numErrs; i++) {
       if (firstByte == ttcLongLengthIndicator) buf.skipUB4();
-      buf.readUB2();
+      batchCodes.add(buf.readUB2());
     }
     if (firstByte == ttcLongLengthIndicator) buf.skip(1);
   }
-  // batch error offsets
+  // batch error offsets (0-based input row indices)
+  final batchOffsets = <int>[];
   final numOff = buf.readUB4();
   if (numOff > 0) {
+    if (numOff > 65535) {
+      // node-oracledb ERR_TOO_MANY_BATCH_ERRORS: Oracle caps a single
+      // array-DML call at 65535 batch errors; a larger count is a malformed
+      // stream, not a survivable result.
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'executeMany() batch-error offset array exceeds the 65535 limit; '
+            'the TTC ERROR body is malformed.',
+      );
+    }
     final firstByte = buf.readUint8();
     for (var i = 0; i < numOff; i++) {
       if (firstByte == ttcLongLengthIndicator) buf.skipUB4();
-      buf.readUB4();
+      batchOffsets.add(buf.readUB4());
     }
     if (firstByte == ttcLongLengthIndicator) buf.skip(1);
   }
   // batch error messages
+  final batchMessages = <String>[];
   final errMsgArr = buf.readUB2();
   if (errMsgArr > 0) {
-    buf.skip(1);
+    buf.skip(1); // packed size (ignored)
     for (var i = 0; i < errMsgArr; i++) {
-      buf.skipUB2();
-      buf.readBytesWithLength();
-      buf.skip(2);
+      buf.skipUB2(); // chunk length (ignored)
+      final bytes = buf.readBytesWithLength(); // node readStr(CSFRM_IMPLICIT)
+      batchMessages.add(utf8.decode(bytes, allowMalformed: true).trim());
+      buf.skip(2); // end marker (ignored)
     }
   }
   final num = buf.readUB4(); // extended error number
@@ -2537,12 +2647,25 @@ TtcErrorInfo decodeTtcErrorBody(
     final bytes = buf.readBytesWithLength();
     message = utf8.decode(bytes, allowMalformed: true).trim();
   }
+  // Zip the three parallel batch arrays into value types, guarding on the
+  // code count (offsets/messages track it index-for-index, node parity). A
+  // missing offset/message for some index degrades to 0 / '' rather than
+  // throwing, so a truncated tail never crashes the decode.
+  final batchErrors = <OracleBatchError>[
+    for (var i = 0; i < batchCodes.length; i++)
+      OracleBatchError(
+        errorCode: batchCodes[i],
+        offset: i < batchOffsets.length ? batchOffsets[i] : 0,
+        message: i < batchMessages.length ? batchMessages[i] : '',
+      ),
+  ];
   return TtcErrorInfo(
     num: num,
     message: message,
     offset: errorPos >= 0 ? errorPos : null,
     cursorId: cursorId,
     rowCount: rowCount,
+    batchErrors: batchErrors,
   );
 }
 
@@ -2558,7 +2681,22 @@ void _processError(ReadBuffer buf, _DecodeState s) {
     s.errorMessage = err.message;
   }
   s.errorNum = num;
-  if (s.isQuery && num == 1403) {
+  if (err.batchErrors.isNotEmpty) {
+    // Batch errors (array-DML executeMany(batchErrors: true)): Oracle applied
+    // the valid rows and returned per-row data errors in the ERROR body under
+    // a statement-level ORA-24381 ("error(s) in array DML"). node-oracledb
+    // forces errorOccurred=false here (withData.js processErrorInfo) — this is
+    // a SUCCESS returning row errors as data, not a thrown failure. Capture the
+    // rows, clear the statement-level error so the call does not throw, and
+    // keep the extended DML row count as rowsAffected.
+    s.batchErrors = err.batchErrors;
+    s.errorNum = 0;
+    s.errorMessage = null;
+    s.errorOffset = null;
+    if (!s.isQuery) {
+      s.rowsAffected = rowCount;
+    }
+  } else if (s.isQuery && num == 1403) {
     // ORA-01403 == end of fetch — not a real error for queries.
     s.errorNum = 0;
     s.moreRowsToFetch = false;
@@ -2599,7 +2737,7 @@ void _processStatus(ReadBuffer buf, _DecodeState s) {
   s.endOfResponse = true;
 }
 
-void _processReturnParameter(ReadBuffer buf) {
+void _processReturnParameter(ReadBuffer buf, _DecodeState s) {
   // Drain the variable-length structure conservatively.
   final numParams = buf.readUB2();
   for (var i = 0; i < numParams; i++) {
@@ -2624,6 +2762,18 @@ void _processReturnParameter(ReadBuffer buf) {
   }
   final regLen = buf.readUB2();
   if (regLen > 0) buf.skip(regLen);
+  // Array DML row counts (node-oracledb withData.js processReturnParameter):
+  // when dmlRowCounts was requested, one UB4 count precedes that many UB8
+  // per-iteration row counts, appended after the registration section. Gated
+  // on the request flag so a normal RETURN_PARAMETER response is untouched —
+  // and threaded into the completion probe too, so both passes consume the
+  // same trailing bytes.
+  if (s.arrayDmlRowCounts) {
+    final numRows = buf.readUB4();
+    for (var i = 0; i < numRows; i++) {
+      s.dmlRowCounts.add(buf.readUB8());
+    }
+  }
 }
 
 /// Consumes the body of a server-side piggyback message. Shared with the

@@ -193,6 +193,8 @@ class _CharsetFakeTransport extends Transport {
     bool preserveTimestampTimeZone = false,
     List<List<Object?>>? bulkRows,
     int? executeManyIters,
+    bool batchErrors = false,
+    bool dmlRowCounts = false,
   }) async {
     executeCalls++;
     return _response;

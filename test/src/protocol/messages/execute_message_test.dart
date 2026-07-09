@@ -4826,6 +4826,255 @@ void main() {
     });
   });
 
+  group('batchErrors / dmlRowCounts ExecuteRequest encoding (Story 11.3)', () {
+    const sql = 'INSERT INTO t (id, name) VALUES (:1, :2)';
+    List<Object?> slots() => [
+      BindVariable(value: null, oraType: oraTypeNumber),
+      BindVariable(value: null, oraType: oraTypeVarchar, maxSize: 5),
+    ];
+    List<List<Object?>> rows() => [
+      [1, 'a'],
+      [2, 'b'],
+      [3, 'c'],
+    ];
+
+    test('a plain array DML executeMany sets neither bit nor the pointer '
+        'block', () {
+      final bytes = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        bindValues: slots(),
+        bulkRows: rows(),
+      ).toBytes();
+      expect(_readOptionsFromHeader(bytes) & ttcExecOptionBatchErrors, 0);
+      expect(_openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
+          0);
+      final block = _readArrayDmlRowCountBlock(bytes);
+      expect(block.pointer, 0);
+      expect(block.count, 0);
+      expect(block.pointer2, 0);
+    });
+
+    test('batchErrors sets TNS_EXEC_OPTION_BATCH_ERRORS (0x80000) in the '
+        'options word only', () {
+      final bytes = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        bindValues: slots(),
+        bulkRows: rows(),
+        batchErrors: true,
+      ).toBytes();
+      expect(ttcExecOptionBatchErrors, 0x80000);
+      expect(_readOptionsFromHeader(bytes) & ttcExecOptionBatchErrors,
+          ttcExecOptionBatchErrors);
+      // batchErrors alone leaves the DML-row-count exec-flag and pointer clear.
+      expect(_openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
+          0);
+      expect(_readArrayDmlRowCountBlock(bytes).pointer, 0);
+    });
+
+    test('dmlRowCounts sets TNS_EXEC_OPTION_DML_ROWCOUNTS (0x4000) in the '
+        'exec-flags word and emits the pointer block', () {
+      final bytes = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        bindValues: slots(),
+        bulkRows: rows(),
+        dmlRowCounts: true,
+      ).toBytes();
+      expect(ttcExecOptionDmlRowCounts, 0x4000);
+      expect(_openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
+          ttcExecOptionDmlRowCounts);
+      // The pointer block carries the executeMany iteration count (3 rows).
+      final block = _readArrayDmlRowCountBlock(bytes);
+      expect(block.pointer, 1);
+      expect(block.count, 3);
+      expect(block.pointer2, 1);
+      // dmlRowCounts alone leaves the batch-errors bit clear.
+      expect(_readOptionsFromHeader(bytes) & ttcExecOptionBatchErrors, 0);
+    });
+
+    test('both options set both bits and the pointer block together', () {
+      final bytes = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        bindValues: slots(),
+        bulkRows: rows(),
+        batchErrors: true,
+        dmlRowCounts: true,
+      ).toBytes();
+      expect(_readOptionsFromHeader(bytes) & ttcExecOptionBatchErrors,
+          ttcExecOptionBatchErrors);
+      expect(_openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
+          ttcExecOptionDmlRowCounts);
+      expect(_readArrayDmlRowCountBlock(bytes).count, 3);
+    });
+
+    test('the row-count pointer count follows numExecs for a single row', () {
+      final bytes = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        bindValues: slots(),
+        bulkRows: [
+          [1, 'a'],
+        ],
+        dmlRowCounts: true,
+      ).toBytes();
+      expect(_readArrayDmlRowCountBlock(bytes).count, 1);
+    });
+
+    test('the options are DML-only: query / PL/SQL combinations assert', () {
+      expect(
+        () => ExecuteRequest(
+          sql: 'SELECT 1 FROM dual',
+          isQuery: true,
+          batchErrors: true,
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+      expect(
+        () => ExecuteRequest(
+          sql: 'BEGIN p(:1); END;',
+          isQuery: false,
+          isPlSql: true,
+          bindValues: slots(),
+          bulkRows: rows(),
+          dmlRowCounts: true,
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+    });
+  });
+
+  group('batch errors / dml row counts response decoding (Story 11.3)', () {
+    test('a batch-error ERROR body decodes to a SUCCESS with per-row errors',
+        () {
+      final payload = _buildPayload([
+        _batchErrorMessage(
+          errors: const [
+            (code: 1, offset: 0, message: 'ORA-00001: unique constraint'),
+            (code: 1, offset: 2, message: 'ORA-00001: unique constraint'),
+          ],
+          rowCount: 2,
+        ),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      // ORA-24381 at the statement level is NOT a thrown failure when a batch
+      // array is present — it is a success returning row errors as data.
+      expect(r.isSuccess, isTrue);
+      expect(r.errorCode, isNull);
+      expect(r.batchErrors, hasLength(2));
+      expect(r.batchErrors[0].offset, 0);
+      expect(r.batchErrors[0].errorCode, 1);
+      expect(r.batchErrors[0].code, 'ORA-00001');
+      expect(r.batchErrors[0].message, contains('unique constraint'));
+      expect(r.batchErrors[1].offset, 2);
+      // The extended row count still surfaces as rowsAffected (valid rows).
+      expect(r.rowsAffected, 2);
+    });
+
+    test('an ordinary DML error (no batch array) still throws-shaped '
+        '(isSuccess false, empty batchErrors)', () {
+      final payload = _buildPayload([
+        _errorMessage(
+          errorNum: 1,
+          rowCount: 0,
+          errorMessage: 'ORA-00001: unique constraint violated',
+        ),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.isSuccess, isFalse);
+      expect(r.errorCode, 1);
+      expect(r.batchErrors, isEmpty);
+    });
+
+    test('dmlRowCounts read the trailing UB4 count + UB8 row counts when '
+        'requested', () {
+      final payload = _buildPayload([
+        _parameterWithRowCounts(const [1, 0, 1]),
+        _errorMessage(errorNum: 0, rowCount: 2),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false, dmlRowCounts: true);
+      expect(r.isSuccess, isTrue);
+      expect(r.dmlRowCounts, [1, 0, 1]);
+      expect(r.rowsAffected, 2);
+    });
+
+    test('the row-count trailer is NOT read when dmlRowCounts was not '
+        'requested', () {
+      // A plain RETURN_PARAMETER (no trailer) must decode identically whether
+      // or not the flag is set; without the flag the decoder must not attempt
+      // to read a phantom trailer.
+      final payload = _buildPayload([
+        [
+          ttcMsgTypeParameter,
+          ..._ub2(0), // numParams
+          ..._ub2(0), // transaction length
+          ..._ub2(0), // numKv
+          ..._ub2(0), // registration length
+        ],
+        _errorMessage(errorNum: 0, rowCount: 5),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      expect(r.isSuccess, isTrue);
+      expect(r.dmlRowCounts, isEmpty);
+      expect(r.rowsAffected, 5);
+    });
+
+    test('batch errors and dml row counts decode together', () {
+      final payload = _buildPayload([
+        _parameterWithRowCounts(const [0, 1, 0]),
+        _batchErrorMessage(
+          errors: const [
+            (code: 1, offset: 0, message: 'ORA-00001'),
+            (code: 1, offset: 2, message: 'ORA-00001'),
+          ],
+          rowCount: 1,
+        ),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false, dmlRowCounts: true);
+      expect(r.isSuccess, isTrue);
+      expect(r.batchErrors.map((e) => e.offset), [0, 2]);
+      expect(r.dmlRowCounts, [0, 1, 0]);
+    });
+
+    test('a batch-error offsets array count over 65535 throws before '
+        'reading it (malformed stream)', () {
+      final payload = _buildPayload([
+        _batchErrorMessage(errors: const [], offsetsCountOverride: 65536),
+      ]);
+      expect(
+        () => decodeExecuteResponse(payload, isQuery: false),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(oraProtocolError),
+          ),
+        ),
+      );
+    });
+
+    test('a dmlRowCounts response is complete under the pre-23.4 probe', () {
+      // The completion probe must consume the trailing row-count block too, or
+      // a pre-23.4 (21c) read loop would never see end-of-response.
+      final payload = _buildPayload([
+        _parameterWithRowCounts(const [1, 1]),
+        _errorMessage(errorNum: 0, rowCount: 2),
+      ]);
+      expect(
+        ttcStreamIsComplete(payload, endOfRequestSupport: false,
+            dmlRowCounts: true),
+        isTrue,
+      );
+    });
+  });
+
   group('PL/SQL executeMany ExecuteRequest encoding', () {
     // Wire parity target (validated byte-for-byte against a live
     // node-oracledb capture on 23ai): PL/SQL executeMany is TWO messages.
@@ -5399,6 +5648,147 @@ _openDmlExecuteForRead(Uint8List bytes) {
     buf: buf,
   );
 }
+
+/// Walks a freshly-parsed (cursorId == 0) DML EXECUTE at ttcFieldVersion 24
+/// up to the array-DML row-count pointer block (al8pidmlrc / al8pidmlrcbl /
+/// al8pidmlrcl) and returns its three fields. Off is `(0, 0, 0)`; on is
+/// `(1, numExecs, 1)`.
+({int pointer, int count, int pointer2}) _readArrayDmlRowCountBlock(
+  Uint8List bytes,
+) {
+  final buf = ReadBuffer(bytes);
+  buf.readUint8(); // msg type
+  buf.readUint8(); // func code
+  buf.readUint8(); // sequence
+  buf.skipUB8(); // token number (ttcFieldVersion >= 23.1 ext1)
+  buf.readUB4(); // options
+  buf.readUB4(); // cursor id
+  buf.readUint8(); // SQL pointer
+  buf.readUB4(); // SQL length
+  buf.readUint8(); // vector pointer
+  buf.readUB4(); // al8i4 array length (13)
+  buf.readUint8(); // al8o4
+  buf.readUint8(); // al8o4l
+  buf.readUint8(); // prefetch buffer size
+  buf.readUB4(); // prefetch num rows
+  buf.readUB4(); // maximum long size
+  buf.readUint8(); // bind pointer
+  buf.readUB4(); // num binds
+  buf.readUint8(); // al8pp
+  buf.readUint8(); // al8txn
+  buf.readUint8(); // al8txl
+  buf.readUint8(); // al8kv
+  buf.readUint8(); // al8kvl
+  buf.readUint8(); // define pointer
+  buf.readUB4(); // define count
+  buf.readUB4(); // registration id
+  buf.readUint8(); // al8objlist
+  buf.readUint8(); // al8objlen
+  buf.readUint8(); // al8blv pointer
+  buf.readUB4(); // al8blv
+  buf.readUint8(); // al8dnam
+  buf.readUB4(); // al8dnaml
+  buf.readUB4(); // al8regid_msb
+  final pointer = buf.readUint8(); // array dml row counts pointer
+  final count = buf.readUB4(); // array dml row counts length
+  final pointer2 = buf.readUint8(); // array dml row counts pointer 2
+  return (pointer: pointer, count: count, pointer2: pointer2);
+}
+
+/// Builds a TTC ERROR (type 4) message carrying a batch-error array — the
+/// shape Oracle returns for array-DML executeMany(batchErrors: true) with
+/// failing rows (statement-level ORA-24381 plus per-row code/offset/message
+/// arrays). Mirrors the layout [decodeTtcErrorBody] walks.
+List<int> _batchErrorMessage({
+  required List<({int code, int offset, String message})> errors,
+  int rowCount = 0,
+  int cursorId = 0,
+  int topErrorNum = 24381,
+  int ttcFieldVersion = 24,
+  int? offsetsCountOverride,
+}) {
+  final out = <int>[ttcMsgTypeError];
+  out.addAll(_ub4(0)); // end of call status
+  out.addAll(_ub2(0)); // end-to-end seq num
+  out.addAll(_ub4(0)); // current row
+  out.addAll(_ub2(0)); // err num short
+  out.addAll(_ub2(0)); // array elem
+  out.addAll(_ub2(0)); // array elem
+  out.addAll(_ub4(cursorId)); // cursor id
+  out.addAll(_ub4(0)); // error position (SB4)
+  out.add(0); // sql type
+  out.add(0); // fatal
+  out.add(0); // flags
+  out.add(0); // user cursor opts
+  out.add(0); // UPI param
+  out.add(0); // warning
+  out.addAll(_ub4(0)); // rowID rba
+  out.addAll(_ub2(0));
+  out.add(0);
+  out.addAll(_ub4(0));
+  out.addAll(_ub2(0));
+  out.addAll(_ub4(0)); // OS error
+  out.add(0); // statement error
+  out.add(0); // call number
+  out.addAll(_ub2(0)); // padding
+  out.addAll(_ub4(0)); // success iters
+  out.addAll(_ub4(0)); // oerrdd length
+  // batch error codes: count, firstByte (non-0xFE: not chunked), UB2 per code
+  out.addAll(_ub2(errors.length));
+  if (errors.isNotEmpty) {
+    out.add(0x01);
+    for (final e in errors) {
+      out.addAll(_ub2(e.code));
+    }
+  }
+  // batch error offsets: count, firstByte, UB4 per offset
+  out.addAll(_ub4(offsetsCountOverride ?? errors.length));
+  if (errors.isNotEmpty) {
+    out.add(0x01);
+    for (final e in errors) {
+      out.addAll(_ub4(e.offset));
+    }
+  }
+  // batch error messages: count, packed-size byte, then per element a UB2
+  // chunk length + length-prefixed message bytes + 2-byte end marker.
+  out.addAll(_ub2(errors.length));
+  if (errors.isNotEmpty) {
+    out.add(0x00); // packed size (ignored)
+    for (final e in errors) {
+      out.addAll(_ub2(0)); // chunk length (ignored)
+      out.addAll(_bytesWithLength(utf8.encode(e.message)));
+      out.addAll([0, 0]); // end marker
+    }
+  }
+  out.addAll(_ub4(topErrorNum)); // extended error number (ORA-24381)
+  if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
+    out.addAll(_ub8(rowCount));
+    if (ttcFieldVersion >= ttcCcapFieldVersion20_1) {
+      out.addAll(_ub4(0)); // 20.1 sql type
+      out.addAll(_ub4(0)); // 20.1 checksum
+    }
+  }
+  if (topErrorNum != 0) {
+    out.addAll(
+      _bytesWithLength('ORA-24381: error(s) in array DML'.codeUnits),
+    );
+  }
+  return out;
+}
+
+/// Builds a RETURN_PARAMETER (type 8) message with empty kv/registration
+/// sections followed by the array-DML row-count trailer that
+/// [_processReturnParameter] reads when dmlRowCounts was requested: a UB4
+/// count then one UB8 per input row.
+List<int> _parameterWithRowCounts(List<int> counts) => [
+  ttcMsgTypeParameter,
+  ..._ub2(0), // numParams
+  ..._ub2(0), // transaction length
+  ..._ub2(0), // numKv
+  ..._ub2(0), // registration length
+  ..._ub4(counts.length), // number of row counts
+  for (final c in counts) ..._ub8(c),
+];
 
 /// Reads [numParams] bind-metadata blocks (default ttcFieldVersion 24 layout)
 /// from [buf], leaving it positioned at the first ROW_DATA message byte.

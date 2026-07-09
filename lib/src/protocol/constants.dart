@@ -330,6 +330,17 @@ const int ttcExecOptionCommit = 0x100;
 /// Describe query without executing.
 const int ttcExecOptionDescribe = 0x20000;
 
+/// Collect row-level DML errors instead of aborting on the first
+/// (node-oracledb `TNS_EXEC_OPTION_BATCH_ERRORS`). Set in the `options` field
+/// of the EXECUTE request for array-DML `executeMany(batchErrors: true)`.
+const int ttcExecOptionBatchErrors = 0x80000;
+
+/// Return one affected-row count per input row (node-oracledb
+/// `TNS_EXEC_OPTION_DML_ROWCOUNTS`). Set in the `dmlOptions` / exec-flags
+/// (al8i4[9]) field of the EXECUTE request for array-DML
+/// `executeMany(dmlRowCounts: true)`.
+const int ttcExecOptionDmlRowCounts = 0x4000;
+
 /// SQL is not PL/SQL (used in the `options` field of EXECUTE request).
 const int ttcExecOptionNotPlSql = 0x8000;
 

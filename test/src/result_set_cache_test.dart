@@ -80,6 +80,8 @@ class _FakeCacheTransport extends Transport {
     bool preserveTimestampTimeZone = false,
     List<List<Object?>>? bulkRows,
     int? executeManyIters,
+    bool batchErrors = false,
+    bool dmlRowCounts = false,
   }) async {
     sendExecuteCalls++;
     sendExecuteCursorIds.add(cursorId);
