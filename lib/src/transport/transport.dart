@@ -556,12 +556,14 @@ class Transport {
     int? executeManyIters,
     bool batchErrors = false,
     bool dmlRowCounts = false,
+    bool dmlReturning = false,
   }) async {
     _log.fine(
       'Sending execute request (isQuery=$isQuery, isPlSql=$isPlSql, '
       'cursorId=$cursorId'
       '${bulkRows != null ? ', bulkRows=${bulkRows.length}' : ''}'
       '${executeManyIters != null ? ', executeManyIters=$executeManyIters' : ''}'
+      '${dmlReturning ? ', dmlReturning' : ''}'
       ')...',
     );
 
@@ -569,6 +571,19 @@ class Transport {
     // both the completion probe and the real decode pass must know to consume
     // every one of them (single-execute PL/SQL stops after the first).
     final plSqlExecuteMany = isPlSql && executeManyIters != null;
+
+    // DML RETURNING ships no IO_VECTOR (node-oracledb sets `outVariables` up
+    // front from the return binds in `preProcess`). Seed the OUT-bind order
+    // from the client-declared return-bind positions (OUT / IN OUT slots) so
+    // both the completion probe and the real decode pass know which slots the
+    // per-iteration ROW_DATA carries. Computed here (not in the connection
+    // layer) so the transport owns the wire-order contract end to end.
+    final List<int>? returningOutBindIndices = dmlReturning && bindMetadata != null
+        ? <int>[
+            for (var i = 0; i < bindMetadata.length; i++)
+              if (bindMetadata[i].dir != BindDir.input) i,
+          ]
+        : null;
 
     // Record whether this execute reuses a cached server cursor (parse bit
     // cleared) or performs a full parse. The cursorId sent on the wire is the
@@ -652,6 +667,10 @@ class Transport {
       // wire, so these are always false on the PL/SQL two-RPC path above).
       batchErrors: batchErrors,
       dmlRowCounts: dmlRowCounts,
+      // DML RETURNING: permit the OUT / IN OUT return binds on this non-PL/SQL
+      // statement and omit them from the per-iteration row data. Single-RPC,
+      // numExecs = N (no REEXECUTE split).
+      dmlReturning: dmlReturning,
     );
 
     // Prepend piggybacks: close-cursor (LRU evictions) and free-temp-LOBs
@@ -680,10 +699,12 @@ class Transport {
       expectedColumns: expectedColumns,
       bindMetadata: bindMetadata,
       plSqlExecuteMany: plSqlExecuteMany,
+      dmlReturning: dmlReturning,
       dmlRowCounts: dmlRowCounts,
+      presetOutBindIndices: returningOutBindIndices,
     );
 
-    final response = decodeExecuteResponse(
+    var response = decodeExecuteResponse(
       payload,
       isQuery: isQuery,
       ttcFieldVersion: _ttcFieldVersion,
@@ -694,8 +715,42 @@ class Transport {
       supportsNationalCharset: supportsNationalCharset,
       nationalCharset: nationalCharset,
       plSqlExecuteMany: plSqlExecuteMany,
+      dmlReturning: dmlReturning,
       dmlRowCounts: dmlRowCounts,
+      presetOutBindIndices: returningOutBindIndices,
     );
+
+    // DML RETURNING error path: the server ended the execute response with a
+    // FLUSH_OUT_BINDS marker and now expects a matching flush request before
+    // it will accept the next RPC. The DML outcome — a statement error
+    // (ORA-00001, first-error mode) OR the row-level batch errors
+    // (batchErrors: true) — travels in the FLUSH response, while the
+    // per-iteration returning OUT rows (for the rows that DID apply) are in the
+    // execute response above. Send the flush here (inside the concurrency
+    // guard, keeping the connection usable) and MERGE the two so neither the
+    // returned values nor the error signal is lost.
+    if (response.flushOutBinds) {
+      final flushResponse = await _flushOutBinds(
+        timeout,
+        dmlRowCounts: dmlRowCounts,
+      );
+      response = ExecuteResponse(
+        isSuccess: flushResponse.isSuccess,
+        cursorId: flushResponse.cursorId != 0
+            ? flushResponse.cursorId
+            : response.cursorId,
+        outBindIndices: response.outBindIndices,
+        outBindRows: response.outBindRows,
+        rowsAffected: flushResponse.rowsAffected ?? response.rowsAffected,
+        batchErrors: flushResponse.batchErrors,
+        dmlRowCounts: flushResponse.dmlRowCounts.isNotEmpty
+            ? flushResponse.dmlRowCounts
+            : response.dmlRowCounts,
+        errorCode: flushResponse.errorCode,
+        errorMessage: flushResponse.errorMessage,
+        errorOffset: flushResponse.errorOffset,
+      );
+    }
 
     // PL/SQL executeMany, second RPC: run iterations 2..N via REEXECUTE
     // against the cursor the first execution opened, then merge the
@@ -944,11 +999,13 @@ class Transport {
   Future<ExecuteResponse> materializeLobs(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
+    bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
   }) {
     return _materializeLobValues(
       response,
       bindMetadata: bindMetadata,
+      dmlReturning: dmlReturning,
       timeout: timeout,
     );
   }
@@ -1435,6 +1492,7 @@ class Transport {
   Future<ExecuteResponse> _materializeLobValues(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
+    bool dmlReturning = false,
     Duration? timeout,
   }) async {
     if (!response.isSuccess) return response;
@@ -1442,9 +1500,17 @@ class Transport {
       (row) => row.any((v) => v is LobLocator),
     );
     final hasOutLob = response.outBindValues.any((v) => v is LobLocator);
-    final hasBatchOutLob = response.outBindRows.any(
-      (row) => row.any((v) => v is LobLocator),
-    );
+    // A DML RETURNING outBindRows cell is itself a list of returned values
+    // (one per return bind), so its locators live one level deeper than the
+    // PL/SQL executeMany shape (a scalar value per OUT bind). Detect and
+    // materialize accordingly.
+    final hasBatchOutLob = dmlReturning
+        ? response.outBindRows.any(
+            (row) => row.any(
+              (cell) => cell is List && cell.any((v) => v is LobLocator),
+            ),
+          )
+        : response.outBindRows.any((row) => row.any((v) => v is LobLocator));
     if (!hasRowLob && !hasOutLob && !hasBatchOutLob) return response;
 
     // Oracle's duplicate-column optimization can alias one LobLocator
@@ -1506,35 +1572,56 @@ class Transport {
 
     var outBindRows = response.outBindRows;
     if (hasBatchOutLob) {
-      // PL/SQL executeMany: materialize OUT LOB locators inside every
-      // iteration's row, enforcing the declared maxSize per value exactly
-      // like the single-execute OUT path above. Position j of each row maps
-      // to bindMetadata[outBindIndices[j]], so the guard resolution is
-      // shared with the flat path.
+      // Enforce the declared maxSize per returned LOB value, then materialize
+      // it, exactly like the single-execute OUT path above. Position j of each
+      // row maps to bindMetadata[outBindIndices[j]], so the guard resolution is
+      // shared across all executeMany shapes.
+      OracleException tooLarge(LobLocator value, int maxSize) {
+        final isBlob = value.oracleType == oraTypeBlob;
+        return OracleException(
+          errorCode: oraBindTypeError,
+          message:
+              '${isBlob ? 'BLOB' : 'CLOB'} OUT bind returned '
+              '${value.length} ${isBlob ? 'bytes' : 'characters'} in an '
+              'executeMany iteration but OracleBindDef maxSize is $maxSize — '
+              'increase maxSize to at least the largest value the block can '
+              'return',
+        );
+      }
+
       final newRows = <List<Object?>>[];
       for (final row in response.outBindRows) {
         final newRow = List<Object?>.of(row);
         for (var j = 0; j < newRow.length; j++) {
-          final value = newRow[j];
-          if (value is! LobLocator) continue;
           final maxSize = resolveOutBindMaxSize(
             valueIndex: j,
             outBindIndices: response.outBindIndices,
             bindMetadata: bindMetadata,
           );
-          if (maxSize != null && value.length > maxSize) {
-            final isBlob = value.oracleType == oraTypeBlob;
-            throw OracleException(
-              errorCode: oraBindTypeError,
-              message:
-                  '${isBlob ? 'BLOB' : 'CLOB'} OUT bind returned '
-                  '${value.length} ${isBlob ? 'bytes' : 'characters'} in an '
-                  'executeMany iteration but OracleBindDef maxSize is '
-                  '$maxSize — increase maxSize to at least the largest value '
-                  'the block can return',
-            );
+          final cell = newRow[j];
+          if (dmlReturning) {
+            // DML RETURNING: cell is the list of returned values for return
+            // bind j in this iteration (possibly several database rows, or an
+            // empty list for a zero-row match). Materialize each locator.
+            if (cell is! List) continue;
+            final newCell = List<Object?>.of(cell);
+            for (var k = 0; k < newCell.length; k++) {
+              final value = newCell[k];
+              if (value is! LobLocator) continue;
+              if (maxSize != null && value.length > maxSize) {
+                throw tooLarge(value, maxSize);
+              }
+              newCell[k] = await readLocator(value);
+            }
+            newRow[j] = newCell;
+          } else {
+            // PL/SQL executeMany: cell is a scalar OUT value.
+            if (cell is! LobLocator) continue;
+            if (maxSize != null && cell.length > maxSize) {
+              throw tooLarge(cell, maxSize);
+            }
+            newRow[j] = await readLocator(cell);
           }
-          newRow[j] = await readLocator(value);
         }
         newRows.add(newRow);
       }
@@ -1554,11 +1641,10 @@ class Transport {
       implicitResults: response.implicitResults,
       rowsAffected: response.rowsAffected,
       moreRowsToFetch: response.moreRowsToFetch,
-      // Preserve Story 11.3 array-DML row-level reporting through the
-      // rebuild. Currently unreachable for a batchErrors/dmlRowCounts call
-      // (DML RETURNING is rejected before wire, so there are no OUT binds or
-      // rows to materialize here), but Story 11.4 (DML RETURNING) will route
-      // through this exact path, so these must not be silently dropped.
+      // Preserve Story 11.3 array-DML row-level reporting through the rebuild.
+      // A DML RETURNING executeMany (Story 11.4) with LOB return binds and
+      // `dmlRowCounts: true` routes through this exact path, so these must not
+      // be silently dropped.
       batchErrors: response.batchErrors,
       dmlRowCounts: response.dmlRowCounts,
     );
@@ -1742,6 +1828,36 @@ class Transport {
     }
   }
 
+  /// Sends a `TNS_MSG_TYPE_FLUSH_OUT_BINDS` request and drains its response.
+  ///
+  /// The DML `RETURNING ... INTO` error path ends its response with a
+  /// FLUSH_OUT_BINDS marker; the server then expects a matching one-byte
+  /// FLUSH_OUT_BINDS request to reset the accumulated OUT-bind state before it
+  /// will process the next RPC (node-oracledb `protocol.js flushOutBindMessage`,
+  /// gated on `message.flushOutBinds` in `_processCallStatus`). Skipping it
+  /// leaves the wire desynchronized — the next execute/commit/rollback draws
+  /// ORA-03137. The response carries no client-visible data (the original DML
+  /// error is surfaced separately), so it is decoded only to consume the bytes.
+  Future<ExecuteResponse> _flushOutBinds(
+    Duration? timeout, {
+    bool dmlRowCounts = false,
+  }) async {
+    final buf = WriteBuffer()..writeUint8(ttcMsgTypeFlushOutBinds);
+    await sendData(buf.toBytes());
+    final payload = await _receiveDataWithTimeout(
+      timeout,
+      operation: 'FlushOutBinds',
+      dmlRowCounts: dmlRowCounts,
+    );
+    return decodeExecuteResponse(
+      payload,
+      isQuery: false,
+      ttcFieldVersion: _ttcFieldVersion,
+      endOfRequestSupport: _supportsEndOfRequest,
+      dmlRowCounts: dmlRowCounts,
+    );
+  }
+
   /// Sends a DEFINE call for an open query cursor whose result shape
   /// contains a CLOB column and returns its decoded response.
   ///
@@ -1829,6 +1945,7 @@ class Transport {
     List<BindMetadata>? bindMetadata,
     bool Function(Uint8List accumulated)? completionProbe,
     bool plSqlExecuteMany = false,
+    bool dmlReturning = false,
     bool dmlRowCounts = false,
     List<int>? presetOutBindIndices,
   }) async {
@@ -1838,6 +1955,7 @@ class Transport {
       bindMetadata: bindMetadata,
       completionProbe: completionProbe,
       plSqlExecuteMany: plSqlExecuteMany,
+      dmlReturning: dmlReturning,
       dmlRowCounts: dmlRowCounts,
       presetOutBindIndices: presetOutBindIndices,
     );
@@ -1883,6 +2001,7 @@ class Transport {
     List<BindMetadata>? bindMetadata,
     bool Function(Uint8List accumulated)? completionProbe,
     bool plSqlExecuteMany = false,
+    bool dmlReturning = false,
     bool dmlRowCounts = false,
     List<int>? presetOutBindIndices,
   }) async {
@@ -1913,6 +2032,7 @@ class Transport {
                 expectedColumns: expectedColumns,
                 bindMetadata: bindMetadata,
                 plSqlExecuteMany: plSqlExecuteMany,
+                dmlReturning: dmlReturning,
                 dmlRowCounts: dmlRowCounts,
                 presetOutBindIndices: presetOutBindIndices,
               );
@@ -2027,8 +2147,12 @@ class Transport {
         // the pre-23.4 probe is exercised for this branch by the benchmark in
         // test/src/transport/ttc_stream_benchmark_test.dart. The long-term fix
         // (a stateful/lazy parser) is the shared follow-up tracked below.
+        // A DML RETURNING error response instead ends with the FLUSH_OUT_BINDS
+        // marker (0x13); treat it the same way — a trailing marker that only
+        // terminates once the accumulated stream parses to a complete response.
         if (ttcData.isNotEmpty &&
-            ttcData.last == ttcMsgTypeEndOfRequest &&
+            (ttcData.last == ttcMsgTypeEndOfRequest ||
+                ttcData.last == ttcMsgTypeFlushOutBinds) &&
             isComplete(_concatChunks(chunks))) {
           break;
         }

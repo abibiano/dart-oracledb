@@ -305,6 +305,16 @@ const int ttcMsgTypeImplicitResultSet = 27;
 /// End of request marker (response complete).
 const int ttcMsgTypeEndOfRequest = 29;
 
+/// Flush-out-binds marker (node-oracledb `TNS_MSG_TYPE_FLUSH_OUT_BINDS`).
+///
+/// Sent by the server at the end of a DML `RETURNING ... INTO` **error**
+/// response (e.g. a constraint violation with array binds): it is a terminal,
+/// zero-body message that ends the response and signals the client to discard
+/// the partial OUT-bind values it accumulated for the successful rows and to
+/// send a matching FLUSH_OUT_BINDS request (a single type byte) before the
+/// connection is reusable. Also used as the request type for that flush.
+const int ttcMsgTypeFlushOutBinds = 19;
+
 // ============================================================================
 // TTC Execute Option Flags (al8i4 / dmlOptions)
 // ============================================================================

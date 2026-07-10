@@ -448,3 +448,78 @@ bool hasReturningIntoClause(String sql) {
   }
   return false;
 }
+
+/// For a DML `RETURNING ... INTO` statement, returns the first bind
+/// placeholder token that appears BOTH before and after the (paren-depth-0)
+/// `RETURNING` keyword, or null when no placeholder spans that boundary.
+///
+/// A placeholder before `RETURNING` is an input bind; a placeholder after it
+/// is a `RETURNING ... INTO` target. The same placeholder cannot be both —
+/// node-oracledb rejects it (NJS-149, statement.js `_addBind`). This scanner
+/// mirrors that structural rule: named binds compare by name, positional
+/// binds by number (both upper-cased for the named comparison). Placeholders
+/// are recognized at any paren depth (INSERT `VALUES (:1)` nests them), but
+/// the `RETURNING` boundary keyword is only recognized at depth 0. Literals,
+/// comments, and quoted identifiers are skipped via [_skipNonCode], and a
+/// `:=`/`::` is never treated as a placeholder.
+///
+/// Call only for SQL already known to carry a `RETURNING ... INTO` clause.
+String? returningBindReusedName(String sql) {
+  final n = sql.length;
+  var pos = 0;
+  var depth = 0;
+  var afterReturning = false;
+  // Upper-cased key (Oracle bind names are case-insensitive) → original-case
+  // token, so the reported name reads like the SQL the caller wrote.
+  final before = <String, String>{};
+  final after = <String, String>{};
+  while (pos < n) {
+    final skipped = _skipNonCode(sql, pos);
+    if (skipped != pos) {
+      pos = skipped;
+      continue;
+    }
+    final c = sql.codeUnitAt(pos);
+    if (c == 0x28) {
+      depth++;
+      pos++;
+      continue;
+    }
+    if (c == 0x29) {
+      if (depth > 0) depth--;
+      pos++;
+      continue;
+    }
+    // Bind placeholder `:name` / `:1` — recognized at any depth. A `:=`
+    // assignment or `::` cast is not a placeholder.
+    if (c == 0x3A && pos + 1 < n) {
+      final next = sql.codeUnitAt(pos + 1);
+      if (_isIdentStart(next) || (next >= 0x30 && next <= 0x39)) {
+        final start = pos + 1;
+        var p = start;
+        while (p < n && _isIdentChar(sql.codeUnitAt(p))) {
+          p++;
+        }
+        final token = sql.substring(start, p);
+        (afterReturning ? after : before)[token.toUpperCase()] = token;
+        pos = p;
+        continue;
+      }
+    }
+    if (depth == 0 && _isIdentStart(c)) {
+      if (!afterReturning && matchesKeyword(sql, pos, 'RETURNING')) {
+        afterReturning = true;
+      }
+      pos++;
+      while (pos < n && _isIdentChar(sql.codeUnitAt(pos))) {
+        pos++;
+      }
+      continue;
+    }
+    pos++;
+  }
+  for (final entry in before.entries) {
+    if (after.containsKey(entry.key)) return entry.value;
+  }
+  return null;
+}

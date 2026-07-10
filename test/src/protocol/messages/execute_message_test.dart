@@ -5560,6 +5560,399 @@ void main() {
       expect(r.outBindRows, isEmpty);
     });
   });
+
+  group('DML RETURNING executeMany ExecuteRequest encoding', () {
+    const sql = 'INSERT INTO t (name) VALUES (:1) RETURNING id INTO :2';
+    // Slot 0: IN varchar; slot 1: RETURNING OUT number.
+    List<Object?> slots() => [
+      BindVariable(
+        value: null,
+        oraType: oraTypeVarchar,
+        maxSize: 100,
+        dir: BindDir.input,
+      ),
+      BindVariable(value: null, oraType: oraTypeNumber, dir: BindDir.output),
+    ];
+
+    test('single-RPC: N in al8i4[1], prefetch 1, all binds get metadata', () {
+      final req = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        dmlReturning: true,
+        bindValues: slots(),
+        bulkRows: [
+          ['Alice', null],
+          ['Bob', null],
+        ],
+      );
+      final parsed = _openDmlExecuteForRead(req.toBytes());
+      expect(parsed.executionCount, equals(2));
+      expect(parsed.prefetchNumRows, equals(1));
+      expect(
+        parsed.numParams,
+        equals(2),
+        reason: 'every bind (IN and RETURNING OUT) is written in the metadata '
+            'block, matching node-oracledb processBindParams',
+      );
+    });
+
+    test('RETURNING OUT bind metadata keeps the scalar shape', () {
+      final req = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        dmlReturning: true,
+        bindValues: slots(),
+        bulkRows: [
+          ['Alice', null],
+        ],
+      );
+      final parsed = _openDmlExecuteForRead(req.toBytes());
+      final meta = _readBindMetadata(parsed.buf, parsed.numParams);
+      expect(meta, hasLength(2));
+      for (final m in meta) {
+        expect(m.flags, equals(ttcBindUseIndicators));
+        expect(
+          m.flags & ttcBindArray,
+          equals(0),
+          reason: 'node-oracledb does not mark DML RETURNING binds as arrays',
+        );
+        expect(m.maxNumElements, equals(0));
+      }
+      expect(meta[0].oraType, equals(oraTypeVarchar));
+      expect(meta[0].maxSize, equals(100));
+      expect(meta[1].oraType, equals(oraTypeNumber));
+    });
+
+    test('per-iteration ROW_DATA OMITS the RETURNING OUT slot', () {
+      final req = ExecuteRequest(
+        sql: sql,
+        isQuery: false,
+        dmlReturning: true,
+        bindValues: slots(),
+        bulkRows: [
+          ['Alice', null],
+          ['Bob', null],
+        ],
+      );
+      final parsed = _openDmlExecuteForRead(req.toBytes());
+      _readBindMetadata(parsed.buf, parsed.numParams);
+      final buf = parsed.buf;
+      // Row 0: only the IN value 'Alice' — no null placeholder for the OUT
+      // slot (node-oracledb writeBindParamsRow skips isReturnBind variables).
+      expect(buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(buf.readBytesWithLength(), equals(utf8.encode('Alice')));
+      // Immediately the NEXT row's ROW_DATA (proving no second value in row 0).
+      expect(buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(buf.readBytesWithLength(), equals(utf8.encode('Bob')));
+      expect(
+        buf.hasRemaining,
+        isFalse,
+        reason: 'exactly one IN value per iteration; OUT slots omitted',
+      );
+    });
+
+    test('OUT bind on a non-PL/SQL statement is rejected without dmlReturning',
+        () {
+      expect(
+        () => ExecuteRequest(
+          sql: sql,
+          isQuery: false,
+          bindValues: slots(), // slot 1 is an OUT bind
+          bulkRows: [
+            ['Alice', null],
+          ],
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('OUT'), contains('RETURNING')),
+          ),
+        ),
+        reason: 'ordinary array DML must never smuggle OUT binds onto the wire',
+      );
+    });
+  });
+
+  group('DML RETURNING executeMany OUT decode', () {
+    // No IO_VECTOR: the return-bind order is seeded from presetOutBindIndices,
+    // and each iteration ships one ROW_DATA whose OUT slot is a [numRows]
+    // count followed by that many values.
+    List<int> returningRow(List<List<int>> perBindValues) => [
+      ttcMsgTypeRowData,
+      for (final values in perBindValues) ...[
+        ..._ub4(values.length),
+        for (final _ in values) ...[
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._ub4(0), // SB4 actualNumBytes trailer
+        ],
+      ],
+    ];
+
+    const oneBindMeta = [
+      BindMetadata(oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+    ];
+
+    test('one returned value per iteration → node-oracledb nested shape', () {
+      final payload = _buildPayload([
+        returningRow([
+          [1],
+        ]),
+        returningRow([
+          [1],
+        ]),
+        returningRow([
+          [1],
+        ]),
+        _errorMessage(errorNum: 0, rowCount: 3),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: oneBindMeta,
+        dmlReturning: true,
+        presetOutBindIndices: const [0],
+      );
+      expect(r.isSuccess, isTrue);
+      expect(r.outBindIndices, equals([0]));
+      expect(
+        r.outBindRows,
+        equals([
+          [
+            [5],
+          ],
+          [
+            [5],
+          ],
+          [
+            [5],
+          ],
+        ]),
+      );
+      expect(r.rowsAffected, equals(3));
+    });
+
+    test('zero-row match → empty inner list in input order', () {
+      final payload = _buildPayload([
+        returningRow([
+          [1],
+        ]),
+        returningRow([<int>[]]), // matched no rows → numRows 0
+        returningRow([
+          [1],
+        ]),
+        _errorMessage(errorNum: 0, rowCount: 2),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: oneBindMeta,
+        dmlReturning: true,
+        presetOutBindIndices: const [0],
+      );
+      expect(
+        r.outBindRows,
+        equals([
+          [
+            [5],
+          ],
+          [<Object?>[]],
+          [
+            [5],
+          ],
+        ]),
+      );
+    });
+
+    test('an iteration affecting several rows returns all of them', () {
+      final payload = _buildPayload([
+        returningRow([
+          [1, 1, 1],
+        ]),
+        _errorMessage(errorNum: 0, rowCount: 3),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: oneBindMeta,
+        dmlReturning: true,
+        presetOutBindIndices: const [0],
+      );
+      expect(
+        r.outBindRows,
+        equals([
+          [
+            [5, 5, 5],
+          ],
+        ]),
+      );
+    });
+
+    test('two RETURNING OUT binds decode per iteration in order', () {
+      // Positional: :1 IN, :2 OUT number, :3 OUT number.
+      final payload = _buildPayload([
+        returningRow([
+          [1], // bind at index 1
+          [1], // bind at index 2
+        ]),
+        _errorMessage(errorNum: 0, rowCount: 1),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
+          BindMetadata(oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+          BindMetadata(oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+        ],
+        dmlReturning: true,
+        presetOutBindIndices: const [1, 2],
+      );
+      expect(r.outBindIndices, equals([1, 2]));
+      expect(
+        r.outBindRows,
+        equals([
+          [
+            [5],
+            [5],
+          ],
+        ]),
+      );
+    });
+
+    test('completion probe consumes every returning ROW_DATA', () {
+      final payload = _buildPayload([
+        returningRow([
+          [1],
+        ]),
+        returningRow([<int>[]]),
+        _errorMessage(errorNum: 0, rowCount: 1),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      expect(
+        ttcStreamIsComplete(
+          payload,
+          bindMetadata: oneBindMeta,
+          dmlReturning: true,
+          presetOutBindIndices: const [0],
+        ),
+        isTrue,
+      );
+    });
+
+    test('dmlRowCounts ride alongside a DML RETURNING response', () {
+      final payload = _buildPayload([
+        returningRow([
+          [1],
+        ]),
+        returningRow([
+          [1],
+        ]),
+        _parameterWithRowCounts(const [1, 1]),
+        _errorMessage(errorNum: 0, rowCount: 2),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: oneBindMeta,
+        dmlReturning: true,
+        dmlRowCounts: true,
+        presetOutBindIndices: const [0],
+      );
+      expect(r.dmlRowCounts, equals([1, 1]));
+      expect(
+        r.outBindRows,
+        equals([
+          [
+            [5],
+          ],
+          [
+            [5],
+          ],
+        ]),
+      );
+    });
+
+    test('a trailing FLUSH_OUT_BINDS marker terminates and flags the response',
+        () {
+      // DML RETURNING error path: the execute response carries the per-row
+      // returning data then ends with FLUSH_OUT_BINDS (19) — no ERROR body
+      // (the error arrives in the follow-up flush response). The marker is
+      // terminal and sets flushOutBinds so the transport sends the flush.
+      final payload = _buildPayload([
+        returningRow([
+          [1],
+        ]),
+        returningRow([<int>[]]), // failed row returned nothing
+        [ttcMsgTypeFlushOutBinds],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: oneBindMeta,
+        dmlReturning: true,
+        presetOutBindIndices: const [0],
+      );
+      expect(r.isSuccess, isTrue, reason: 'no ERROR body in this response');
+      expect(r.flushOutBinds, isTrue);
+      expect(
+        r.outBindRows,
+        equals([
+          [
+            [5],
+          ],
+          [<Object?>[]],
+        ]),
+      );
+      // The completion probe must accept the FLUSH_OUT_BINDS terminator too.
+      expect(
+        ttcStreamIsComplete(
+          payload,
+          bindMetadata: oneBindMeta,
+          dmlReturning: true,
+          presetOutBindIndices: const [0],
+        ),
+        isTrue,
+      );
+    });
+
+    test('a returning CLOB bind decodes to a nested LobLocator', () {
+      // CLOB LOB-prefetch wire shape inside the [numRows] count.
+      final locatorBytes = List<int>.generate(40, (i) => 0xB0 + (i % 16));
+      final payload = _buildPayload([
+        [
+          ttcMsgTypeRowData,
+          ..._ub4(1), // numRows for this iteration's single return bind
+          ..._ub4(40), // locator length (> 0 ⇒ non-null)
+          ..._ub8(7), // LOB length in chars
+          ..._ub4(8060), // chunk size
+          ..._bytesWithLength(locatorBytes),
+          ..._ub4(0), // SB4 actualNumBytes trailer
+        ],
+        _errorMessage(errorNum: 0, rowCount: 1),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeClob, maxSize: 100, dir: BindDir.output),
+        ],
+        dmlReturning: true,
+        presetOutBindIndices: const [0],
+      );
+      final cell = r.outBindRows.single.single! as List<Object?>;
+      final loc = cell.single! as LobLocator;
+      expect(loc.oracleType, equals(oraTypeClob));
+      expect(loc.length, equals(7));
+      expect(loc.chunkSize, equals(8060));
+    });
+  });
 }
 
 /// Reads only the execute-options word (the UB4 right after the function

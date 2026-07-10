@@ -77,6 +77,7 @@ class _FakeResultSetTransport extends Transport {
     int? executeManyIters,
     bool batchErrors = false,
     bool dmlRowCounts = false,
+    bool dmlReturning = false,
   }) async {
     sendExecuteCalls++;
     lastCursorsToClose = cursorsToClose;
@@ -108,6 +109,7 @@ class _FakeResultSetTransport extends Transport {
   Future<ExecuteResponse> materializeLobs(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
+    bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
   }) async {
     materializeCalls++;

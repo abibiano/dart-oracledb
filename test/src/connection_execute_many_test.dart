@@ -85,16 +85,15 @@ void main() {
       expect(result.rowsAffected, isNull, reason: 'PL/SQL has no row count');
     });
 
-    test('rejects DML RETURNING ... INTO pointing at Story 11.4 scope',
-        () async {
+    test('rejects DML RETURNING ... INTO without bindDefs', () async {
       await expectRejectedBeforeWire(
         () => conn.executeMany(
           'INSERT INTO t (id) VALUES (:1) RETURNING id INTO :2',
           [
-            [1, 0],
+            [1],
           ],
         ),
-        ['RETURNING', '11.4'],
+        ['DML RETURNING', 'bindDefs'],
       );
     });
 
@@ -356,12 +355,12 @@ void main() {
       );
     });
 
-    test('OracleBind specs fail before wire pointing at Story 11.4', () async {
+    test('OracleBind specs inside rows fail before wire', () async {
       await expectRejectedBeforeWire(
         () => conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
           [OracleBind.out(type: OracleDbType.number)],
         ]),
-        ['OracleBind', '11.4'],
+        ['OracleBind', 'bindDefs'],
       );
     });
 
@@ -727,7 +726,7 @@ void main() {
       );
     });
 
-    test('bindDefs against a DML statement fail pointing at Story 11.4',
+    test('bindDefs against non-returning DML fail (PL/SQL and RETURNING only)',
         () async {
       await expectRejectedBeforeWire(
         () => conn.executeMany(
@@ -739,7 +738,7 @@ void main() {
             bindDefs: [OracleBindDef.input(type: OracleDbType.number)],
           ),
         ),
-        ['bindDefs', 'PL/SQL', '11.4'],
+        ['bind definitions', 'PL/SQL', 'RETURNING'],
       );
     });
 
@@ -1250,7 +1249,8 @@ void main() {
       );
     });
 
-    test('the new options do not bypass the DML RETURNING guard', () async {
+    test('DML RETURNING still requires bindDefs even with these options',
+        () async {
       await expectRejectedBeforeWire(
         () => conn.executeMany(
           'INSERT INTO t (id) VALUES (:1) RETURNING id INTO :2',
@@ -1259,7 +1259,363 @@ void main() {
           ],
           const OracleExecuteManyOptions(batchErrors: true, dmlRowCounts: true),
         ),
-        ['RETURNING', 'Story 11.4'],
+        ['DML RETURNING', 'bindDefs'],
+      );
+    });
+  });
+
+  group('executeMany() DML RETURNING', () {
+    const insertReturningPos =
+        'INSERT INTO t (name) VALUES (:1) RETURNING id INTO :2';
+
+    test('routes DML RETURNING to the wire with OUT placeholders omitted from '
+        'the metadata-less inference but present in the row data', () async {
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 2,
+          outBindIndices: const [1],
+          outBindRows: const [
+            [
+              [1],
+            ],
+            [
+              [2],
+            ],
+          ],
+        ),
+      );
+      final result = await conn.executeMany(
+        insertReturningPos,
+        [
+          ['Alice'],
+          ['Bob'],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
+            OracleBindDef.output(type: OracleDbType.number),
+          ],
+        ),
+      );
+      expect(transport.executeCalls, equals(1));
+      expect(transport.lastDmlReturning, isTrue);
+      expect(transport.lastIsPlSql, isFalse);
+      expect(transport.lastExecuteManyIters, equals(2));
+      // Row data carries a null placeholder for the OUT slot (:2).
+      expect(transport.lastBulkRows, [
+        ['Alice', null],
+        ['Bob', null],
+      ]);
+      // Row-major: one entry per INPUT row; each is one list per OUT bind.
+      expect(result.outBinds.toList(), [
+        [
+          [1],
+        ],
+        [
+          [2],
+        ],
+      ]);
+      expect(result.rowsAffected, equals(2));
+    });
+
+    test('positional RETURNING result is row-major, node-oracledb shape',
+        () async {
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 3,
+          outBindIndices: const [1],
+          outBindRows: const [
+            [
+              [10],
+            ],
+            [
+              [20],
+            ],
+            [
+              [30],
+            ],
+          ],
+        ),
+      );
+      final result = await conn.executeMany(
+        insertReturningPos,
+        [
+          ['a'],
+          ['b'],
+          ['c'],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 10),
+            OracleBindDef.output(type: OracleDbType.number),
+          ],
+        ),
+      );
+      expect(result.outBinds.toList(), [
+        [
+          [10],
+        ],
+        [
+          [20],
+        ],
+        [
+          [30],
+        ],
+      ]);
+      expect(result.outBinds[0], [
+        [10],
+      ]);
+    });
+
+    test('named RETURNING result is keyed by OUT bind name per row', () async {
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 2,
+          outBindIndices: const [1],
+          outBindRows: const [
+            [
+              [100],
+            ],
+            [
+              [200],
+            ],
+          ],
+        ),
+      );
+      final result = await conn.executeMany(
+        'INSERT INTO t (name) VALUES (:name) RETURNING id INTO :outId',
+        [
+          {'name': 'Alice'},
+          {'name': 'Bob'},
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: {
+            'name': OracleBindDef.input(
+              type: OracleDbType.varchar,
+              maxSize: 100,
+            ),
+            'outId': OracleBindDef.output(type: OracleDbType.number),
+          },
+        ),
+      );
+      expect(result.outBinds.toList(), [
+        {
+          'outId': [100],
+        },
+        {
+          'outId': [200],
+        },
+      ]);
+    });
+
+    test('zero-row match returns an empty OUT list in input order', () async {
+      // The middle UPDATE row matched no database rows → empty inner list,
+      // and the surrounding rows keep their values in the same positions.
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 2,
+          outBindIndices: const [1],
+          outBindRows: const [
+            [
+              [7],
+            ],
+            [<Object?>[]],
+            [
+              [9],
+            ],
+          ],
+        ),
+      );
+      final result = await conn.executeMany(
+        'UPDATE t SET name = :1 WHERE id = seq.nextval RETURNING id INTO :2',
+        [
+          ['a'],
+          ['b'],
+          ['c'],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 10),
+            OracleBindDef.output(type: OracleDbType.number),
+          ],
+        ),
+      );
+      expect(result.outBinds.toList(), [
+        [
+          [7],
+        ],
+        [<Object?>[]],
+        [
+          [9],
+        ],
+      ]);
+    });
+
+    test('threads batchErrors / dmlRowCounts to the wire for DML RETURNING',
+        () async {
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 1,
+          outBindIndices: const [1],
+          outBindRows: const [
+            [
+              [1],
+            ],
+          ],
+          dmlRowCounts: const [1],
+        ),
+      );
+      final result = await conn.executeMany(
+        insertReturningPos,
+        [
+          ['x'],
+        ],
+        OracleExecuteManyOptions(
+          dmlRowCounts: true,
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 10),
+            OracleBindDef.output(type: OracleDbType.number),
+          ],
+        ),
+      );
+      expect(transport.lastDmlReturning, isTrue);
+      expect(transport.lastDmlRowCounts, isTrue);
+      expect(result.dmlRowCounts, equals([1]));
+    });
+
+    test('rejects bindDefs count mismatch before wire', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          insertReturningPos,
+          [
+            ['a'],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [OracleBindDef.input(type: OracleDbType.varchar, maxSize: 5)],
+          ),
+        ),
+        ['bindDefs', '2 positional placeholder'],
+      );
+    });
+
+    test('rejects a RETURNING statement with no OUT bind definition', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          insertReturningPos,
+          [
+            ['a'],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [
+              OracleBindDef.input(type: OracleDbType.varchar, maxSize: 5),
+              OracleBindDef.input(type: OracleDbType.number),
+            ],
+          ),
+        ),
+        ['at least one OUT bind'],
+      );
+    });
+
+    test('rejects a bind placeholder reused across the RETURNING boundary',
+        () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'UPDATE t SET name = :v WHERE id = 1 RETURNING name INTO :v',
+          [
+            {'v': 'a'},
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: {
+              'v': OracleBindDef.inputOutput(
+                type: OracleDbType.varchar,
+                maxSize: 10,
+              ),
+            },
+          ),
+        ),
+        ['":v"', 'before and after'],
+      );
+    });
+
+    test('rejects a non-null input value for a RETURNING OUT slot', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          insertReturningPos,
+          [
+            ['a', 99],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [
+              OracleBindDef.input(type: OracleDbType.varchar, maxSize: 5),
+              OracleBindDef.output(type: OracleDbType.number),
+            ],
+          ),
+        ),
+        ['RETURNING bind', 'no per-row input'],
+      );
+    });
+
+    test('rejects a type-mismatched IN value without leaking the value',
+        () async {
+      await expectLater(
+        () => conn.executeMany(
+          insertReturningPos,
+          [
+            [42], // declared varchar but supplied int
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [
+              OracleBindDef.input(type: OracleDbType.varchar, maxSize: 5),
+              OracleBindDef.output(type: OracleDbType.number),
+            ],
+          ),
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('int'), isNot(contains('42'))),
+          ),
+        ),
+      );
+      expect(transport.executeCalls, equals(0));
+    });
+
+    test('rejects the numIterations form for DML RETURNING', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          insertReturningPos,
+          3,
+          OracleExecuteManyOptions(
+            bindDefs: [
+              OracleBindDef.input(type: OracleDbType.varchar, maxSize: 5),
+              OracleBindDef.output(type: OracleDbType.number),
+            ],
+          ),
+        ),
+        ['numIterations', 'PL/SQL'],
+      );
+    });
+  });
+
+  group('executeMany() bindDefs are rejected for non-returning DML', () {
+    test('plain INSERT with bindDefs fails before wire', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany(
+          'INSERT INTO t (id) VALUES (:1)',
+          [
+            [1],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [OracleBindDef.input(type: OracleDbType.number)],
+          ),
+        ),
+        ['bind definitions', 'RETURNING'],
       );
     });
   });
@@ -1286,6 +1642,7 @@ class _BulkFakeTransport extends Transport {
   List<int> lastCursorsToClose = const <int>[];
   bool lastBatchErrors = false;
   bool lastDmlRowCounts = false;
+  bool lastDmlReturning = false;
 
   void releaseGate() {
     _heldGate?.complete();
@@ -1319,6 +1676,7 @@ class _BulkFakeTransport extends Transport {
     int? executeManyIters,
     bool batchErrors = false,
     bool dmlRowCounts = false,
+    bool dmlReturning = false,
   }) async {
     executeCalls++;
     lastCursorId = cursorId;
@@ -1331,6 +1689,7 @@ class _BulkFakeTransport extends Transport {
     lastCursorsToClose = cursorsToClose;
     lastBatchErrors = batchErrors;
     lastDmlRowCounts = dmlRowCounts;
+    lastDmlReturning = dmlReturning;
     final gate = executeGate;
     if (gate != null) {
       executeGate = null; // only the first call parks

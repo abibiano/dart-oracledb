@@ -1191,6 +1191,7 @@ class _FakeTransport extends Transport {
     int? executeManyIters,
     bool batchErrors = false,
     bool dmlRowCounts = false,
+    bool dmlReturning = false,
   }) async {
     executeCalls++;
     lastCursorId = cursorId;

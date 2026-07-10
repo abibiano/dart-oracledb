@@ -147,8 +147,11 @@ class OracleExecuteManyOptions {
   final bool dmlRowCounts;
 
   /// Metadata-only bind definitions for the statement's placeholders
-  /// (node-oracledb `bindDefs` parity). Only supported for PL/SQL blocks in
-  /// this driver; array DML infers its IN bind shapes from the row values.
+  /// (node-oracledb `bindDefs` parity). Supported for PL/SQL blocks and for
+  /// DML `RETURNING ... INTO` statements (where they are **required** — the
+  /// RETURNING OUT targets carry no per-row value to infer a type from). Plain
+  /// (non-returning) array DML rejects `bindDefs` and infers its IN bind
+  /// shapes from the row values.
   ///
   /// Shape must match the SQL's bind style:
   /// - positional SQL (`:1`, `:2`, ...) takes a `List<OracleBindDef>` with
@@ -1100,9 +1103,10 @@ class OracleConnection {
   }
 
   /// Executes one statement multiple times in a **single wire round trip**:
-  /// Oracle array DML for INSERT/UPDATE/DELETE/MERGE, and repeated PL/SQL
-  /// execution with per-iteration IN, OUT, and IN OUT binds (node-oracledb
-  /// `executeMany` parity).
+  /// Oracle array DML for INSERT/UPDATE/DELETE/MERGE (including
+  /// `RETURNING ... INTO` array OUT binds), and repeated PL/SQL execution with
+  /// per-iteration IN, OUT, and IN OUT binds (node-oracledb `executeMany`
+  /// parity).
   ///
   /// ```dart
   /// // Array DML: one INSERT executed once per row.
@@ -1174,6 +1178,47 @@ class OracleConnection {
   /// positional SQL, or a `Map<String, Object?>` keyed by bind name for named
   /// SQL. [OracleResult.rowsAffected] is `null` for PL/SQL.
   ///
+  /// ## DML `RETURNING ... INTO`
+  ///
+  /// INSERT/UPDATE/DELETE/MERGE statements with a `RETURNING ... INTO` clause
+  /// return per-row generated values, ROWIDs, or updated column values through
+  /// array OUT binds. The RETURNING targets — and every other bind — are
+  /// declared once via [OracleExecuteManyOptions.bindDefs] (required for
+  /// RETURNING: the OUT targets carry no per-row value to infer a type from):
+  ///
+  /// ```dart
+  /// final result = await connection.executeMany(
+  ///   'INSERT INTO emp (name) VALUES (:1) RETURNING id, ROWID INTO :2, :3',
+  ///   [
+  ///     ['Alice'],
+  ///     ['Bob'],
+  ///   ],
+  ///   OracleExecuteManyOptions(bindDefs: [
+  ///     OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
+  ///     OracleBindDef.output(type: OracleDbType.number),
+  ///     OracleBindDef.output(type: OracleDbType.varchar, maxSize: 18),
+  ///   ]),
+  /// );
+  /// // Row-major, one entry per INPUT row; each entry holds one list per OUT
+  /// // bind of that row's RETURNING values:
+  /// //   [ [[1], ['AAA...']], [[2], ['AAB...']] ]
+  /// print(result.outBinds.toList());
+  /// ```
+  ///
+  /// The RETURNING result shape differs from PL/SQL executeMany: because a
+  /// single input row can affect several database rows, each OUT bind's entry
+  /// is itself a **list** of returned values. An UPDATE/DELETE/MERGE input row
+  /// that matches no database rows produces an **empty** list for that
+  /// iteration's OUT binds, and successful rows keep their values in the same
+  /// positions as the input rows (input order is always preserved). For named
+  /// RETURNING binds each row-major entry is a `Map<String, Object?>` keyed by
+  /// OUT bind name. A RETURNING target takes no per-row input — supplying a
+  /// value for one fails before any wire round trip. A bind placeholder reused
+  /// on both sides of the `RETURNING` clause is rejected (node-oracledb
+  /// parity). [OracleResult.rowsAffected] is the total DML row count;
+  /// `dmlRowCounts: true` still reports per-input-row counts, and no
+  /// auto-commit is added — inspect results, then `commit()` / `rollback()`.
+  ///
   /// The positive-int `numIterations` form runs a PL/SQL block that needs no
   /// per-iteration input — bind-free, or all-OUT bind definitions:
   ///
@@ -1204,9 +1249,9 @@ class OracleConnection {
   /// The following fail loudly before any wire round trip:
   /// - SELECT / `WITH ... SELECT` queries — use [execute], [executeStream],
   ///   or [openResultSet] instead (queries have no array form).
-  /// - DML `RETURNING ... INTO` (array OUT binds) — planned: Epic 11
-  ///   Story 11.4. Per-row `batchErrors` / `dmlRowCounts` result shapes are
-  ///   Story 11.3 scope and not implemented.
+  /// - DML `RETURNING ... INTO` without [OracleExecuteManyOptions.bindDefs],
+  ///   and `bindDefs` on plain (non-returning) array DML — bindDefs are for
+  ///   PL/SQL and DML RETURNING only.
   /// - [OracleBind] value specs inside rows — declare [OracleBindDef]
   ///   definitions in [OracleExecuteManyOptions.bindDefs] instead.
   /// - `SYS_REFCURSOR` OUT binds and PL/SQL collection (associative array)
@@ -1318,28 +1363,36 @@ class OracleConnection {
         sql: sql,
       );
     }
+    if (hasReturningIntoClause(sql)) {
+      // DML RETURNING ... INTO: the INTO targets are array OUT binds. They
+      // need explicit metadata (type / direction / maxSize) — there is no
+      // per-row input value to infer them from — so bindDefs are REQUIRED.
+      if (options?.bindDefs == null) {
+        throw OracleException(
+          errorCode: oraBindTypeError,
+          message:
+              'executeMany() with a DML RETURNING ... INTO statement requires '
+              'OracleExecuteManyOptions(bindDefs: ...) declaring every bind '
+              '(IN binds and the RETURNING OUT targets); the OUT targets carry '
+              'no per-row value to infer their type from. '
+              '[SQL: ${_truncateSql(sql)}]',
+          sql: sql,
+        );
+      }
+      return _prepareDmlReturning(sql, rows!, options!);
+    }
     if (options?.bindDefs != null) {
+      // Non-returning array DML keeps Story 11.1 inference semantics: bindDefs
+      // are accepted only for PL/SQL blocks and for DML RETURNING (above).
       throw OracleException(
         errorCode: oraBindTypeError,
         message:
             'executeMany() bind definitions '
-            '(OracleExecuteManyOptions.bindDefs) are only supported for '
-            'PL/SQL blocks; DML OUT binds (RETURNING ... INTO) are planned '
-            'for Epic 11 Story 11.4. [SQL: ${_truncateSql(sql)}]',
-        sql: sql,
-      );
-    }
-    if (hasReturningIntoClause(sql)) {
-      // A RETURNING ... INTO placeholder is an OUT bind. Without this guard it
-      // would slip past the OracleBind check below (a plain caller value in
-      // that slot looks like an ordinary IN bind) and be sent as array-DML IN
-      // data, producing an obscure server error instead of a clean rejection.
-      throw OracleException(
-        errorCode: oraProtocolError,
-        message:
-            'executeMany() does not support DML RETURNING ... INTO yet '
-            '(array OUT binds) — planned for Epic 11 Story 11.4. Use '
-            'execute() for RETURNING statements. [SQL: ${_truncateSql(sql)}]',
+            '(OracleExecuteManyOptions.bindDefs) are supported for PL/SQL '
+            'blocks and for DML RETURNING ... INTO statements only; plain '
+            'array DML (INSERT / UPDATE / DELETE / MERGE without RETURNING) '
+            'infers its IN bind shapes from the row values. '
+            '[SQL: ${_truncateSql(sql)}]',
         sql: sql,
       );
     }
@@ -1482,6 +1535,409 @@ class OracleConnection {
     );
   }
 
+  /// Normalizes a DML `RETURNING ... INTO` [executeMany] call: bind-definition
+  /// resolution, per-occurrence row normalization (IN slots take the row's
+  /// value; RETURNING OUT / IN OUT slots are server-populated and take no
+  /// per-row input), and per-slot template building. The SQL is already
+  /// classified as non-query, non-PL/SQL, RETURNING-bearing, and [options]
+  /// carries the required [OracleExecuteManyOptions.bindDefs].
+  ///
+  /// The wire shape is single-RPC array DML (node-oracledb has no REEXECUTE
+  /// split for DML RETURNING): every bind's metadata is written, only the IN
+  /// binds travel in the per-iteration ROW_DATA, and the server streams the
+  /// returned values back one iteration at a time — exposed row-major on
+  /// [OracleResult.outBinds] (one entry per input row, each holding one list
+  /// of returned values per OUT bind).
+  _ExecuteManyCall _prepareDmlReturning(
+    String sql,
+    List<Object?> rows,
+    OracleExecuteManyOptions options,
+  ) {
+    // node-oracledb rejects a placeholder used both before and after the
+    // RETURNING clause (NJS-149): a bind is either an input or a RETURNING
+    // INTO target, never both. Enforce it here as a pure SQL-shape check,
+    // before binds are resolved.
+    final reused = returningBindReusedName(sql);
+    if (reused != null) {
+      throw OracleException(
+        errorCode: oraBindMismatch,
+        message:
+            'The bind placeholder ":$reused" cannot be used both before and '
+            'after the RETURNING clause in a DML RETURNING statement; a '
+            'placeholder is either an input bind or a RETURNING INTO target, '
+            'not both. [SQL: ${_truncateSql(sql)}]',
+        sql: sql,
+      );
+    }
+
+    // Bind style comes from the SQL text. Unlike PL/SQL, SQL DML binds by
+    // POSITION: every :name occurrence is its own slot (isNamedBinds throws on
+    // a mix of :name and :1).
+    final named = BindParser.isNamedBinds(sql);
+    final List<String> bindNames;
+    final int slotCount;
+    if (named) {
+      bindNames = BindParser.parseNamedBinds(sql);
+      slotCount = bindNames.length;
+    } else {
+      bindNames = const [];
+      slotCount = BindParser.parsePositionalBinds(sql);
+    }
+    if (slotCount == 0) {
+      throw OracleException(
+        errorCode: oraBindMismatch,
+        message:
+            'executeMany() DML RETURNING requires at least one bind '
+            'placeholder (the RETURNING ... INTO target). '
+            '[SQL: ${_truncateSql(sql)}]',
+        sql: sql,
+      );
+    }
+    final distinctNames = named ? bindNames.toSet() : const <String>{};
+
+    // Resolve bindDefs into one definition per slot occurrence, in SQL order
+    // (repeated named placeholders share their name's definition).
+    final defsRaw = options.bindDefs;
+    final List<OracleBindDef> slotDefs;
+    if (named) {
+      if (defsRaw is! Map<String, OracleBindDef>) {
+        throw OracleException(
+          errorCode: oraBindTypeError,
+          message:
+              'executeMany() bindDefs must be a Map<String, OracleBindDef> '
+              'for named-bind SQL (got ${defsRaw.runtimeType}).',
+        );
+      }
+      for (final key in defsRaw.keys) {
+        if (!distinctNames.contains(key)) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message:
+                'executeMany() bindDefs contains ":$key" with no matching '
+                'placeholder in the SQL. Placeholders: '
+                '${distinctNames.map((n) => ':$n').join(', ')}.',
+          );
+        }
+      }
+      for (final name in distinctNames) {
+        if (!defsRaw.containsKey(name)) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message:
+                'executeMany() bindDefs is missing a definition for ":$name" '
+                '— when bindDefs is provided it must define every placeholder.',
+          );
+        }
+      }
+      slotDefs = [for (final n in bindNames) defsRaw[n]!];
+    } else {
+      if (defsRaw is! List<OracleBindDef>) {
+        throw OracleException(
+          errorCode: oraBindTypeError,
+          message:
+              'executeMany() bindDefs must be a List<OracleBindDef> for '
+              'positional-bind SQL (got ${defsRaw.runtimeType}).',
+        );
+      }
+      if (defsRaw.length != slotCount) {
+        throw OracleException(
+          errorCode: oraBindMismatch,
+          message:
+              'executeMany() bindDefs has ${defsRaw.length} definition'
+              '${defsRaw.length == 1 ? '' : 's'} but the SQL has $slotCount '
+              'positional placeholder${slotCount == 1 ? '' : 's'} — when '
+              'bindDefs is provided it must define every placeholder.',
+        );
+      }
+      slotDefs = defsRaw;
+    }
+
+    // At least one RETURNING OUT target must be declared, else this is not a
+    // RETURNING call the way the caller framed it (and the response would ship
+    // no returned values).
+    if (!slotDefs.any((d) => d.hasOutput)) {
+      throw OracleException(
+        errorCode: oraBindMismatch,
+        message:
+            'executeMany() DML RETURNING requires at least one OUT bind '
+            'definition (OracleBindDef.output / .inputOutput) for the '
+            'RETURNING ... INTO target(s). [SQL: ${_truncateSql(sql)}]',
+        sql: sql,
+      );
+    }
+
+    // Two RETURNING targets sharing the same bind name cannot both be
+    // represented in the named row-major result (one entry per name) —
+    // reject pre-wire rather than silently keeping only one column's values.
+    if (named) {
+      final seenOutputNames = <String>{};
+      for (var s = 0; s < slotCount; s++) {
+        if (!slotDefs[s].hasOutput) continue;
+        if (!seenOutputNames.add(bindNames[s])) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message:
+                'executeMany() DML RETURNING bind ":${bindNames[s]}" is used '
+                'for more than one RETURNING ... INTO target; each '
+                'RETURNING target requires a distinct bind name. '
+                '[SQL: ${_truncateSql(sql)}]',
+            sql: sql,
+          );
+        }
+      }
+    }
+
+    final normalized = _normalizeDmlReturningRows(
+      rows,
+      named: named,
+      bindNames: bindNames,
+      slotCount: slotCount,
+      distinctNames: distinctNames,
+      slotDefs: slotDefs,
+    );
+
+    // Validate every IN value against its slot's declared type before the
+    // wire (OUT slots are null and pass _validateDefValue's early return).
+    for (var r = 0; r < normalized.length; r++) {
+      for (var s = 0; s < slotCount; s++) {
+        _validateDefValue(
+          slotDefs[s],
+          normalized[r][s],
+          rowIndex: r,
+          slotLabel: named ? 'bind ":${bindNames[s]}"' : 'bind :${s + 1}',
+        );
+      }
+    }
+
+    // Build the per-slot wire templates and decoder metadata from the declared
+    // definitions.
+    final slots = <BindVariable>[];
+    final bindMetadata = <BindMetadata>[];
+    for (var s = 0; s < slotCount; s++) {
+      final def = slotDefs[s];
+      final isNChar = def.isNChar;
+      final charsetInfo = _charsetInfo;
+      if (isNChar &&
+          charsetInfo != null &&
+          !charsetInfo.supportsNationalCharacterSet) {
+        throw OracleException(
+          errorCode: oc.oraUnsupportedType,
+          message:
+              'NCHAR/NVARCHAR2/NCLOB binds require the '
+              '${OracleCharsetInfo.supportedNationalCharset} national '
+              'character set; this connection negotiated '
+              '${charsetInfo.nationalCharset}.',
+        );
+      }
+      // IN-only sized slots may omit maxSize: size them from the largest value
+      // across rows (Story 11.1 rule; minimum 1). OUT / IN OUT (returning)
+      // slots require a declared maxSize (enforced by OracleBindDef); it sizes
+      // the server return buffer and bounds the materialized value.
+      var maxSize = def.maxSize;
+      if (maxSize == null &&
+          def.direction == BindDir.input &&
+          (def.type == OracleDbType.varchar ||
+              def.type == OracleDbType.nVarchar ||
+              def.type == OracleDbType.raw)) {
+        var largest = 0;
+        for (final row in normalized) {
+          final v = row[s];
+          if (v is String) {
+            final len = def.type == OracleDbType.nVarchar
+                ? v.length
+                : utf8.encode(v).length;
+            if (len > largest) largest = len;
+          } else if (v is Uint8List && v.length > largest) {
+            largest = v.length;
+          }
+        }
+        maxSize = largest > 0 ? largest : 1;
+      }
+      slots.add(
+        BindVariable(
+          value: null,
+          oraType: def.oracleTypeCode,
+          maxSize: maxSize,
+          dir: def.direction,
+          isNChar: isNChar,
+        ),
+      );
+      bindMetadata.add(
+        BindMetadata(
+          oraType: def.oracleTypeCode,
+          maxSize: def.maxSize,
+          dir: def.direction,
+          csfrm: isNChar ? oc.ttcCsfrmNChar : 0,
+        ),
+      );
+    }
+
+    // First-occurrence position per name so row-major named OUT results can be
+    // keyed by bind name (repeated names map to their first occurrence).
+    Map<String, int>? outBindNameIndex;
+    if (named) {
+      outBindNameIndex = <String, int>{};
+      for (var i = 0; i < bindNames.length; i++) {
+        outBindNameIndex.putIfAbsent(bindNames[i], () => i);
+      }
+    }
+
+    return _ExecuteManyCall(
+      stmt: _PreparedStatement(
+        bindList: slots,
+        bindNames: named ? bindNames : null,
+        outBindNameIndex: outBindNameIndex,
+        bindMetadata: bindMetadata,
+        isQuery: false,
+        isPlSql: false,
+        eligible: isCacheEligibleSql(sql),
+        cacheKey: StatementCacheKey(sql, _bindSignature(bindMetadata)),
+      ),
+      rows: normalized,
+      numIterations: normalized.length,
+      batchErrors: options.batchErrors,
+      dmlRowCounts: options.dmlRowCounts,
+      dmlReturning: true,
+    );
+  }
+
+  /// Normalizes DML RETURNING executeMany rows into slot-ordered value lists
+  /// (one slot per SQL placeholder occurrence, DML per-position semantics).
+  /// IN slots take the row's value; RETURNING OUT / IN OUT slots are
+  /// server-populated and MUST NOT carry a per-row input value (a non-null
+  /// value fails loud, mirroring [_normalizePlSqlRows]'s OUT-only rule
+  /// extended to every returning bind). Never includes bind values in errors.
+  List<List<Object?>> _normalizeDmlReturningRows(
+    List<Object?> rows, {
+    required bool named,
+    required List<String> bindNames,
+    required int slotCount,
+    required Set<String> distinctNames,
+    required List<OracleBindDef> slotDefs,
+  }) {
+    final normalized = <List<Object?>>[];
+    for (var r = 0; r < rows.length; r++) {
+      final row = rows[r];
+      if (named) {
+        if (row is! Map) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'executeMany() row $r is ${row.runtimeType}, but the SQL uses '
+                'named binds (:name) so every row must be a '
+                'Map<String, Object?>.',
+          );
+        }
+        final rowValues = <String, Object?>{};
+        for (final entry in row.entries) {
+          final key = entry.key;
+          if (key is! String) {
+            throw OracleException(
+              errorCode: oraBindTypeError,
+              message:
+                  'executeMany() row $r has a bind key of type '
+                  '${key.runtimeType}; named rows must be '
+                  'Map<String, Object?>.',
+            );
+          }
+          if (!distinctNames.contains(key)) {
+            throw OracleException(
+              errorCode: oraBindMismatch,
+              message:
+                  'executeMany() row $r contains bind key ":$key" with no '
+                  'matching placeholder in the SQL. Placeholders: '
+                  '${distinctNames.map((n) => ':$n').join(', ')}.',
+            );
+          }
+          rowValues[key] = entry.value;
+        }
+        for (var s = 0; s < slotCount; s++) {
+          final name = bindNames[s];
+          if (slotDefs[s].hasOutput) {
+            if (rowValues[name] != null) {
+              throw OracleException(
+                errorCode: oraBindMismatch,
+                message:
+                    'executeMany() row $r supplies a value for RETURNING bind '
+                    '":$name"; a RETURNING ... INTO target is '
+                    'populated by the server and takes no per-row input — omit '
+                    'the key or pass null.',
+              );
+            }
+          } else if (!row.containsKey(name)) {
+            throw OracleException(
+              errorCode: oraBindMismatch,
+              message:
+                  'executeMany() row $r is missing a value for IN bind '
+                  '":$name"; every IN bind must be present in the row (pass '
+                  'null explicitly for a SQL NULL).',
+            );
+          }
+        }
+        normalized.add([for (final name in bindNames) rowValues[name]]);
+      } else {
+        if (row is Map) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message:
+                'executeMany() row $r is a Map, but the SQL uses positional '
+                'binds (:1, :2, ...) so every row must be a List<Object?>. '
+                'Use :name placeholders for Map rows.',
+          );
+        }
+        if (row is! List || row is Uint8List) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'executeMany() row $r is ${row.runtimeType}; positional rows '
+                'must be List<Object?>.',
+          );
+        }
+        if (row.length > slotCount) {
+          throw OracleException(
+            errorCode: oraBindMismatch,
+            message:
+                'executeMany() row $r has ${row.length} values but the SQL '
+                'has only $slotCount positional placeholder'
+                '${slotCount == 1 ? '' : 's'}.',
+          );
+        }
+        // Rows shorter than the placeholder count bind SQL NULL for the
+        // missing trailing slots — but only trailing RETURNING OUT / IN OUT
+        // slots may be omitted this way; a missing trailing IN slot is a
+        // caller error, not an implicit null.
+        final values = <Object?>[
+          for (var s = 0; s < slotCount; s++) s < row.length ? row[s] : null,
+        ];
+        for (var s = 0; s < slotCount; s++) {
+          if (slotDefs[s].hasOutput) {
+            if (values[s] != null) {
+              throw OracleException(
+                errorCode: oraBindMismatch,
+                message:
+                    'executeMany() row $r supplies a value for RETURNING bind '
+                    ':${s + 1}; a RETURNING ... INTO target is populated by '
+                    'the server and takes no per-row input — omit trailing '
+                    'OUT slots or pass null.',
+              );
+            }
+          } else if (s >= row.length) {
+            throw OracleException(
+              errorCode: oraBindMismatch,
+              message:
+                  'executeMany() row $r has ${row.length} value'
+                  '${row.length == 1 ? '' : 's'} but bind :${s + 1} is an IN '
+                  'bind that requires an explicit value (only trailing '
+                  'RETURNING OUT / IN OUT slots may be omitted).',
+            );
+          }
+        }
+        normalized.add(values);
+      }
+    }
+    return normalized;
+  }
+
   /// Infers one uniform Oracle wire type per slot from the first non-null
   /// value across [normalized] rows, enforces cross-row consistency, and
   /// tracks the largest string/RAW byte length so the single bind-metadata
@@ -1512,10 +1968,11 @@ class OracleConnection {
                       'rows (row $r, $slotLabel): declare OUT/IN OUT binds '
                       'once via OracleExecuteManyOptions(bindDefs: ...) '
                       'using OracleBindDef instead.'
-                : 'executeMany() does not support OracleBind specs '
-                      '(row $r, $slotLabel): DML OUT binds '
-                      '(RETURNING ... INTO) are planned for Epic 11 '
-                      'Story 11.4.',
+                : 'executeMany() does not accept OracleBind values inside '
+                      'rows (row $r, $slotLabel): plain array DML has no OUT '
+                      'binds, and DML RETURNING ... INTO declares its OUT '
+                      'targets via OracleExecuteManyOptions(bindDefs: ...) '
+                      'using OracleBindDef instead.',
           );
         }
         final oraType = dt.inferOraTypeForValue(value);
@@ -2303,6 +2760,7 @@ class OracleConnection {
       executeManyIters: bulk?.numIterations,
       batchErrors: bulk?.batchErrors ?? false,
       dmlRowCounts: bulk?.dmlRowCounts ?? false,
+      dmlReturning: bulk?.dmlReturning ?? false,
     );
     StatementCacheEntry? cacheEntry = open.cacheEntry;
     var unhandledCursorId = open.response.cursorId;
@@ -2398,10 +2856,13 @@ class OracleConnection {
       }
 
       // Materialize CLOB/BLOB locators over the fully-drained result so a
-      // locator aliased into several rows is read exactly once.
+      // locator aliased into several rows is read exactly once. A DML
+      // RETURNING call carries its returned LOB locators nested inside each
+      // iteration's OUT rows, so the materializer descends one level deeper.
       response = await _transport.materializeLobs(
         response,
         bindMetadata: stmt.bindMetadata,
+        dmlReturning: bulk?.dmlReturning ?? false,
       );
 
       // Eagerly materialize any cursor-typed SELECT columns
@@ -2600,6 +3061,7 @@ class OracleConnection {
     int? executeManyIters,
     bool batchErrors = false,
     bool dmlRowCounts = false,
+    bool dmlReturning = false,
   }) async {
     // Try to acquire a cached cursor.
     StatementCacheEntry? cacheEntry;
@@ -2661,6 +3123,7 @@ class OracleConnection {
           executeManyIters: executeManyIters,
           batchErrors: batchErrors,
           dmlRowCounts: dmlRowCounts,
+          dmlReturning: dmlReturning,
         );
 
         if (!response.isSuccess) {
@@ -3790,6 +4253,7 @@ class _ExecuteManyCall {
     required this.numIterations,
     this.batchErrors = false,
     this.dmlRowCounts = false,
+    this.dmlReturning = false,
   }) : assert(
          rows == null || rows.length == numIterations,
          'numIterations must match the normalized row count',
@@ -3798,6 +4262,10 @@ class _ExecuteManyCall {
          (!batchErrors && !dmlRowCounts) || (!stmt.isQuery && !stmt.isPlSql),
          'batchErrors / dmlRowCounts are DML-only and must be rejected before '
          'reaching the wire for queries and PL/SQL',
+       ),
+       assert(
+         !dmlReturning || (!stmt.isQuery && !stmt.isPlSql),
+         'dmlReturning is a DML-only executeMany shape',
        );
 
   final _PreparedStatement stmt;
@@ -3811,4 +4279,10 @@ class _ExecuteManyCall {
   /// Array-DML per-row DML row counts requested (DML-only). Threaded into the
   /// EXECUTE request and mapped to [OracleResult.dmlRowCounts].
   final bool dmlRowCounts;
+
+  /// DML `RETURNING ... INTO` executeMany (array OUT binds). Threaded into the
+  /// EXECUTE request (permits OUT binds, omits them from row data, seeds the
+  /// return-bind decode order) and drives the nested row-major
+  /// [OracleResult.outBinds] shape and the returning LOB materialization.
+  final bool dmlReturning;
 }

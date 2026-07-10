@@ -124,6 +124,7 @@ class ExecuteRequest extends Message {
     this.noImplicitRelease = false,
     this.batchErrors = false,
     this.dmlRowCounts = false,
+    this.dmlReturning = false,
     super.sequence = 1,
   }) : assert(
          !(isQuery && isPlSql),
@@ -133,6 +134,10 @@ class ExecuteRequest extends Message {
          (!batchErrors && !dmlRowCounts) || (!isQuery && !isPlSql),
          'batchErrors / dmlRowCounts are DML-only (node-oracledb rejects them '
          'for queries and PL/SQL before the wire)',
+       ),
+       assert(
+         !dmlReturning || (!isQuery && !isPlSql),
+         'dmlReturning is a DML-only (non-query, non-PL/SQL) execute shape',
        ),
        assert(
          defineColumns == null ||
@@ -157,15 +162,19 @@ class ExecuteRequest extends Message {
          'when rows are present',
        ),
        super(messageType: ttcMsgTypeFunction) {
-    // OUT and IN OUT binds are only meaningful in PL/SQL. Refuse mid-build
-    // rather than emit malformed bytes that would surface as a confusing
-    // server error.
-    if (bindValues != null) {
+    // OUT and IN OUT binds are only meaningful in PL/SQL blocks OR as the
+    // RETURNING ... INTO targets of a DML RETURNING statement ([dmlReturning]).
+    // Refuse them on any other non-PL/SQL statement mid-build rather than emit
+    // malformed bytes that would surface as a confusing server error — this is
+    // what keeps ordinary array DML from smuggling OUT binds onto the wire.
+    if (bindValues != null && !isPlSql && !dmlReturning) {
       for (final v in bindValues!) {
-        if (v is BindVariable && v.hasOutput && !isPlSql) {
+        if (v is BindVariable && v.hasOutput) {
           throw const OracleException(
             errorCode: oraBindTypeError,
-            message: 'OUT/IN OUT binds are only supported in PL/SQL blocks',
+            message:
+                'OUT/IN OUT binds are only supported in PL/SQL blocks or as '
+                'the RETURNING ... INTO targets of a DML RETURNING statement',
           );
         }
       }
@@ -253,6 +262,18 @@ class ExecuteRequest extends Message {
   /// the exec-flags word (al8i4[9]) and emits the array DML row-count pointer
   /// block with the executeMany iteration count. DML-only.
   final bool dmlRowCounts;
+
+  /// Whether this is a DML `RETURNING ... INTO` executeMany request
+  /// (node-oracledb `statement.isReturning`). When true, OUT / IN OUT bind
+  /// slots are permitted on a non-PL/SQL statement (the RETURNING INTO
+  /// targets), their per-bind column metadata is written like any other bind,
+  /// but they are OMITTED from every per-iteration `ROW_DATA` payload
+  /// (node-oracledb `writeBindParamsRow` skips `isReturnBind` variables — the
+  /// server populates them and streams the returned values back per iteration).
+  /// The single-RPC execution count (al8i4[1]) stays the row count, exactly
+  /// like array DML; there is no REEXECUTE split (that is PL/SQL-only). Only
+  /// meaningful for non-query, non-PL/SQL statements.
+  final bool dmlReturning;
 
   /// Number of execute iterations for DML / PL/SQL: the explicit executeMany
   /// count when set, else the bulk row count, else 1 (node-oracledb
@@ -489,12 +510,20 @@ class ExecuteRequest extends Message {
           }
           _writeRowData(buffer, [
             for (var i = 0; i < binds.length; i++)
-              BindVariable(
-                value: row[i],
-                oraType: binds[i].oraType,
-                maxSize: binds[i].maxSize,
-                isNChar: binds[i].isNChar,
-              ),
+              // DML RETURNING: the RETURNING ... INTO targets (OUT / IN OUT
+              // binds) are written in the metadata block above but OMITTED
+              // from the per-iteration row data — the server populates them
+              // and streams the returned values back (node-oracledb
+              // writeBindParamsRow skips isReturnBind variables). Every other
+              // executeMany shape writes all slots (array-DML IN binds and
+              // PL/SQL OUT null-indicator placeholders alike).
+              if (!(dmlReturning && binds[i].hasOutput))
+                BindVariable(
+                  value: row[i],
+                  oraType: binds[i].oraType,
+                  maxSize: binds[i].maxSize,
+                  isNChar: binds[i].isNChar,
+                ),
           ], isPlSql: isPlSql);
         }
       }
@@ -1195,6 +1224,7 @@ class ExecuteResponse {
     List<int> dmlRowCounts = const [],
     this.rowsAffected,
     this.moreRowsToFetch = false,
+    this.flushOutBinds = false,
     this.errorCode,
     this.errorMessage,
     this.errorOffset,
@@ -1278,6 +1308,12 @@ class ExecuteResponse {
   /// Whether the server reported more rows are available beyond [rows].
   final bool moreRowsToFetch;
 
+  /// Whether a `TNS_MSG_TYPE_FLUSH_OUT_BINDS` (19) marker terminated the
+  /// response (DML RETURNING error path). The transport sends the matching
+  /// flush request to reset the server-side out-bind state before the
+  /// connection is reused; higher layers never see it.
+  final bool flushOutBinds;
+
   /// Oracle error code if [isSuccess] is false.
   final int? errorCode;
 
@@ -1309,6 +1345,7 @@ bool ttcStreamIsComplete(
   List<ColumnMetadata>? expectedColumns,
   List<BindMetadata>? bindMetadata,
   bool plSqlExecuteMany = false,
+  bool dmlReturning = false,
   bool dmlRowCounts = false,
   List<int>? presetOutBindIndices,
 }) {
@@ -1329,6 +1366,10 @@ bool ttcStreamIsComplete(
     // Byte accuracy requires the probe to consume EVERY per-iteration OUT
     // ROW_DATA on a PL/SQL executeMany response, not just the first.
     plSqlExecuteMany: plSqlExecuteMany,
+    // A DML RETURNING executeMany ships one ROW_DATA per iteration in the
+    // returning format (per-bind [numRows][values...]); the probe must walk
+    // every one of them byte-accurately on pre-23.4 servers.
+    dmlReturning: dmlReturning,
   );
   // A REEXECUTE response ships no IO_VECTOR (live-capture verified): the OUT
   // bind order carries over from the first execution's response. Seed it so
@@ -1382,6 +1423,7 @@ ExecuteResponse decodeExecuteResponse(
   String nationalCharset = 'AL16UTF16',
   List<Object?>? previousRoundLastRow,
   bool plSqlExecuteMany = false,
+  bool dmlReturning = false,
   bool dmlRowCounts = false,
   List<int>? presetOutBindIndices,
 }) {
@@ -1400,6 +1442,7 @@ ExecuteResponse decodeExecuteResponse(
     nationalCharset: nationalCharset,
     previousRoundLastRow: previousRoundLastRow,
     plSqlExecuteMany: plSqlExecuteMany,
+    dmlReturning: dmlReturning,
   );
   // A REEXECUTE response ships no IO_VECTOR (live-capture verified): seed the
   // OUT bind order from the first execution's response so each per-iteration
@@ -1447,6 +1490,7 @@ ExecuteResponse decodeExecuteResponse(
     dmlRowCounts: state.dmlRowCounts,
     rowsAffected: state.rowsAffected,
     moreRowsToFetch: state.moreRowsToFetch,
+    flushOutBinds: state.flushOutBinds,
     errorCode: isSuccess ? null : state.errorNum,
     errorMessage: isSuccess ? null : state.errorMessage,
     errorOffset: isSuccess ? null : state.errorOffset,
@@ -1466,6 +1510,7 @@ class _DecodeState {
     this.nationalCharset = 'AL16UTF16',
     this.previousRoundLastRow,
     this.plSqlExecuteMany = false,
+    this.dmlReturning = false,
     this.arrayDmlRowCounts = false,
   }) : cursorColumnIndices = cursorColumnIndicesOf(columns);
 
@@ -1537,6 +1582,18 @@ class _DecodeState {
   /// per ROW_DATA and stores per-variable `values[rowIndex]`).
   final bool plSqlExecuteMany;
 
+  /// Whether this response belongs to a DML `RETURNING ... INTO` executeMany
+  /// request. The server ships one ROW_DATA per iteration; unlike the PL/SQL
+  /// shape, each return bind's slot in that ROW_DATA is a `[UB4 numRows]`
+  /// count followed by that many decoded values (node-oracledb
+  /// `processRowData` returning branch). Each iteration is decoded into a row
+  /// of [outBindRows] whose cells are themselves lists (one per return bind)
+  /// of that iteration's returned values — an input row matching zero database
+  /// rows yields an empty inner list, preserving input order. There is no
+  /// IO_VECTOR for DML RETURNING; [outBindIndices] is seeded up front from the
+  /// return-bind positions (see `presetOutBindIndices`).
+  final bool dmlReturning;
+
   /// Per-iteration OUT bind value rows accumulated when [plSqlExecuteMany]
   /// is set. Deliberately NOT cleared by the IO_VECTOR reset (node-oracledb
   /// keeps `variable.values` across a re-sent IO_VECTOR); each decode pass
@@ -1569,6 +1626,11 @@ class _DecodeState {
   String? errorMessage;
   int? errorOffset;
   Uint8List? bitVector;
+
+  /// Set when a `TNS_MSG_TYPE_FLUSH_OUT_BINDS` (19) marker terminated the
+  /// response — the DML RETURNING error path. The transport reacts by sending
+  /// the matching flush request (node-oracledb `flushOutBindMessage`).
+  bool flushOutBinds = false;
 }
 
 void _dispatch(int msgType, ReadBuffer buf, _DecodeState s) {
@@ -1607,6 +1669,14 @@ void _dispatch(int msgType, ReadBuffer buf, _DecodeState s) {
       _processImplicitResultSet(buf, s);
       return;
     case ttcMsgTypeEndOfRequest:
+      s.endOfResponse = true;
+      return;
+    case ttcMsgTypeFlushOutBinds:
+      // DML RETURNING error path: a terminal, zero-body marker (node-oracledb
+      // withData.js sets flushOutBinds = true and endOfResponse = true). The
+      // transport must send a matching FLUSH_OUT_BINDS request afterward to
+      // clear the server-side out-bind state before the connection is reused.
+      s.flushOutBinds = true;
       s.endOfResponse = true;
       return;
     default:
@@ -1754,6 +1824,16 @@ void _processRowData(ReadBuffer buf, _DecodeState s) {
   // SELECT responses use ROW_DATA after DESCRIBE_INFO + ROW_HEADER to ship
   // result rows. The two never mix on the same statement.
   if (!s.isQuery && s.outBindIndices.isNotEmpty) {
+    if (s.dmlReturning) {
+      // DML RETURNING executeMany: the server ships one ROW_DATA per
+      // iteration, and each return bind's slot in it is a per-iteration
+      // returned-row COUNT followed by that many values (an input row
+      // matching zero database rows sends count 0). Decode into a row whose
+      // cells are lists — one per return bind (node-oracledb processRowData
+      // returning branch stores `variable.values[rowIndex] = [values...]`).
+      s.outBindRows.add(_decodeReturningRow(buf, s));
+      return;
+    }
     if (s.plSqlExecuteMany) {
       // PL/SQL executeMany: the server ships one ROW_DATA per iteration;
       // each is decoded as its own row of OUT values (node-oracledb
@@ -1872,6 +1952,55 @@ List<Object?> _decodeOutBindRow(ReadBuffer buf, _DecodeState s) {
     // trailer (matches node-oracledb processColumnData !inFetch path).
     buf.skipSB4();
     row.add(value);
+  }
+  return row;
+}
+
+/// Decodes one iteration's ROW_DATA payload for a DML `RETURNING ... INTO`
+/// executeMany response.
+///
+/// Unlike the PL/SQL shape ([_decodeOutBindRow], one scalar value per OUT
+/// bind), each return bind here is a `[UB4 numRows]` count followed by that
+/// many decoded values (node-oracledb `processRowData` returning branch):
+/// a single input DML row can affect several database rows, so RETURNING
+/// values are always an array. An input row that matched zero database rows
+/// sends count 0 → an empty list, which preserves input order in the
+/// row-major result. Returns one inner `List<Object?>` per return bind in
+/// [s.outBindIndices] order.
+List<Object?> _decodeReturningRow(ReadBuffer buf, _DecodeState s) {
+  final row = <Object?>[];
+  for (final bindIdx in s.outBindIndices) {
+    final numRows = buf.readUB4();
+    if (bindIdx >= s.bindMetadata.length) {
+      // Server returned more OUT slots than the client declared binds.
+      // Consume bytes conservatively so the stream stays aligned.
+      for (var j = 0; j < numRows; j++) {
+        buf.readBytesWithLength();
+        buf.skipSB4();
+      }
+      row.add(const <Object?>[]);
+      continue;
+    }
+    final meta = s.bindMetadata[bindIdx];
+    final values = <Object?>[];
+    for (var j = 0; j < numRows; j++) {
+      final value = _decodeValueByOraType(
+        buf,
+        meta.oraType,
+        strict: s.strictTypes,
+        preserveTimestampTimeZone: s.preserveTimestampTimeZone,
+        csfrm: meta.csfrm,
+        supportsNationalCharset: s.supportsNationalCharset,
+        nationalCharset: s.nationalCharset,
+        outMaxSize: meta.maxSize,
+        ttcFieldVersion: s.ttcFieldVersion,
+      );
+      // Each returned value carries the same SB4 "actual num bytes" trailer as
+      // a scalar OUT bind (node-oracledb processColumnData !inFetch path).
+      buf.skipSB4();
+      values.add(value);
+    }
+    row.add(values);
   }
   return row;
 }

@@ -195,6 +195,7 @@ class _CharsetFakeTransport extends Transport {
     int? executeManyIters,
     bool batchErrors = false,
     bool dmlRowCounts = false,
+    bool dmlReturning = false,
   }) async {
     executeCalls++;
     return _response;

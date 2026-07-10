@@ -82,6 +82,7 @@ class _FakeCacheTransport extends Transport {
     int? executeManyIters,
     bool batchErrors = false,
     bool dmlRowCounts = false,
+    bool dmlReturning = false,
   }) async {
     sendExecuteCalls++;
     sendExecuteCursorIds.add(cursorId);
@@ -108,6 +109,7 @@ class _FakeCacheTransport extends Transport {
   Future<ExecuteResponse> materializeLobs(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
+    bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
   }) async =>
       response;

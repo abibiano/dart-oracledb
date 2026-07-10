@@ -1106,6 +1106,322 @@ END;''');
       expect(conn.debugReuseExecutes, reuseBefore);
     });
   });
+
+  group('executeMany() DML RETURNING (Story 11.4)', () {
+    OracleConnection? connHandle;
+    late OracleConnection conn;
+    final t = uniqueTableName('s114_em');
+
+    setUp(() async {
+      connHandle = await connectForTest();
+      conn = connHandle!;
+      await _ignoreOraCodes(
+        () => conn.execute(
+          'CREATE TABLE $t ( '
+          'id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, '
+          'name VARCHAR2(100), '
+          'code VARCHAR2(50), '
+          'n NUMBER, '
+          'c CLOB, '
+          'b BLOB, '
+          'CONSTRAINT ${t}_uc UNIQUE (code))',
+        ),
+        const [955], // ORA-00955: name already used
+      );
+      await conn.execute('TRUNCATE TABLE $t');
+    });
+
+    tearDown(() async {
+      final c = connHandle;
+      connHandle = null;
+      await cleanUpConnection(
+        c,
+        rollbackFirst: true,
+        dropStatements: ['DROP TABLE $t PURGE'],
+      );
+    });
+
+    // The returned values for one OUT bind of one input row: outBinds is
+    // row-major (one entry per input row); a positional entry is a List whose
+    // element `bind` is that bind's returned-values list, a named entry is a
+    // Map keyed by OUT bind name.
+    List<Object?> returned(OracleResult r, int row, Object bind) {
+      final entry = r.outBinds[row];
+      final cell = entry is Map ? entry[bind] : (entry as List)[bind as int];
+      return (cell as List).cast<Object?>();
+    }
+
+    test('positional INSERT RETURNING id and ROWID, row-major per input row',
+        () async {
+      final names = ['Alice', 'Bob', 'Carol'];
+      final result = await conn.executeMany(
+        'INSERT INTO $t (name) VALUES (:1) RETURNING id, ROWID INTO :2, :3',
+        [
+          for (final n in names) [n],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
+            OracleBindDef.output(type: OracleDbType.number),
+            OracleBindDef.output(type: OracleDbType.varchar, maxSize: 18),
+          ],
+        ),
+      );
+      await conn.commit();
+
+      expect(result.outBinds.length, equals(3), reason: 'one entry per row');
+      final ids = <int>[];
+      for (var i = 0; i < 3; i++) {
+        final idList = returned(result, i, 0);
+        final rowidList = returned(result, i, 1);
+        expect(idList, hasLength(1), reason: 'INSERT affects exactly one row');
+        expect(rowidList, hasLength(1));
+        expect(idList.single, isA<int>());
+        expect(rowidList.single, isA<String>());
+        expect((rowidList.single as String).isNotEmpty, isTrue);
+        ids.add(idList.single as int);
+      }
+      // The returned ids are the actual generated primary keys.
+      final check = await conn.execute(
+        'SELECT id, name FROM $t ORDER BY id',
+      );
+      expect(check.rows.map((r) => r['ID']).toList(), equals(ids));
+      expect(check.rows.map((r) => r['NAME']).toList(), equals(names));
+    });
+
+    test('named UPDATE RETURNING keyed by OUT bind name per row', () async {
+      await conn.executeMany(
+        'INSERT INTO $t (name, n) VALUES (:1, :2)',
+        [
+          ['Alice', 1],
+          ['Bob', 2],
+        ],
+      );
+      await conn.commit();
+
+      final upd = await conn.executeMany(
+        'UPDATE $t SET n = :val WHERE name = :nm RETURNING n INTO :outn',
+        [
+          {'nm': 'Alice', 'val': 10},
+          {'nm': 'Bob', 'val': 20},
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: {
+            'val': OracleBindDef.input(type: OracleDbType.number),
+            'nm': OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
+            'outn': OracleBindDef.output(type: OracleDbType.number),
+          },
+        ),
+      );
+      await conn.commit();
+
+      expect(upd.outBinds[0], isA<Map<String, Object?>>());
+      expect(returned(upd, 0, 'outn'), equals([10]));
+      expect(returned(upd, 1, 'outn'), equals([20]));
+    });
+
+    test('zero-row DELETE returns an empty OUT list in input order', () async {
+      await conn.executeMany(
+        'INSERT INTO $t (name) VALUES (:1)',
+        [
+          ['keep-a'],
+          ['keep-b'],
+        ],
+      );
+      await conn.commit();
+
+      final del = await conn.executeMany(
+        'DELETE FROM $t WHERE name = :1 RETURNING id INTO :2',
+        [
+          ['keep-a'],
+          ['does-not-exist'],
+          ['keep-b'],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
+            OracleBindDef.output(type: OracleDbType.number),
+          ],
+        ),
+      );
+      await conn.commit();
+
+      expect(returned(del, 0, 0), hasLength(1), reason: 'keep-a matched');
+      expect(returned(del, 1, 0), isEmpty, reason: 'no match → empty list');
+      expect(returned(del, 2, 0), hasLength(1), reason: 'keep-b matched');
+    });
+
+    test('returns a CLOB value through the returning LOB path', () async {
+      final clobA = 'clob-value-alpha-${'x' * 50}';
+      const clobB = 'clob-value-beta';
+      final result = await conn.executeMany(
+        'INSERT INTO $t (name, c) VALUES (:1, :2) RETURNING c INTO :3',
+        [
+          ['a', clobA],
+          ['b', clobB],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 10),
+            OracleBindDef.input(type: OracleDbType.clob, maxSize: 4000),
+            OracleBindDef.output(type: OracleDbType.clob, maxSize: 4000),
+          ],
+        ),
+      );
+      await conn.commit();
+      // The single RETURNING OUT bind is the 0th (and only) return bind, so
+      // its per-row entry is at ordinal 0 (positional entries index the OUT
+      // binds in order, not the original slot position — node-oracledb parity).
+      expect(returned(result, 0, 0), equals([clobA]));
+      expect(returned(result, 1, 0), equals([clobB]));
+    });
+
+    test('returns a BLOB value through the returning LOB path', () async {
+      final blobA = Uint8List.fromList([1, 2, 3, 4, 5]);
+      final blobB = Uint8List.fromList(List<int>.generate(20, (i) => i));
+      final result = await conn.executeMany(
+        'INSERT INTO $t (name, b) VALUES (:1, :2) RETURNING b INTO :3',
+        [
+          ['a', blobA],
+          ['b', blobB],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 10),
+            OracleBindDef.input(type: OracleDbType.blob, maxSize: 4000),
+            OracleBindDef.output(type: OracleDbType.blob, maxSize: 4000),
+          ],
+        ),
+      );
+      await conn.commit();
+      expect(returned(result, 0, 0).single, equals(blobA));
+      expect(returned(result, 1, 0).single, equals(blobB));
+    });
+
+    test('dmlRowCounts ride alongside DML RETURNING, input-ordered', () async {
+      final result = await conn.executeMany(
+        'INSERT INTO $t (name) VALUES (:1) RETURNING id INTO :2',
+        [
+          ['a'],
+          ['b'],
+          ['c'],
+        ],
+        OracleExecuteManyOptions(
+          dmlRowCounts: true,
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 10),
+            OracleBindDef.output(type: OracleDbType.number),
+          ],
+        ),
+      );
+      await conn.commit();
+      expect(result.dmlRowCounts, equals([1, 1, 1]));
+      expect(result.outBinds.length, equals(3));
+      for (var i = 0; i < 3; i++) {
+        expect(returned(result, i, 0), hasLength(1));
+      }
+    });
+
+    test('an oversized returned LOB fails as a thrown statement error',
+        () async {
+      // A returned CLOB longer than the declared maxSize is caught client-side
+      // during LOB materialization and thrown as an OracleException (AC5:
+      // oversized returned values fail as statement errors, never batchErrors).
+      await expectLater(
+        () => conn.executeMany(
+          'INSERT INTO $t (name, c) VALUES (:1, :2) RETURNING c INTO :3',
+          [
+            ['a', 'a-clob-value-that-exceeds-the-declared-maxSize'],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [
+              OracleBindDef.input(type: OracleDbType.varchar, maxSize: 10),
+              OracleBindDef.input(type: OracleDbType.clob, maxSize: 4000),
+              OracleBindDef.output(type: OracleDbType.clob, maxSize: 5),
+            ],
+          ),
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('CLOB'), contains('maxSize')),
+          ),
+        ),
+      );
+      await conn.rollback();
+    });
+
+    test('without batchErrors, a failing row throws (first-error behavior)',
+        () async {
+      await conn.execute("INSERT INTO $t (name, code) VALUES ('x', 'DUP')");
+      await conn.commit();
+      // The second row violates the UNIQUE(code) constraint; with no
+      // batchErrors the whole call throws.
+      await expectLater(
+        () => conn.executeMany(
+          'INSERT INTO $t (name, code) VALUES (:1, :2) RETURNING id INTO :3',
+          [
+            ['ok', 'FRESH'],
+            ['dup', 'DUP'],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [
+              OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
+              OracleBindDef.input(type: OracleDbType.varchar, maxSize: 50),
+              OracleBindDef.output(type: OracleDbType.number),
+            ],
+          ),
+        ),
+        throwsA(isA<OracleException>()),
+      );
+      await conn.rollback();
+    });
+
+    test('batchErrors + DML RETURNING applies valid rows, reports the failed '
+        'row, and returns values in input order', () async {
+      // Probed and documented behavior (23ai + 21c): the combination is
+      // supported. Oracle applies the valid rows (returning their values),
+      // reports the constraint-violating row as an OracleBatchError at its
+      // 0-based input offset, and leaves that row's returning entry an empty
+      // list — all WITHOUT throwing. The row error travels in the server's
+      // FLUSH_OUT_BINDS follow-up response, which the driver merges with the
+      // per-iteration returning rows (dropping either would be silent data
+      // loss).
+      await conn.execute("INSERT INTO $t (name, code) VALUES ('x','DUP')");
+      await conn.commit();
+      final r = await conn.executeMany(
+        'INSERT INTO $t (name, code) VALUES (:1, :2) RETURNING id INTO :3',
+        [
+          ['ok', 'FRESH'],
+          ['dup', 'DUP'], // violates UNIQUE(code)
+          ['ok2', 'FRESH2'],
+        ],
+        OracleExecuteManyOptions(
+          batchErrors: true,
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 50),
+            OracleBindDef.output(type: OracleDbType.number),
+          ],
+        ),
+      );
+      await conn.commit();
+
+      expect(r.batchErrors, hasLength(1));
+      expect(r.batchErrors.single.offset, equals(1),
+          reason: '0-based offset of the failed input row');
+      // Valid rows returned their generated ids; the failed row is empty.
+      expect(returned(r, 0, 0), hasLength(1));
+      expect(returned(r, 1, 0), isEmpty, reason: 'failed row returns nothing');
+      expect(returned(r, 2, 0), hasLength(1));
+      // The two valid rows are persisted.
+      final count = await conn.execute(
+        "SELECT COUNT(*) AS c FROM $t WHERE code IN ('FRESH','FRESH2')",
+      );
+      expect(count.rows.single['C'], equals(2));
+    });
+  });
 }
 
 /// Runs [action], swallowing [OracleException]s whose code is in [codes].
