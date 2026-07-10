@@ -36,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-07-10  # Story 11.5 done (code review complete, dual-env executeMany closeout)
+last_updated: 2026-07-10  # Epic 11 retrospective complete; epic-11 flipped to done; action_items recorded
 project: dart-oracledb
 project_key: NOKEY
 tracking_system: file-system
@@ -189,13 +189,13 @@ development_status:
   epic-10-retrospective: done  # 2026-06-25 — Retrospective complete. See epic-10-retro-2026-06-25.md
 
   # Epic 11: Bulk DML (executeMany)
-  epic-11: in-progress
+  epic-11: done  # 2026-07-10 — all stories 11.1-11.5 + retrospective complete (see epic-11-retro-2026-07-10.md); status flipped from in-progress during retro closeout
   11-1-execute-many-array-dml: done  # 2026-07-02 — code review complete (3-layer adversarial: Blind Hunter + Edge Case Hunter + Acceptance Auditor; 0 layers failed). AC3 ttcBindArray deviation independently re-verified vs reference/node-oracledb and confirmed JUSTIFIED (spec-text defect; code is reference-correct). 3 patches applied: (1) invalid-JSON bind value no longer leaks into the error message; (2) non-finite double (NaN/±Inf) rejected before any wire round trip; (3) DML RETURNING ... INTO now fails loud pointing to Story 11.4 (new literal-shielded hasReturningIntoClause classifier). 2 test-coverage items deferred, 7 dismissed. dart analyze clean; full unit 1406 pass (+9 new regression tests); executeMany integration 14/14 on 23ai AND 21c.
   11-2-bulk-plsql-array-binds: done  # 2026-07-03 — code review complete (3-layer adversarial: Blind Hunter + Edge Case Hunter + Acceptance Auditor; 0 layers failed). All 9 ACs verified in code. 1 patch applied: N>1 PL/SQL executeMany leaked its NO_IMPL_REL server cursor (kept alive for the REEXECUTE, never queued for close since PL/SQL is not cache-eligible) → ORA-01000 risk on pooled connections; now requeued for the close-cursor piggyback on success + error paths, node-oracledb returnStatement parity (found independently by Blind + Edge Hunters). 2 deferred (maxSize input-length validation; 2× timeout across the two RPCs), 5 dismissed (incl. int?-type false positive — analyzer clean). +2 unit regression tests (1448 pass); executeMany integration 25/25 on 23ai AND 21c; analyzer clean. dev-story: PL/SQL executeMany — OracleBindDef/OracleExecuteManyOptions, numIterations form, row-major OUT results, node-parity two-RPC wire contract.
   11-3-row-level-batch-errors: done  # 2026-07-09 — code review complete (3-layer adversarial: Blind Hunter + Edge Case Hunter + Acceptance Auditor; 0 layers failed). 5 patches applied: (1) batch-error cache eviction now checks response.cursorId != 0 before invalidating (node-oracledb processErrorInfo parity — was evicting a still-valid cached cursor on every batch error); (2) _materializeLobValues LOB-rebuild path now forwards batchErrors/dmlRowCounts (was silently dropping them; unreachable today, latent trap for Story 11.4); (3) added a byte-level regression test for the numOff>65535 throw path; (4) added dual-env MERGE integration coverage (dmlRowCounts alone + batchErrors alone) per AC1; (5) added a PL/SQL N>1 REEXECUTE regression test proving row-major OUT results/cursor lifecycle are unaffected by the new options. 3 deferred (OracleBatchError equality, test-helper duplication, ttcExecOption naming), 7 dismissed (verified against node-oracledb reference or existing codebase convention). Also surfaced and documented a genuine Oracle 21c server-side dmlRowCounts under-count when combined with batchErrors on a MERGE (dismissed as platform limitation, not a driver bug — see deferred-work.md). dart analyze clean; full unit 1479 pass; executeMany integration 36/36 + full integration suites pass on 23ai (457/28-skip) AND 21c (458/27-skip).
   11-4-dml-returning-execute-many: done  # 2026-07-10 — code review complete (3-layer adversarial: Blind Hunter + Edge Case Hunter + Acceptance Auditor; 0 layers failed). 1 decision resolved: AC7 wording ("null OUT placeholders") corrected to describe the actual omission behavior, confirmed parity-correct against reference/node-oracledb's writeBindParamsRow (isReturnBind skip). 3 patches applied, all independently/triple-flagged: (1) _flushOutBinds() omitted the dmlRowCounts decode flag — risked stream desync or a silently empty dmlRowCounts on the DML RETURNING error path; now threads dmlRowCounts through _receiveDataWithTimeout and decodeExecuteResponse; (2) an omitted required IN slot (positional short row / named missing key) silently bound SQL NULL instead of a pre-wire validation error; now throws unless the omitted slot is OUT/IN-OUT-designated; (3) a duplicate RETURNING bind name (e.g. RETURNING a, b INTO :x, :x) silently dropped one column's returned values; now rejected pre-wire (a deliberate deviation from node-oracledb, which silently last-wins-overwrites the same case). 2 deferred (bindDefs direction/position not cross-validated against the RETURNING boundary; dmlReturning invariant is assert-only, stripped in release/AOT builds — both pre-existing patterns, not introduced by this story), 3 dismissed as false positives after direct source verification (maxSize enforcement already covered by OracleBindDef._validate; LOB locator dedup already shared via closure across flat/PL-SQL/DML-RETURNING shapes; the flagged "inconsistent" error codes are actually a consistent type-vs-mismatch convention). dart analyze clean; full unit 1503 pass (no regressions from the 3 patches).
   11-5-dual-env-integration-tests: done  # 2026-07-10 — code review complete (3-layer adversarial: Blind Hunter + Edge Case Hunter + Acceptance Auditor; 0 layers failed). 1 decision resolved: AC4's live "cursorId == 0" branch is inherently non-deterministic server-side, so the resilient proxy assertion (no cache growth, correct retry) already in the new integration test is accepted as sufficient dual-env evidence alongside the pre-existing Story 11.3 unit-level pin. 10 patches applied, all test-only (zero lib/ changes): (1) RETURNING assertions in 3 new tests strengthened from hasLength(1) to cross-checking the actual returned id against its own row's generated primary key; (2)-(3) two loose-bound assertions (greaterThanOrEqualTo(6), lessThanOrEqualTo(3)) tightened to equals() — tightening (2) surfaced the true committed-row count was 9, not 6, and applying (1) added a new cached SQL text that bumped (3)'s true count from 3 to 4, both caught only because the bounds were tightened; (4) the repeated-PL/SQL cursor-leak test now also asserts debugPendingCloseCount stays bounded every iteration via the existing debug hook; (5) the CLOB long-data test's periodic 26-char payload (which made a shift-by-26 corruption invisible to its own equality check) replaced with a non-periodic chunk-indexed payload; (6) added the mirrored long-first/short-second byte-level ordering case; (7) the 3x-duplicated returned() outBinds helper hoisted into test_helper.dart; (8) removed an unexplained %T/.replaceFirst() SQL-building indirection; (9) copied the established json_data_type_integration_test.dart skip-code comment onto the new JSON probe; (10) uniqueObjectName()/uniqueTableName() deduplicated (the latter now delegates to the former). 4 deferred, all pre-existing patterns inherited from already-accepted codebase convention, not new risk (uniqueObjectName/uniqueTableName validation gaps; unvalidated derived-identifier suffix length; JSON probe cleanup + returned() type-cast, both exact copies of established code; "crosses packet boundaries" claim proven only by payload-volume math, not direct packet instrumentation, which would need production-side changes out of scope for this test-only story). dart analyze clean; full unit 1492 pass/12 skipped (+1 new regression from patch 6); focused executeMany integration 53/0 on 23ai AND 21c; full integration suite 474/28-skip on 23ai and 475/27-skip on 21c — identical to pre-review baseline, zero regressions from the 10 patches.
-  epic-11-retrospective: optional
+  epic-11-retrospective: done  # 2026-07-10 — Retrospective complete. See epic-11-retro-2026-07-10.md
 
   # Epic 12: LOB Streaming & Temporary LOBs [extends Epic 4]
   epic-12: backlog
@@ -230,3 +230,34 @@ development_status:
   15-4-vector: backlog
   15-5-dual-env-integration-tests: backlog
   epic-15-retrospective: optional
+
+# ==========================================================================
+# ACTION ITEMS — created by epic retrospectives
+# Created 2026-07-10 during the Epic 11 retrospective (first action_items block).
+# NOTE: Epic 10's retro (2026-06-25) predated this section; its 6 items were
+# not tracked here. Follow-through was cross-checked against repo evidence in
+# epic-11-retro-2026-07-10.md ("Previous Retrospective Follow-Through"):
+# 5 of 6 landed (arch review, branch decision, nested-cursor over-delivered);
+# only the coverage-floor recalibration slipped — carried forward as item 1 below.
+# ==========================================================================
+action_items:
+  - epic: 11
+    action: "Recalibrate CI coverage floor 68% -> 73% as a one-line diff bundled into the first Epic 12 story (standalone retro-item form has slipped 4 epics)"
+    owner: "Amelia"
+    status: open
+  - epic: 11
+    action: "When a story introduces an option flag that changes wire-decode shape, enumerate every decode entry point it must thread through (per-story flag-threading checklist) to avoid cross-story latent traps like 11.3 -> 11.4"
+    owner: "Amelia"
+    status: open
+  - epic: 11
+    action: "Make deferred-work target field actually enforced (flag any new deferral lacking one) or formally remove the field from the template"
+    owner: "Amelia"
+    status: open
+  - epic: 11
+    action: "Pre-story confirmation review of the OracleLob streaming surface: temp-LOB free-on-close lifecycle + in-flight/leak guard against the chunked sendLobOp loop, reusing Epic 11 cursor-lifecycle precedent, before Story 12.1 ACs"
+    owner: "Winston"
+    status: open
+  - epic: 11
+    action: "Carry the Oracle 21c MERGE dmlRowCounts under-count limitation forward as a known-server-behavior reference for any Epic 12+ story combining batch results with MERGE"
+    owner: "Amelia"
+    status: open
