@@ -2,11 +2,11 @@
 
 A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire protocol. No Oracle Client libraries required.
 
-[![Pub Version](https://img.shields.io/badge/pub-v1.2.0-orange)](https://pub.dev/packages/oracledb)
+[![Pub Version](https://img.shields.io/badge/pub-v1.3.0-orange)](https://pub.dev/packages/oracledb)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **Stable API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is complete: `OraclePool.create()` builds a pool of prewarmed authenticated sessions, `acquire()`/`release()` borrow and recycle them (with automatic rollback of uncommitted work on release), `withConnection()` wraps the pair leak-safely, queued acquires can be bounded with `acquireTimeout`, surplus idle sessions shrink back to `minConnections` with `idleTimeout`, `close(drainTimeout: ...)` waits for borrowed sessions on shutdown, and session tagging (`acquire(tag: ...)` with an optional `sessionCallback`) reuses session state such as NLS settings across borrowers. As of 1.1, query results can also be consumed incrementally — `OracleResultSet` and `queryStream()` / `executeStream()` stream rows without materializing them, PL/SQL `REF CURSOR` OUT binds and `DBMS_SQL.RETURN_RESULT` implicit result sets are consumable, and nested `CURSOR()` columns materialize inline. As of 1.2, non-`AL32UTF8` database character sets are supported: the client always negotiates UTF-8 and the server converts, so `VARCHAR2`/`CHAR`/`CLOB` text round-trips correctly on single-byte databases too (validated against `WE8MSWIN1252`), with national types (`NCHAR`/`NVARCHAR2`/`NCLOB`) supported on `AL16UTF16`. Depend on `oracledb: ^1.2.0`; the public API now follows semantic versioning (breaking changes bump the major version).
+> **Stable API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is complete: `OraclePool.create()` builds a pool of prewarmed authenticated sessions, `acquire()`/`release()` borrow and recycle them (with automatic rollback of uncommitted work on release), `withConnection()` wraps the pair leak-safely, queued acquires can be bounded with `acquireTimeout`, surplus idle sessions shrink back to `minConnections` with `idleTimeout`, `close(drainTimeout: ...)` waits for borrowed sessions on shutdown, and session tagging (`acquire(tag: ...)` with an optional `sessionCallback`) reuses session state such as NLS settings across borrowers. As of 1.1, query results can also be consumed incrementally — `OracleResultSet` and `queryStream()` / `executeStream()` stream rows without materializing them, PL/SQL `REF CURSOR` OUT binds and `DBMS_SQL.RETURN_RESULT` implicit result sets are consumable, and nested `CURSOR()` columns materialize inline. As of 1.2, non-`AL32UTF8` database character sets are supported: the client always negotiates UTF-8 and the server converts, so `VARCHAR2`/`CHAR`/`CLOB` text round-trips correctly on single-byte databases too (validated against `WE8MSWIN1252`), with national types (`NCHAR`/`NVARCHAR2`/`NCLOB`) supported on `AL16UTF16`. As of 1.3, bulk DML is available: `executeMany()` runs one statement across many bind sets in a single round trip — array INSERT/UPDATE/DELETE/MERGE (including `RETURNING ... INTO`), repeated PL/SQL with per-iteration binds, optional row-level batch errors, and per-row affected-row counts. Depend on `oracledb: ^1.3.0`; the public API now follows semantic versioning (breaking changes bump the major version).
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -18,6 +18,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 - **Native Dart platforms** — macOS, Windows, Linux, Android, and iOS (web unsupported — requires `dart:io` TCP sockets)
 - **TLS/SSL** — encrypted connections with certificate validation
 - **Full query support** — SELECT, INSERT, UPDATE, DELETE with positional and named bind parameters
+- **Bulk DML** — `executeMany()` runs one statement across many bind sets in a single round trip, with array `RETURNING`, per-iteration PL/SQL binds, batch errors, and per-row counts
 - **PL/SQL** — stored procedures and functions with OUT / IN OUT bind parameters
 - **Result sets & streaming** — consume large queries incrementally via `OracleResultSet` or `queryStream()` / `executeStream()` instead of materializing every row
 - **REF CURSOR & implicit results** — PL/SQL `SYS_REFCURSOR` OUT binds, `DBMS_SQL.RETURN_RESULT` implicit result sets, and nested `CURSOR()` columns
@@ -55,7 +56,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  oracledb: ^1.2.0
+  oracledb: ^1.3.0
 ```
 
 Then run:
@@ -228,6 +229,94 @@ final result = await connection.execute(
 );
 print('Rows affected: ${result.rowsAffected}');
 ```
+
+### Bulk DML — `executeMany()`
+
+`executeMany()` runs one statement many times in a **single wire round trip**:
+Oracle array DML for INSERT/UPDATE/DELETE/MERGE (including `RETURNING ... INTO`),
+and repeated PL/SQL execution with per-iteration binds (node-oracledb
+`executeMany` parity). Iterations run inside the current transaction and are
+**not** auto-committed — call `commit()` / `rollback()` exactly as after
+`execute()`.
+
+```dart
+// Array DML — one INSERT executed once per row.
+final result = await connection.executeMany(
+  'INSERT INTO emp (id, name) VALUES (:1, :2)',
+  [
+    [1, 'Alice'],
+    [2, 'Bob'],
+    [3, null], // NULL name
+  ],
+);
+print('Inserted ${result.rowsAffected} rows'); // 3
+await connection.commit();
+```
+
+Rows are a `List` for positional (`:1`, `:2`) SQL or a `Map` for named
+(`:name`) SQL. Each slot's Oracle type is inferred from the first non-null
+value and must stay consistent across all rows; string/RAW slots are sized to
+the largest value. All row-shape and type validation happens before any wire
+round trip, and bind values never appear in error messages.
+
+**Batch errors and per-row counts.** By default the first failing row throws.
+Pass `batchErrors: true` to apply every valid row and collect each failed row's
+data error instead, and `dmlRowCounts: true` for one affected-row count per
+input row (both DML-only):
+
+```dart
+final result = await connection.executeMany(
+  'INSERT INTO emp (id, name) VALUES (:1, :2)',
+  [[1, 'Alice'], [1, 'Dup'], [2, 'Bob']], // row 1 duplicates the PK
+  OracleExecuteManyOptions(batchErrors: true, dmlRowCounts: true),
+);
+for (final e in result.batchErrors) {
+  print('row ${e.offset} failed: ${e.code} ${e.message}'); // row 1: ORA-00001 ...
+}
+print(result.dmlRowCounts); // [1, 0, 1]
+await connection.commit(); // applied rows stay pending until you commit
+```
+
+**DML `RETURNING ... INTO`.** Declare every placeholder once via `bindDefs`
+(required for RETURNING — the OUT targets carry no per-row value to infer a type
+from). Results are row-major: one entry per input row, each holding a list of
+returned values per OUT bind.
+
+```dart
+final result = await connection.executeMany(
+  'INSERT INTO emp (name) VALUES (:1) RETURNING id INTO :2',
+  [['Alice'], ['Bob']],
+  OracleExecuteManyOptions(bindDefs: [
+    OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
+    OracleBindDef.output(type: OracleDbType.number),
+  ]),
+);
+print(result.outBinds.toList()); // [[[1]], [[2]]]
+```
+
+**Bulk PL/SQL.** A `BEGIN`/`DECLARE`/`CALL` block runs once per row (or
+`numIterations` times). OUT / IN OUT placeholders are declared once via
+`bindDefs`; OUT results are row-major, one entry per iteration:
+
+```dart
+final result = await connection.executeMany(
+  'BEGIN :2 := double_it(:1); END;',
+  [[10], [20]],
+  OracleExecuteManyOptions(bindDefs: [
+    OracleBindDef.input(type: OracleDbType.number),
+    OracleBindDef.output(type: OracleDbType.number),
+  ]),
+);
+print(result.outBinds.toList()); // [[20], [40]]
+
+// A positive int runs a bind-free (or all-OUT) PL/SQL block N times:
+await connection.executeMany('BEGIN log_tick(); END;', 3);
+```
+
+> SELECT / `WITH ... SELECT` queries, `SYS_REFCURSOR` OUT binds, PL/SQL
+> collection binds, `OracleBind` value specs inside rows, RETURNING without
+> `bindDefs`, and `bindDefs` on plain (non-returning) array DML all fail loudly
+> before any wire round trip.
 
 ### Transactions
 
@@ -429,6 +518,9 @@ final isAlive = await connection.ping();
 | `OracleConnection.withConnection(...)`    | Open, use, and auto-close a connection              |
 | `connection.execute(sql, [bindValues])`   | Run a query, DML statement, or PL/SQL block         |
 | `connection.execute(sql, binds, OracleExecuteOptions(...))` | Eager (default), lazy result set (`resultSet: true`), or row-capped (`maxRows:`) execution |
+| `connection.executeMany(sql, rows, [OracleExecuteManyOptions(...)])` | Run one statement across many bind sets in a single round trip (array DML, PL/SQL, RETURNING) |
+| `OracleBindDef.input/output/inputOutput(type: ..., maxSize: ...)` | Declare a placeholder's type & direction for `executeMany` `bindDefs` (PL/SQL and DML RETURNING) |
+| `result.batchErrors` / `result.dmlRowCounts` | Per-row errors / per-row affected-row counts from `executeMany` (opt-in via `OracleExecuteManyOptions`) |
 | `connection.queryStream(sql, [binds])` / `executeStream(...)` | Stream a query's rows as `Stream<OracleRow>` |
 | `OracleBind.out(type: ..., maxSize: ...)` | Declare a PL/SQL OUT bind parameter                 |
 | `OracleBind.out(type: OracleDbType.cursor)` | Declare a PL/SQL REF CURSOR OUT bind (returned as an `OracleResultSet`) |
@@ -682,6 +774,7 @@ This package implements a subset of the full Oracle driver feature set. Below is
 | Connection pooling                              | ✅ Done        |
 | Result sets, streaming, REF CURSOR & implicit results | ✅ Done  |
 | Character set support (`AL32UTF8` + non-`AL32UTF8` databases, national types) | ✅ Done |
+| Bulk DML (`executeMany()` — array DML, RETURNING, bulk PL/SQL, batch errors) | ✅ Done |
 
 ### Planned After 1.0
 
@@ -689,11 +782,10 @@ After the 1.0 release, the project roadmap includes larger API and compatibility
 
 | Priority | Planned enhancement                                                                       |
 | -------- | ----------------------------------------------------------------------------------------- |
-| 1        | Bulk DML / `executeMany()`                                                                |
-| 2        | Public LOB streaming and temporary LOBs                                                   |
-| 3        | Extended JSON / OSON parity (Oracle-specific JSON scalars, OSON-in-BLOB helpers)          |
-| 4        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
-| 5        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
+| 1        | Public LOB streaming and temporary LOBs                                                   |
+| 2        | Extended JSON / OSON parity (Oracle-specific JSON scalars, OSON-in-BLOB helpers)          |
+| 3        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
+| 4        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
 
 ## Tests
 

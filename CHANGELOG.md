@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.3.0
+
+Bulk DML — `executeMany()`. A single wire round trip now executes one statement
+many times: Oracle array DML for INSERT/UPDATE/DELETE/MERGE (including
+`RETURNING ... INTO` array OUT binds), and repeated PL/SQL execution with
+per-iteration IN, OUT, and IN OUT binds (node-oracledb `executeMany` parity).
+All additive — no breaking changes — and validated against Oracle 23ai and
+Oracle 21c (53/53 focused `executeMany` integration tests green on both).
+
+### Features
+
+- **`OracleConnection.executeMany(sql, rowsOrNumIterations, [options])`**: run
+  one statement across many bind sets in a single round trip. Pass a non-empty
+  list of bind rows (a `List` for positional `:1`/`:2` SQL, a `Map` for named
+  `:name` SQL), or — for PL/SQL blocks that need no per-iteration input — a
+  positive `int` iteration count (node-oracledb `numIterations` form). Reuses
+  the same bind parsing/ordering pipeline, statement caching, one-in-flight
+  concurrency guard, and transaction semantics as `execute()` (no auto-commit).
+- **Array DML** (INSERT/UPDATE/DELETE/MERGE): each slot's Oracle type is
+  inferred from the first non-null value and must stay consistent across rows;
+  string/RAW slots are sized to the largest value; `rowsAffected` is the total
+  row count. Rows may be shorter than the placeholder count (missing trailing
+  values bind SQL NULL).
+- **DML `RETURNING ... INTO`**: per-row generated values, ROWIDs, or updated
+  column values come back through array OUT binds. Results are row-major, one
+  entry per input row, each holding a list of returned values per OUT bind
+  (an input row that matches no database rows yields an empty list).
+- **Bulk PL/SQL array binds** via `OracleBindDef`
+  (`OracleBindDef.input` / `.output` / `.inputOutput`): declare each
+  placeholder's type and direction once in `OracleExecuteManyOptions.bindDefs`
+  (`List` for positional SQL, `Map<String, OracleBindDef>` for named). OUT
+  results are row-major, one entry per iteration.
+- **Row-level batch errors** (`OracleExecuteManyOptions(batchErrors: true)`):
+  DML applies every valid row and reports each failed row's data error as an
+  `OracleBatchError` (with its 0-based input `offset`) in
+  `OracleResult.batchErrors` instead of throwing on the first failure.
+  Statement-level failures still throw. DML only.
+- **Per-row DML row counts** (`OracleExecuteManyOptions(dmlRowCounts: true)`):
+  `OracleResult.dmlRowCounts` holds one affected-row count per input row, in
+  input order. DML only; requires Oracle Database 12 or later.
+- **Fail-loud scope**: SELECT/`WITH ... SELECT` queries, `SYS_REFCURSOR` OUT
+  binds, PL/SQL collection binds, `OracleBind` value specs inside rows,
+  RETURNING without `bindDefs`, and `bindDefs` on plain (non-returning) array
+  DML all fail before any wire round trip.
+
 ## 1.2.0
 
 Non-`AL32UTF8` database character set compatibility. The driver always

@@ -60,7 +60,21 @@ Future<void> main() async {
         );
       });
 
-      final rows = await conn.execute('SELECT * FROM oracledb_example');
+      // ── Bulk DML in a single round trip (executeMany) ───────────────
+      final bulk = await conn.executeMany(
+        'INSERT INTO oracledb_example (id, label) VALUES (:1, :2)',
+        [
+          [2, 'second'],
+          [3, 'third'],
+          [4, 'fourth'],
+        ],
+      );
+      await conn.commit();
+      print('Bulk-inserted ${bulk.rowsAffected} rows');
+
+      final rows = await conn.execute(
+        'SELECT * FROM oracledb_example ORDER BY id',
+      );
       for (final row in rows.rows) {
         print('id=${row['ID']}  label=${row['LABEL']}');
       }
