@@ -128,26 +128,47 @@ Future<OracleConnection> connectForTest({
 
 final Random _random = Random();
 
-/// Returns a per-run-unique table name `t_<base>_<8 hex chars>`.
+/// Returns a per-run-unique Oracle identifier `<base>_<8 hex chars>` for a
+/// non-table schema object (procedure, package, constraint).
 ///
 /// Call once per group (at declaration site) so setUp, test bodies, and
-/// tearDown all reference the same table, while two concurrent or
-/// back-to-back runs never collide on leftover tables. The result is guarded
-/// to stay within Oracle 21c's 30-byte identifier limit (23ai allows 128,
-/// but the dual-environment rule targets the stricter bound).
-String uniqueTableName(String base) {
+/// tearDown all reference the same name, while two concurrent or back-to-back
+/// runs never collide on a leftover object — e.g. a `CREATE OR REPLACE
+/// PROCEDURE` in one run replacing another run's live procedure, or a
+/// tearDown `DROP` removing it. The result is guarded to stay within Oracle
+/// 21c's 30-byte identifier limit (23ai allows 128, but the dual-environment
+/// rule targets the stricter bound).
+String uniqueObjectName(String base) {
   final suffix = _random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
-  final name = 't_${base}_$suffix';
+  final name = '${base}_$suffix';
   if (name.length > 30) {
     throw ArgumentError.value(
       base,
       'base',
-      'uniqueTableName("$base") yields "$name" '
+      'uniqueObjectName("$base") yields "$name" '
           '(${name.length} chars) — exceeds the 30-byte Oracle 21c '
           'identifier limit; shorten the base name',
     );
   }
   return name;
+}
+
+/// Returns a per-run-unique table name `t_<base>_<8 hex chars>`.
+///
+/// Same purpose and 30-byte Oracle 21c guard as [uniqueObjectName], with the
+/// table-specific `t_` prefix folded into `base` before delegating to it.
+String uniqueTableName(String base) => uniqueObjectName('t_$base');
+
+/// The returned values for one OUT bind of one input row of an
+/// `executeMany()` result.
+///
+/// `outBinds` is row-major (one entry per input row): a positional entry is
+/// a `List` whose element `bind` is that bind's returned-values list, and a
+/// named entry is a `Map` keyed by OUT bind name.
+List<Object?> returned(OracleResult r, int row, Object bind) {
+  final entry = r.outBinds[row];
+  final cell = entry is Map ? entry[bind] : (entry as List)[bind as int];
+  return (cell as List).cast<Object?>();
 }
 
 /// Monotonically increasing primary-key generator seeded from a random base.

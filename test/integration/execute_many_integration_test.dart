@@ -422,12 +422,14 @@ void main() {
     OracleConnection? connHandle;
     late OracleConnection conn;
     final testTable = uniqueTableName('s112_em');
-    // Fixed story-prefixed server object names (same convention as the
-    // story33_* PL/SQL fixtures); dropped in tearDown.
-    const procMulti = 'story112_multi';
-    const procInOut = 'story112_incr';
-    const procClob = 'story112_clob';
-    const pkg = 'story112_pkg';
+    // Per-run-unique server object names (Story 11.5 AC8): a fixed name would
+    // let two concurrent or back-to-back runs collide — a CREATE OR REPLACE in
+    // one run replacing another run's live procedure, or a tearDown DROP
+    // removing it mid-test. All stay within Oracle 21c's 30-byte limit.
+    final procMulti = uniqueObjectName('s112_multi');
+    final procInOut = uniqueObjectName('s112_incr');
+    final procClob = uniqueObjectName('s112_clob');
+    final pkg = uniqueObjectName('s112_pkg');
 
     setUp(() async {
       connHandle = await connectForTest();
@@ -1141,16 +1143,6 @@ END;''');
       );
     });
 
-    // The returned values for one OUT bind of one input row: outBinds is
-    // row-major (one entry per input row); a positional entry is a List whose
-    // element `bind` is that bind's returned-values list, a named entry is a
-    // Map keyed by OUT bind name.
-    List<Object?> returned(OracleResult r, int row, Object bind) {
-      final entry = r.outBinds[row];
-      final cell = entry is Map ? entry[bind] : (entry as List)[bind as int];
-      return (cell as List).cast<Object?>();
-    }
-
     test('positional INSERT RETURNING id and ROWID, row-major per input row',
         () async {
       final names = ['Alice', 'Bob', 'Carol'];
@@ -1420,6 +1412,647 @@ END;''');
         "SELECT COUNT(*) AS c FROM $t WHERE code IN ('FRESH','FRESH2')",
       );
       expect(count.rows.single['C'], equals(2));
+    });
+
+    test('batchErrors + dmlRowCounts + DML RETURNING stay aligned: offset, '
+        'per-row counts, and returned values in input order (Story 11.5 AC6)',
+        () async {
+      // All three result structures must line up on the SAME input ordering
+      // when enabled together, and the failed row must not shift later
+      // results. INSERT (not MERGE) is used deliberately so both 23ai and 21c
+      // share a reliable per-row count contract (the documented Oracle 21c
+      // MERGE under-count applies only to MERGE + batchErrors + dmlRowCounts).
+      await conn.execute("INSERT INTO $t (name, code) VALUES ('seed','DUP')");
+      await conn.commit();
+
+      final r = await conn.executeMany(
+        'INSERT INTO $t (name, code) VALUES (:1, :2) RETURNING id INTO :3',
+        [
+          ['ok0', 'FRESH0'], // success
+          ['dup', 'DUP'], // violates UNIQUE(code) -> batch error at offset 1
+          ['ok2', 'FRESH2'], // success
+        ],
+        OracleExecuteManyOptions(
+          batchErrors: true,
+          dmlRowCounts: true,
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 50),
+            OracleBindDef.output(type: OracleDbType.number),
+          ],
+        ),
+      );
+
+      // batchErrors: only the middle row, at its 0-based input offset.
+      expect(r.batchErrors, hasLength(1));
+      expect(r.batchErrors.single.offset, equals(1));
+      expect(r.batchErrors.single.errorCode, equals(1)); // ORA-00001
+
+      // dmlRowCounts: one input-ordered count per row (success, failure,
+      // success).
+      expect(r.dmlRowCounts, equals([1, 0, 1]));
+
+      // outBinds: returned id for each success, an empty list for the failed
+      // row, WITHOUT shifting the later success's returned value.
+      expect(r.outBinds.length, equals(3));
+      final id0 = returned(r, 0, 0);
+      final id2 = returned(r, 2, 0);
+      expect(id0, hasLength(1));
+      expect(returned(r, 1, 0), isEmpty, reason: 'failed row returns nothing');
+      expect(id2, hasLength(1));
+
+      // The valid rows remain PENDING for explicit caller action (no
+      // auto-commit); an explicit rollback undoes them.
+      final pending = await conn.execute(
+        "SELECT code, id FROM $t WHERE code IN ('FRESH0','FRESH2') ORDER BY code",
+      );
+      expect(pending.rows, hasLength(2));
+      final idByCode = {for (final row in pending.rows) row['CODE']: row['ID']};
+      // The returned ids are the actual generated primary keys for THEIR OWN
+      // row, not just "some" value — proves no row/offset misalignment.
+      expect(id0.single, equals(idByCode['FRESH0']));
+      expect(id2.single, equals(idByCode['FRESH2']));
+      await conn.rollback();
+      final afterRollback = await conn.execute(
+        "SELECT COUNT(*) AS c FROM $t WHERE code IN ('FRESH0','FRESH2')",
+      );
+      expect(
+        afterRollback.rows.single['C'],
+        equals(0),
+        reason: 'rollback undoes the pending valid rows',
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Story 11.5 — cross-feature coexistence on ONE long-lived connection.
+  //
+  // Stories 11.1-11.4 each validated one executeMany mode in isolation. This
+  // group proves the modes coexist on a single session: cache-eligible array
+  // DML, N>1 PL/SQL with OUT binds, DML with batchErrors/dmlRowCounts, and DML
+  // RETURNING run in sequence without leaking _executeInProgress, statement
+  // cache ownership, pending cursor closes, or response-decode state between
+  // calls, and the connection stays reusable (AC2, AC4, AC5). PL/SQL uses
+  // anonymous blocks so the group needs no server-side procedures.
+  // -------------------------------------------------------------------------
+  group('executeMany() cross-feature coexistence (Story 11.5)', () {
+    OracleConnection? connHandle;
+    late OracleConnection conn;
+    final coex = uniqueTableName('s115_coex');
+    final insertSql = 'INSERT INTO $coex (k, v) VALUES (:1, :2)';
+    const plsqlDouble = 'BEGIN :o := :i * 2; END;';
+    final plsqlDefs = OracleExecuteManyOptions(
+      bindDefs: {
+        'i': OracleBindDef.input(type: OracleDbType.number),
+        'o': OracleBindDef.output(type: OracleDbType.number),
+      },
+    );
+
+    setUp(() async {
+      connHandle = await connectForTest();
+      conn = connHandle!;
+      await _ignoreOraCodes(
+        () => conn.execute(
+          'CREATE TABLE $coex ( '
+          'id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, '
+          'k NUMBER, '
+          'v VARCHAR2(100), '
+          'CONSTRAINT ${coex}_uk UNIQUE (k))',
+        ),
+        const [955], // ORA-00955: name already used
+      );
+      await conn.execute('TRUNCATE TABLE $coex');
+    });
+
+    tearDown(() async {
+      final c = connHandle;
+      connHandle = null;
+      await cleanUpConnection(
+        c,
+        rollbackFirst: true,
+        dropStatements: ['DROP TABLE $coex PURGE'],
+      );
+    });
+
+    test('all executeMany modes coexist on one connection and leave it '
+        'reusable (AC2, AC4)', () async {
+      // Running count of every row this test inserts into $coex, so the
+      // phase-5 total is derived from the test's own inserts rather than a
+      // hand-computed literal that can silently drift out of sync.
+      var expectedRowCount = 0;
+
+      // Phase 1 — cache-eligible array DML, run twice: the second reuses the
+      // cached cursor with no reparse and no new cache entry.
+      final k1 = nextTestId();
+      final k2 = nextTestId();
+      final k3 = nextTestId();
+      final k4 = nextTestId();
+      await conn.executeMany(insertSql, [
+        [k1, 'a'],
+        [k2, 'b'],
+      ]);
+      expectedRowCount += 2;
+      final cacheAfterFirst = conn.debugCacheSize;
+      final reuseBefore = conn.debugReuseExecutes;
+      final parseBefore = conn.debugFullParseExecutes;
+      await conn.executeMany(insertSql, [
+        [k3, 'c'],
+        [k4, 'd'],
+      ]);
+      expectedRowCount += 2;
+      expect(conn.debugReuseExecutes, equals(reuseBefore + 1),
+          reason: 'the second array DML of the same SQL reuses the cursor');
+      expect(conn.debugFullParseExecutes, equals(parseBefore));
+      expect(conn.debugCacheSize, equals(cacheAfterFirst));
+      // Commit so the k values above are a durable dup source for phase 3.
+      await conn.commit();
+
+      // Phase 2 — N>1 PL/SQL with OUT binds does NOT enter the cache and
+      // returns row-major OUT results.
+      final cacheBeforePlsql = conn.debugCacheSize;
+      final plsql = await conn.executeMany(
+        plsqlDouble,
+        [
+          {'i': 10},
+          {'i': 20},
+          {'i': 30},
+        ],
+        plsqlDefs,
+      );
+      expect(plsql.outBinds.toList(), [
+        {'o': 20},
+        {'o': 40},
+        {'o': 60},
+      ]);
+      expect(conn.debugCacheSize, equals(cacheBeforePlsql),
+          reason: 'PL/SQL executeMany is never statement-cached');
+
+      // The array-DML cache entry SURVIVES the intervening PL/SQL call and is
+      // reused again (an intervening un-cached PL/SQL execute must not evict a
+      // cached DML cursor). A batch error later may legitimately re-parse the
+      // cursor (server-reported cursorId != 0), so this reuse check is placed
+      // before phase 3 where reuse is deterministic.
+      final reuseAfterPlsql = conn.debugReuseExecutes;
+      await conn.executeMany(insertSql, [
+        [nextTestId(), 'after-plsql'],
+      ]);
+      expectedRowCount += 1;
+      expect(conn.debugReuseExecutes, equals(reuseAfterPlsql + 1),
+          reason: 'the cached array-DML cursor survives an intervening PL/SQL '
+              'executeMany call');
+
+      // Phase 3 — DML with batchErrors + dmlRowCounts (k2 duplicates a
+      // committed row). Valid rows apply; the dup is reported by offset.
+      final okA = nextTestId();
+      final okB = nextTestId();
+      final batch = await conn.executeMany(
+        insertSql,
+        [
+          [okA, 'ok'],
+          [k2, 'dup'], // duplicate committed key -> batch error offset 1
+          [okB, 'ok2'],
+        ],
+        const OracleExecuteManyOptions(batchErrors: true, dmlRowCounts: true),
+      );
+      expect(batch.batchErrors.map((e) => e.offset), [1]);
+      expect(batch.dmlRowCounts, [1, 0, 1]);
+      expectedRowCount += 2; // okA and okB; the k2 dup batch-errors, no row
+
+      // Phase 4 — DML RETURNING on the same connection.
+      final kR1 = nextTestId();
+      final kR2 = nextTestId();
+      final ret = await conn.executeMany(
+        'INSERT INTO $coex (k, v) VALUES (:1, :2) RETURNING id INTO :3',
+        [
+          [kR1, 'r1'],
+          [kR2, 'r2'],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.number),
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
+            OracleBindDef.output(type: OracleDbType.number),
+          ],
+        ),
+      );
+      expectedRowCount += 2;
+      expect(ret.outBinds.length, equals(2));
+      final retId0 = returned(ret, 0, 0);
+      final retId1 = returned(ret, 1, 0);
+      expect(retId0, hasLength(1));
+      expect(retId1, hasLength(1));
+
+      // Phase 5 — connection still fully usable after every mode: a query and
+      // a final array DML both succeed. That all four modes ran in sequence
+      // without any raising "Concurrent operation" proves _executeInProgress,
+      // pending cursor closes, temporary-LOB state, and response-decode state
+      // never leaked between calls.
+      await conn.commit();
+      // The RETURNING ids match the actual generated primary keys for THEIR
+      // OWN row (k1/k2), not just "some" value — proves no row/offset
+      // misalignment survived the intervening cache/PL-SQL/batch-error calls.
+      final retRows = await conn.execute(
+        'SELECT k, id FROM $coex WHERE k IN ($kR1, $kR2) ORDER BY k',
+      );
+      final idByK = {for (final row in retRows.rows) row['K']: row['ID']};
+      expect(retId0.single, equals(idByK[kR1]));
+      expect(retId1.single, equals(idByK[kR2]));
+      final q = await conn.execute('SELECT COUNT(*) AS c FROM $coex');
+      expect(q.rows.single['C'], equals(expectedRowCount));
+      final finalDml = await conn.executeMany(insertSql, [
+        [nextTestId(), 'final'],
+      ]);
+      expect(finalDml.rowsAffected, equals(1));
+      // No cache leak: only the four distinct cache-eligible SQL texts in
+      // this test can ever hold entries — the plain array INSERT, the
+      // RETURNING INSERT, the returned-id cross-check SELECT, and the
+      // phase-5 SELECT COUNT(*). Repeating any of them (or an intervening
+      // PL/SQL / batch-error call) never accretes extra entries.
+      expect(conn.debugCacheSize, equals(4),
+          reason: 'no unbounded cache growth across the mixed workload');
+      await conn.rollback();
+    });
+
+    test('DML RETURNING first-error completes through FLUSH_OUT_BINDS and '
+        'leaves the connection reusable (AC5)', () async {
+      // Seed a committed row so the RETURNING batch hits a UNIQUE(k) violation.
+      final dupK = nextTestId();
+      await conn.execute(
+        'INSERT INTO $coex (k, v) VALUES ($dupK, :1)',
+        ['seed'],
+      );
+      await conn.commit();
+
+      final sql =
+          'INSERT INTO $coex (k, v) VALUES (:1, :2) RETURNING id INTO :3';
+      final defs = OracleExecuteManyOptions(
+        bindDefs: [
+          OracleBindDef.input(type: OracleDbType.number),
+          OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
+          OracleBindDef.output(type: OracleDbType.number),
+        ],
+      );
+
+      // No batchErrors: the row error must THROW after Oracle completes through
+      // FLUSH_OUT_BINDS. The returned rows arrive before the error in the
+      // flush response; the driver must consume and merge both, or the next
+      // RPC desyncs (ORA-03137).
+      await expectLater(
+        () => conn.executeMany(sql, [
+          [nextTestId(), 'ok'],
+          [dupK, 'dup'], // duplicate k -> ORA-00001
+        ], defs),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(1),
+          ),
+        ),
+      );
+
+      // Rollback succeeds and the connection is fully reusable: an immediate
+      // query plus a SECOND RETURNING executeMany both work, proving no
+      // protocol desynchronization.
+      await conn.rollback();
+      final q = await conn.execute(
+        'SELECT COUNT(*) AS c FROM $coex WHERE k = $dupK',
+      );
+      expect(q.rows.single['C'], equals(1),
+          reason: 'only the committed seed remains after rollback');
+
+      final kAfter1 = nextTestId();
+      final kAfter2 = nextTestId();
+      final again = await conn.executeMany(sql, [
+        [kAfter1, 'after1'],
+        [kAfter2, 'after2'],
+      ], defs);
+      expect(again.outBinds.length, equals(2));
+      final againId0 = returned(again, 0, 0);
+      final againId1 = returned(again, 1, 0);
+      expect(againId0, hasLength(1));
+      expect(againId1, hasLength(1));
+      // The returned ids are the actual generated primary keys for THEIR OWN
+      // row, proving the post-FLUSH connection is not just usable but still
+      // correctly aligning RETURNING output to input order.
+      final againRows = await conn.execute(
+        'SELECT k, id FROM $coex WHERE k IN ($kAfter1, $kAfter2) ORDER BY k',
+      );
+      final idByK = {for (final row in againRows.rows) row['K']: row['ID']};
+      expect(againId0.single, equals(idByK[kAfter1]));
+      expect(againId1.single, equals(idByK[kAfter2]));
+      await conn.rollback();
+    });
+
+    test('a valid batch after a batch-error batch applies correctly and never '
+        'accretes a second cache entry (AC4)', () async {
+      // Story 11.3 fix: a batch error whose response echoes cursorId == 0 must
+      // NOT evict the still-valid cached cursor (the cursorId == 0 branch is
+      // pinned at the unit level; whether a live server echoes 0 or a fresh
+      // non-zero id on a batch error is server-dependent, so this integration
+      // test asserts the resilient, always-true guarantees instead: the retry
+      // applies the expected rows without a reparse-induced failure, and the
+      // same SQL never grows a second cache entry).
+      //
+      // Prime the cache with a successful execute so the batch-error call below
+      // RE-EXECUTES a cached cursor (the exact scenario the fix guards).
+      await conn.executeMany(insertSql, [
+        [nextTestId(), 'prime'],
+      ]);
+      await conn.commit();
+
+      final dupK = nextTestId();
+      await conn.execute(
+        'INSERT INTO $coex (k, v) VALUES ($dupK, :1)',
+        ['seed'],
+      );
+      await conn.commit();
+      final cacheBefore = conn.debugCacheSize;
+
+      // A batch that re-executes the cached cursor AND hits a row-level error.
+      final errored = await conn.executeMany(insertSql, [
+        [dupK, 'dup'], // duplicates the committed key -> batch error
+        [nextTestId(), 'ok'],
+      ], const OracleExecuteManyOptions(batchErrors: true));
+      expect(errored.batchErrors, hasLength(1));
+      await conn.rollback();
+
+      // The valid retry applies the expected rows without a reparse-induced
+      // failure, and the same SQL never accretes a second cache entry.
+      final k1 = nextTestId();
+      final k2 = nextTestId();
+      final ok = await conn.executeMany(insertSql, [
+        [k1, 'v1'],
+        [k2, 'v2'],
+      ], const OracleExecuteManyOptions(batchErrors: true));
+      expect(ok.batchErrors, isEmpty);
+      expect(ok.rowsAffected, equals(2));
+      expect(conn.debugCacheSize, lessThanOrEqualTo(cacheBefore),
+          reason: 'repeated batches on one SQL never accrete extra cache '
+              'entries after a batch error');
+      await conn.commit();
+
+      // Rows are durable and the connection is fully healthy.
+      final count = await conn.execute(
+        'SELECT COUNT(*) AS c FROM $coex WHERE k IN ($k1, $k2)',
+      );
+      expect(count.rows.single['C'], equals(2));
+    });
+
+    test('repeated N>1 PL/SQL executeMany keeps row-major OUT results and '
+        'leaks no server cursor (AC4)', () async {
+      // Story 11.2 fix: N>1 PL/SQL executeMany requeues its NO_IMPL_REL /
+      // REEXECUTE server cursor for close on every call. Repeating on one
+      // connection guards against that cursor leaking across calls; the cache
+      // must not grow (PL/SQL is ineligible) and the session stays usable.
+      final cacheBefore = conn.debugCacheSize;
+      for (var iteration = 0; iteration < 10; iteration++) {
+        final r = await conn.executeMany(
+          plsqlDouble,
+          [
+            {'i': 1},
+            {'i': 2},
+            {'i': 3},
+          ],
+          plsqlDefs,
+        );
+        expect(r.outBinds.toList(), [
+          {'o': 2},
+          {'o': 4},
+          {'o': 6},
+        ], reason: 'row-major OUT results stay correct on repeat #$iteration');
+        // The EXECUTE+REEXECUTE server cursor from THIS call is, at most,
+        // requeued to piggyback on the NEXT execute — it must never accrete
+        // (a real leak would grow this by one on every iteration instead of
+        // staying bounded).
+        expect(conn.debugPendingCloseCount, lessThanOrEqualTo(1),
+            reason: 'no unbounded server-cursor close backlog on repeat '
+                '#$iteration');
+      }
+      expect(conn.debugCacheSize, equals(cacheBefore),
+          reason: 'PL/SQL stays cache-ineligible across repeats');
+      final q = await conn.execute('SELECT 1 AS one FROM dual');
+      expect(q.rows.single['ONE'], equals(1),
+          reason: 'no cursor leak — the connection is still usable');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Story 11.5 — scale and long-data evidence (AC3). Closes the two Story 11.1
+  // deferred coverage gaps at the integration level: a high-volume batch whose
+  // row data spans multiple network packets, and a shared bind slot that mixes
+  // a short string with a >32767-byte value routed into a large column (CLOB).
+  // -------------------------------------------------------------------------
+  group('executeMany() scale and long-data (Story 11.5)', () {
+    OracleConnection? connHandle;
+    late OracleConnection conn;
+    final scaleT = uniqueTableName('s115_scale');
+
+    setUp(() async {
+      connHandle = await connectForTest();
+      conn = connHandle!;
+      await _ignoreOraCodes(
+        () => conn.execute(
+          'CREATE TABLE $scaleT ( '
+          'id NUMBER PRIMARY KEY, '
+          'v VARCHAR2(4000), '
+          'c CLOB)',
+        ),
+        const [955], // ORA-00955: name already used
+      );
+      await conn.execute('TRUNCATE TABLE $scaleT');
+    });
+
+    tearDown(() async {
+      final c = connHandle;
+      connHandle = null;
+      await cleanUpConnection(
+        c,
+        rollbackFirst: true,
+        dropStatements: ['DROP TABLE $scaleT PURGE'],
+      );
+    });
+
+    test('a 256-row batch crosses packet boundaries; total and sampled rows '
+        'round-trip in order (AC3)', () async {
+      const rowCount = 256;
+      // A reserved block that no other nextTestId() call can reproduce.
+      final base = nextTestId() * 1000;
+      // Deterministic, non-trivial ~300-byte payload keyed by row index.
+      String payload(int i) => 'row-$i-${'p' * 300}-end-$i';
+
+      final result = await conn.executeMany(
+        'INSERT INTO $scaleT (id, v) VALUES (:1, :2)',
+        [
+          for (var i = 0; i < rowCount; i++) [base + i, payload(i)],
+        ],
+      );
+      expect(result.rowsAffected, equals(rowCount));
+
+      // Sample first, middle, and last rows for byte-exact round-trip.
+      for (final i in [0, rowCount ~/ 2, rowCount - 1]) {
+        final r = await conn.execute(
+          'SELECT v FROM $scaleT WHERE id = :1',
+          [base + i],
+        );
+        expect(r.rows.single['V'], equals(payload(i)),
+            reason: 'row $i must round-trip without truncation or reordering');
+      }
+      final c = await conn.execute('SELECT COUNT(*) AS c FROM $scaleT');
+      expect(c.rows.single['C'], equals(rowCount),
+          reason: 'no dropped or duplicated rows');
+      await conn.rollback();
+    });
+
+    test('a slot mixing a short string and a >32767-byte value round-trips '
+        'into a CLOB (AC3)', () async {
+      // The shared inferred slot sizes to the largest value (> 32767 bytes),
+      // which forces the long-data deferral path for BOTH rows in that slot
+      // (pinned at the byte level in execute_message_test.dart). This proves
+      // it end to end: a short value and a >32767-byte value in the same slot
+      // both round-trip byte-for-byte into a CLOB column.
+      final id1 = nextTestId();
+      final id2 = nextTestId();
+      const shortText = 'short-clob-value';
+      // 40000 ASCII chars (5000 8-char chunks, each stamped with its own
+      // strictly-increasing chunk index) = 40000 bytes, comfortably past the
+      // 32767 limit. The chunk index — rather than a `% 26`-periodic
+      // alphabet — is load-bearing: a periodic payload would make a
+      // reordering bug that shifts data by a multiple of the period
+      // invisible to the byte-for-byte equality check below.
+      final longText = List<String>.generate(
+        5000,
+        (chunk) => 'c${chunk.toString().padLeft(6, '0')}x',
+      ).join();
+      expect(longText.length, greaterThan(32767));
+
+      final result = await conn.executeMany(
+        'INSERT INTO $scaleT (id, c) VALUES (:1, :2)',
+        [
+          [id1, shortText],
+          [id2, longText],
+        ],
+      );
+      expect(result.rowsAffected, equals(2));
+
+      final rows = await conn.execute(
+        'SELECT c FROM $scaleT WHERE id IN (:1, :2) ORDER BY id',
+        [id1, id2],
+      );
+      expect(rows.rows[0]['C'], equals(shortText),
+          reason: 'the short value round-trips from the long-metadata slot');
+      expect(rows.rows[1]['C'], equals(longText),
+          reason: 'the >32767-byte value round-trips byte-for-byte');
+      await conn.rollback();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Story 11.5 — native JSON DML RETURNING (AC7). Reuses the OracleDbType.json
+  // OSON codec and the established feature-probe skip pattern; no second JSON
+  // representation. Native JSON columns need database compatible >= 20.
+  // -------------------------------------------------------------------------
+  group('executeMany() JSON DML RETURNING (Story 11.5)', () {
+    String? jsonUnavailable;
+    OracleConnection? connHandle;
+    late OracleConnection conn;
+    final jsonT = uniqueTableName('s115_json');
+
+    setUpAll(() async {
+      // One CREATE TABLE probe; TABLESPACE USERS (ASSM) is required for JSON
+      // columns on both fixtures. Skip only for the "no native JSON" codes.
+      final probe = await connectForTest();
+      final probeTable = uniqueTableName('s115jp');
+      try {
+        await probe.execute(
+          'CREATE TABLE $probeTable (doc JSON) TABLESPACE USERS',
+        );
+        await probe.execute('DROP TABLE $probeTable PURGE');
+      } on OracleException catch (e) {
+        // Skip only for the errors that mean "this server cannot create
+        // native JSON columns": ORA-00902 (invalid datatype, pre-21c
+        // parser), ORA-00406 (COMPATIBLE below 20) and ORA-43853 (JSON
+        // rejects the tablespace's segment management) — same established
+        // codes as json_data_type_integration_test.dart. Anything else —
+        // privileges, quota, connectivity — is a real failure and must fail
+        // loudly, not silently skip.
+        const jsonUnavailableCodes = {902, 406, 43853};
+        if (!jsonUnavailableCodes.contains(e.errorCode)) rethrow;
+        jsonUnavailable = 'ORA-${e.errorCode}: ${e.message}';
+      } finally {
+        await probe.close();
+      }
+    });
+
+    setUp(() async {
+      connHandle = await connectForTest();
+      conn = connHandle!;
+      if (jsonUnavailable != null) return;
+      await _ignoreOraCodes(
+        () => conn.execute(
+          'CREATE TABLE $jsonT (id NUMBER PRIMARY KEY, doc JSON) '
+          'TABLESPACE USERS',
+        ),
+        const [955], // ORA-00955: name already used
+      );
+      await conn.execute('TRUNCATE TABLE $jsonT');
+    });
+
+    tearDown(() async {
+      final c = connHandle;
+      connHandle = null;
+      await cleanUpConnection(
+        c,
+        rollbackFirst: true,
+        dropStatements: ['DROP TABLE $jsonT PURGE'],
+      );
+    });
+
+    test('Map and List JSON values round-trip through row-major RETURNING '
+        'outBinds (AC7)', () async {
+      if (jsonUnavailable != null) {
+        markTestSkipped('Native JSON unavailable: $jsonUnavailable');
+        return;
+      }
+      final id1 = nextTestId();
+      final id2 = nextTestId();
+      final mapDoc = <String, Object?>{
+        'name': 'alpha',
+        'n': 1,
+        'tags': ['a', 'b'],
+      };
+      final listDoc = <Object?>[
+        1,
+        2,
+        {'k': 'v'},
+      ];
+
+      final r = await conn.executeMany(
+        'INSERT INTO $jsonT (id, doc) VALUES (:1, :2) RETURNING doc INTO :3',
+        [
+          [id1, mapDoc],
+          [id2, listDoc],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.number),
+            OracleBindDef.input(type: OracleDbType.json),
+            OracleBindDef.output(type: OracleDbType.json, maxSize: 4000),
+          ],
+        ),
+      );
+      await conn.commit();
+
+      expect(r.outBinds.length, equals(2));
+      expect(returned(r, 0, 0).single, equals(mapDoc));
+      expect(returned(r, 1, 0).single, equals(listDoc));
+
+      // The persisted rows match what RETURNING handed back.
+      final check = await conn.execute(
+        'SELECT id, doc FROM $jsonT ORDER BY id',
+      );
+      expect(check.rows[0]['DOC'], equals(mapDoc));
+      expect(check.rows[1]['DOC'], equals(listDoc));
     });
   });
 }

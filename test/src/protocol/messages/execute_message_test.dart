@@ -4751,6 +4751,94 @@ void main() {
       expect(buf.hasRemaining, isFalse);
     });
 
+    test('a slot long in one row but short in another defers EVERY row value',
+        () {
+      // Story 11.5 AC3 (closes the Story 11.1 deferred coverage gap): the
+      // long-data deferral is keyed on the SHARED slot's declared max size, not
+      // on each individual value's length. When one row's value in a slot
+      // exceeds 32767 bytes, the slot's metadata max size covers it, so EVERY
+      // row's value in that slot — including the SHORT ones — is written after
+      // all other slots in its own ROW_DATA payload. This pins that
+      // non-obvious ordering (node-oracledb writeBindParamsRow `foundLong`
+      // applies per iteration against the variable's shared max size).
+      final longValue = 'x' * 40000;
+      const shortValue = 'hi';
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t (big, id) VALUES (:1, :2)',
+        isQuery: false,
+        bindValues: [
+          // Slot max size 40000 (> 32767) — set once for the slot, as the
+          // executeMany normalizer sizes it from the largest value across rows.
+          BindVariable(value: null, oraType: oraTypeVarchar, maxSize: 40000),
+          BindVariable(value: null, oraType: oraTypeNumber),
+        ],
+        bulkRows: [
+          [shortValue, 1], // SHORT value in the long-metadata slot
+          [longValue, 2], // long value in the same slot
+        ],
+      );
+      final parsed = _openDmlExecuteForRead(req.toBytes());
+      _readBindMetadata(parsed.buf, parsed.numParams);
+      final buf = parsed.buf;
+
+      // Row 0: NUMBER (slot 2) first; the SHORT string (slot 1) is STILL
+      // deferred to the end because its slot's declared max size is long.
+      expect(buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(buf.readBytesWithLength(), equals(encodeNumber(1)));
+      expect(
+        buf.readBytesWithLength(),
+        equals(utf8.encode(shortValue)),
+        reason: 'a short value in a long-metadata slot is deferred like the '
+            'long ones — the deferral is per-slot, not per-value',
+      );
+      // Row 1: NUMBER first; the long string deferred to close out the row.
+      expect(buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(buf.readBytesWithLength(), equals(encodeNumber(2)));
+      expect(buf.readBytesWithLength(), equals(utf8.encode(longValue)));
+      expect(buf.hasRemaining, isFalse);
+    });
+
+    test(
+        'a slot long in the FIRST row but short in the second still defers '
+        'EVERY row value', () {
+      // Same invariant as the test above, with the long/short rows in the
+      // opposite order, so the "per-slot, not per-value" deferral is pinned
+      // regardless of which row happens to carry the long value first.
+      final longValue = 'x' * 40000;
+      const shortValue = 'hi';
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t (big, id) VALUES (:1, :2)',
+        isQuery: false,
+        bindValues: [
+          BindVariable(value: null, oraType: oraTypeVarchar, maxSize: 40000),
+          BindVariable(value: null, oraType: oraTypeNumber),
+        ],
+        bulkRows: [
+          [longValue, 1], // long value in the slot FIRST
+          [shortValue, 2], // SHORT value in the same slot, second
+        ],
+      );
+      final parsed = _openDmlExecuteForRead(req.toBytes());
+      _readBindMetadata(parsed.buf, parsed.numParams);
+      final buf = parsed.buf;
+
+      // Row 0: NUMBER first; the long string deferred to close out the row.
+      expect(buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(buf.readBytesWithLength(), equals(encodeNumber(1)));
+      expect(buf.readBytesWithLength(), equals(utf8.encode(longValue)));
+      // Row 1: NUMBER (slot 2) first; the SHORT string (slot 1) is STILL
+      // deferred to the end because its slot's declared max size is long.
+      expect(buf.readUint8(), equals(ttcMsgTypeRowData));
+      expect(buf.readBytesWithLength(), equals(encodeNumber(2)));
+      expect(
+        buf.readBytesWithLength(),
+        equals(utf8.encode(shortValue)),
+        reason: 'a short value in a long-metadata slot is deferred like the '
+            'long ones, even when it is not the row that made the slot long',
+      );
+      expect(buf.hasRemaining, isFalse);
+    });
+
     test('a row whose length mismatches the slot count fails encoding', () {
       final req = ExecuteRequest(
         sql: sql,
