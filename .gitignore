@@ -239,3 +239,6 @@ _bmad/
 # Un-ignore the submodule's contents so no parent pattern matches them. The
 # whole tree is still excluded from the published package via .pubignore.
 !reference/node-oracledb/**
+.bmad-loop/runs/
+.bmad-loop/cache/
+.bmad-loop/policy.toml
