@@ -1,6 +1,6 @@
 # Story 12.1: Public LOB object (OracleLob) — read/write streaming for CLOB/BLOB
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- FIRST story of Epic 12. baseline_commit is injected by the auto-bmad orchestrator (it owns git); do not fabricate it here. -->
@@ -85,34 +85,34 @@ so that I can work with large LOB columns and LOB OUT binds without pulling the 
 
 ## Tasks / Subtasks
 
-- [ ] **Create the public `OracleLob` class** (AC: 1, 3, 4, 6)
-  - [ ] New file `lib/src/oracle_lob.dart`; `@internal` constructor `OracleLob.fromLocator({connection, locator, ...})` wrapping the internal `LobLocator` (`lib/src/protocol/lob_locator.dart`) plus a package-internal handle onto the connection for serialized LOB ops. Mirror `OracleResultSet.fromCursor` structure and dartdoc tone.
-  - [ ] Properties: `type` (map `LobLocator.oracleType` + `isNChar` → `OracleDbType.clob`/`nclob`/`blob`), `length`, `chunkSize`, `isClosed`.
-  - [ ] `read({int offset = 1, int? amount})` and `getData([int offset = 1, int? amount])`: validate `offset`/`amount` (ArgumentError pre-wire), then a bracketed `sendLobOp(tnsLobOpRead, sourceLocator: locator.locator, sourceOffset: offset, sendAmount: true, amount: amount ?? (length - offset + 1))`; decode result bytes per charset (UTF-16BE for NCLOB/var-length CLOB, UTF-8 for CLOB, raw for BLOB) using the same helpers as `_readClobAsString`/`_readBlobAsBytes`.
-  - [ ] `write(offset, data)`: encode per charset, single `sendLobOp(tnsLobOpWrite, sourceLocator, sourceOffset: offset, data: ...)`; update local `length` to `max(length, offset-1 + writtenUnits)`.
-  - [ ] `close()`: idempotent + exception-free; deregister from `_openLobs`.
-- [ ] **Add `fetchLobs` acquisition path** (AC: 2, 5, 7)
-  - [ ] Add `final bool fetchLobs;` (default `false`) to `OracleExecuteOptions` with dartdoc; export unchanged (`OracleExecuteOptions` is already exported).
-  - [ ] Thread `fetchLobs` into `Transport.materializeLobs(...)` so it **wraps** each `LobLocator` in an `OracleLob` instead of calling `_readClobAsString`/`_readBlobAsBytes`. **Enumerate and thread every materialization entry point** (see the flag-threading checklist in Dev Notes) — rows, OUT-bind values, OUT-bind rows, and implicit-result rows inside `_materializeLobValues`, plus every `materializeLobs` call site.
-  - [ ] Reject `resultSet: true && fetchLobs: true` before the wire trip with a message pointing to Story 12.3; keep the streaming/result-set continuation path (`result_set_cursor.dart:341`) on the materialize path for now.
-- [ ] **Wire the in-flight / concurrency / leak-guard discipline** (AC: 5, 6)
-  - [ ] Add `final Set<OracleLob> _openLobs` (or list) to `OracleConnection`; register handles when an `execute(fetchLobs:true)` returns any, hold the slot like `_openResultSet`/`_openImplicitResultSets`.
-  - [ ] Extend `_rejectConcurrentOperation()` to include open LOBs and update its message; extend `isExecuting`/`hasOpenResultSet` sibling `hasOpenLob` as needed.
-  - [ ] Add a `runLobOp(...)`-style bracket (mirror `runResultSetFetch`) so each read/write brackets `_executeInProgress`/poison cleanly.
-  - [ ] `OracleLob.close()` → `connection.releaseLob(this)`; free the slot when `_openLobs` empties and no result set is open.
-  - [ ] Extend `forceCloseOpenResultSet` (connection) and `OraclePool.release` (pool.dart ~L842/857) to force-close open LOBs; add an `OracleLob.markReclaimedByPool()` mirroring `OracleResultSet` so a post-reclaim op raises `oraConnectionClosed`.
-- [ ] **Update the `LobLocator` "never escapes the transport" invariant** (AC: 1, 2)
-  - [ ] Amend the `lob_locator.dart` class dartdoc: locators now escape the transport (wrapped in `OracleLob`) when `fetchLobs` is set; the default path still materializes and never lets a locator escape.
-- [ ] **Recalibrate CI coverage floor** (AC: 8)
-  - [ ] `.github/workflows/ci.yml`: `threshold=68` → `threshold=73`; update the adjacent comment to a fresh measured baseline + date (2026-07-12). One-line functional change; verify the gate still passes locally against the story's coverage.
-- [ ] **Export + docs** (AC: 1)
-  - [ ] `lib/oracledb.dart`: `export 'src/oracle_lob.dart' show OracleLob;`
-  - [ ] Dartdoc on `OracleLob`, `fetchLobs`, and a README note that fetched LOB handles hold the connection until closed and are read/written in the type's native units (chars for CLOB/NCLOB, bytes for BLOB), 1-based.
-- [ ] **Tests** (AC: 1-9)
-  - [ ] Unit: `OracleLob` offset/amount ArgumentError validation, `close()` idempotency, `type` mapping, charset selection, `length` update after `write`, `resultSet+fetchLobs` rejection — under `test/src/` mirroring `lib/src/oracle_lob.dart`; use the fake-transport harness pattern used by `result_set_stream_test.dart`.
-  - [ ] Unit: `_rejectConcurrentOperation` fires with an open LOB; `materializeLobs(fetchLobs:true)` wraps on **every** entry point (rows, OUT binds, OUT-bind rows, implicit rows).
-  - [ ] Integration: `test/integration/lob_stream_integration_test.dart` per AC9, `test_helper.dart` getters only.
-  - [ ] Run focused + full suites on **both** 23ai and 21c; `dart analyze` clean. Assert LOB read-op counts via `connection.debugLobReadOps` where load-bearing (one increment per `tnsLobOpRead`).
+- [x] **Create the public `OracleLob` class** (AC: 1, 3, 4, 6)
+  - [x] New file `lib/src/oracle_lob.dart`; `@internal` constructor `OracleLob.fromLocator({connection, locator, ...})` wrapping the internal `LobLocator` (`lib/src/protocol/lob_locator.dart`) plus a package-internal handle onto the connection for serialized LOB ops. Mirror `OracleResultSet.fromCursor` structure and dartdoc tone.
+  - [x] Properties: `type` (map `LobLocator.oracleType` + `isNChar` → `OracleDbType.clob`/`nclob`/`blob`), `length`, `chunkSize`, `isClosed`.
+  - [x] `read({int offset = 1, int? amount})` and `getData([int offset = 1, int? amount])`: validate `offset`/`amount` (ArgumentError pre-wire), then a bracketed `sendLobOp(tnsLobOpRead, sourceLocator: locator.locator, sourceOffset: offset, sendAmount: true, amount: amount ?? (length - offset + 1))`; decode result bytes per charset (UTF-16BE for NCLOB/var-length CLOB, UTF-8 for CLOB, raw for BLOB) using the same helpers as `_readClobAsString`/`_readBlobAsBytes`.
+  - [x] `write(offset, data)`: encode per charset, single `sendLobOp(tnsLobOpWrite, sourceLocator, sourceOffset: offset, data: ...)`; update local `length` to `max(length, offset-1 + writtenUnits)`.
+  - [x] `close()`: idempotent + exception-free; deregister from `_openLobs`.
+- [x] **Add `fetchLobs` acquisition path** (AC: 2, 5, 7)
+  - [x] Add `final bool fetchLobs;` (default `false`) to `OracleExecuteOptions` with dartdoc; export unchanged (`OracleExecuteOptions` is already exported).
+  - [x] Thread `fetchLobs` into `Transport.materializeLobs(...)` so it **wraps** each `LobLocator` in an `OracleLob` instead of calling `_readClobAsString`/`_readBlobAsBytes`. **Enumerate and thread every materialization entry point** (see the flag-threading checklist in Dev Notes) — rows, OUT-bind values, OUT-bind rows, and implicit-result rows inside `_materializeLobValues`, plus every `materializeLobs` call site. (Implemented as a `wrapLob` callback threaded through `materializeLobs` — keeps the transport free of a circular `OracleConnection`/`OracleLob` import while threading the wrap-vs-materialize decision through every shape.)
+  - [x] Reject `resultSet: true && fetchLobs: true` before the wire trip with a message pointing to Story 12.3; keep the streaming/result-set continuation path (`result_set_cursor.dart:341`) on the materialize path for now.
+- [x] **Wire the in-flight / concurrency / leak-guard discipline** (AC: 5, 6)
+  - [x] Add `final Set<OracleLob> _openLobs` (or list) to `OracleConnection`; register handles when an `execute(fetchLobs:true)` returns any, hold the slot like `_openResultSet`/`_openImplicitResultSets`.
+  - [x] Extend `_rejectConcurrentOperation()` to include open LOBs and update its message; extend `isExecuting`/`hasOpenResultSet` sibling `hasOpenLob` as needed.
+  - [x] Add a `runLobOp(...)`-style bracket (mirror `runResultSetFetch`) so each read/write brackets `_executeInProgress`/poison cleanly. (Implemented as `_runLobOp` + `runLobRead`/`runLobWrite` seams.)
+  - [x] `OracleLob.close()` → `connection.releaseLob(this)`; free the slot when `_openLobs` empties and no result set is open.
+  - [x] Extend `forceCloseOpenResultSet` (connection) and `OraclePool.release` (pool.dart ~L842/857) to force-close open LOBs; add an `OracleLob.markReclaimedByPool()` mirroring `OracleResultSet` so a post-reclaim op raises `oraConnectionClosed`. (Added a sibling `forceCloseOpenLobs`; the eager-execute error-cleanup catch reaps `_openLobs` too.)
+- [x] **Update the `LobLocator` "never escapes the transport" invariant** (AC: 1, 2)
+  - [x] Amend the `lob_locator.dart` class dartdoc: locators now escape the transport (wrapped in `OracleLob`) when `fetchLobs` is set; the default path still materializes and never lets a locator escape.
+- [x] **Recalibrate CI coverage floor** (AC: 8)
+  - [x] `.github/workflows/ci.yml`: `threshold=68` → `threshold=73`; update the adjacent comment to a fresh measured baseline + date (2026-07-12). One-line functional change; verify the gate still passes locally against the story's coverage. (Fresh measured baseline 80.85% on 2026-07-12; gate PASS locally.)
+- [x] **Export + docs** (AC: 1)
+  - [x] `lib/oracledb.dart`: `export 'src/oracle_lob.dart' show OracleLob;`
+  - [x] Dartdoc on `OracleLob`, `fetchLobs`, and a README note that fetched LOB handles hold the connection until closed and are read/written in the type's native units (chars for CLOB/NCLOB, bytes for BLOB), 1-based.
+- [x] **Tests** (AC: 1-9)
+  - [x] Unit: `OracleLob` offset/amount ArgumentError validation, `close()` idempotency, `type` mapping, charset selection, `length` update after `write`, `resultSet+fetchLobs` rejection — under `test/src/` mirroring `lib/src/oracle_lob.dart`; use the fake-transport harness pattern used by `result_set_stream_test.dart`.
+  - [x] Unit: `_rejectConcurrentOperation` fires with an open LOB; `materializeLobs(fetchLobs:true)` wraps on **every** entry point (rows, OUT binds, OUT-bind rows, implicit rows). (Transport-level `wrapLob` threading tests in `test/src/transport/lob_materialize_wrap_test.dart`; implicit-result rows reach the same transport `rows` shape.)
+  - [x] Integration: `test/integration/lob_stream_integration_test.dart` per AC9, `test_helper.dart` getters only.
+  - [x] Run focused + full suites on **both** 23ai and 21c; `dart analyze` clean. Assert LOB read-op counts via `connection.debugLobReadOps` where load-bearing (one increment per `tnsLobOpRead`).
 
 ## Dev Notes
 
@@ -191,10 +191,95 @@ No LOB item in the ledger is currently **open** and unresolved for this story to
 
 ### Agent Model Used
 
+Opus 4.8 (auto-bmad dev-story delegate).
+
 ### Debug Log References
+
+- Live behavior probe (23ai) de-risking the novel paths before writing AC9:
+  `TO_CLOB(...) FROM dual` → OracleLob (chunkSize 32600); PL/SQL CLOB OUT-bind
+  handle readable after `execute()` returns; `SELECT ... FOR UPDATE` locators
+  writable for both CLOB and BLOB with byte-exact read-back. All confirmed.
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
+- Public `OracleLob` handle (`lib/src/oracle_lob.dart`) added: `type` / `length`
+  / `chunkSize` / `isClosed` properties; `read({offset,amount})` / `getData` /
+  `write(offset,data)` / `close()`. 1-based offsets; units are UCS-2 code units
+  for CLOB/NCLOB and bytes for BLOB. `read` decodes once over the full sub-range
+  buffer (UTF-16BE for NCLOB/var-length CLOB, UTF-8 for plain CLOB, raw for
+  BLOB); `write` encodes symmetrically and advances local `length` to
+  `max(length, (offset-1)+writtenUnits)` with no server re-verification
+  (node-oracledb parity).
+- Opt-in `OracleExecuteOptions(fetchLobs: true)` wraps each fetched LOB locator
+  in a connection-owned handle instead of materializing. **Threading design
+  decision:** rather than importing `OracleConnection`/`OracleLob` into the
+  transport (a circular import), `materializeLobs` gained an
+  `Object Function(LobLocator)? wrapLob` callback; the connection passes
+  `_registerLob` when `fetchLobs` is set. The callback is threaded through EVERY
+  materialization shape in `_materializeLobValues` (rows, OUT-bind values,
+  OUT-bind rows scalar + DML-RETURNING nested) and through both eager call sites
+  (the result-wide materialize and the implicit-result drain) — satisfying the
+  Epic 11 retro flag-threading mandate. The OUT-bind `maxSize` guard is skipped
+  when wrapping (a handle materializes nothing).
+- Lifecycle: `_openLobs` set on `OracleConnection` holds the single in-flight
+  slot for the handles' lifetime (parallel to `_openResultSet` /
+  `_openImplicitResultSets`); `_rejectConcurrentOperation` and a new `hasOpenLob`
+  now name it; `_runLobOp`/`runLobRead`/`runLobWrite` bracket each round trip
+  like `runResultSetFetch`; `releaseLob` frees the slot on `close()`;
+  `forceCloseOpenLobs(reclaimedByPool:)` + `OracleLob.markReclaimedByPool()` give
+  the pool-reclaim ORA-03113-class error; `OraclePool.release` and
+  `connection.close()` reap open handles.
+- Scope boundaries fail loud: `resultSet: true` + `fetchLobs: true` throws
+  pre-wire pointing at Story 12.3; the internal single-read materialize path is
+  unchanged. Nested `CURSOR()` LOB columns still materialize even under
+  `fetchLobs` (they drain via the result-set/cursor engine, which stays on the
+  materialize path — consistent with the result-set-shaped-things-don't-wrap
+  boundary) — documented as a known limitation, see Open Questions.
+- CI coverage floor recalibrated 68 → 73 (`.github/workflows/ci.yml`); fresh
+  measured unit baseline is 80.85% on 2026-07-12 (this story's diff), gate PASS
+  locally. `oracle_lob.dart` is 61/61 lines covered by unit tests.
+- Validation: `dart analyze` clean (lib + test). Unit suite 1537 pass / 6 skip
+  (40 new OracleLob tests + 8 transport wrap tests). Focused LOB integration
+  11/11 on 23ai AND 21c. Full integration 485/28-skip on 23ai and 486/27-skip on
+  21c (+11 new each, zero regressions vs the pre-story baseline).
 
 ### File List
+
+- `lib/src/oracle_lob.dart` (NEW) — public `OracleLob` handle.
+- `lib/oracledb.dart` (CHANGED) — export `OracleLob`.
+- `lib/src/connection.dart` (CHANGED) — `OracleExecuteOptions.fetchLobs`;
+  `_openLobs`, `hasOpenLob`, `_registerLob`, `releaseLob`, `forceCloseOpenLobs`,
+  `_runLobOp`/`runLobRead`/`runLobWrite`; `_rejectConcurrentOperation` +
+  `resultSet+fetchLobs` reject; `fetchLobs` threaded through `_executeGuarded`,
+  the eager materialize call, and `_drainImplicitResults`/`_drainOneImplicitResult`;
+  eager error-cleanup + `close()` reap `_openLobs`.
+- `lib/src/transport/transport.dart` (CHANGED) — `materializeLobs` /
+  `_materializeLobValues` gain the `wrapLob` callback; OUT-bind `maxSize` guard
+  skipped when wrapping; `sendLobOp` dartdoc updated.
+- `lib/src/protocol/lob_locator.dart` (CHANGED) — "never escapes the transport"
+  invariant amended for the `fetchLobs` wrap path.
+- `lib/src/pool.dart` (CHANGED) — `OraclePool.release` force-closes open LOBs
+  (reclaimedByPool) alongside open result sets.
+- `.github/workflows/ci.yml` (CHANGED) — coverage floor 68 → 73 with fresh
+  measured baseline + date.
+- `README.md` (CHANGED) — new "Incremental LOB access with `fetchLobs`"
+  subsection; CLOB/BLOB intros note the opt-in handle.
+- `test/src/oracle_lob_test.dart` (NEW) — 40 unit tests (acquisition, read/
+  getData, write, close idempotency, in-flight/concurrency, pool-reclaim,
+  fetchLobs-off regression).
+- `test/src/transport/lob_materialize_wrap_test.dart` (NEW) — 8 transport-level
+  `wrapLob` threading + maxSize-skip + dedup tests.
+- `test/integration/lob_stream_integration_test.dart` (NEW) — AC9 dual-env suite.
+- `test/src/{result_set,result_set_cache,result_set_stream,implicit_result_set,nested_cursor}_test.dart`
+  (CHANGED) — fake-transport `materializeLobs` overrides updated for the new
+  `wrapLob` parameter (+ `lob_locator.dart` import).
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` (CHANGED) — 12-1
+  status ready-for-dev → in-progress → review.
+
+### Change Log
+
+- 2026-07-12 — Story 12.1 implemented: public `OracleLob` handle + opt-in
+  `OracleExecuteOptions(fetchLobs: true)` acquisition path + in-flight/
+  concurrency/pool-reclaim lifecycle; CI coverage floor 68 → 73. All 9 ACs
+  satisfied; unit + dual-env integration green; `dart analyze` clean. Status →
+  review.

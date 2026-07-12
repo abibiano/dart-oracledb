@@ -995,18 +995,30 @@ class Transport {
   /// result in one pass (result-wide locator dedup) and `ResultSetCursor` can
   /// materialize per batch as rows are consumed. Sends no traffic for a
   /// locator-free or unsuccessful response.
+  ///
+  /// When [wrapLob] is supplied (the `OracleExecuteOptions(fetchLobs: true)`
+  /// path, Story 12.1) each [LobLocator] is passed to it and replaced by whatever
+  /// it returns — a connection-owned `OracleLob` handle — instead of being read
+  /// into a `String` / `Uint8List`. No LOB READ round trip is issued in that
+  /// case (the handle reads lazily), and the OUT-bind `maxSize` guard is skipped
+  /// (a handle materializes nothing, so no return-buffer bound applies). The
+  /// callback is threaded through EVERY shape below (rows, OUT-bind values,
+  /// OUT-bind rows, DML RETURNING nesting) so a LOB is never materialized on one
+  /// shape while handle-wrapped on another.
   @internal
   Future<ExecuteResponse> materializeLobs(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
+    Object Function(LobLocator locator)? wrapLob,
   }) {
     return _materializeLobValues(
       response,
       bindMetadata: bindMetadata,
       dmlReturning: dmlReturning,
       timeout: timeout,
+      wrapLob: wrapLob,
     );
   }
 
@@ -1079,9 +1091,11 @@ class Transport {
   /// Sends one TTC LOB operation and decodes its response.
   ///
   /// Used internally by [sendExecute] for temp-CLOB creation/writes and for
-  /// materializing CLOB locators into Strings. Callers above the transport
-  /// never issue LOB operations directly, so every LOB round trip stays
-  /// inside the connection's single-execute concurrency guard.
+  /// materializing CLOB locators into Strings, and by the connection's
+  /// `OracleLob` read/write seam (`runLobRead` / `runLobWrite`, Story 12.1).
+  /// Every caller brackets the round trip through the connection's in-flight
+  /// guard (the eager-execute flag or the `_runLobOp` bracket), so a LOB
+  /// operation never interleaves with another statement on the same connection.
   ///
   /// Throws [OracleException] when the server reports an error.
   Future<LobOpResponse> sendLobOp({
@@ -1494,6 +1508,7 @@ class Transport {
     List<BindMetadata>? bindMetadata,
     bool dmlReturning = false,
     Duration? timeout,
+    Object Function(LobLocator locator)? wrapLob,
   }) async {
     if (!response.isSuccess) return response;
     final hasRowLob = response.rows.any(
@@ -1514,12 +1529,21 @@ class Transport {
     if (!hasRowLob && !hasOutLob && !hasBatchOutLob) return response;
 
     // Oracle's duplicate-column optimization can alias one LobLocator
-    // instance into several rows; read each distinct locator once.
+    // instance into several rows; resolve each distinct locator once. On the
+    // fetchLobs path this dedup means one locator yields exactly one shared
+    // OracleLob handle no matter how many rows alias it.
     final materialized = <LobLocator, Object>{};
-    Future<Object> readLocator(LobLocator locator) async =>
-        materialized[locator] ??= locator.oracleType == oraTypeBlob
-        ? await _readBlobAsBytes(locator, timeout)
-        : await _readClobAsString(locator, timeout);
+    Future<Object> readLocator(LobLocator locator) async {
+      final existing = materialized[locator];
+      if (existing != null) return existing;
+      final Object value = wrapLob != null
+          ? wrapLob(locator)
+          : locator.oracleType == oraTypeBlob
+              ? await _readBlobAsBytes(locator, timeout)
+              : await _readClobAsString(locator, timeout);
+      materialized[locator] = value;
+      return value;
+    }
 
     var rows = response.rows;
     if (hasRowLob) {
@@ -1554,7 +1578,10 @@ class Transport {
           outBindIndices: response.outBindIndices,
           bindMetadata: bindMetadata,
         );
-        if (maxSize != null && value.length > maxSize) {
+        // The maxSize guard bounds the materialized return buffer; a fetchLobs
+        // handle materializes nothing (the caller reads bounded pieces), so it
+        // does not apply when wrapping.
+        if (wrapLob == null && maxSize != null && value.length > maxSize) {
           final isBlob = value.oracleType == oraTypeBlob;
           throw OracleException(
             errorCode: oraBindTypeError,
@@ -1608,7 +1635,7 @@ class Transport {
             for (var k = 0; k < newCell.length; k++) {
               final value = newCell[k];
               if (value is! LobLocator) continue;
-              if (maxSize != null && value.length > maxSize) {
+              if (wrapLob == null && maxSize != null && value.length > maxSize) {
                 throw tooLarge(value, maxSize);
               }
               newCell[k] = await readLocator(value);
@@ -1617,7 +1644,7 @@ class Transport {
           } else {
             // PL/SQL executeMany: cell is a scalar OUT value.
             if (cell is! LobLocator) continue;
-            if (maxSize != null && cell.length > maxSize) {
+            if (wrapLob == null && maxSize != null && cell.length > maxSize) {
               throw tooLarge(cell, maxSize);
             }
             newRow[j] = await readLocator(cell);

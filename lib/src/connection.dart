@@ -9,10 +9,12 @@ import 'crypto/auth.dart';
 import 'errors.dart';
 import 'oracle_bind.dart';
 import 'oracle_charset_info.dart';
+import 'oracle_lob.dart';
 import 'oracle_timestamp_tz.dart';
 import 'protocol/bind_parser.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/data_types.dart' as dt;
+import 'protocol/lob_locator.dart';
 import 'protocol/messages/execute_message.dart';
 import 'protocol/oson.dart' show assertValidJsonBindValue;
 import 'protocol/result_set_cursor.dart';
@@ -54,6 +56,7 @@ class OracleExecuteOptions {
     this.resultSet = false,
     this.fetchSize,
     this.maxRows = 0,
+    this.fetchLobs = false,
   });
 
   /// When `true`, [OracleConnection.execute] returns a lazy
@@ -95,6 +98,27 @@ class OracleExecuteOptions {
   /// DML / OUT binds (there is no row set to cap). A negative value throws
   /// [ArgumentError] before any wire round trip.
   final int maxRows;
+
+  /// When `true`, each CLOB / NCLOB / BLOB in [OracleResult.rows] and
+  /// [OracleResult.outBinds] is returned as an incrementally-consumable
+  /// [OracleLob] handle instead of a materialized `String` / `Uint8List`
+  /// (Story 12.1).
+  ///
+  /// Opt-in and backward compatible: with `fetchLobs` omitted or `false`,
+  /// behavior is byte-for-byte identical to the default materialize path
+  /// (`String` for CLOB/NCLOB, `Uint8List` for BLOB, empty-vs-NULL distinctions
+  /// preserved). A SQL `NULL` LOB is Dart `null` under both modes — never a
+  /// handle to nothing.
+  ///
+  /// Each returned handle holds the connection's single in-flight slot until it
+  /// is closed: the connection rejects other operations, and the pool
+  /// force-closes any still-open handle on release, while a handle is open.
+  /// Always `close()` every handle when done.
+  ///
+  /// Combining `fetchLobs: true` with [resultSet] `true` is **not** supported in
+  /// this release (streaming rows that yield LOB handles is Story 12.3) and
+  /// throws [OracleException] before any wire round trip.
+  final bool fetchLobs;
 }
 
 /// Per-call options for [OracleConnection.executeMany].
@@ -300,6 +324,19 @@ class OracleConnection {
   /// force-close reaps them deterministically.
   final Set<OracleResultSet> _openImplicitResultSets = <OracleResultSet>{};
 
+  /// Open [OracleLob] handles fetched via `OracleExecuteOptions(fetchLobs:
+  /// true)` and not yet closed (Story 12.1).
+  ///
+  /// A fetched LOB is a caller-held, connection-backed handle read/written in
+  /// bounded pieces, so — exactly like [_openResultSet] /
+  /// [_openImplicitResultSets] — it holds the connection's single in-flight slot
+  /// for its lifetime: the connection is considered owned, and rejects other
+  /// operations, while this set is non-empty (see [_rejectConcurrentOperation]
+  /// and [hasOpenLob]). Each handle's `close()` removes itself via [releaseLob];
+  /// the connection frees up only once this set empties (and no result set is
+  /// open). Insertion order is preserved so a force-close reaps deterministically.
+  final Set<OracleLob> _openLobs = <OracleLob>{};
+
   /// The configured statement cache size for this connection.
   int get statementCacheSize => _cache.maxSize;
 
@@ -386,6 +423,17 @@ class OracleConnection {
   @internal
   bool get hasOpenResultSet =>
       _openResultSet != null || _openImplicitResultSets.isNotEmpty;
+
+  /// Whether any [OracleLob] handle fetched via
+  /// `OracleExecuteOptions(fetchLobs: true)` is still open on this connection.
+  ///
+  /// Package-internal seam for the connection pool: a connection released with
+  /// an open-but-idle LOB handle is recoverable — the pool force-closes the
+  /// handle(s) (no wire traffic; a fetched non-temporary LOB has no server
+  /// resource to free) and reclaims the session — exactly like an open-but-idle
+  /// result set. A mid-op race is caught separately by [isExecuting].
+  @internal
+  bool get hasOpenLob => _openLobs.isNotEmpty;
 
   /// Whether the connection is currently open and usable.
   ///
@@ -707,11 +755,16 @@ class OracleConnection {
   Future<List<Object>> _drainImplicitResults(
     List<DecodedCursorResult> descriptors, {
     int maxRows = 0,
+    bool fetchLobs = false,
   }) async {
     try {
       final out = <Object>[];
       for (final descriptor in descriptors) {
-        out.add(await _drainOneImplicitResult(descriptor, maxRows: maxRows));
+        out.add(await _drainOneImplicitResult(
+          descriptor,
+          maxRows: maxRows,
+          fetchLobs: fetchLobs,
+        ));
       }
       return out;
     } finally {
@@ -731,6 +784,7 @@ class OracleConnection {
   Future<List<OracleRow>> _drainOneImplicitResult(
     DecodedCursorResult descriptor, {
     int maxRows = 0,
+    bool fetchLobs = false,
   }) async {
     final cursor = ResultSetCursor(
       transport: _transport,
@@ -779,14 +833,20 @@ class OracleConnection {
       );
     }
     // Materialize CLOB/BLOB locators across the fully-drained result, exactly
-    // like a normal SELECT (result-wide locator dedup).
+    // like a normal SELECT (result-wide locator dedup). With fetchLobs: true
+    // the implicit-result rows yield OracleLob handles instead — threaded here
+    // so the implicit-result shape is not the one path that silently
+    // materializes while the rest wrap (Epic 11 retro action item 2).
     var response = ExecuteResponse(
       isSuccess: true,
       cursorId: descriptor.cursorId,
       columnMetadata: descriptor.columns,
       rows: drained,
     );
-    response = await _transport.materializeLobs(response);
+    response = await _transport.materializeLobs(
+      response,
+      wrapLob: fetchLobs ? _registerLob : null,
+    );
     // Implicit result rows can themselves carry cursor-valued columns; resolve
     // them with the same eager nested-cursor pass SELECT rows use.
     final nestedCursorIndices = cursorColumnIndicesOf(descriptor.columns);
@@ -1029,6 +1089,23 @@ class OracleConnection {
       );
     }
 
+    final fetchLobs = options?.fetchLobs ?? false;
+    // Reject the resultSet + fetchLobs combination before any wire round trip
+    // (Story 12.1 scope boundary / AC7): streaming rows that yield LOB handles
+    // is Story 12.3. Fail loud rather than silently ignoring either flag.
+    if (fetchLobs && options?.resultSet == true) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'OracleExecuteOptions(resultSet: true) combined with '
+            'fetchLobs: true is not supported in this release: streaming rows '
+            'that yield OracleLob handles is Story 12.3. Use resultSet without '
+            'fetchLobs (LOB columns materialize), or fetchLobs on the eager '
+            'execute() path (which returns OracleLob handles in '
+            'OracleResult.rows / outBinds).',
+      );
+    }
+
     if (options?.resultSet == true) {
       final effectiveFetchSize = options!.fetchSize ?? _defaultPrefetchRows;
       if (effectiveFetchSize <= 0 || effectiveFetchSize > _maxFetchSize) {
@@ -1096,7 +1173,12 @@ class OracleConnection {
     // the connection.
     _executeInProgress = true;
     try {
-      return await _executeGuarded(sql, bindValues, maxRows: maxRows);
+      return await _executeGuarded(
+        sql,
+        bindValues,
+        maxRows: maxRows,
+        fetchLobs: fetchLobs,
+      );
     } finally {
       _executeInProgress = false;
     }
@@ -2580,16 +2662,18 @@ class OracleConnection {
   void _rejectConcurrentOperation() {
     if (_executeInProgress ||
         _openResultSet != null ||
-        _openImplicitResultSets.isNotEmpty) {
+        _openImplicitResultSets.isNotEmpty ||
+        _openLobs.isNotEmpty) {
       throw const OracleException(
         errorCode: oraProtocolError,
         message:
             'Concurrent operation on a single OracleConnection is not '
             'supported: another operation (an execute(), executeStream(), '
-            'queryStream(), openResultSet(), or an open OracleResultSet) is '
-            'still in progress on this connection. Await the previous operation '
-            '(or close the OracleResultSet) before starting another, or use a '
-            'separate connection for concurrent work.',
+            'queryStream(), openResultSet(), an open OracleResultSet, or an '
+            'open OracleLob) is still in progress on this connection. Await the '
+            'previous operation (or close the OracleResultSet / OracleLob) '
+            'before starting another, or use a separate connection for '
+            'concurrent work.',
       );
     }
   }
@@ -2729,6 +2813,13 @@ class OracleConnection {
   /// statement as cache-ineligible regardless of its SQL, so the internal
   /// startup detection query opens no cached cursor and leaves the
   /// statement cache untouched.
+  ///
+  /// [fetchLobs] (Story 12.1) makes each CLOB/NCLOB/BLOB in the result rows and
+  /// OUT binds a connection-owned [OracleLob] handle (registered via
+  /// [_registerLob]) instead of a materialized `String` / `Uint8List`. It is
+  /// threaded into every LOB materialization entry point — the result-wide
+  /// materialize below and the eager implicit-result drain — so the wrap-vs-
+  /// materialize decision can never split across shapes.
   Future<OracleResult> _executeGuarded(
     String sql,
     Object? bindValues, {
@@ -2736,6 +2827,7 @@ class OracleConnection {
     int implicitPrefetchRows = _defaultPrefetchRows,
     int maxRows = 0,
     bool forceUncacheable = false,
+    bool fetchLobs = false,
     _ExecuteManyCall? bulk,
   }) async {
     _log.fine(
@@ -2859,10 +2951,19 @@ class OracleConnection {
       // locator aliased into several rows is read exactly once. A DML
       // RETURNING call carries its returned LOB locators nested inside each
       // iteration's OUT rows, so the materializer descends one level deeper.
+      //
+      // With fetchLobs: true, wrapLob replaces "read the locator into a
+      // String/Uint8List" with "wrap the locator in a connection-owned
+      // OracleLob and register it". The callback is threaded through EVERY
+      // materialization entry point (rows, OUT-bind values, OUT-bind rows,
+      // DML RETURNING nesting) inside _materializeLobValues, so a LOB is never
+      // silently materialized on one shape while handle-wrapped on another
+      // (Epic 11 retro action item 2).
       response = await _transport.materializeLobs(
         response,
         bindMetadata: stmt.bindMetadata,
         dmlReturning: bulk?.dmlReturning ?? false,
+        wrapLob: fetchLobs ? _registerLob : null,
       );
 
       // Eagerly materialize any cursor-typed SELECT columns
@@ -2983,6 +3084,7 @@ class OracleConnection {
             : await _drainImplicitResults(
                 response.implicitResults,
                 maxRows: maxRows,
+                fetchLobs: fetchLobs,
               );
       }
 
@@ -3034,6 +3136,13 @@ class OracleConnection {
       // handle was open at entry, so anything open now belongs to this call.
       if (_openResultSet != null || _openImplicitResultSets.isNotEmpty) {
         await forceCloseOpenResultSet();
+      }
+      // Likewise reap any OracleLob handles registered during a fetchLobs
+      // materialize before a later step (nested-cursor materialization, cache
+      // disposition) threw — so a failed execute never leaves a phantom open
+      // LOB wedging the connection.
+      if (_openLobs.isNotEmpty) {
+        await forceCloseOpenLobs();
       }
       if (e is OracleException) rethrow;
       throw OracleException(
@@ -3756,6 +3865,116 @@ class OracleConnection {
     }
   }
 
+  /// Wraps a fetched [LobLocator] in a connection-owned [OracleLob] and
+  /// registers it as an open handle holding the connection's in-flight slot.
+  ///
+  /// This is the `wrapLob` callback threaded into
+  /// [Transport.materializeLobs] on the `fetchLobs: true` path (Story 12.1): a
+  /// locator that would otherwise be read into a `String` / `Uint8List` is
+  /// instead returned to the caller as a handle. Synchronous and never throws —
+  /// so it cannot leave a half-registered handle. The connection is owned until
+  /// every returned handle is [releaseLob]d (or force-closed on reclaim).
+  OracleLob _registerLob(LobLocator locator) {
+    final lob = OracleLob.fromLocator(connection: this, locator: locator);
+    _openLobs.add(lob);
+    return lob;
+  }
+
+  /// Removes [lob] from the open-LOB set when it closes, freeing the
+  /// connection's in-flight slot once no LOB (and no result set) remains open.
+  /// Issues no wire traffic (a fetched non-temporary LOB has no server resource
+  /// to free), so it is safe during pool release. Package-internal seam for
+  /// `oracle_lob.dart`.
+  @internal
+  void releaseLob(OracleLob lob) {
+    _openLobs.remove(lob);
+  }
+
+  /// Force-closes every open [OracleLob] this connection holds, reclaiming the
+  /// in-flight slot so the connection stays reusable. Package-internal seam for
+  /// the connection pool's leaked-handle cleanup on release.
+  ///
+  /// [reclaimedByPool] mirrors [forceCloseOpenResultSet]: when true, each handle
+  /// is marked reclaimed-by-pool BEFORE it is closed, so a borrower that still
+  /// holds the handle sees a clear pool-reclaim error on its next read/write
+  /// rather than the generic "is closed" detail. The default (`false`) is the
+  /// plain reap-any-leaked-handles behavior used by the execute-failure cleanup
+  /// path. Closing issues no wire traffic either way.
+  @internal
+  Future<void> forceCloseOpenLobs({bool reclaimedByPool = false}) async {
+    // Snapshot before iterating: each close() calls back into releaseLob, which
+    // mutates _openLobs.
+    final lobs = _openLobs.toList(growable: false);
+    for (final lob in lobs) {
+      if (reclaimedByPool) lob.markReclaimedByPool();
+      await lob.close();
+    }
+  }
+
+  /// Reads a bounded piece of a fetched LOB and returns the raw READ payload
+  /// bytes (CLOB/NCLOB text is decoded by the [OracleLob], not here).
+  /// Package-internal seam for `oracle_lob.dart`.
+  @internal
+  Future<Uint8List> runLobRead({
+    required Uint8List sourceLocator,
+    required int offset,
+    required int amount,
+  }) {
+    return _runLobOp(() async {
+      final response = await _transport.sendLobOp(
+        operation: oc.tnsLobOpRead,
+        sourceLocator: sourceLocator,
+        sourceOffset: offset,
+        sendAmount: true,
+        amount: amount,
+      );
+      return response.data ?? Uint8List(0);
+    });
+  }
+
+  /// Writes [data] into a fetched LOB at 1-based [offset] in a single WRITE
+  /// round trip. Package-internal seam for `oracle_lob.dart`.
+  @internal
+  Future<void> runLobWrite({
+    required Uint8List sourceLocator,
+    required int offset,
+    required Uint8List data,
+  }) {
+    return _runLobOp(() async {
+      await _transport.sendLobOp(
+        operation: oc.tnsLobOpWrite,
+        sourceLocator: sourceLocator,
+        sourceOffset: offset,
+        data: data,
+      );
+    });
+  }
+
+  /// Brackets one [OracleLob] read/write round trip with the connection's
+  /// in-flight guard — mirroring [runResultSetFetch] — so a concurrent
+  /// operation is rejected, a mid-op failure poisons cleanly, and
+  /// [_executeInProgress] is never left stuck. The handle's own closed /
+  /// pool-reclaimed state is checked by [OracleLob] before it calls in here.
+  Future<T> _runLobOp<T>(Future<T> Function() body) async {
+    _ensureOpen();
+    if (_executeInProgress) {
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'Concurrent operation on a single OracleConnection is not '
+            'supported: a wire round trip is already in progress. Await the '
+            'previous LOB read()/write() (or other operation) before starting '
+            'another.',
+      );
+    }
+    _executeInProgress = true;
+    try {
+      return await body();
+    } finally {
+      _executeInProgress = false;
+    }
+  }
+
   /// The database server hostname.
   String get host => _connectionInfo.host;
 
@@ -4194,6 +4413,11 @@ class OracleConnection {
     // when implicit handles were abandoned.
     _openResultSet = null;
     _openImplicitResultSets.clear();
+    // Drop any open LOB handles' bookkeeping too. A fetched non-temporary LOB
+    // has no server resource to free, and a later OracleLob.close() then
+    // no-ops; a read/write on an abandoned handle fails via the
+    // closed-connection guard in _runLobOp.
+    _openLobs.clear();
 
     // Clear cache state locally; per node-oracledb reference, cached cursors
     // are only ever closed via piggyback on a subsequent execute. On close

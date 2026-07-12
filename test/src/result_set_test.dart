@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:oracledb/oracledb.dart';
+import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
@@ -111,6 +112,7 @@ class _FakeResultSetTransport extends Transport {
     List<BindMetadata>? bindMetadata,
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
+    Object Function(LobLocator locator)? wrapLob,
   }) async {
     materializeCalls++;
     if (materializeThrowOnCall != null &&

@@ -857,6 +857,20 @@ class OraclePool {
       await connection.forceCloseOpenResultSet(reclaimedByPool: true);
     }
 
+    if (connection.hasOpenLob) {
+      // Same disposition for an OracleLob the borrower left open (Story 12.1):
+      // no round trip is in flight (caught above), and a fetched non-temporary
+      // LOB has no server resource to free, so force-close the handle(s) to
+      // clear the in-flight slot and recycle the session. reclaimedByPool: a
+      // borrower still holding the handle sees a clear pool-reclaim error on its
+      // next read/write rather than the generic "OracleLob is closed" detail.
+      _log.warning(
+        'Connection released with an open OracleLob; closing it and '
+        'reclaiming the session. Always close() LOB handles before release.',
+      );
+      await connection.forceCloseOpenLobs(reclaimedByPool: true);
+    }
+
     try {
       await connection.rollback();
     } catch (_) {
