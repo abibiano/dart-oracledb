@@ -181,12 +181,37 @@ class OracleLob {
             '$offset, amount $effectiveAmount)',
       );
     }
-    if (_isBlob) return bytes;
+    // The number of units the in-range request should yield: the caller's
+    // requested amount, capped at what actually remains from [offset]
+    // (`_length - offset + 1`). An EXPLICIT `amount` may deliberately overshoot
+    // the end — that reads to the end and is not a truncation (node-oracledb
+    // parity, `lob.getData(offset, amount)`); the null-amount path already
+    // resolves to exactly the remaining count.
+    final remaining = _length - offset + 1;
+    final expectedUnits =
+        effectiveAmount < remaining ? effectiveAmount : remaining;
+    if (_isBlob) {
+      // Strict truncation guard, mirroring the materialize path's
+      // `verifyBlobReadLength`: a short (fewer-units-than-expected) non-empty
+      // read is a real truncation — most likely the requested piece exceeds
+      // what one READ round trip can deliver (read a smaller `amount`), never a
+      // valid result to return silently. Fail loud rather than substituting.
+      if (bytes.length != expectedUnits) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message: 'BLOB read length mismatch: expected $expectedUnits bytes '
+              'for the in-range request (offset $offset, amount '
+              '$effectiveAmount) but ${bytes.length} were received',
+        );
+      }
+      return bytes;
+    }
+    final String text;
     try {
       // Strict decode over the fully assembled buffer: malformed bytes mean
       // stream corruption — fail loud rather than substituting replacement
       // characters (same policy as the internal single-read materialize path).
-      return _isUtf16 ? decodeUtf16Be(bytes) : utf8.decode(bytes);
+      text = _isUtf16 ? decodeUtf16Be(bytes) : utf8.decode(bytes);
     } on FormatException catch (e) {
       throw OracleException(
         errorCode: oraProtocolError,
@@ -195,6 +220,19 @@ class OracleLob {
         cause: e,
       );
     }
+    // Strict truncation guard, mirroring the materialize path's
+    // `text.length == locator.length` check: Oracle counts CLOB/NCLOB length in
+    // UCS-2 code units (== Dart `String.length`), so a short decoded result is a
+    // real truncation, not a code-point-vs-code-unit artifact. Fail loud.
+    if (text.length != expectedUnits) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'CLOB read length mismatch: expected $expectedUnits chars for '
+            'the in-range request (offset $offset, amount $effectiveAmount) but '
+            '${text.length} were received',
+      );
+    }
+    return text;
   }
 
   /// Alias of [read] with positional arguments, matching node-oracledb
@@ -321,6 +359,23 @@ class OracleLob {
   @internal
   void markReclaimedByPool() {
     _reclaimedByPool = true;
+  }
+
+  /// Marks this handle closed because its owning connection was closed
+  /// (`OracleConnection.close()`), without issuing the [close] bookkeeping
+  /// callback (the connection is tearing down its own `_openLobs` set).
+  ///
+  /// Flipping `_closed` here is load-bearing: `read`/`write` gate on the
+  /// handle's own [_ensureOpen] *before* their empty/past-end/empty-write
+  /// short-circuits, which return without ever reaching the connection-level
+  /// liveness check. Without this, an empty/past-end read or an empty write on
+  /// a handle abandoned across `connection.close()` would silently succeed
+  /// (AC5 violation). Marking closed also makes [isClosed] report `true` after
+  /// the owning connection is closed. Package-internal seam for
+  /// `connection.dart`.
+  @internal
+  void markClosedByConnection() {
+    _closed = true;
   }
 
   void _validateOffsetAmount(int offset, int? amount) {

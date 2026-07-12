@@ -694,10 +694,38 @@ try {
   the connection rejects other operations (and the pool force-closes any
   still-open handle on release) until every handle is `close()`d. `close()` is
   idempotent. A SQL `NULL` LOB is Dart `null` under both modes, never a handle.
+- **Multi-row caveat** — a multi-row SELECT with a LOB column yields **one
+  handle per row** (200 rows → up to 200 open handles), and only **one** handle
+  can be read/written at a time: the connection stays busy — rejecting every
+  other statement, and logging a warning if the pool reclaims it — until you
+  close **every** handle. Read each row's LOB fully and `close()` it before
+  moving to the next, and don't leave any handle open. To close them all at once
+  when you're done, call `result.closeLobs()` (it closes every open handle in
+  `rows` / `outBinds` and returns the count):
 
-Not yet available: `resultSet: true` combined with `fetchLobs: true` (streaming
-rows that yield handles), a `Stream` surface, `createTemporary*` LOB creation,
-BFILE, and `trim()`.
+  ```dart
+  final result = await connection.execute(
+    'SELECT id, doc FROM articles',
+    null,
+    OracleExecuteOptions(fetchLobs: true),
+  );
+  try {
+    for (final row in result.rows) {
+      final lob = row['DOC'] as OracleLob;
+      final text = await lob.read() as String; // read one at a time
+      await lob.close();                        // ...and close before the next
+      // ... use text ...
+    }
+  } finally {
+    await result.closeLobs(); // safety net: close any handle left open
+  }
+  ```
+
+Not yet available: `resultSet: true` combined with `fetchLobs: true` (a
+top-level streaming result set that yields handles), a `Stream` surface,
+`createTemporary*` LOB creation, BFILE, and `trim()`. A CLOB/BLOB nested in a
+`CURSOR(...)` column or a REF CURSOR OUT bind, however, **does** arrive as an
+`OracleLob` handle under `fetchLobs`.
 
 ### JSON support
 

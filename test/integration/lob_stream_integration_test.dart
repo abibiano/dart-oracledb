@@ -342,6 +342,39 @@ void main() {
         expect(lob.isClosed, isTrue);
       });
 
+      test('closeLobs() bulk-closes every open handle from a multi-row SELECT '
+          'and frees the connection', () async {
+        // Three rows, each with a CLOB → three open handles wedging the
+        // connection until closed. closeLobs() reaps them all in one call.
+        const texts = ['alpha', 'bravo', 'charlie'];
+        for (var i = 0; i < texts.length; i++) {
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (${nextTestId()}, :v)',
+            {'v': texts[i]},
+          );
+        }
+        final result = await connection.execute(
+          'SELECT doc FROM $testTable ORDER BY id',
+          null,
+          const OracleExecuteOptions(fetchLobs: true),
+        );
+        expect(connection.hasOpenLob, isTrue);
+        // One handle per row; read each fully one at a time (single-in-flight).
+        final read = <String>[];
+        for (final row in result.rows) {
+          final lob = row['DOC'] as OracleLob;
+          read.add(await lob.read() as String);
+        }
+        expect(read, equals(texts));
+        // Bulk-close reaps all three distinct handles and frees the slot.
+        final closed = await result.closeLobs();
+        expect(closed, equals(3));
+        expect(connection.hasOpenLob, isFalse);
+        // The connection runs the next statement without a per-handle close.
+        final ok = await connection.execute('SELECT 1 AS v FROM dual');
+        expect(ok.rows.single['V'], equals(1));
+      });
+
       // ---------------------------------------------------------------
       // fetchLobs OFF regression
       // ---------------------------------------------------------------

@@ -348,6 +348,53 @@ void main() {
       await lob.close();
     });
 
+    test('a short-but-nonempty CLOB read fails loud (truncation guard)',
+        () async {
+      final (conn, t, lob) = await _fetchLob(_clob(11));
+      // In-range request for 5 units but the server delivers only 3 — a real
+      // truncation, not a valid short value. Must fail loud, mirroring the
+      // materialize path's text.length == locator.length check.
+      t.lobReadData = Uint8List.fromList(utf8.encode('abc'));
+      await expectLater(
+        lob.read(offset: 1, amount: 5),
+        throwsA(isA<OracleException>().having(
+          (e) => e.message,
+          'message',
+          allOf(contains('length mismatch'), contains('expected 5')),
+        )),
+      );
+      await lob.close();
+    });
+
+    test('a short-but-nonempty BLOB read fails loud (truncation guard)',
+        () async {
+      final (conn, t, blob) = await _fetchLob(_blob(11));
+      // Requested 5 bytes in range, server delivered only 2.
+      t.lobReadData = Uint8List.fromList([1, 2]);
+      await expectLater(
+        blob.read(offset: 1, amount: 5),
+        throwsA(isA<OracleException>().having(
+          (e) => e.message,
+          'message',
+          allOf(contains('length mismatch'), contains('expected 5 bytes')),
+        )),
+      );
+      await blob.close();
+    });
+
+    test('an EXPLICIT amount past the end reads to the end (not a truncation)',
+        () async {
+      // offset 7 into an 11-char CLOB with an explicit amount 100: only 5 units
+      // remain (7..11). The server returns those 5 — the request is in range at
+      // its start, so this reads-to-end and must NOT trip the truncation guard
+      // (node-oracledb getData(offset, amount) parity).
+      final (conn, t, lob) = await _fetchLob(_clob(11));
+      t.lobReadData = Uint8List.fromList(utf8.encode('world'));
+      final value = await lob.read(offset: 7, amount: 100);
+      expect(value, equals('world'));
+      await lob.close();
+    });
+
     test('offset <= 0 throws ArgumentError before any wire round trip',
         () async {
       final (conn, t, lob) = await _fetchLob(_clob(5));
@@ -531,6 +578,57 @@ void main() {
     });
   });
 
+  group('OracleLob after the owning connection is closed', () {
+    test('isClosed reports true once the connection is closed', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      expect(lob.isClosed, isFalse);
+      await conn.close();
+      expect(lob.isClosed, isTrue);
+    });
+
+    test('an empty/past-end read short-circuit still fails loud after '
+        'connection.close() (AC5)', () async {
+      // The empty-LOB / past-end read short-circuits return BEFORE the wire
+      // round trip; connection.close() must still make them fail loud rather
+      // than silently returning '' / Uint8List(0).
+      final (conn, t, lob) = await _fetchLob(_clob(0)); // empty CLOB
+      await conn.close();
+      await expectLater(
+        lob.read(), // would short-circuit to '' on an open handle
+        throwsA(isA<OracleException>()),
+      );
+      final (conn2, t2, blob) = await _fetchLob(_blob(4));
+      await conn2.close();
+      await expectLater(
+        blob.read(offset: 5, amount: 8), // past-end short-circuit
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.lobReadCalls, equals(0));
+      expect(t2.lobReadCalls, equals(0));
+    });
+
+    test('an empty write no-op still fails loud after connection.close() (AC5)',
+        () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      await conn.close();
+      await expectLater(
+        lob.write(3, ''), // empty write would no-op on an open handle
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.lobWriteCalls, equals(0));
+    });
+
+    test('a wire read also fails loud after connection.close()', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      await conn.close();
+      await expectLater(
+        lob.read(offset: 1, amount: 3),
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.lobReadCalls, equals(0));
+    });
+  });
+
   group('OracleLob in-flight / concurrency discipline', () {
     test('an open handle holds the connection busy: execute() is rejected',
         () async {
@@ -629,6 +727,86 @@ void main() {
       expect(result.rows.single['DOC'], isA<String>());
       // A real LOB READ round trip was issued (materialize path).
       expect(t.lobReadCalls, equals(1));
+      expect(conn.hasOpenLob, isFalse);
+    });
+  });
+
+  group('OracleResult.closeLobs bulk-close', () {
+    test('closes every open handle across a multi-row result and returns the '
+        'count', () async {
+      // Three rows, three distinct CLOB locators → three open handles wedging
+      // the connection. closeLobs() closes them all in one call.
+      final locs = [_clob(1), _clob(2), _clob(3)];
+      final t = _FakeLobTransport()
+        ..nextResponses.add(
+          ExecuteResponse(
+            isSuccess: true,
+            cursorId: 0,
+            columnMetadata: const [
+              ColumnMetadata(name: 'DOC', oracleType: oraTypeClob, maxLength: 0),
+            ],
+            rows: [
+              [locs[0]],
+              [locs[1]],
+              [locs[2]],
+            ],
+            moreRowsToFetch: false,
+          ),
+        );
+      final conn = OracleConnection.forTesting(transport: t);
+      final result = await conn.execute(
+        'SELECT doc FROM t',
+        null,
+        const OracleExecuteOptions(fetchLobs: true),
+      );
+      expect(conn.hasOpenLob, isTrue);
+      final handles =
+          result.rows.map((r) => r['DOC'] as OracleLob).toList();
+      final closed = await result.closeLobs();
+      expect(closed, equals(3));
+      expect(handles.every((h) => h.isClosed), isTrue);
+      // The connection is freed for the next statement.
+      expect(conn.hasOpenLob, isFalse);
+    });
+
+    test('returns 0 when the result holds no LOB handles (fetchLobs off)',
+        () async {
+      final t = _FakeLobTransport()
+        ..nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      final conn = OracleConnection.forTesting(transport: t);
+      final result = await conn.execute('SELECT 1 FROM dual');
+      expect(await result.closeLobs(), equals(0));
+    });
+
+    test('closing all handles via closeLobs frees the connection even when a '
+        'handle was already closed by hand', () async {
+      final locs = [_clob(1), _clob(2)];
+      final t = _FakeLobTransport()
+        ..nextResponses.add(
+          ExecuteResponse(
+            isSuccess: true,
+            cursorId: 0,
+            columnMetadata: const [
+              ColumnMetadata(name: 'DOC', oracleType: oraTypeClob, maxLength: 0),
+            ],
+            rows: [
+              [locs[0]],
+              [locs[1]],
+            ],
+            moreRowsToFetch: false,
+          ),
+        );
+      final conn = OracleConnection.forTesting(transport: t);
+      final result = await conn.execute(
+        'SELECT doc FROM t',
+        null,
+        const OracleExecuteOptions(fetchLobs: true),
+      );
+      await (result.rows.first['DOC'] as OracleLob).close();
+      // Still one open handle; closeLobs reaps both (idempotent on the closed
+      // one) and the count reflects both distinct handles.
+      final closed = await result.closeLobs();
+      expect(closed, equals(2));
       expect(conn.hasOpenLob, isFalse);
     });
   });

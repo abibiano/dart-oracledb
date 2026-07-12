@@ -115,8 +115,14 @@ class OracleExecuteOptions {
   /// force-closes any still-open handle on release, while a handle is open.
   /// Always `close()` every handle when done.
   ///
-  /// Combining `fetchLobs: true` with [resultSet] `true` is **not** supported in
-  /// this release (streaming rows that yield LOB handles is Story 12.3) and
+  /// A CLOB/BLOB nested inside a `CURSOR(...)` result column or carried by a
+  /// REF CURSOR OUT bind is also returned as an [OracleLob] handle under
+  /// `fetchLobs` — those columns are drained per-batch through the same wrapping
+  /// seam on the ordinary `execute()` path.
+  ///
+  /// Only the **top-level** streaming result set is excluded: combining
+  /// `fetchLobs: true` with [resultSet] `true` is **not** supported in this
+  /// release (a top-level `resultSet` that yields LOB handles is Story 12.3) and
   /// throws [OracleException] before any wire round trip.
   final bool fetchLobs;
 }
@@ -1121,18 +1127,24 @@ class OracleConnection {
 
     final fetchLobs = options?.fetchLobs ?? false;
     // Reject the resultSet + fetchLobs combination before any wire round trip
-    // (Story 12.1 scope boundary / AC7): streaming rows that yield LOB handles
-    // is Story 12.3. Fail loud rather than silently ignoring either flag.
+    // (Story 12.1 scope boundary / AC7). The carve-out is narrow: only the
+    // TOP-LEVEL streaming result set (`resultSet: true`) is excluded — a
+    // top-level SELECT whose rows are consumed lazily through an OracleResultSet
+    // cannot yet yield OracleLob handles (Story 12.3). Nested-cursor / REF-CURSOR
+    // OUT-bind LOB columns DO wrap into OracleLob handles under `fetchLobs` on
+    // the ordinary eager execute() path (they are drained per-batch through the
+    // same wrapLob seam). Fail loud rather than silently ignoring either flag.
     if (fetchLobs && options?.resultSet == true) {
       throw const OracleException(
         errorCode: oraProtocolError,
         message:
             'OracleExecuteOptions(resultSet: true) combined with '
-            'fetchLobs: true is not supported in this release: streaming rows '
-            'that yield OracleLob handles is Story 12.3. Use resultSet without '
-            'fetchLobs (LOB columns materialize), or fetchLobs on the eager '
-            'execute() path (which returns OracleLob handles in '
-            'OracleResult.rows / outBinds).',
+            'fetchLobs: true is not supported in this release: a top-level '
+            'streaming result set cannot yet yield OracleLob handles (Story '
+            '12.3). Use resultSet without fetchLobs (LOB columns materialize), '
+            'or fetchLobs on the eager execute() path (which returns OracleLob '
+            'handles in OracleResult.rows / outBinds, including nested-cursor '
+            'and REF-CURSOR OUT-bind LOB columns).',
       );
     }
 
@@ -4468,10 +4480,18 @@ class OracleConnection {
     // when implicit handles were abandoned.
     _openResultSet = null;
     _openImplicitResultSets.clear();
-    // Drop any open LOB handles' bookkeeping too. A fetched non-temporary LOB
-    // has no server resource to free, and a later OracleLob.close() then
-    // no-ops; a read/write on an abandoned handle fails via the
-    // closed-connection guard in _runLobOp.
+    // Mark every open LOB handle closed BEFORE dropping the bookkeeping. A
+    // fetched non-temporary LOB has no server resource to free, and a later
+    // OracleLob.close() then no-ops. Flipping each handle's `_closed` is
+    // load-bearing: read()/write() gate on the handle's own closed check ahead
+    // of their empty/past-end/empty-write short-circuits, which return without
+    // reaching the connection-level liveness check in _runLobOp — so a handle
+    // left open across close() would otherwise silently succeed those cases
+    // (AC5 violation). Marking closed makes every op — short-circuit and wire —
+    // fail loud, and makes isClosed report `true` after the connection closes.
+    for (final lob in _openLobs) {
+      lob.markClosedByConnection();
+    }
     _openLobs.clear();
 
     // Clear cache state locally; per node-oracledb reference, cached cursors
