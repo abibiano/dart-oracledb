@@ -587,7 +587,10 @@ class OracleConnection {
   /// throws on id 0), and PL/SQL is never cache-eligible, so the result set is
   /// non-cached: [OracleResultSet.close] queues its id through the existing
   /// close-cursor piggyback.
-  List<Object?> _wrapRefCursorOutBinds(ExecuteResponse response) {
+  List<Object?> _wrapRefCursorOutBinds(
+    ExecuteResponse response, {
+    bool fetchLobs = false,
+  }) {
     final values = response.outBindValues;
     var cursorCount = 0;
     for (final v in values) {
@@ -641,8 +644,16 @@ class OracleConnection {
         requiresFullExecute: nestedCursorIndices.isNotEmpty,
         onBatchDecoded: nestedCursorIndices.isEmpty
             ? null
-            : (batch) =>
-                  _materializeNestedCursorsInBatch(batch, nestedCursorIndices),
+            : (batch) => _materializeNestedCursorsInBatch(
+                  batch,
+                  nestedCursorIndices,
+                  fetchLobs: fetchLobs,
+                ),
+        // fetchLobs: wrap the REF CURSOR's own LOB columns in OracleLob handles
+        // as each fetched batch is materialized, rather than reading them into
+        // String/Uint8List — node-oracledb wraps CLOB/BLOB columns uniformly at
+        // wire-decode, including a REF CURSOR OUT bind's rows.
+        wrapLob: fetchLobs ? _registerLob : null,
       );
       final rs = OracleResultSet.fromCursor(
         connection: this,
@@ -669,10 +680,18 @@ class OracleConnection {
   /// A distinct [DecodedCursorResult] instance is drained at most once per call
   /// per server cursor id, so duplicate-column aliases or repeated descriptors
   /// never double-drain (or double-close) the same server cursor.
+  ///
+  /// [fetchLobs] threads the `OracleExecuteOptions(fetchLobs: true)` wrap
+  /// decision one level down: when set, LOB columns inside the drained nested
+  /// rows are wrapped in connection-owned `OracleLob` handles (like the
+  /// top-level rows) instead of materialized — so the nested-cursor shape is
+  /// not the one path that silently materializes while the rest wrap (Epic 11
+  /// retro action item 2, and this story's flag-threading mandate).
   Future<void> _materializeNestedCursorsInBatch(
     List<List<Object?>> rows,
-    List<int> cursorColumnIndices,
-  ) async {
+    List<int> cursorColumnIndices, {
+    bool fetchLobs = false,
+  }) async {
     if (cursorColumnIndices.isEmpty || rows.isEmpty) return;
     final drained = <int, List<OracleRow>>{};
     for (final row in rows) {
@@ -681,7 +700,7 @@ class OracleConnection {
         if (value is! DecodedCursorResult) continue; // NULL cursor stays null
         var nestedRows = drained[value.cursorId];
         if (nestedRows == null) {
-          nestedRows = await _drainNestedCursor(value);
+          nestedRows = await _drainNestedCursor(value, fetchLobs: fetchLobs);
           drained[value.cursorId] = nestedRows;
         }
         row[i] = nestedRows;
@@ -707,8 +726,9 @@ class OracleConnection {
   /// drain queues its id before the error propagates). The close queue is a
   /// `LinkedHashSet`, so a repeated id is never enqueued twice.
   Future<List<OracleRow>> _drainNestedCursor(
-    DecodedCursorResult decoded,
-  ) async {
+    DecodedCursorResult decoded, {
+    bool fetchLobs = false,
+  }) async {
     // A nested cursor can itself project a CURSOR() column. Computed once here
     // so it also drives requiresFullExecute below (pre-23 needs the inline
     // nested describe, which only a full EXECUTE carries) and the post-fetch
@@ -728,14 +748,23 @@ class OracleConnection {
       // so pre-23 (21c) ships the deeper describe inline (a plain OFETCH would
       // shear). A scalar/LOB nested cursor stays on plain OFETCH.
       requiresFullExecute: deeperCursorIndices.isNotEmpty,
+      // fetchLobs: wrap LOB columns in these nested rows into OracleLob handles
+      // rather than materializing them, matching how node-oracledb wraps every
+      // CLOB/BLOB/BFILE column uniformly at wire-decode — including
+      // nested-cursor rows (withData.js).
+      wrapLob: fetchLobs ? _registerLob : null,
     );
     try {
       final rawRows = await nested.nextAllRowsData();
       // Resolve any deeper CURSOR() columns with the same eager pass, recursing
       // through this method (the close queue dedupes ids, so recursion never
-      // double-reaps).
+      // double-reaps). fetchLobs propagates to arbitrary nesting depth.
       if (deeperCursorIndices.isNotEmpty) {
-        await _materializeNestedCursorsInBatch(rawRows, deeperCursorIndices);
+        await _materializeNestedCursorsInBatch(
+          rawRows,
+          deeperCursorIndices,
+          fetchLobs: fetchLobs,
+        );
       }
       final builder = OracleRowBuilder(decoded.columns);
       return rawRows.map(builder.build).toList();
@@ -854,6 +883,7 @@ class OracleConnection {
       await _materializeNestedCursorsInBatch(
         response.rows,
         nestedCursorIndices,
+        fetchLobs: fetchLobs,
       );
     }
     final builder = OracleRowBuilder(descriptor.columns);
@@ -2981,6 +3011,7 @@ class OracleConnection {
           await _materializeNestedCursorsInBatch(
             response.rows,
             cursorColumnIndices,
+            fetchLobs: fetchLobs,
           );
         }
       }
@@ -3068,7 +3099,10 @@ class OracleConnection {
       // OracleResultSet and register it as the one open lazy handle. Done last
       // (after cache disposition) so a thrown wrap never leaves a phantom
       // open-handle on a connection whose cache state was not yet settled.
-      final outBindValues = _wrapRefCursorOutBinds(response);
+      final outBindValues = _wrapRefCursorOutBinds(
+        response,
+        fetchLobs: fetchLobs,
+      );
 
       // Implicit results from DBMS_SQL.RETURN_RESULT (PL/SQL only; the list is
       // empty for SELECT/DML). In the default eager path each cursor is drained
@@ -3928,6 +3962,7 @@ class OracleConnection {
         sendAmount: true,
         amount: amount,
       );
+      _copyBackLocator(sourceLocator, response.updatedLocator);
       return response.data ?? Uint8List(0);
     });
   }
@@ -3941,13 +3976,33 @@ class OracleConnection {
     required Uint8List data,
   }) {
     return _runLobOp(() async {
-      await _transport.sendLobOp(
+      final response = await _transport.sendLobOp(
         operation: oc.tnsLobOpWrite,
         sourceLocator: sourceLocator,
         sourceOffset: offset,
         data: data,
       );
+      _copyBackLocator(sourceLocator, response.updatedLocator);
     });
+  }
+
+  /// Copies the server's echoed (post-op) locator bytes back into the handle's
+  /// live locator buffer, in place, after a LOB READ/WRITE round trip.
+  ///
+  /// node-oracledb's `lobOp.processReturnParameter` copies the returned locator
+  /// bytes into `sourceLobImpl._locator` after EVERY LOB op
+  /// (`reference/node-oracledb/lib/thin/protocol/messages/lobOp.js`), and this
+  /// driver's `_createTempClob`/`_createTempBlob` already mirror it. Without the
+  /// copy-back a write-then-read (or write-then-write) on the same writable
+  /// handle would reference pre-op locator state. The buffer is the same
+  /// `Uint8List` the `OracleLob` holds, so mutating it in place propagates.
+  /// Guarded on an equal length (a mismatched echo is ignored, never truncates
+  /// or grows the live locator).
+  void _copyBackLocator(Uint8List sourceLocator, Uint8List? updatedLocator) {
+    if (updatedLocator != null &&
+        updatedLocator.length == sourceLocator.length) {
+      sourceLocator.setRange(0, sourceLocator.length, updatedLocator);
+    }
   }
 
   /// Brackets one [OracleLob] read/write round trip with the connection's

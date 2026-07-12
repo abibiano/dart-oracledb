@@ -154,7 +154,14 @@ class OracleLob {
     // empty value without a wire round trip, matching the internal materialize
     // path's EMPTY_CLOB()/EMPTY_BLOB() short-circuit.
     final effectiveAmount = amount ?? (_length - offset + 1);
-    if (_length == 0 || effectiveAmount <= 0) {
+    // Nothing to read: an empty LOB, a read starting at or past the end, or a
+    // range that resolves to zero units. Short-circuit without a wire round
+    // trip, matching the internal materialize path's EMPTY_CLOB()/EMPTY_BLOB()
+    // behavior. The `offset > _length` guard applies to an EXPLICIT `amount`
+    // too: an offset past the end has nothing to fetch, so it must not issue a
+    // needless READ past end — parity with the null-amount path (which resolves
+    // to `effectiveAmount <= 0` for the same offset).
+    if (_length == 0 || offset > _length || effectiveAmount <= 0) {
       return _isBlob ? Uint8List(0) : '';
     }
     final bytes = await _connection.runLobRead(
@@ -162,6 +169,18 @@ class OracleLob {
       offset: offset,
       amount: effectiveAmount,
     );
+    // A legitimate in-range READ that comes back empty is a fault, not a valid
+    // empty value (the empty cases were short-circuited above) — fail loud
+    // rather than silently substituting an empty result, the same policy the
+    // internal single-read materialize path enforces ("CLOB read returned no
+    // data").
+    if (bytes.isEmpty) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'LOB read returned no data for an in-range read (offset '
+            '$offset, amount $effectiveAmount)',
+      );
+    }
     if (_isBlob) return bytes;
     try {
       // Strict decode over the fully assembled buffer: malformed bytes mean
@@ -207,6 +226,14 @@ class OracleLob {
   /// parity); no server round trip re-verifies it. `writtenUnits` is the
   /// character count for CLOB/NCLOB and the byte count for BLOB.
   ///
+  /// An **empty** [data] (an empty `String`, or empty bytes) is a deliberate
+  /// no-op: no wire round trip is issued and [length] is left unchanged. This
+  /// is an intentional deviation from node-oracledb, which runs the
+  /// `max(length, (offset - 1) + writtenUnits)` formula unconditionally and so
+  /// could advance the length on an empty write past the current end; here a
+  /// zero-length write changes nothing (there is no `trim()` in this release to
+  /// undo an accidental extension either, so the no-op is the safer choice).
+  ///
   /// Throws [ArgumentError] before any wire round trip if [offset] `<= 0` or
   /// [data] is the wrong type for this LOB. Throws [OracleException] if the
   /// handle is closed, the connection is closed/broken, or the WRITE fails.
@@ -225,6 +252,20 @@ class OracleLob {
       if (data is Uint8List) {
         bytes = data;
       } else if (data is List<int>) {
+        // Uint8List.fromList silently maps any out-of-range element modulo 256
+        // (e.g. -1 -> 255, 256 -> 0), which would write corrupted bytes to the
+        // LOB with no error. Reject a bad element loud, before the write.
+        for (final b in data) {
+          if (b < 0 || b > 255) {
+            throw ArgumentError.value(
+              b,
+              'data',
+              'a BLOB OracleLob.write requires every List<int> element in '
+                  '0..255 (values outside that range would be silently wrapped '
+                  'modulo 256, corrupting the stored bytes)',
+            );
+          }
+        }
         bytes = Uint8List.fromList(data);
       } else {
         throw ArgumentError.value(

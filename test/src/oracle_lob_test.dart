@@ -32,12 +32,20 @@ class _FakeLobTransport extends Transport {
   /// letting a test hold a read/write in flight to prove overlap rejection.
   Completer<void>? lobOpGate;
 
+  /// When set, every `sendLobOp` echoes this as the response's `updatedLocator`
+  /// (the server's post-op locator state), so a copy-back test can assert the
+  /// handle's live locator buffer tracks it.
+  Uint8List? lobUpdatedLocator;
+
   int lobReadCalls = 0;
   int lobWriteCalls = 0;
   int lastReadOffset = -1;
   int lastReadAmount = -1;
   int lastWriteOffset = -1;
   Uint8List? lastWriteData;
+
+  /// Snapshot (copy) of the `sourceLocator` bytes passed to each op, in order.
+  final List<Uint8List> sentLocators = <Uint8List>[];
 
   @override
   bool get isConnected => true;
@@ -95,16 +103,23 @@ class _FakeLobTransport extends Transport {
         message: 'simulated LOB operation failure',
       );
     }
+    if (sourceLocator != null) {
+      sentLocators.add(Uint8List.fromList(sourceLocator));
+    }
     if (operation == tnsLobOpRead) {
       lobReadCalls++;
       lastReadOffset = sourceOffset;
       lastReadAmount = amount;
-      return LobOpResponse(isSuccess: true, data: lobReadData);
+      return LobOpResponse(
+        isSuccess: true,
+        data: lobReadData,
+        updatedLocator: lobUpdatedLocator,
+      );
     }
     lobWriteCalls++;
     lastWriteOffset = sourceOffset;
     lastWriteData = data;
-    return LobOpResponse(isSuccess: true);
+    return LobOpResponse(isSuccess: true, updatedLocator: lobUpdatedLocator);
   }
 }
 
@@ -298,6 +313,41 @@ void main() {
       await lob.close();
     });
 
+    test('reading past the end with an EXPLICIT amount also short-circuits '
+        '(no needless READ past end)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      // offset 6 == length + 1, explicit amount 10: nothing to fetch. Must not
+      // issue a READ (parity with the null-amount path).
+      final value = await lob.read(offset: 6, amount: 10);
+      expect(value, equals(''));
+      expect(t.lobReadCalls, equals(0));
+      // Same for a BLOB.
+      final (conn2, t2, blob) = await _fetchLob(_blob(4));
+      final bytes = await blob.read(offset: 5, amount: 8);
+      expect(bytes, isA<Uint8List>());
+      expect(bytes as Uint8List, isEmpty);
+      expect(t2.lobReadCalls, equals(0));
+      await lob.close();
+      await blob.close();
+    });
+
+    test('a legitimate in-range READ that returns no data fails loud', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      t.lobReadData = null; // server returns an empty/null payload for an
+      // in-range read (offset 1, amount 5) — a fault, not a valid empty value.
+      await expectLater(
+        lob.read(offset: 1, amount: 5),
+        throwsA(isA<OracleException>().having(
+          (e) => e.message,
+          'message',
+          contains('returned no data'),
+        )),
+      );
+      // The READ round trip WAS issued (this is not the short-circuit case).
+      expect(t.lobReadCalls, equals(1));
+      await lob.close();
+    });
+
     test('offset <= 0 throws ArgumentError before any wire round trip',
         () async {
       final (conn, t, lob) = await _fetchLob(_clob(5));
@@ -365,6 +415,19 @@ void main() {
       await lob.close();
     });
 
+    test('a BLOB List<int> with an out-of-range element throws ArgumentError '
+        'before any write (no silent modulo-256 corruption)', () async {
+      final (conn, t, lob) = await _fetchLob(_blob(0));
+      // 256 would wrap to 0, -1 to 255 under Uint8List.fromList — reject loud.
+      expect(() => lob.write(1, [1, 256, 3]), throwsArgumentError);
+      expect(() => lob.write(1, [-1, 2]), throwsArgumentError);
+      expect(t.lobWriteCalls, equals(0));
+      // A clean 0..255 list still writes.
+      await lob.write(1, [0, 128, 255]);
+      expect(t.lastWriteData, equals([0, 128, 255]));
+      await lob.close();
+    });
+
     test('does not advance length when the write stays within it', () async {
       final (conn, t, lob) = await _fetchLob(_clob(100));
       await lob.write(1, 'abc');
@@ -413,6 +476,29 @@ void main() {
       t.failLobOp = false;
       t.lobReadData = Uint8List.fromList(utf8.encode('h'));
       expect(await lob.read(offset: 1, amount: 1), equals('h'));
+      await lob.close();
+    });
+
+    test('the server echoed (updated) locator is copied back after an op so a '
+        'later op references post-op state (node copy-back parity)', () async {
+      // A BLOB avoids charset decode: the echoed locator bytes carry no CLOB
+      // charset-flag meaning here, so the test isolates the copy-back.
+      final (conn, t, lob) = await _fetchLob(_blob(5));
+      // The server echoes a fresh locator state on every op (same length as the
+      // live locator buffer, so the copy-back guard applies).
+      final echoed = Uint8List(tnsLobLocatorBufferSize)
+        ..fillRange(0, tnsLobLocatorBufferSize, 0xAB);
+      t.lobUpdatedLocator = echoed;
+      t.lobReadData = Uint8List.fromList([1, 2, 3, 4, 5]);
+
+      await lob.write(1, Uint8List.fromList([9]));
+      // The write itself sent the ORIGINAL (all-zero) locator bytes.
+      expect(t.sentLocators.first, everyElement(equals(0)));
+
+      // A subsequent read must reference the UPDATED locator bytes — proving
+      // runLobWrite copied the echoed locator back into the live buffer.
+      await lob.read(offset: 1, amount: 5);
+      expect(t.sentLocators.last, equals(echoed));
       await lob.close();
     });
   });

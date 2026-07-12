@@ -231,10 +231,22 @@ Opus 4.8 (auto-bmad dev-story delegate).
   `connection.close()` reap open handles.
 - Scope boundaries fail loud: `resultSet: true` + `fetchLobs: true` throws
   pre-wire pointing at Story 12.3; the internal single-read materialize path is
-  unchanged. Nested `CURSOR()` LOB columns still materialize even under
-  `fetchLobs` (they drain via the result-set/cursor engine, which stays on the
-  materialize path — consistent with the result-set-shaped-things-don't-wrap
-  boundary) — documented as a known limitation, see Open Questions.
+  unchanged. **Review update (Decision fix):** nested `CURSOR()` and
+  REF-CURSOR-OUT-bind LOB columns now ALSO wrap into `OracleLob` handles under
+  `fetchLobs` — the `wrapLob` decision is threaded through `_drainNestedCursor`,
+  `_wrapRefCursorOutBinds`, the implicit-result nested-cursor pass, and the
+  shared `ResultSetCursor` per-batch materialize (new `wrapLob` constructor
+  param), matching node-oracledb which wraps every CLOB/BLOB/BFILE column
+  uniformly at wire-decode including nested-cursor rows (`withData.js`). The
+  earlier "still materialize … see Open Questions" note was incorrect (no Open
+  Questions section existed); it is superseded by this fix. The separate
+  top-level `resultSet: true` + `fetchLobs: true` fail-loud rejection is
+  UNCHANGED (still Story 12.3 scope per AC7). NOTE: the nested-cursor /
+  REF-cursor-carrying-a-LOB shape trips a pre-existing, fetchLobs-INDEPENDENT
+  FETCH-decode limitation (ORA-12547 buffer underrun inside
+  `decodeExecuteResponse`, before any wrap step), so it is not exercisable live
+  yet; the wrap-threading is proven by fake-transport unit tests
+  (`test/src/result_set_test.dart`, `test/src/nested_cursor_test.dart`).
 - CI coverage floor recalibrated 68 → 73 (`.github/workflows/ci.yml`); fresh
   measured unit baseline is 80.85% on 2026-07-12 (this story's diff), gate PASS
   locally. `oracle_lob.dart` is 61/61 lines covered by unit tests.
@@ -275,6 +287,18 @@ Opus 4.8 (auto-bmad dev-story delegate).
   `wrapLob` parameter (+ `lob_locator.dart` import).
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` (CHANGED) — 12-1
   status ready-for-dev → in-progress → review.
+- **Review fixes (2026-07-12):** `lib/src/protocol/result_set_cursor.dart`
+  (CHANGED) — optional `wrapLob` constructor param threaded to the per-batch
+  `materializeLobs`. `lib/src/connection.dart` (CHANGED) — `wrapLob`/`fetchLobs`
+  threaded through `_materializeNestedCursorsInBatch`, `_drainNestedCursor`,
+  `_wrapRefCursorOutBinds`, and the implicit-result nested pass; new
+  `_copyBackLocator` called after `runLobRead`/`runLobWrite`.
+  `lib/src/oracle_lob.dart` (CHANGED) — `read()` past-end short-circuit +
+  in-range empty-read fail-loud; BLOB `write()` 0..255 `List<int>` validation;
+  empty-write no-op documented in the dartdoc. `test/src/oracle_lob_test.dart`,
+  `test/src/nested_cursor_test.dart`, `test/src/result_set_test.dart`,
+  `test/integration/lob_stream_integration_test.dart` (CHANGED) — new coverage
+  for every fix.
 
 ### Change Log
 
@@ -283,3 +307,23 @@ Opus 4.8 (auto-bmad dev-story delegate).
   concurrency/pool-reclaim lifecycle; CI coverage floor 68 → 73. All 9 ACs
   satisfied; unit + dual-env integration green; `dart analyze` clean. Status →
   review.
+- 2026-07-12 — Addressed code review findings — 6 items resolved (1 High
+  Decision: nested-`CURSOR()`/REF-CURSOR-OUT-bind LOB columns now wrap under
+  `fetchLobs` via `wrapLob` threading through `ResultSetCursor`; 3 Med + 2 Low
+  Patches: `read()` past-end short-circuit + in-range empty-read fail-loud,
+  locator copy-back after read/write, BLOB `write()` element-range validation,
+  empty-write dartdoc, NCLOB non-1-offset bounded reads). Unit suite +
+  dual-env integration green; `dart analyze` clean.
+
+### Review Findings
+
+- [x] [Review][Decision][High] Nested `CURSOR()` / REF-CURSOR-OUT-bind LOB columns silently bypass `fetchLobs` — A LOB nested inside a `CURSOR(SELECT ...)` result column or a REF CURSOR OUT bind's rows is drained via `ResultSetCursor` / `_drainNestedCursor`, which calls `_transport.materializeLobs(fetched, timeout: ...)` with **no** `wrapLob` (result_set_cursor.dart:341; connection.dart `_drainNestedCursor` ~L709-740). So under `fetchLobs: true` those LOBs still materialize to `String`/`Uint8List` instead of an `OracleLob` — violating AC2 — and, unlike the `resultSet:true`+`fetchLobs:true` combination, this does **not** fail loud: a caller's `as OracleLob` cast throws a runtime `TypeError`. This is the exact silent materialize-vs-wrap split the story's own flag-threading mandate (Epic 11 retro action item 2) exists to prevent; the checklist never itemized the nested-cursor entry point. Compounding: the Completion Notes claim this limitation is "documented ... see Open Questions," but no "Open Questions" section, `deferred-work.md` entry, or README callout exists. No unit/integration test covers nested-cursor or REF-CURSOR-OUT-bind + `fetchLobs`. (Auditor could not reproduce the nested-cursor-column case live due to a pre-existing, `fetchLobs`-independent nested-cursor decode limitation, so real reachability of that shape is uncertain; the REF-CURSOR-OUT-bind shape and the contract gap remain.) Sources: blind@secondary+edge@secondary+auditor@secondary. Recommended: fix: on the `fetchLobs` path, detect a nested-`CURSOR()`/REF-CURSOR-OUT-bind LOB column and fail loud pre-wire (mirror the `resultSet`+`fetchLobs` rejection pointing at a follow-up story) — or thread `wrapLob` through `_drainNestedCursor`/`ResultSetCursor`; and add the missing Open Questions / `deferred-work.md` entry the Completion Notes reference. **→ RESOLVED 2026-07-12 (chosen direction: match the node-oracledb reference):** threaded the existing `wrapLob` decision through the eager nested-cursor/REF-CURSOR-OUT-bind drain path so those LOB columns now wrap into `OracleLob` handles under `fetchLobs: true`. `ResultSetCursor` gained an optional `wrapLob` constructor param passed to its per-batch `materializeLobs`; `_materializeNestedCursorsInBatch`/`_drainNestedCursor`/`_wrapRefCursorOutBinds` and the implicit-result nested pass thread a `fetchLobs` flag that supplies `_registerLob` as `wrapLob`. The top-level `resultSet:true`+`fetchLobs:true` fail-loud rejection is unchanged (AC7 / Story 12.3). The false "see Open Questions" Completion-Notes reference is corrected. New fake-transport unit tests prove the wrap (`test/src/nested_cursor_test.dart` nested-CURSOR() group; `test/src/result_set_test.dart` REF CURSOR group). Live end-to-end coverage is blocked by a pre-existing, `fetchLobs`-independent FETCH-decode limitation (ORA-12547 buffer underrun in `decodeExecuteResponse`, before any wrap step) for the LOB-in-cursor-row shape — documented inline in the integration test.
+- [x] [Review][Patch][Med] `read()` omits the fail-loud / short-circuit guards the materialize path enforces [lib/src/oracle_lob.dart:149-166] — (a) with an **explicit** `amount` and `offset` past the LOB end (`offset > _length`), the read is not short-circuited (only the null-`amount` path is, via `effectiveAmount <= 0`), so it issues a needless LOB READ past end — inconsistent with the null-`amount` behavior; add an `if (offset > _length)` return-empty guard. (b) `runLobRead` coalesces a null/empty server payload to `Uint8List(0)` and `read()` returns it silently, whereas `_readClobAsString` throws "CLOB read returned no data" — an empty/null response for a legitimate in-range read should fail loud per the same "fail loud rather than substituting" policy the file states. Sources: blind@primary+blind@secondary+edge@primary+edge@secondary. **→ RESOLVED 2026-07-12:** (a) `read()` now short-circuits to empty when `offset > _length` too (explicit `amount` path), so no needless READ-past-end is issued; (b) a legitimate in-range READ that returns an empty/null payload now throws `OracleException` ("LOB read returned no data …"), matching the materialize path. Unit tests added in `test/src/oracle_lob_test.dart` (explicit-amount past-end short-circuit for CLOB+BLOB; in-range empty-read fails loud).
+- [x] [Review][Patch][Med] `runLobRead`/`runLobWrite` discard the server's echoed (updated) locator, breaking node copy-back parity [lib/src/connection.dart:3918-3945] — node-oracledb's `lobOp.processReturnParameter` copies the returned locator bytes into `sourceLobImpl._locator` after EVERY op (reference/node-oracledb/lib/thin/protocol/messages/lobOp.js:171-176), and this driver's `_createTempClob`/`_createTempBlob` mirror it (transport.dart:1366-1369). `runLobWrite` throws the `sendLobOp` response away and `runLobRead` returns only `response.data`, so `_locator.locator` goes stale; a write-then-read (or write-then-write) on the same writable handle can reference pre-op locator state. Untested (FOR UPDATE integration tests write once then `close()`). Fix: copy `updatedLocator` back into `_locator.locator` after read and write. Source: blind@primary. **→ RESOLVED 2026-07-12:** added `_copyBackLocator(sourceLocator, response.updatedLocator)` (in-place `setRange` on the live locator buffer, length-guarded — mirrors `_createTempClob`/`_createTempBlob`) called after both `runLobRead` and `runLobWrite`. Unit test added (`test/src/oracle_lob_test.dart`): after a write whose echoed locator differs, the subsequent op references the updated locator bytes.
+- [x] [Review][Patch][Med] BLOB `write()` of a `List<int>` with out-of-range elements silently corrupts data [lib/src/oracle_lob.dart:228] — `Uint8List.fromList(data)` maps any element outside 0..255 modulo 256 (e.g. `-1` → 255, `256` → 0), so a caller passing signed/computed ints writes corrupted bytes to the LOB with no error. Validate every element is in 0..255 and throw `ArgumentError` before the write. Sources: edge@primary+edge@secondary. **→ RESOLVED 2026-07-12:** BLOB `write()` now validates every `List<int>` element is in 0..255 and throws `ArgumentError` before any write (a clean list still writes). Unit test added in `test/src/oracle_lob_test.dart`.
+- [x] [Review][Patch][Low] Empty `write()` is an undocumented no-op that also skips AC4's length-update formula [lib/src/oracle_lob.dart:253] — `if (bytes.isEmpty) return;` short-circuits before the `max(length, (offset-1)+writtenUnits)` update; node-oracledb runs that formula unconditionally, so an empty write at `offset > length+1` advances `_length` in node but not here (degenerate, arguably benign). The no-op is explained only in an internal comment, not the public `write()` dartdoc (the class advertises `trim()` as unavailable, making a silent no-op write extra-surprising). Fix: document the empty-write no-op in the dartdoc (note the intentional length deviation). Sources: blind@primary+auditor@primary+blind@secondary. **→ RESOLVED 2026-07-12:** the public `write()` dartdoc now documents the empty-write no-op and the intentional length-formula deviation from node-oracledb (and that there is no `trim()` to undo an accidental extension). Behavior unchanged (still a no-op).
+- [x] [Review][Patch][Low] AC9: no non-1-offset bounded read exercised for NCLOB (multibyte) [test/integration/lob_stream_integration_test.dart] — AC9 mandates a non-1-offset bounded read for CLOB, NCLOB, **and** BLOB; the NCLOB test only does `read()` and `read(offset:1, amount:4)` (both offset 1), and NCLOB is precisely where the surrogate-split caveat bites. Add an NCLOB non-1-offset bounded read on both 23ai and 21c. Sources: auditor@primary+blind@primary. **→ RESOLVED 2026-07-12:** the NCLOB integration test now adds two non-1-offset bounded reads on a clean character boundary — `read(offset: 6, amount: 5)` == 'crème' and `read(offset: 12, amount: 5)` over the multibyte CJK run — passing on BOTH 23ai and 21c.
+- [x] [Review][Defer][Low] AC4 read-only-SELECT write fail-loud is proven only via a mock, not a real server [test/integration/lob_stream_integration_test.dart] — deferred, minor evidence gap.
+- [x] [Review][Defer][Low] No test for `fetchLobs` + a DML `RETURNING ... INTO` OUT bind [test] — deferred, pre-existing coverage gap.
+- [x] [Review][Defer][Low] Connection reset leaves `OracleLob.isClosed` reporting `false` [lib/src/connection.dart:4420] — deferred, pre-existing (mirrors result-set reset behavior).
+- [x] [Review][Defer][Low] Fetched server-expression LOBs (e.g. `SELECT TO_CLOB(...)`) may allocate temp LOBs not freed on `close()` [lib/src/oracle_lob.dart close()] — deferred, out-of-scope for 12.1 (target: Story 12.2).

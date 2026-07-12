@@ -142,6 +142,16 @@ void main() {
         // (4 code units) at offset 1.
         expect(await lob.read(offset: 1, amount: 4), equals('café'));
 
+        // Non-1-offset bounded read (AC9 mandates this for NCLOB too, not just
+        // CLOB/BLOB): 'crème' is 5 UCS-2 code units at 1-based offset 6
+        // ('café ' = 5 units, so 'crème' starts at 6). Clean boundary — no
+        // surrogate split.
+        expect(await lob.read(offset: 6, amount: 5), equals('crème'));
+
+        // A non-1-offset bounded read over the multibyte CJK run:
+        // '中文日本語' is 5 code units at offset 12 ('café crème ' = 11 units).
+        expect(await lob.read(offset: 12, amount: 5), equals(cjk));
+
         await lob.close();
       });
 
@@ -208,6 +218,21 @@ void main() {
         expect(await lob.read(), equals(text));
         await lob.close();
       });
+
+      // NOTE (Story 12.1 review Decision fix): the fetchLobs wrap decision is
+      // now threaded through the nested-CURSOR() / REF-CURSOR-OUT-bind drain so
+      // those LOB columns ALSO wrap into OracleLob handles (see the connection
+      // + ResultSetCursor threading, and the fake-transport unit tests in
+      // test/src/result_set_test.dart "a CLOB column in a REF CURSOR OUT bind
+      // wraps into an OracleLob" and test/src/nested_cursor_test.dart
+      // "nested-CURSOR() LOB columns honor fetchLobs"). It is NOT exercised live
+      // here: a REF CURSOR / nested CURSOR() whose rows carry a LOB trips a
+      // PRE-EXISTING, fetchLobs-independent FETCH-decode limitation
+      // ("ORA-12547 buffer underrun in execute response / Integer too large"
+      // inside decodeExecuteResponse, which runs BEFORE any wrap/materialize
+      // step), so the shape cannot be driven end-to-end against a real server
+      // yet regardless of fetchLobs. The wrap-threading itself is proven by the
+      // unit/fake-transport tests above.
 
       // ---------------------------------------------------------------
       // Writing through a writable (FOR UPDATE) locator

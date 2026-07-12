@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:oracledb/oracledb.dart';
+import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/transport/transport.dart';
@@ -115,6 +117,7 @@ class _FakeResultSetTransport extends Transport {
     Object Function(LobLocator locator)? wrapLob,
   }) async {
     materializeCalls++;
+    materializeWrapLobFlags.add(wrapLob != null);
     if (materializeThrowOnCall != null &&
         materializeCalls == materializeThrowOnCall) {
       throw const OracleException(
@@ -122,8 +125,22 @@ class _FakeResultSetTransport extends Transport {
         message: 'simulated LOB materialization failure mid-stream',
       );
     }
+    if (wrapLob != null) {
+      // Faithful stand-in for the fetchLobs wrap path: replace every LobLocator
+      // cell with whatever the callback returns; issue no wire traffic.
+      for (final row in response.rows) {
+        for (var i = 0; i < row.length; i++) {
+          final cell = row[i];
+          if (cell is LobLocator) row[i] = wrapLob(cell);
+        }
+      }
+    }
     return response;
   }
+
+  /// One entry per [materializeLobs] call: whether a `wrapLob` callback was
+  /// supplied (i.e. `fetchLobs: true` was threaded to that materialization).
+  final List<bool> materializeWrapLobFlags = [];
 }
 
 ExecuteResponse _batch(
@@ -1060,6 +1077,65 @@ void main() {
           isSuccess: true,
         ); // plain non-cursor reply
         await conn.execute('SELECT 1 FROM dual');
+      },
+    );
+
+    // Story 12.1 review finding (Decision, High): a LOB column inside a REF
+    // CURSOR OUT bind's rows must ALSO wrap into an OracleLob under
+    // fetchLobs: true — the `wrapLob` decision is threaded through
+    // `_wrapRefCursorOutBinds` -> the REF cursor's `ResultSetCursor` ->
+    // per-batch `materializeLobs`. node-oracledb wraps CLOB/BLOB columns
+    // uniformly at wire-decode, including a REF CURSOR's rows.
+    LobLocator clobLocator({int length = 4}) => LobLocator(
+          locator: Uint8List(tnsLobLocatorBufferSize),
+          oracleType: oraTypeClob,
+          length: length,
+          chunkSize: 0,
+        );
+
+    test(
+      'a CLOB column in a REF CURSOR OUT bind wraps into an OracleLob under '
+      'fetchLobs: true',
+      () async {
+        final clob = clobLocator();
+        final t = _FakeResultSetTransport(
+          firstBatch: ExecuteResponse(
+            isSuccess: true,
+            outBindValues: [
+              DecodedCursorResult(
+                columns: [_col('DOC')],
+                cursorId: 42,
+              ),
+            ],
+            outBindIndices: const [0],
+          ),
+          fetchBatches: [
+            _batch([
+              [clob],
+            ], more: false, cursorId: 42),
+          ],
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+        final result = await conn.execute(
+          'BEGIN p(:1); END;',
+          [OracleBind.out(type: OracleDbType.cursor)],
+          const OracleExecuteOptions(fetchLobs: true),
+        );
+        final rs = result.outBinds[0]! as OracleResultSet;
+
+        final row = await rs.getRow();
+        final lob = row!['DOC'];
+        expect(lob, isA<OracleLob>(),
+            reason: 'REF CURSOR LOB column must wrap, not materialize');
+        expect((lob! as OracleLob).type, equals(OracleDbType.clob));
+        expect(conn.hasOpenLob, isTrue);
+        // The per-batch materialize on the REF cursor carried the wrap decision.
+        expect(t.materializeWrapLobFlags, contains(true));
+
+        await (lob as OracleLob).close();
+        await rs.close();
+        expect(conn.hasOpenLob, isFalse);
+        expect(conn.hasOpenResultSet, isFalse);
       },
     );
   });
