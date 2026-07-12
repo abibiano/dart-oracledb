@@ -1,0 +1,3 @@
+## Story 12-1-public-lob-object
+- [Phase 3 — create-story] Epic 12 story ACs were authored from scratch (epics.md carried only a one-line summary per story) — future epic-12 stories will hit the same; ground ACs in the actual LOB source + node-oracledb reference.
+- [Phase 3 — create-story] Scoping + API-surface decisions made by create-story (not pre-specified): fetchLobs acquisition via OracleExecuteOptions.fetchLobs; open OracleLob holds the connection's single in-flight slot until closed; streaming LOB handles (resultSet+fetchLobs) deferred to 12.3 and rejected fail-loud in 12.1; temp-LOB creation deferred to 12.2. Confirm against the retro's intended pre-story OracleLob-surface review.

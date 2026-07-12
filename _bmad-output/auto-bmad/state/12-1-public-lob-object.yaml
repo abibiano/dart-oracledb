@@ -5,10 +5,10 @@ epic_num: 12
 story_num: 1
 branch: story/12-1-public-lob-object
 status: in-progress
-updated_at: "2026-07-12T09:00:43Z"
+updated_at: "2026-07-12T09:14:03Z"
 started_at: "2026-07-12T09:00:43Z"
 completed_at: null
-active_seconds: 0
+active_seconds: 697
 timing_anchor: null
 is_first_in_epic: true
 is_last_in_epic: false
@@ -20,14 +20,14 @@ tea_selected: []
 tea_rationale: null
 epic_story_count: 4
 stories_after_in_epic: 3
-completed_phases: [0]
+completed_phases: [0, 2, 3]
 code_review_iterations: 0
 code_review_loop_done: false
 hitl_halt: null
 external_review_iterations: 0
 convergence_unverified: false
 story_trace: null
-commits: []
+commits: [2436dca]
 phase8_steps:
   trace_gate: null
   nfr: null
@@ -46,7 +46,8 @@ pr_merged: false
 merge_method: null
 merge_commit: null
 branch_deleted: false
-open_questions: []
+open_questions:
+  - "create-story decided the LOB acquisition/lifecycle boundaries (grounded in architecture.md cross-cutting note 1, non-blocking): fetchLobs via OracleExecuteOptions.fetchLobs; open OracleLob holds the connection's single in-flight slot until closed; streaming handles (resultSet+fetchLobs) deferred to 12.3 (fail-loud in 12.1); temp-LOB creation deferred to 12.2; BFILE/trim() out of scope. Dev + code review should confirm these boundaries."
 deferred_work: []
 blockers: []
 overrides: {}
