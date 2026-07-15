@@ -100,6 +100,7 @@ class ResultSetCursor {
   /// before construction (the constructor seeds the buffer synchronously), so
   /// this callback only ever runs on continuation FETCH rounds.
   final Future<void> Function(List<List<Object?>> batch)? _onBatchDecoded;
+
   final Duration? _fetchTimeout;
 
   /// Rows decoded but not yet handed to the caller.
@@ -338,7 +339,10 @@ class ResultSetCursor {
     }
     try {
       final batch = _materializePerBatch
-          ? await _transport.materializeLobs(fetched, timeout: _fetchTimeout)
+          ? await _transport.materializeLobs(
+              fetched,
+              timeout: _fetchTimeout,
+            )
           : fetched;
       // Eager nested-cursor materialization runs AFTER LOB materialization and
       // BEFORE buffering, so the replaced `List<OracleRow>` values are what

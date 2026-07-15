@@ -3,10 +3,16 @@
 ///
 /// A locator is a reference to LOB data stored on the server, shipped with
 /// LOB-prefetch metadata (length and chunk size) because the driver
-/// negotiates `TNS_CCAP_LOB_PREFETCH` in its compile capabilities. Instances
-/// never escape the transport layer: `Transport.sendExecute` materializes
-/// every locator into a Dart `String` (CLOB) or `Uint8List` (BLOB) via TTC
-/// LOB READ operations before the response reaches `OracleConnection`.
+/// negotiates `TNS_CCAP_LOB_PREFETCH` in its compile capabilities.
+///
+/// On the DEFAULT path a locator never escapes the transport layer:
+/// `Transport.materializeLobs` reads every locator into a Dart `String` (CLOB)
+/// or `Uint8List` (BLOB) via TTC LOB READ operations before the response
+/// reaches `OracleConnection`. On the opt-in `OracleExecuteOptions(fetchLobs:
+/// true)` path (Story 12.1) a locator instead escapes wrapped in a public
+/// `OracleLob` handle (the `wrapLob` callback threaded into `materializeLobs`);
+/// the handle owns the locator and drives its own bounded LOB READ/WRITE round
+/// trips. The locator bytes themselves are still never handed to callers.
 library;
 
 import 'dart:typed_data';

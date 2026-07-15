@@ -590,8 +590,9 @@ and fails with a clear `OracleException`.
 
 ### CLOB support
 
-CLOB values round-trip as Dart `String`s — no LOB handle or streaming API is
-needed (or exposed):
+CLOB values round-trip as Dart `String`s by default (opt into an incremental
+[`OracleLob` handle](#incremental-lob-access-with-fetchlobs) with
+`fetchLobs: true`):
 
 - **Queries** — selecting a `CLOB` column returns a `String` (`null` for SQL
   NULL, `''` for `EMPTY_CLOB()`). The driver reads LOB locators transparently
@@ -618,8 +619,9 @@ normal cursor reuse.
 
 ### BLOB support
 
-BLOB values round-trip as Dart `Uint8List`s — no LOB handle or streaming API
-is needed (or exposed):
+BLOB values round-trip as Dart `Uint8List`s by default (opt into an incremental
+[`OracleLob` handle](#incremental-lob-access-with-fetchlobs) with
+`fetchLobs: true`):
 
 - **Queries** — selecting a `BLOB` column returns a `Uint8List` (`null` for
   SQL NULL, an empty `Uint8List` for `EMPTY_BLOB()`). The driver reads LOB
@@ -653,6 +655,84 @@ still not claimed: values are materialized in memory as a single `String` /
 `Uint8List`. NCLOB columns are supported as Dart `String` (the national
 `AL16UTF16` charset — see [Character Set Support](#character-set-support)); BFILE
 columns are not supported and fail with a clear `OracleException`.
+
+### Incremental LOB access with `fetchLobs`
+
+By default a fetched CLOB/NCLOB/BLOB is materialized whole into a `String` /
+`Uint8List`. Pass `OracleExecuteOptions(fetchLobs: true)` to `execute()` instead
+and each CLOB/NCLOB/BLOB in `result.rows` / `result.outBinds` arrives as an
+`OracleLob` handle you read (and, for a writable locator, write) in bounded
+pieces by offset and amount:
+
+```dart
+final result = await connection.execute(
+  'SELECT doc FROM articles WHERE id = :1',
+  [42],
+  OracleExecuteOptions(fetchLobs: true),
+);
+final lob = result.rows.single['DOC'] as OracleLob;
+try {
+  print(lob.length);                       // native units (see below)
+  final head = await lob.read(offset: 1, amount: 100) as String;
+  final all = await lob.read() as String;  // whole value (default args)
+} finally {
+  await lob.close();                        // always close
+}
+```
+
+- **Units and offsets** — offsets are **1-based**; offsets, amounts, and
+  `length` are counted in **characters (UCS-2 code units) for CLOB/NCLOB** and in
+  **bytes for BLOB**. A CLOB/NCLOB `read` returns a `String`, a BLOB `read`
+  returns a `Uint8List`. An `offset`/`amount` that splits a UTF-16 surrogate pair
+  (a supplemental/astral character occupies two UCS-2 code units) has a
+  type-dependent outcome — choose boundaries carefully: an **NCLOB /
+  variable-length-charset CLOB** (decoded UTF-16BE) returns a lone surrogate as a
+  partial character, while a **plain CLOB** (decoded UTF-8) fails loud with an
+  `OracleException` because the split leaves an incomplete UTF-8 sequence.
+- **Writing** — `write(offset, data)` (a `String` for CLOB/NCLOB, `Uint8List` /
+  `List<int>` for BLOB) requires a **writable** locator: a LOB OUT/IN OUT bind or
+  a `SELECT ... FOR UPDATE` locator. Writing through a read-only plain-`SELECT`
+  locator surfaces the Oracle server error (it is not blocked client-side).
+- **Lifecycle** — each open handle holds the connection's single in-flight slot:
+  the connection rejects other operations (and the pool force-closes any
+  still-open handle on release) until every handle is `close()`d. `close()` is
+  idempotent. A SQL `NULL` LOB is Dart `null` under both modes, never a handle.
+- **Multi-row caveat** — a multi-row SELECT with a LOB column yields **one
+  handle per row** (200 rows → up to 200 open handles), and only **one** handle
+  can be read/written at a time: the connection stays busy — rejecting every
+  other statement, and logging a warning if the pool reclaims it — until you
+  close **every** handle. Read each row's LOB fully and `close()` it before
+  moving to the next, and don't leave any handle open. To close them all at once
+  when you're done, call `result.closeLobs()` (it closes every open handle in
+  `rows` / `outBinds` and returns the count):
+
+  ```dart
+  final result = await connection.execute(
+    'SELECT id, doc FROM articles',
+    null,
+    OracleExecuteOptions(fetchLobs: true),
+  );
+  try {
+    for (final row in result.rows) {
+      final lob = row['DOC'] as OracleLob;
+      final text = await lob.read() as String; // read one at a time
+      await lob.close();                        // ...and close before the next
+      // ... use text ...
+    }
+  } finally {
+    await result.closeLobs(); // safety net: close any handle left open
+  }
+  ```
+
+`fetchLobs` wraps only the **eager** shapes: top-level `execute()` SELECT rows
+and scalar OUT / IN OUT binds. A CLOB/NCLOB/BLOB carried by a **lazily-streamed**
+handle is not wrapped in this release and is deferred to Story 12.3: combining
+`resultSet: true` with `fetchLobs: true` throws before any wire round trip, and a
+CLOB/BLOB nested in a `CURSOR(...)` column or carried by a REF CURSOR OUT bind
+**fails loud** under `fetchLobs` (rather than silently materializing) — run those
+statements without `fetchLobs` and the LOB materializes to a `String` /
+`Uint8List` as before. Also not yet available: a `Stream` surface,
+`createTemporary*` LOB creation, BFILE, and `trim()`.
 
 ### JSON support
 

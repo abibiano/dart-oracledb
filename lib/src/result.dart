@@ -4,10 +4,13 @@
 /// handling SELECT query results and DML operation outcomes.
 library;
 
+import 'dart:typed_data';
+
 import 'package:meta/meta.dart';
 
 import 'errors.dart';
 import 'oracle_bind.dart';
+import 'oracle_lob.dart';
 import 'protocol/messages/execute_message.dart';
 import 'result_set.dart';
 
@@ -201,6 +204,66 @@ class OracleResult {
 
   /// Column names in result order.
   List<String> get columnNames => _columnMetadata.map((c) => c.name).toList();
+
+  /// Closes every open [OracleLob] handle held anywhere in this result —
+  /// [rows], [outBinds], and eager [implicitResults] — in one call, and returns
+  /// how many distinct handles were closed.
+  ///
+  /// Only relevant when the statement ran with
+  /// `OracleExecuteOptions(fetchLobs: true)`: each CLOB/NCLOB/BLOB value then
+  /// arrives as an [OracleLob] handle that holds the connection's single
+  /// in-flight slot until closed. A multi-row SELECT with a LOB column yields
+  /// **one handle per distinct locator** (e.g. 200 rows → up to 200 handles),
+  /// and the connection rejects every other operation until they are **all**
+  /// closed — so missing even one leaves the connection wedged. This is a
+  /// convenience to close them in bulk instead of iterating and calling
+  /// [OracleLob.close] on each by hand.
+  ///
+  /// It does **not** relax the single-in-flight invariant (AC5): only one
+  /// [OracleLob] per connection can be read/written at a time, and each must be
+  /// closed before the next is read. This method just closes handles; it never
+  /// runs concurrent LOB ops. Idempotent and exception-free per handle
+  /// ([OracleLob.close] is), so calling it after some handles were already
+  /// closed is safe (already-closed handles are counted as closed).
+  Future<int> closeLobs() async {
+    final lobs = <OracleLob>{};
+    _collectLobs(_rows, lobs);
+    _collectLobs(outBinds.toList(), lobs);
+    _collectLobs(implicitResults, lobs);
+    for (final lob in lobs) {
+      await lob.close();
+    }
+    return lobs.length;
+  }
+
+  /// Recursively gathers every [OracleLob] reachable from [value] into [acc].
+  /// LOB handles nest one level deep in a few result shapes: rows and
+  /// implicit-result [OracleRow]s, `executeMany`/named OUT-bind entries (a
+  /// `List`/`Map` per iteration), and DML-RETURNING OUT-bind cells (a `List`
+  /// per return bind). Deduped via the [Set] so an aliased locator's shared
+  /// handle is closed once.
+  static void _collectLobs(Object? value, Set<OracleLob> acc) {
+    if (value is OracleLob) {
+      acc.add(value);
+    } else if (value is OracleRow) {
+      _collectLobs(value._data, acc);
+    } else if (value is Map) {
+      for (final v in value.values) {
+        _collectLobs(v, acc);
+      }
+    } else if (value is TypedData) {
+      // A materialized BLOB value is a Uint8List — i.e. an Iterable<int> that
+      // can never contain an OracleLob. Skip it explicitly (ahead of the
+      // Iterable branch) so closeLobs() on a result produced WITHOUT fetchLobs
+      // (or a mixed result) does not walk every byte of every BLOB column
+      // looking for handles it cannot hold.
+      return;
+    } else if (value is Iterable) {
+      for (final v in value) {
+        _collectLobs(v, acc);
+      }
+    }
+  }
 
   static Map<String, int> _buildNameMap(List<ColumnMetadata> columns) {
     final map = <String, int>{};

@@ -1,0 +1,58 @@
+# auto-bmad per-story state — written by scripts/state_update.py (full stable schema;
+# see references/state-and-resume.md). Prose belongs in reports/{key}.md, not here.
+story_key: 12-1-public-lob-object
+epic_num: 12
+story_num: 1
+branch: story/12-1-public-lob-object
+status: done
+updated_at: "2026-07-15T07:23:29Z"
+started_at: "2026-07-12T09:00:43Z"
+completed_at: "2026-07-15T07:23:29Z"
+active_seconds: 221776
+timing_anchor: null
+is_first_in_epic: true
+is_last_in_epic: false
+needs_project_context_bootstrap: false
+git_mode: remote
+base_branch: main
+tea_risk: null
+tea_selected: []
+tea_rationale: null
+epic_story_count: 4
+stories_after_in_epic: 3
+completed_phases: [0, 2, 3, 4, 5, 6, 7, 8, 9]
+code_review_iterations: 4
+code_review_loop_done: true
+hitl_halt: "skipped (clean convergence)"
+external_review_iterations: 0
+convergence_unverified: false
+story_trace: null
+commits: [2436dca, a738a16, 2ad8018, 01ec7e0, 810f0ed, 028fa52, b512413, 018fa7e]
+phase8_steps:
+  trace_gate: done
+  nfr: done
+  test_review: done
+  project_context: done
+  reconcile: done
+  archive: done
+  retro: done
+gate_decision: null
+gate_iterations: 0
+deferred_work_archived: 0
+pr_url: "https://github.com/abibiano/dart-oracledb/pull/1"
+ci_run_url: "https://github.com/abibiano/dart-oracledb/actions/runs/29396817523"
+ci_status: passed
+pr_merged: false
+merge_method: null
+merge_commit: null
+branch_deleted: false
+open_questions:
+  - "create-story decided the LOB acquisition/lifecycle boundaries (grounded in architecture.md cross-cutting note 1, non-blocking): fetchLobs via OracleExecuteOptions.fetchLobs; open OracleLob holds the connection's single in-flight slot until closed; streaming handles (resultSet+fetchLobs) deferred to 12.3 (fail-loud in 12.1); temp-LOB creation deferred to 12.2; BFILE/trim() out of scope. Dev + code review should confirm these boundaries."
+  - "Code-review Decision (High) — nested CURSOR()/REF-CURSOR-OUT-bind LOB columns bypass fetchLobs. RESOLVED by user: match the node-oracledb reference. Node wraps every CLOB/BLOB/BFILE column into a Lob handle at wire-decode (thin/protocol/messages/withData.js:380) uniformly, incl. nested-cursor rows (TNS_DATA_TYPE_CURSOR). Fix = thread wrapLob through the nested-cursor drain path so cursor-column LOBs wrap into OracleLob handles under fetchLobs; fix the false 'see Open Questions' doc reference. Top-level resultSet+fetchLobs AC7 rejection stays (separate 12.3 scope)."
+  - "Code-review iter-2 Decision (Low) — multi-row fetchLobs foot-gun (one handle per locator, single in-flight, no bulk-close). RESOLVED by user: FIX NOW — add an OracleResult-level close-all-open-LOBs convenience API + a README multi-row caveat (single-in-flight-until-closed). AC5 single-in-flight invariant stays intact."
+  - "Code-review iter-3 Decision (High) — REF-CURSOR/nested-CURSOR() + fetchLobs handle-lifecycle leak (iter-1's cursor wrap shipped without force-close/reclaim/bulk-close reach). RESOLVED by user: REJECT + DEFER TO 12.3 — reject cursor-column LOBs under fetchLobs pre-wire (fail-loud like resultSet+fetchLobs), reversing iter-1's cursor wrap; top-level eager wrapping (12.1 core) stays. Lazy cursor/streamed LOB handle + full lifecycle deferred to Story 12.3."
+deferred_work:
+  - "Pre-existing FETCH-decode bug (ORA-12547 buffer underrun in decodeExecuteResponse) blocks LIVE exercise of a LOB carried in a nested-CURSOR()/REF-CURSOR-OUT-bind FETCH row — independent of fetchLobs. 12.1's wrap-threading is now correct and unit-proven, but end-to-end validation of that shape is gated on fixing the decode path. Candidate for a future Epic 12 story (target: 12.x)."
+blockers: []
+overrides: {}
+constraints: []

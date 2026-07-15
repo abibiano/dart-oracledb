@@ -43,6 +43,7 @@ export 'src/pool.dart' show OraclePool, PoolSessionCallback;
 // Query Results
 export 'src/result.dart' show OracleResult, OracleRow;
 export 'src/result_set.dart' show OracleResultSet;
+export 'src/oracle_lob.dart' show OracleLob;
 export 'src/protocol/messages/execute_message.dart' show ColumnMetadata;
 
 // Output bind API

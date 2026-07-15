@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:oracledb/oracledb.dart';
+import 'package:oracledb/src/protocol/constants.dart';
+import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
@@ -111,8 +113,10 @@ class _FakeResultSetTransport extends Transport {
     List<BindMetadata>? bindMetadata,
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
+    Object Function(LobLocator locator)? wrapLob,
   }) async {
     materializeCalls++;
+    materializeWrapLobFlags.add(wrapLob != null);
     if (materializeThrowOnCall != null &&
         materializeCalls == materializeThrowOnCall) {
       throw const OracleException(
@@ -120,8 +124,22 @@ class _FakeResultSetTransport extends Transport {
         message: 'simulated LOB materialization failure mid-stream',
       );
     }
+    if (wrapLob != null) {
+      // Faithful stand-in for the fetchLobs wrap path: replace every LobLocator
+      // cell with whatever the callback returns; issue no wire traffic.
+      for (final row in response.rows) {
+        for (var i = 0; i < row.length; i++) {
+          final cell = row[i];
+          if (cell is LobLocator) row[i] = wrapLob(cell);
+        }
+      }
+    }
     return response;
   }
+
+  /// One entry per [materializeLobs] call: whether a `wrapLob` callback was
+  /// supplied (i.e. `fetchLobs: true` was threaded to that materialization).
+  final List<bool> materializeWrapLobFlags = [];
 }
 
 ExecuteResponse _batch(
@@ -1058,6 +1076,56 @@ void main() {
           isSuccess: true,
         ); // plain non-cursor reply
         await conn.execute('SELECT 1 FROM dual');
+      },
+    );
+
+    // Story 12.1 review finding (Decision, High — iter 3): a LOB column carried
+    // by a REF CURSOR OUT bind's rows arrives through a LAZY per-batch drain
+    // whose OracleLob handle lifecycle is not yet complete (force-close on
+    // result-set close / pool-reclaim / decode-throw; closeLobs() reaching a
+    // result-set OUT bind). Wrapping it would orphan handles that permanently
+    // wedge the connection, so Story 12.1 REJECTS such a REF-CURSOR-embedded LOB
+    // column pre-wire (fail loud) rather than silently materializing (AC2) or
+    // wrapping an untrackable handle — wrap is deferred to Story 12.3. This
+    // reverses the iter-1 wrap decision. A real REF CURSOR describing a CLOB
+    // column carries oraTypeClob in its describe metadata, so the reject keys
+    // off the column type.
+    ColumnMetadata clobCol(String name) =>
+        ColumnMetadata(name: name, oracleType: oraTypeClob, maxLength: 0);
+
+    test(
+      'a CLOB column in a REF CURSOR OUT bind fails loud under fetchLobs: true '
+      '(deferred to Story 12.3)',
+      () async {
+        final t = _FakeResultSetTransport(
+          firstBatch: ExecuteResponse(
+            isSuccess: true,
+            outBindValues: [
+              DecodedCursorResult(
+                columns: [clobCol('DOC')],
+                cursorId: 42,
+              ),
+            ],
+            outBindIndices: const [0],
+          ),
+          fetchBatches: const [],
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+        await expectLater(
+          conn.execute(
+            'BEGIN p(:1); END;',
+            [OracleBind.out(type: OracleDbType.cursor)],
+            const OracleExecuteOptions(fetchLobs: true),
+          ),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('Story 12.3'))
+              .having((e) => e.message, 'message', contains('REF CURSOR'))),
+        );
+        // Rejected pre-wrap: no handle registered, and the REF cursor was never
+        // handed back as an open result set — nothing wedges the connection.
+        expect(conn.hasOpenLob, isFalse);
+        expect(conn.hasOpenResultSet, isFalse);
       },
     );
   });

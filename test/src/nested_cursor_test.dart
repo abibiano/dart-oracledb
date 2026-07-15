@@ -12,8 +12,11 @@
 /// piggyback on success and on failure.
 library;
 
+import 'dart:typed_data';
+
 import 'package:oracledb/oracledb.dart';
 import 'package:oracledb/src/protocol/constants.dart';
+import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
@@ -122,8 +125,37 @@ class _NestedCursorTransport extends Transport {
     List<BindMetadata>? bindMetadata,
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
-  }) async => response;
+    Object Function(LobLocator locator)? wrapLob,
+  }) async {
+    // Record whether the fetchLobs wrap decision reached this call, so tests can
+    // assert the flag was threaded through the nested-cursor / REF-cursor drain.
+    materializeWrapLobFlags.add(wrapLob != null);
+    if (wrapLob == null) return response;
+    // Faithful stand-in for the real wrap path: replace every LobLocator cell
+    // (in rows) with whatever the callback returns, issuing no wire traffic.
+    for (final row in response.rows) {
+      for (var i = 0; i < row.length; i++) {
+        final cell = row[i];
+        if (cell is LobLocator) row[i] = wrapLob(cell);
+      }
+    }
+    return response;
+  }
+
+  /// One entry per [materializeLobs] call: whether a `wrapLob` callback was
+  /// supplied (i.e. `fetchLobs: true` was threaded to that materialization).
+  final List<bool> materializeWrapLobFlags = [];
 }
+
+/// Builds a minimal CLOB [LobLocator] for the fetchLobs threading tests. A
+/// non-zero length keeps `OracleLob.length` meaningful; the buffer is never
+/// read (the wrap path issues no LOB READ).
+LobLocator _clobLocator({int length = 4}) => LobLocator(
+      locator: Uint8List(tnsLobLocatorBufferSize),
+      oracleType: oraTypeClob,
+      length: length,
+      chunkSize: 0,
+    );
 
 const _parentColumns = [
   ColumnMetadata(name: 'ID', oracleType: oraTypeNumber, maxLength: 0),
@@ -593,6 +625,98 @@ void main() {
           reason:
               'both the nested cursor and parent result-set cursor are queued',
         );
+      },
+    );
+  });
+
+  // Story 12.1 review finding (Decision, High — iter 3): a LOB nested inside a
+  // CURSOR() result column arrives through a LAZY per-batch result-set drain
+  // whose OracleLob handle lifecycle is not yet complete (force-close on
+  // result-set close / pool-reclaim / decode-throw; closeLobs() reaching a
+  // result-set OUT bind). Wrapping it would orphan handles that permanently
+  // wedge the connection, so Story 12.1 REJECTS such cursor-embedded LOB columns
+  // pre-wire (fail loud) rather than silently materializing (which would break
+  // AC2) — the wrap is deferred to Story 12.3. This reverses the iter-1 wrap
+  // decision. fetchLobs OFF still materializes unchanged.
+  group('nested-CURSOR() LOB columns fail loud under fetchLobs (review '
+      'Decision fix, iter 3)', () {
+    const nestedLobColumns = [
+      ColumnMetadata(name: 'X', oracleType: oraTypeNumber, maxLength: 0),
+      ColumnMetadata(name: 'DOC', oracleType: oraTypeClob, maxLength: 0),
+    ];
+
+    // The nested cursor descriptor must carry the CLOB column in its metadata
+    // so the drained row maps DOC (otherwise OracleRowBuilder drops it).
+    const nestedCursor = DecodedCursorResult(
+      columns: nestedLobColumns,
+      cursorId: 100,
+    );
+
+    _NestedCursorTransport buildTransport(LobLocator clob) =>
+        _NestedCursorTransport(
+          firstBatch: _resp(
+            [
+              [5, nestedCursor],
+            ],
+            more: false,
+            columns: _parentColumns,
+          ),
+          nestedFetches: {
+            100: [
+              ExecuteResponse(
+                isSuccess: true,
+                cursorId: 100,
+                columnMetadata: nestedLobColumns,
+                rows: [
+                  [1, clob],
+                ],
+                moreRowsToFetch: false,
+              ),
+            ],
+          },
+        );
+
+    test(
+      'a CLOB inside a CURSOR() column fails loud under fetchLobs: true '
+      '(deferred to Story 12.3)',
+      () async {
+        final clob = _clobLocator();
+        final t = buildTransport(clob);
+        final conn = OracleConnection.forTesting(transport: t);
+        await expectLater(
+          conn.execute(
+            'SELECT id, nc FROM t',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          ),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('Story 12.3'))
+              .having((e) => e.message, 'message', contains('CURSOR'))),
+        );
+        // No handle was registered for the cursor-embedded LOB: the reject
+        // fires before it could be wrapped, so nothing wedges the connection.
+        // (The parent row carries no top-level LOB, so the eager top-level
+        // materialize registers nothing either.)
+        expect(conn.hasOpenLob, isFalse);
+      },
+    );
+
+    test(
+      'fetchLobs OFF leaves a nested-CURSOR() CLOB on the materialize path '
+      '(no OracleLob, wrapLob never threaded)',
+      () async {
+        final clob = _clobLocator();
+        final t = buildTransport(clob);
+        final conn = OracleConnection.forTesting(transport: t);
+        final result = await conn.execute('SELECT id, nc FROM t');
+
+        final nested = result.rows.single['NC']! as List<OracleRow>;
+        // The fake's materialize path returns the raw locator unwrapped.
+        expect(nested.single['DOC'], isNot(isA<OracleLob>()));
+        expect(conn.hasOpenLob, isFalse);
+        expect(t.materializeWrapLobFlags, everyElement(isFalse),
+            reason: 'no fetchLobs -> no wrapLob on any materialize call');
       },
     );
   });
