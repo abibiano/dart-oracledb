@@ -231,7 +231,13 @@ Opus 4.8 (auto-bmad dev-story delegate).
   `connection.close()` reap open handles.
 - Scope boundaries fail loud: `resultSet: true` + `fetchLobs: true` throws
   pre-wire pointing at Story 12.3; the internal single-read materialize path is
-  unchanged. **Review update (Decision fix):** nested `CURSOR()` and
+  unchanged. **⚠ SUPERSEDED by the iteration-3 Decision fix (2026-07-15):** the
+  iter-1 wrap described in this bullet was REVERSED — nested-`CURSOR()` /
+  REF-CURSOR-OUT-bind LOB columns are now REJECTED pre-wire under `fetchLobs`
+  (deferred to Story 12.3), NOT wrapped. See the iteration-3 Change Log entry and
+  the resolved High Decision finding for the current behavior; the paragraph
+  below is retained only as history. **Review update (Decision fix — iter 1, now
+  reversed):** nested `CURSOR()` and
   REF-CURSOR-OUT-bind LOB columns now ALSO wrap into `OracleLob` handles under
   `fetchLobs` — the `wrapLob` decision is threaded through `_drainNestedCursor`,
   `_wrapRefCursorOutBinds`, the implicit-result nested-cursor pass, and the
@@ -311,6 +317,28 @@ Opus 4.8 (auto-bmad dev-story delegate).
   `test/src/oracle_lob_test.dart`,
   `test/integration/lob_stream_integration_test.dart` (CHANGED) — new coverage
   for every iter-2 fix (truncation guard, connection-close liveness, closeLobs).
+- **Iteration-3 review fixes (2026-07-15):** `lib/src/protocol/result_set_cursor.dart`
+  (CHANGED) — removed the `wrapLob` param/field/pass-through + unused
+  `lob_locator.dart` import (reverses the iter-1 cursor wrap). `lib/src/connection.dart`
+  (CHANGED) — new `_cursorCarriesLob` + `_rejectCursorEmbeddedLob`, wired into
+  `_wrapRefCursorOutBinds` / `_materializeNestedCursorsInBatch` / `_drainNestedCursor`
+  (fail loud pre-wire on cursor-embedded LOBs under `fetchLobs`); new
+  `@internal ensureUsableForLobOp()`; `close()` now just clears `_openLobs`
+  (removed the per-handle marking loop); `fetchLobs` dartdoc + `resultSet+fetchLobs`
+  rejection message/comment reworded to the accurate carve-out.
+  `lib/src/oracle_lob.dart` (CHANGED) — `_ensureOpen()` + `isClosed` consult
+  connection liveness (broken-connection AC5 fix); removed the now-dead
+  `markClosedByConnection()`; plain-CLOB vs NCLOB surrogate-split caveat
+  corrected. `lib/src/result.dart` (CHANGED) — `_collectLobs` skips `TypedData`
+  before the `Iterable` branch (imports `dart:typed_data`). `README.md`
+  (CHANGED) — surrogate-split caveat + "not yet available" carve-out reworded.
+  `test/src/nested_cursor_test.dart`, `test/src/result_set_test.dart` (CHANGED)
+  — iter-1 wrap tests rewritten to assert the fail-loud rejection.
+  `test/src/oracle_lob_test.dart` (CHANGED) — new broken-transport group + a
+  settable `isConnected` on the fake transport.
+  `test/integration/lob_stream_integration_test.dart` (CHANGED) — decision note
+  corrected. `_bmad-output/implementation-artifacts/deferred-work.md` (CHANGED)
+  — target-12.3 entry for the lazy streamed-LOB handle + lifecycle.
 
 ### Change Log
 
@@ -339,6 +367,27 @@ Opus 4.8 (auto-bmad dev-story delegate).
   REF-cursor OUT-bind LOB columns DO wrap). Unit suite (1549 pass) + dual-env
   integration green (23ai 486/28, 21c 487/27, +1 new closeLobs test each);
   `dart analyze` clean.
+- 2026-07-15 — Addressed iteration-3 code review findings — 4 items resolved
+  (1 High Decision + 1 Med + 2 Low Patch). **Decision (REJECT + defer to 12.3):**
+  REVERSED iter-1's cursor-column wrap — nested-`CURSOR()` and REF-CURSOR
+  OUT-bind LOB columns under `fetchLobs: true` now fail loud pre-wire
+  (`_rejectCursorEmbeddedLob`, keyed off the describe column type via
+  `_cursorCarriesLob`) instead of wrapping through the lazy `ResultSetCursor`
+  drain (whose handle lifecycle is deferred to 12.3); `ResultSetCursor` lost its
+  `wrapLob` param/field. The eager top-level row + scalar OUT-bind wrapping
+  (AC1-AC6) is unchanged. `fetchLobs`/`resultSet` dartdoc + rejection message +
+  README reworded to the accurate carve-out; iter-1 wrap tests rewritten to
+  assert the rejection; `deferred-work.md` entry (target 12.3) added for the
+  lazy streamed-handle + full lifecycle. **Med (broken-connection liveness):**
+  `OracleLob._ensureOpen()` and `isClosed` now consult the connection's own
+  liveness (new `@internal ensureUsableForLobOp()`), so read/write short-circuits
+  AND wire ops fail loud on every invalidation path — close, rollback-failure,
+  pool reset, AND a broken transport (the "closed OR broken" half of AC5); also
+  resolves the deferred `isClosed`-after-reset item. **Low:** plain-CLOB vs NCLOB
+  surrogate-split caveat corrected in dartdoc + README; `_collectLobs` skips
+  `TypedData` (materialized BLOB bytes) before the `Iterable` branch. Unit suite
+  1553 pass; full dual-env integration green (23ai 486/28-skip, 21c 487/27-skip);
+  `dart analyze` clean.
 
 ### Review Findings
 
@@ -361,3 +410,13 @@ Opus 4.8 (auto-bmad dev-story delegate).
 - [x] [Review][Patch][Low] `resultSet+fetchLobs` rejection message and dartdoc overstate the exclusion after the iter-1 REF-cursor wrap decision [lib/src/connection.dart:1130] — the pre-wire rejection says "streaming rows that yield OracleLob handles is Story 12.3", but a REF CURSOR OUT bind (streamed per-batch through the same `ResultSetCursor`/`wrapLob` path) now DOES yield `OracleLob` handles under `fetchLobs` via an ordinary `execute()`; the real carve-out is narrower — only the top-level `resultSet:true` SELECT path. Tighten the rejection message and the `fetchLobs`/`resultSet` dartdoc to match the shipped behavior. Source: blind@secondary. **→ RESOLVED 2026-07-12:** the pre-wire rejection message now describes the narrow carve-out accurately — "a top-level streaming result set cannot yet yield OracleLob handles (Story 12.3)" — and explicitly notes that the eager `execute()` path returns handles "including nested-cursor and REF-CURSOR OUT-bind LOB columns". The `OracleExecuteOptions.fetchLobs` dartdoc gained a sentence stating nested-`CURSOR(...)`/REF-CURSOR-OUT-bind LOB columns DO wrap under `fetchLobs`, and reframes the exclusion as top-level-only. The inline comment at the reject site is corrected to match. The existing `resultSet+fetchLobs` rejection unit test still asserts `contains('Story 12.3')` (unchanged, still passing). README "Not yet available" line reworded to "a top-level streaming result set" with a note that nested-cursor/REF-cursor LOB columns do wrap.
 - [x] [Review][Defer][Low] Write-then-read (and write-then-write) on the SAME still-open handle is never exercised live — the iter-1 `_copyBackLocator` copy-back is proven only via fake-transport canned echoes [test/integration/lob_stream_integration_test.dart] — deferred, minor evidence gap
 - [x] [Review][Defer][Low] Multibyte CLOB / any NCLOB `write()` has no real-server proof — the UTF-16BE write-encoding branch is exercised only against the fake transport, against the project's multibyte-on-23ai-AND-21c mandate [test/integration/lob_stream_integration_test.dart] — deferred, coverage gap
+
+#### Iteration 3 findings (2026-07-12)
+
+- [x] [Review][Decision][High] REF-CURSOR / nested-`CURSOR()` + `fetchLobs` LOB-handle lifecycle is incomplete — orphaned handles wedge the connection with no recovery API — The iter-1 decision to WRAP nested-cursor / REF-CURSOR-OUT-bind LOB columns under `fetchLobs` (node-oracledb parity) is sound, but the handle *lifecycle* for that streamed path was never completed. `ResultSetCursor._fetchNextBatch` calls `materializeLobs(..., wrapLob: _wrapLob)` on the WHOLE prefetched batch (up to the hardcoded 50-row `_defaultPrefetchRows`), so every LOB in the batch is wrapped and registered in `_openLobs` *before* the caller retrieves those rows via `getRow()`. If the caller reads only the first row then `rs.close()`s (an ordinary "give me one row" pattern), `OracleResultSet.close()` → `releaseResultSet(...)` never touches `_openLobs` or the cursor buffer and `ResultSetCursor` has no `close()`, so the wrapped-but-undelivered handles stay in `_openLobs` forever — permanently wedging the connection (every later `execute()` throws concurrent-operation) with no public API to discover or close them. `OracleResult.closeLobs()`/`_collectLobs` (result.dart:243-257) only walk rows / OUT-bind cells / implicit rows — NOT an `OracleResultSet` OUT bind — so the documented bulk-close remedy does nothing for this shape; a mid-batch nested-cursor drain failure orphans already-wrapped handles too. The pre-wire rejection message + README claim REF-CURSOR handles arrive "eager … in rows/outBinds," but they arrive lazily via the result-set handle. AC7 reserves "streaming rows yielding LOB handles" for Story 12.3, so the lazy-streaming sub-case is also an AC2-vs-AC7 tension. Live reachability is currently masked by the pre-existing ORA-12547 nested-cursor decode limitation (so largely latent), but the code path, unit tests, and public contract all exist today. Sources: blind@primary+blind@secondary+edge@primary+edge@secondary+auditor@primary. Recommended: fix: complete the lifecycle — force-close the cursor's wrapped+undelivered `OracleLob` handles when its `OracleResultSet` closes / is pool-reclaimed / a batch-decode throws, and extend `_collectLobs`/`closeLobs()` to reach an `OracleResultSet` OUT bind's buffered handles; then correct the rejection-message/README "eager … in rows/outBinds" wording to describe the lazy result-set handle. Alternative (if AC7 alignment is preferred): reject REF-CURSOR + `fetchLobs` pre-wire like `resultSet:true`+`fetchLobs:true` and defer streamed LOB handles to Story 12.3. **→ RESOLVED 2026-07-15 (chosen direction: REJECT + defer to 12.3 — the recommended Alternative):** iter-1's cursor-column wrap is REVERSED. `ResultSetCursor` lost its `wrapLob` constructor param + field + per-batch pass-through (and the now-unused `lob_locator.dart` import), so a cursor-embedded LOB is never wrapped through the lazy drain. Under `fetchLobs: true`, a nested-`CURSOR(...)` LOB column (`_materializeNestedCursorsInBatch`) and a REF-CURSOR-OUT-bind LOB column (`_wrapRefCursorOutBinds`) now fail loud PRE-WIRE via the new `_rejectCursorEmbeddedLob()` (same `OracleException` style as the top-level `resultSet:true`+`fetchLobs:true` rejection, AC7), keying off the describe column type (`_cursorCarriesLob`); the flag propagates to arbitrary nesting depth. The EAGER top-level row + scalar OUT-bind wrapping (AC1-AC6) is UNCHANGED. The `fetchLobs` dartdoc, the `resultSet+fetchLobs` rejection message/inline comment, and the README now accurately describe the carve-out (eager top-level rows/scalar OUT-binds wrap; streamed result-set handles AND cursor/REF-cursor LOB columns are rejected in 12.1, deferred to 12.3). The iter-1 wrap unit tests were rewritten to assert the fail-loud rejection (`test/src/nested_cursor_test.dart`, `test/src/result_set_test.dart`); the integration-test note was corrected. A `deferred-work.md` entry (target: Story 12.3) captures the lazy cursor/streamed LOB handle AND its full lifecycle (force-close on result-set close / pool-reclaim / decode-throw; `closeLobs()` reaching a result-set OUT bind's buffered handles).
+- [x] [Review][Patch][Med] `read()`/`write()` short-circuits bypass the connection-liveness check on a BROKEN (not cleanly-closed) connection [lib/src/oracle_lob.dart:164-166,332] — the iter-2 fix marks open handles closed inside `OracleConnection.close()` (4492-4494), but that loop only runs when `close()` executes its body; paths that invalidate the connection WITHOUT `close()` never mark the handles: `runTransaction()`'s rollback-failure sets `_isClosed = true` directly (connection.dart:4243) and the reset/disconnect path does `_openLobs.clear()` without flipping `_closed` (connection.dart:4420 — the still-open iter-1 deferred `isClosed` item). A handle left open across such an invalidation still has `_closed == false`, so `read()`'s empty/past-end short-circuit returns `''`/`Uint8List(0)` and empty `write()` no-ops silently instead of throwing — violating AC5 ("issuing a read/write after the connection is closed or broken surfaces a clear OracleException"). Wire (non-short-circuit) ops correctly fail via `_runLobOp`→`_ensureOpen`. Fix: gate the short-circuit branches through connection liveness too (have `OracleLob._ensureOpen()` also consult the connection's closed/broken state, or call `markClosedByConnection()` from every invalidation path); also finally resolves the deferred `isClosed`-after-reset item. Sources: auditor@secondary+edge@secondary. **→ RESOLVED 2026-07-15 (root fix via connection-liveness consultation):** rather than marking handles on each individual invalidation path (which cannot catch a purely broken transport, where no connection code runs to flip a flag), `OracleLob._ensureOpen()` — which `read()`/`write()` call at the very TOP, ahead of every empty/past-end/empty-write short-circuit — now consults the connection's own liveness via a new `@internal OracleConnection.ensureUsableForLobOp()` (delegating to the connection's `_ensureOpen`, which checks `_isClosed` AND live-transport state). This makes short-circuits AND wire ops fail loud on EVERY invalidation path uniformly — a clean `close()`, the `runTransaction` rollback-failure that sets `_isClosed`, a pool reset, AND a broken/disconnected transport (the "broken" half of AC5). `OracleLob.isClosed` likewise returns `_closed || !_connection.isConnected`, so it reports `true` after any invalidation — finally resolving the deferred `isClosed`-after-reset item. The now-redundant `markClosedByConnection()` seam and the `connection.close()` per-handle marking loop were removed (close() just clears the `_openLobs` bookkeeping). New unit group `OracleLob after the owning connection is broken (not cleanly closed)` proves it (broken-transport `isClosed`, empty/past-end read + empty-write short-circuits + wire read all fail loud).
+- [x] [Review][Patch][Low] Supplemental-character read caveat is wrong for a plain (UTF-8) CLOB [lib/src/oracle_lob.dart:139-144] — the `read()` dartdoc and README say an `offset`/`amount` that splits a UTF-16 surrogate pair "returns a partial character." That holds only for the NCLOB / variable-length-charset path (UTF-16BE via `decodeUtf16Be`, which passes a lone surrogate through). For a plain UTF-8 CLOB a boundary inside a surrogate pair yields invalid UTF-8, and strict `utf8.decode` throws a `FormatException` that `read()` converts to an `OracleException` ("LOB read returned malformed UTF-8 data") — a hard error, not a partial character. Refine the AC3 caveat to distinguish the CLOB (decode-error) vs NCLOB (lone-surrogate) outcomes. Sources: blind@primary. **→ RESOLVED 2026-07-15:** the `read()`/`getData()` dartdoc and the README `fetchLobs` "Units and offsets" caveat now describe the type-dependent outcome — an NCLOB / variable-length-charset CLOB (UTF-16BE) returns a lone surrogate as a partial character, while a plain CLOB (UTF-8) fails loud with an `OracleException` ("LOB read returned malformed UTF-8 data") because the split leaves an incomplete UTF-8 sequence.
+- [x] [Review][Patch][Low] `_collectLobs` recurses into materialized BLOB bytes — `closeLobs()` walks every byte of every BLOB column [lib/src/result.dart:252-255] — `_collectLobs` recurses into any `Iterable`, and a materialized BLOB value is a `Uint8List` (`Iterable<int>`). Calling `closeLobs()` on a result produced WITHOUT `fetchLobs` (or a mixed result) traverses every byte of every BLOB column to find no handles — O(total BLOB bytes) of wasted work on a defensively-called convenience. Add a `TypedData`/`Uint8List` guard before the `Iterable` branch. Sources: blind@primary. **→ RESOLVED 2026-07-15:** `_collectLobs` (result.dart) now short-circuits on `value is TypedData` (ahead of the generic `Iterable` branch, `dart:typed_data` imported), so a materialized BLOB `Uint8List` is skipped outright instead of walked byte-by-byte. Behavior is unchanged (a byte list can never hold an `OracleLob`); only the wasted traversal is removed.
+- [x] [Review][Defer][Low] `_copyBackLocator` silently drops a differently-sized server-echoed locator [lib/src/connection.dart:4013-4018] — deferred, minor robustness gap (node copies unconditionally; no realistic trigger — a LOB op's echoed locator is same-length). target: Epic 12 follow-up.
+- [x] [Review][Defer][Low] Sparse/gapped `write()` (offset > length+1) assumes Oracle zero-fills the gap; the local `length` advance is unverified and untested [lib/src/oracle_lob.dart:338-339] — deferred, minor behavior/coverage gap. target: Story 12.3 / Epic 12 follow-up.
+- [x] [Review][Defer][Low] `read()` trusts the once-seeded prefetched `_length` with no re-verification; a concurrently-modified non-`FOR UPDATE` LOB can yield a spurious length-mismatch or a silent empty read [lib/src/oracle_lob.dart:149-166] — deferred, minor (node-parity cached-length behavior); document the staleness window in the dartdoc. target: Epic 12 follow-up.

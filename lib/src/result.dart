@@ -4,6 +4,8 @@
 /// handling SELECT query results and DML operation outcomes.
 library;
 
+import 'dart:typed_data';
+
 import 'package:meta/meta.dart';
 
 import 'errors.dart';
@@ -249,6 +251,13 @@ class OracleResult {
       for (final v in value.values) {
         _collectLobs(v, acc);
       }
+    } else if (value is TypedData) {
+      // A materialized BLOB value is a Uint8List — i.e. an Iterable<int> that
+      // can never contain an OracleLob. Skip it explicitly (ahead of the
+      // Iterable branch) so closeLobs() on a result produced WITHOUT fetchLobs
+      // (or a mixed result) does not walk every byte of every BLOB column
+      // looking for handles it cannot hold.
+      return;
     } else if (value is Iterable) {
       for (final v in value) {
         _collectLobs(v, acc);

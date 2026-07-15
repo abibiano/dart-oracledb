@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:oracledb/oracledb.dart';
 import 'package:oracledb/src/protocol/constants.dart';
@@ -1080,60 +1079,51 @@ void main() {
       },
     );
 
-    // Story 12.1 review finding (Decision, High): a LOB column inside a REF
-    // CURSOR OUT bind's rows must ALSO wrap into an OracleLob under
-    // fetchLobs: true — the `wrapLob` decision is threaded through
-    // `_wrapRefCursorOutBinds` -> the REF cursor's `ResultSetCursor` ->
-    // per-batch `materializeLobs`. node-oracledb wraps CLOB/BLOB columns
-    // uniformly at wire-decode, including a REF CURSOR's rows.
-    LobLocator clobLocator({int length = 4}) => LobLocator(
-          locator: Uint8List(tnsLobLocatorBufferSize),
-          oracleType: oraTypeClob,
-          length: length,
-          chunkSize: 0,
-        );
+    // Story 12.1 review finding (Decision, High — iter 3): a LOB column carried
+    // by a REF CURSOR OUT bind's rows arrives through a LAZY per-batch drain
+    // whose OracleLob handle lifecycle is not yet complete (force-close on
+    // result-set close / pool-reclaim / decode-throw; closeLobs() reaching a
+    // result-set OUT bind). Wrapping it would orphan handles that permanently
+    // wedge the connection, so Story 12.1 REJECTS such a REF-CURSOR-embedded LOB
+    // column pre-wire (fail loud) rather than silently materializing (AC2) or
+    // wrapping an untrackable handle — wrap is deferred to Story 12.3. This
+    // reverses the iter-1 wrap decision. A real REF CURSOR describing a CLOB
+    // column carries oraTypeClob in its describe metadata, so the reject keys
+    // off the column type.
+    ColumnMetadata clobCol(String name) =>
+        ColumnMetadata(name: name, oracleType: oraTypeClob, maxLength: 0);
 
     test(
-      'a CLOB column in a REF CURSOR OUT bind wraps into an OracleLob under '
-      'fetchLobs: true',
+      'a CLOB column in a REF CURSOR OUT bind fails loud under fetchLobs: true '
+      '(deferred to Story 12.3)',
       () async {
-        final clob = clobLocator();
         final t = _FakeResultSetTransport(
           firstBatch: ExecuteResponse(
             isSuccess: true,
             outBindValues: [
               DecodedCursorResult(
-                columns: [_col('DOC')],
+                columns: [clobCol('DOC')],
                 cursorId: 42,
               ),
             ],
             outBindIndices: const [0],
           ),
-          fetchBatches: [
-            _batch([
-              [clob],
-            ], more: false, cursorId: 42),
-          ],
+          fetchBatches: const [],
         );
         final conn = OracleConnection.forTesting(transport: t);
-        final result = await conn.execute(
-          'BEGIN p(:1); END;',
-          [OracleBind.out(type: OracleDbType.cursor)],
-          const OracleExecuteOptions(fetchLobs: true),
+        await expectLater(
+          conn.execute(
+            'BEGIN p(:1); END;',
+            [OracleBind.out(type: OracleDbType.cursor)],
+            const OracleExecuteOptions(fetchLobs: true),
+          ),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('Story 12.3'))
+              .having((e) => e.message, 'message', contains('REF CURSOR'))),
         );
-        final rs = result.outBinds[0]! as OracleResultSet;
-
-        final row = await rs.getRow();
-        final lob = row!['DOC'];
-        expect(lob, isA<OracleLob>(),
-            reason: 'REF CURSOR LOB column must wrap, not materialize');
-        expect((lob! as OracleLob).type, equals(OracleDbType.clob));
-        expect(conn.hasOpenLob, isTrue);
-        // The per-batch materialize on the REF cursor carried the wrap decision.
-        expect(t.materializeWrapLobFlags, contains(true));
-
-        await (lob as OracleLob).close();
-        await rs.close();
+        // Rejected pre-wrap: no handle registered, and the REF cursor was never
+        // handed back as an open result set — nothing wedges the connection.
         expect(conn.hasOpenLob, isFalse);
         expect(conn.hasOpenResultSet, isFalse);
       },

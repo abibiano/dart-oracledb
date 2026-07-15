@@ -114,8 +114,14 @@ class OracleLob {
   /// metadata; it does not bound [read] / [write] amounts.
   int get chunkSize => _locator.chunkSize;
 
-  /// Whether [close] has been called (or the pool force-closed this handle).
-  bool get isClosed => _closed;
+  /// Whether this handle can no longer be read or written — because [close] was
+  /// called, the pool force-closed it on connection reclaim, or the owning
+  /// connection was itself closed or broken (a clean `close()`, a
+  /// `runTransaction` rollback-failure invalidation, a pool reset, or a
+  /// disconnected transport). A handle left open across any connection
+  /// invalidation reports `true` here without that path having to mark each
+  /// handle — [isClosed] consults the connection's own liveness.
+  bool get isClosed => _closed || !_connection.isConnected;
 
   bool get _isBlob => _locator.oracleType == oraTypeBlob;
 
@@ -139,9 +145,16 @@ class OracleLob {
   /// **Supplemental-character caveat (CLOB/NCLOB):** a UCS-2 code unit is
   /// equivalent to a character for all but supplemental (astral) characters,
   /// which occupy **two** UCS-2 code units (a UTF-16 surrogate pair). An
-  /// [offset]/[amount] that lands inside such a pair returns a partial
-  /// character — choose boundaries carefully when supplemental characters may be
-  /// present (node-oracledb documents this exact caveat on `getData`).
+  /// [offset]/[amount] that lands inside such a pair has a **type-dependent**
+  /// outcome — choose boundaries carefully when supplemental characters may be
+  /// present (node-oracledb documents this caveat on `getData`):
+  /// - **NCLOB / variable-length-charset CLOB** (decoded UTF-16BE): the split
+  ///   leaves a lone surrogate, which passes through into the returned `String`
+  ///   as a partial (unpaired) character.
+  /// - **plain CLOB** (decoded UTF-8): the split leaves an incomplete UTF-8
+  ///   byte sequence, which fails strict decode — [read] throws an
+  ///   [OracleException] ("LOB read returned malformed UTF-8 data"), a hard
+  ///   error rather than a partial character.
   ///
   /// Throws [ArgumentError] before any wire round trip if [offset] `<= 0`, or if
   /// [amount] is given and `<= 0`. Throws [OracleException] if the handle is
@@ -361,23 +374,6 @@ class OracleLob {
     _reclaimedByPool = true;
   }
 
-  /// Marks this handle closed because its owning connection was closed
-  /// (`OracleConnection.close()`), without issuing the [close] bookkeeping
-  /// callback (the connection is tearing down its own `_openLobs` set).
-  ///
-  /// Flipping `_closed` here is load-bearing: `read`/`write` gate on the
-  /// handle's own [_ensureOpen] *before* their empty/past-end/empty-write
-  /// short-circuits, which return without ever reaching the connection-level
-  /// liveness check. Without this, an empty/past-end read or an empty write on
-  /// a handle abandoned across `connection.close()` would silently succeed
-  /// (AC5 violation). Marking closed also makes [isClosed] report `true` after
-  /// the owning connection is closed. Package-internal seam for
-  /// `connection.dart`.
-  @internal
-  void markClosedByConnection() {
-    _closed = true;
-  }
-
   void _validateOffsetAmount(int offset, int? amount) {
     if (offset <= 0) {
       throw ArgumentError.value(
@@ -416,5 +412,13 @@ class OracleLob {
             'data',
       );
     }
+    // The handle itself is open, but the owning connection may have been closed
+    // or broken out from under it (a clean close(), a runTransaction
+    // rollback-failure invalidation, a pool reset, or a disconnected transport).
+    // Consult the connection's own liveness so read()/write() — including their
+    // empty/past-end/empty-write short-circuits, which return before the wire
+    // path's connection check — fail loud on every invalidation path (AC5:
+    // "closed OR broken"), not just a borrower-initiated close().
+    _connection.ensureUsableForLobOp();
   }
 }

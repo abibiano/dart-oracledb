@@ -25,7 +25,6 @@ import 'package:meta/meta.dart';
 
 import '../errors.dart';
 import '../transport/transport.dart';
-import 'lob_locator.dart';
 import 'messages/execute_message.dart';
 
 /// Drives incremental row delivery over one open server cursor.
@@ -67,7 +66,6 @@ class ResultSetCursor {
     required bool materializePerBatch,
     bool requiresFullExecute = false,
     Future<void> Function(List<List<Object?>> batch)? onBatchDecoded,
-    Object Function(LobLocator locator)? wrapLob,
     Duration? fetchTimeout = const Duration(minutes: 2),
   })  : _transport = transport,
         _cursorId = cursorId,
@@ -78,7 +76,6 @@ class ResultSetCursor {
         _preserveTimestampTimeZone = preserveTimestampTimeZone,
         _materializePerBatch = materializePerBatch,
         _onBatchDecoded = onBatchDecoded,
-        _wrapLob = wrapLob,
         _fetchTimeout = fetchTimeout,
         _buffer = Queue<List<Object?>>.of(firstBatch),
         _previousRoundLastRow =
@@ -104,13 +101,6 @@ class ResultSetCursor {
   /// this callback only ever runs on continuation FETCH rounds.
   final Future<void> Function(List<List<Object?>> batch)? _onBatchDecoded;
 
-  /// Optional `fetchLobs: true` wrap callback: when supplied, each fetched
-  /// CLOB/NCLOB/BLOB locator in a per-batch materialized row is wrapped in a
-  /// connection-owned `OracleLob` handle instead of being read into a `String`
-  /// / `Uint8List`. Threaded down to [Transport.materializeLobs]. Null on the
-  /// default (materialize) path. Only meaningful when [_materializePerBatch] is
-  /// true (the eager `execute()` drain materializes above this cursor).
-  final Object Function(LobLocator locator)? _wrapLob;
   final Duration? _fetchTimeout;
 
   /// Rows decoded but not yet handed to the caller.
@@ -352,7 +342,6 @@ class ResultSetCursor {
           ? await _transport.materializeLobs(
               fetched,
               timeout: _fetchTimeout,
-              wrapLob: _wrapLob,
             )
           : fetched;
       // Eager nested-cursor materialization runs AFTER LOB materialization and

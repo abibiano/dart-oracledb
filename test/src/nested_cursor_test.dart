@@ -629,13 +629,17 @@ void main() {
     );
   });
 
-  // Story 12.1 review finding (Decision, High): a LOB nested inside a CURSOR()
-  // result column must ALSO wrap into an OracleLob under fetchLobs: true, not
-  // silently materialize on the one path that bypassed the wrap decision.
-  // node-oracledb wraps every CLOB/BLOB column uniformly at wire-decode,
-  // including nested-cursor rows; this proves the `wrapLob` callback is threaded
-  // through `_drainNestedCursor` -> `ResultSetCursor` -> `materializeLobs`.
-  group('nested-CURSOR() LOB columns honor fetchLobs (review Decision fix)', () {
+  // Story 12.1 review finding (Decision, High — iter 3): a LOB nested inside a
+  // CURSOR() result column arrives through a LAZY per-batch result-set drain
+  // whose OracleLob handle lifecycle is not yet complete (force-close on
+  // result-set close / pool-reclaim / decode-throw; closeLobs() reaching a
+  // result-set OUT bind). Wrapping it would orphan handles that permanently
+  // wedge the connection, so Story 12.1 REJECTS such cursor-embedded LOB columns
+  // pre-wire (fail loud) rather than silently materializing (which would break
+  // AC2) — the wrap is deferred to Story 12.3. This reverses the iter-1 wrap
+  // decision. fetchLobs OFF still materializes unchanged.
+  group('nested-CURSOR() LOB columns fail loud under fetchLobs (review '
+      'Decision fix, iter 3)', () {
     const nestedLobColumns = [
       ColumnMetadata(name: 'X', oracleType: oraTypeNumber, maxLength: 0),
       ColumnMetadata(name: 'DOC', oracleType: oraTypeClob, maxLength: 0),
@@ -673,30 +677,27 @@ void main() {
         );
 
     test(
-      'a CLOB inside a CURSOR() column wraps into an OracleLob under '
-      'fetchLobs: true',
+      'a CLOB inside a CURSOR() column fails loud under fetchLobs: true '
+      '(deferred to Story 12.3)',
       () async {
         final clob = _clobLocator();
         final t = buildTransport(clob);
         final conn = OracleConnection.forTesting(transport: t);
-        final result = await conn.execute(
-          'SELECT id, nc FROM t',
-          null,
-          const OracleExecuteOptions(fetchLobs: true),
+        await expectLater(
+          conn.execute(
+            'SELECT id, nc FROM t',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          ),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('Story 12.3'))
+              .having((e) => e.message, 'message', contains('CURSOR'))),
         );
-
-        final nested = result.rows.single['NC']! as List<OracleRow>;
-        final lob = nested.single['DOC'];
-        expect(lob, isA<OracleLob>(),
-            reason: 'nested-cursor LOB must wrap, not materialize');
-        expect((lob! as OracleLob).type, equals(OracleDbType.clob));
-        expect((lob as OracleLob).length, equals(4));
-        // The wrapped handle holds the connection open (AC5 lifecycle).
-        expect(conn.hasOpenLob, isTrue);
-        // The nested-cursor batch was materialized WITH the wrap decision.
-        expect(t.materializeWrapLobFlags, contains(true));
-
-        await lob.close();
+        // No handle was registered for the cursor-embedded LOB: the reject
+        // fires before it could be wrapped, so nothing wedges the connection.
+        // (The parent row carries no top-level LOB, so the eager top-level
+        // materialize registers nothing either.)
         expect(conn.hasOpenLob, isFalse);
       },
     );

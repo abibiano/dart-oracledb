@@ -47,8 +47,14 @@ class _FakeLobTransport extends Transport {
   /// Snapshot (copy) of the `sourceLocator` bytes passed to each op, in order.
   final List<Uint8List> sentLocators = <Uint8List>[];
 
+  /// Flip to `false` to simulate a broken transport (a server-closed socket or
+  /// a poisoned/timed-out RPC) WITHOUT a clean `connection.close()` — the
+  /// BROKEN/RESET invalidation path that leaves `OracleConnection._isClosed`
+  /// unset but the transport disconnected.
+  bool connected = true;
+
   @override
-  bool get isConnected => true;
+  bool get isConnected => connected;
 
   @override
   bool get isCorrupted => false;
@@ -621,6 +627,62 @@ void main() {
     test('a wire read also fails loud after connection.close()', () async {
       final (conn, t, lob) = await _fetchLob(_clob(5));
       await conn.close();
+      await expectLater(
+        lob.read(offset: 1, amount: 3),
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.lobReadCalls, equals(0));
+    });
+  });
+
+  group('OracleLob after the owning connection is broken (not cleanly closed)',
+      () {
+    // A connection can be invalidated WITHOUT connection.close() — a broken
+    // transport (server-closed socket / poisoned RPC) or the runTransaction
+    // rollback-failure path leaves the handle's own `_closed` unset while the
+    // connection is no longer usable. read()/write() gate on the connection's
+    // liveness (via ensureUsableForLobOp), so even the empty/past-end/empty-write
+    // short-circuits fail loud there (AC5 "closed OR broken"), not just the wire
+    // path. (iter-3 Med patch.)
+
+    test('isClosed reports true once the transport goes broken', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      expect(lob.isClosed, isFalse);
+      t.connected = false; // broken transport, no connection.close()
+      expect(lob.isClosed, isTrue);
+    });
+
+    test('empty/past-end read short-circuits fail loud on a broken transport',
+        () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0)); // empty CLOB
+      t.connected = false;
+      await expectLater(
+        lob.read(), // would short-circuit to '' on a live connection
+        throwsA(isA<OracleException>()),
+      );
+      final (conn2, t2, blob) = await _fetchLob(_blob(4));
+      t2.connected = false;
+      await expectLater(
+        blob.read(offset: 5, amount: 8), // past-end short-circuit
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.lobReadCalls, equals(0));
+      expect(t2.lobReadCalls, equals(0));
+    });
+
+    test('empty write no-op fails loud on a broken transport', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      t.connected = false;
+      await expectLater(
+        lob.write(3, ''), // would no-op on a live connection
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.lobWriteCalls, equals(0));
+    });
+
+    test('a wire read also fails loud on a broken transport', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      t.connected = false;
       await expectLater(
         lob.read(offset: 1, amount: 3),
         throwsA(isA<OracleException>()),

@@ -684,8 +684,11 @@ try {
   `length` are counted in **characters (UCS-2 code units) for CLOB/NCLOB** and in
   **bytes for BLOB**. A CLOB/NCLOB `read` returns a `String`, a BLOB `read`
   returns a `Uint8List`. An `offset`/`amount` that splits a UTF-16 surrogate pair
-  (a supplemental/astral character occupies two UCS-2 code units) yields a
-  partial character — choose boundaries carefully.
+  (a supplemental/astral character occupies two UCS-2 code units) has a
+  type-dependent outcome — choose boundaries carefully: an **NCLOB /
+  variable-length-charset CLOB** (decoded UTF-16BE) returns a lone surrogate as a
+  partial character, while a **plain CLOB** (decoded UTF-8) fails loud with an
+  `OracleException` because the split leaves an incomplete UTF-8 sequence.
 - **Writing** — `write(offset, data)` (a `String` for CLOB/NCLOB, `Uint8List` /
   `List<int>` for BLOB) requires a **writable** locator: a LOB OUT/IN OUT bind or
   a `SELECT ... FOR UPDATE` locator. Writing through a read-only plain-`SELECT`
@@ -721,11 +724,15 @@ try {
   }
   ```
 
-Not yet available: `resultSet: true` combined with `fetchLobs: true` (a
-top-level streaming result set that yields handles), a `Stream` surface,
-`createTemporary*` LOB creation, BFILE, and `trim()`. A CLOB/BLOB nested in a
-`CURSOR(...)` column or a REF CURSOR OUT bind, however, **does** arrive as an
-`OracleLob` handle under `fetchLobs`.
+`fetchLobs` wraps only the **eager** shapes: top-level `execute()` SELECT rows
+and scalar OUT / IN OUT binds. A CLOB/NCLOB/BLOB carried by a **lazily-streamed**
+handle is not wrapped in this release and is deferred to Story 12.3: combining
+`resultSet: true` with `fetchLobs: true` throws before any wire round trip, and a
+CLOB/BLOB nested in a `CURSOR(...)` column or carried by a REF CURSOR OUT bind
+**fails loud** under `fetchLobs` (rather than silently materializing) — run those
+statements without `fetchLobs` and the LOB materializes to a `String` /
+`Uint8List` as before. Also not yet available: a `Stream` surface,
+`createTemporary*` LOB creation, BFILE, and `trim()`.
 
 ### JSON support
 

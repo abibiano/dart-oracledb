@@ -219,20 +219,24 @@ void main() {
         await lob.close();
       });
 
-      // NOTE (Story 12.1 review Decision fix): the fetchLobs wrap decision is
-      // now threaded through the nested-CURSOR() / REF-CURSOR-OUT-bind drain so
-      // those LOB columns ALSO wrap into OracleLob handles (see the connection
-      // + ResultSetCursor threading, and the fake-transport unit tests in
-      // test/src/result_set_test.dart "a CLOB column in a REF CURSOR OUT bind
-      // wraps into an OracleLob" and test/src/nested_cursor_test.dart
-      // "nested-CURSOR() LOB columns honor fetchLobs"). It is NOT exercised live
-      // here: a REF CURSOR / nested CURSOR() whose rows carry a LOB trips a
-      // PRE-EXISTING, fetchLobs-independent FETCH-decode limitation
-      // ("ORA-12547 buffer underrun in execute response / Integer too large"
-      // inside decodeExecuteResponse, which runs BEFORE any wrap/materialize
+      // NOTE (Story 12.1 review Decision fix, iter 3): a LOB carried by a nested
+      // CURSOR() result column or a REF CURSOR OUT bind arrives through a LAZY
+      // per-batch result-set drain whose OracleLob handle lifecycle is not yet
+      // complete (force-close on result-set close / pool-reclaim / decode-throw;
+      // closeLobs() reaching a result-set OUT bind). Story 12.1 therefore
+      // REJECTS such cursor-embedded LOB columns pre-wire (fail loud) under
+      // fetchLobs rather than wrapping an untrackable handle or silently
+      // materializing (AC2) — the wrap is deferred to Story 12.3. The reject is
+      // proven by the fake-transport unit tests test/src/result_set_test.dart
+      // "a CLOB column in a REF CURSOR OUT bind fails loud under fetchLobs" and
+      // test/src/nested_cursor_test.dart "nested-CURSOR() LOB columns fail loud
+      // under fetchLobs". It is NOT exercised live here: a REF CURSOR / nested
+      // CURSOR() whose rows carry a LOB trips a PRE-EXISTING,
+      // fetchLobs-independent FETCH-decode limitation ("ORA-12547 buffer
+      // underrun in execute response / Integer too large" inside
+      // decodeExecuteResponse, which runs BEFORE any reject/wrap/materialize
       // step), so the shape cannot be driven end-to-end against a real server
-      // yet regardless of fetchLobs. The wrap-threading itself is proven by the
-      // unit/fake-transport tests above.
+      // yet regardless of fetchLobs.
 
       // ---------------------------------------------------------------
       // Writing through a writable (FOR UPDATE) locator

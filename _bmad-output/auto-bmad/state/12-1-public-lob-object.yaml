@@ -5,11 +5,11 @@ epic_num: 12
 story_num: 1
 branch: story/12-1-public-lob-object
 status: in-progress
-updated_at: "2026-07-12T19:21:14Z"
+updated_at: "2026-07-15T06:28:16Z"
 started_at: "2026-07-12T09:00:43Z"
 completed_at: null
-active_seconds: 7361
-timing_anchor: 1783883240
+active_seconds: 9498
+timing_anchor: 1783886479
 is_first_in_epic: true
 is_last_in_epic: false
 needs_project_context_bootstrap: false
@@ -21,13 +21,13 @@ tea_rationale: null
 epic_story_count: 4
 stories_after_in_epic: 3
 completed_phases: [0, 2, 3, 4, 5]
-code_review_iterations: 2
+code_review_iterations: 3
 code_review_loop_done: true
 hitl_halt: null
 external_review_iterations: 0
 convergence_unverified: true
 story_trace: null
-commits: [2436dca, a738a16, 2ad8018, 01ec7e0]
+commits: [2436dca, a738a16, 2ad8018, 01ec7e0, 810f0ed]
 phase8_steps:
   trace_gate: null
   nfr: null
@@ -50,6 +50,7 @@ open_questions:
   - "create-story decided the LOB acquisition/lifecycle boundaries (grounded in architecture.md cross-cutting note 1, non-blocking): fetchLobs via OracleExecuteOptions.fetchLobs; open OracleLob holds the connection's single in-flight slot until closed; streaming handles (resultSet+fetchLobs) deferred to 12.3 (fail-loud in 12.1); temp-LOB creation deferred to 12.2; BFILE/trim() out of scope. Dev + code review should confirm these boundaries."
   - "Code-review Decision (High) — nested CURSOR()/REF-CURSOR-OUT-bind LOB columns bypass fetchLobs. RESOLVED by user: match the node-oracledb reference. Node wraps every CLOB/BLOB/BFILE column into a Lob handle at wire-decode (thin/protocol/messages/withData.js:380) uniformly, incl. nested-cursor rows (TNS_DATA_TYPE_CURSOR). Fix = thread wrapLob through the nested-cursor drain path so cursor-column LOBs wrap into OracleLob handles under fetchLobs; fix the false 'see Open Questions' doc reference. Top-level resultSet+fetchLobs AC7 rejection stays (separate 12.3 scope)."
   - "Code-review iter-2 Decision (Low) — multi-row fetchLobs foot-gun (one handle per locator, single in-flight, no bulk-close). RESOLVED by user: FIX NOW — add an OracleResult-level close-all-open-LOBs convenience API + a README multi-row caveat (single-in-flight-until-closed). AC5 single-in-flight invariant stays intact."
+  - "Code-review iter-3 Decision (High) — REF-CURSOR/nested-CURSOR() + fetchLobs handle-lifecycle leak (iter-1's cursor wrap shipped without force-close/reclaim/bulk-close reach). RESOLVED by user: REJECT + DEFER TO 12.3 — reject cursor-column LOBs under fetchLobs pre-wire (fail-loud like resultSet+fetchLobs), reversing iter-1's cursor wrap; top-level eager wrapping (12.1 core) stays. Lazy cursor/streamed LOB handle + full lifecycle deferred to Story 12.3."
 deferred_work:
   - "Pre-existing FETCH-decode bug (ORA-12547 buffer underrun in decodeExecuteResponse) blocks LIVE exercise of a LOB carried in a nested-CURSOR()/REF-CURSOR-OUT-bind FETCH row — independent of fetchLobs. 12.1's wrap-threading is now correct and unit-proven, but end-to-end validation of that shape is gated on fixing the decode path. Candidate for a future Epic 12 story (target: 12.x)."
 blockers: []
