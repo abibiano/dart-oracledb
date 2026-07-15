@@ -266,6 +266,14 @@ class OracleLob {
   /// `LOB_OP_WRITE` — wire-level fragmentation is handled underneath (there is
   /// no client-side chunking loop in this release).
   ///
+  /// **Unpaired-surrogate caveat (CLOB/NCLOB):** no pre-wire validation of the
+  /// UTF-16 code units is performed (node-oracledb parity). For a plain CLOB the
+  /// text is UTF-8 encoded and a lone (unpaired) surrogate is silently
+  /// substituted with U+FFFD; for an NCLOB / variable-length CLOB the code units
+  /// are written raw as UTF-16BE, so a lone surrogate ships as invalid UTF-16BE
+  /// to the server. Callers slicing a `String` at arbitrary boundaries should
+  /// split only at whole-character boundaries to avoid splitting a surrogate pair.
+  ///
   /// The value is written through the wrapped locator, so the handle must wrap a
   /// **writable** locator: a LOB OUT / IN OUT bind, or a `SELECT ... FOR UPDATE`
   /// locator. Writing through a read-only plain-`SELECT` locator is **not**
