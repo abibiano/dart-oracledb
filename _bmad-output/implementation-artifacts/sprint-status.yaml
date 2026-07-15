@@ -199,7 +199,7 @@ development_status:
 
   # Epic 12: LOB Streaming & Temporary LOBs [extends Epic 4]
   epic-12: in-progress
-  12-1-public-lob-object: review
+  12-1-public-lob-object: done
   12-2-temporary-lob-lifecycle: backlog
   12-3-chunked-streaming-transfer: backlog
   12-4-dual-env-integration-tests: backlog

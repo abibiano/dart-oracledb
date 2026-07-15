@@ -1,6 +1,6 @@
 # Story 12.1: Public LOB object (OracleLob) — read/write streaming for CLOB/BLOB
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- FIRST story of Epic 12. baseline_commit is injected by the auto-bmad orchestrator (it owns git); do not fabricate it here. -->
