@@ -5,7 +5,7 @@ epic_num: 12
 story_num: 1
 branch: story/12-1-public-lob-object
 status: done
-updated_at: "2026-07-15T07:23:29Z"
+updated_at: "2026-07-15T07:25:23Z"
 started_at: "2026-07-12T09:00:43Z"
 completed_at: "2026-07-15T07:23:29Z"
 active_seconds: 221776
@@ -42,10 +42,10 @@ deferred_work_archived: 0
 pr_url: "https://github.com/abibiano/dart-oracledb/pull/1"
 ci_run_url: "https://github.com/abibiano/dart-oracledb/actions/runs/29396817523"
 ci_status: passed
-pr_merged: false
-merge_method: null
-merge_commit: null
-branch_deleted: false
+pr_merged: true
+merge_method: merge
+merge_commit: fe27dbd64e54d54ea9a39a826232a02af41d59b8
+branch_deleted: true
 open_questions:
   - "create-story decided the LOB acquisition/lifecycle boundaries (grounded in architecture.md cross-cutting note 1, non-blocking): fetchLobs via OracleExecuteOptions.fetchLobs; open OracleLob holds the connection's single in-flight slot until closed; streaming handles (resultSet+fetchLobs) deferred to 12.3 (fail-loud in 12.1); temp-LOB creation deferred to 12.2; BFILE/trim() out of scope. Dev + code review should confirm these boundaries."
   - "Code-review Decision (High) — nested CURSOR()/REF-CURSOR-OUT-bind LOB columns bypass fetchLobs. RESOLVED by user: match the node-oracledb reference. Node wraps every CLOB/BLOB/BFILE column into a Lob handle at wire-decode (thin/protocol/messages/withData.js:380) uniformly, incl. nested-cursor rows (TNS_DATA_TYPE_CURSOR). Fix = thread wrapLob through the nested-cursor drain path so cursor-column LOBs wrap into OracleLob handles under fetchLobs; fix the false 'see Open Questions' doc reference. Top-level resultSet+fetchLobs AC7 rejection stays (separate 12.3 scope)."
