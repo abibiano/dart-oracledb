@@ -5,10 +5,10 @@ epic_num: 12
 story_num: 1
 branch: story/12-1-public-lob-object
 status: in-progress
-updated_at: "2026-07-15T07:12:07Z"
+updated_at: "2026-07-15T07:14:57Z"
 started_at: "2026-07-12T09:00:43Z"
 completed_at: null
-active_seconds: 221639
+active_seconds: 221776
 timing_anchor: null
 is_first_in_epic: true
 is_last_in_epic: false
@@ -20,7 +20,7 @@ tea_selected: []
 tea_rationale: null
 epic_story_count: 4
 stories_after_in_epic: 3
-completed_phases: [0, 2, 3, 4, 5, 6, 7]
+completed_phases: [0, 2, 3, 4, 5, 6, 7, 8]
 code_review_iterations: 4
 code_review_loop_done: true
 hitl_halt: "skipped (clean convergence)"
@@ -29,13 +29,13 @@ convergence_unverified: false
 story_trace: null
 commits: [2436dca, a738a16, 2ad8018, 01ec7e0, 810f0ed, 028fa52]
 phase8_steps:
-  trace_gate: null
-  nfr: null
-  test_review: null
-  project_context: null
-  reconcile: null
-  archive: null
-  retro: null
+  trace_gate: done
+  nfr: done
+  test_review: done
+  project_context: done
+  reconcile: done
+  archive: done
+  retro: done
 gate_decision: null
 gate_iterations: 0
 deferred_work_archived: 0
