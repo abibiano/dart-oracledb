@@ -403,7 +403,9 @@ class OracleLob {
 
   /// Streams this CLOB/NCLOB's text from 1-based [offset] to the end of the LOB
   /// in pieces of at most [pieceSize] **characters** (UCS-2 code units), one
-  /// TTC LOB READ round trip per piece.
+  /// TTC LOB READ round trip per piece — with one documented exception to
+  /// *both* counts when a supplemental character straddles a piece boundary (see
+  /// the piece-boundary bullet below).
   ///
   /// The BLOB sibling is [byteStream]. Use these instead of [read] when the
   /// point is never to hold the whole value in memory:
@@ -427,21 +429,35 @@ class OracleLob {
   ///   [chunkSize] is recommended for efficiency (node-oracledb `lob.pieceSize`
   ///   parity, whose default is also `chunkSize`). Units are characters — the
   ///   type's native units, exactly as for [read] and [length].
-  /// * **One round trip per piece**, and the stream ends when a READ comes back
-  ///   with **no data** (node-oracledb `lob.js _read()`: `data == null` →
+  /// * **One round trip per piece** (except across a straddled supplemental
+  ///   character — see the next bullet), and the stream ends when a READ comes
+  ///   back with **no data** (node-oracledb `lob.js _read()`: `data == null` →
   ///   `push(null)`) — deliberately NOT when the cached [length] is reached, so
   ///   the stream is immune to a stale prefetched length (see [read]) and never
   ///   loops past the end. That terminating empty READ costs one extra round
   ///   trip; an empty LOB therefore yields **no pieces** after a single READ.
-  /// * **Pieces are not guaranteed whole-character-aligned.** The driver — not
-  ///   the caller — picks the boundaries here, and a supplemental (astral)
-  ///   character occupies two UCS-2 code units, so a boundary can fall between
-  ///   the two halves of a surrogate pair. The driver never emits a piece ending
-  ///   in an unpaired high surrogate (it is held back and joined to the next
-  ///   piece), and never splits a multi-byte encoding sequence, so the
-  ///   **concatenation is always exact**; an individual piece may still begin
-  ///   with a low surrogate whose pair partner ended the previous emission only
-  ///   if the LOB itself stores unpaired surrogates.
+  /// * **Pieces are not guaranteed whole-character-aligned, and a supplemental
+  ///   character straddling a boundary relaxes both the piece size and the
+  ///   round-trip count.** The driver — not the caller — picks the boundaries
+  ///   here, and a supplemental (astral) character occupies two UCS-2 code
+  ///   units, so a boundary can fall between the two halves of a surrogate pair.
+  ///   When it does, the trailing high surrogate is held back and joined to the
+  ///   next piece (a split multi-byte encoding sequence is carried over the same
+  ///   way), which is what keeps the **concatenation always exact** — and has two
+  ///   deliberate consequences:
+  ///     * an emitted piece may be **one UCS-2 code unit longer than
+  ///       [pieceSize]** (the carried-over high surrogate ahead of a full piece
+  ///       of freshly read units); and
+  ///     * an emitted piece may span **more than one READ**. A READ whose whole
+  ///       payload has to be held back emits nothing, so the following piece
+  ///       covers two round trips. With `pieceSize: 1` over supplemental text
+  ///       that is every piece.
+  ///   The driver never emits a piece ending in an unpaired high surrogate —
+  ///   *except* for a LOB that itself ends with one, which is emitted as the
+  ///   final piece so the concatenation stays exactly equal to [read]. An
+  ///   individual piece may likewise begin with a low surrogate whose pair
+  ///   partner ended the previous emission only if the LOB itself stores
+  ///   unpaired surrogates.
   /// * **Liveness is re-checked before every piece**, so closing the handle,
   ///   losing the connection, or a pool reclaim mid-stream surfaces a fail-loud
   ///   error on the stream rather than silently truncating it. Each piece also
@@ -642,7 +658,11 @@ class OracleLob {
   /// * **One WRITE per caller chunk** (node-oracledb `lob.js _write()` parity):
   ///   the chunk size the caller emits IS the wire piece size. An **empty**
   ///   chunk is skipped with no round trip, and an empty stream writes nothing
-  ///   and returns `0`.
+  ///   and returns `0`. The one exception is a CLOB/NCLOB stream whose final
+  ///   chunk ends with an unpaired high surrogate: it is held back like any
+  ///   split pair, and — since no further chunk arrives to complete it — flushed
+  ///   by **one extra WRITE** after the stream closes (N + 1 WRITEs for N
+  ///   chunks), which is what preserves [write]'s mandated leniency below.
   /// * **Surrogate pairs split across chunks are joined, not corrupted.** For a
   ///   CLOB/NCLOB a trailing unpaired high surrogate is held back and prepended
   ///   to the next chunk, because the boundary between two chunks is one the
@@ -656,10 +676,17 @@ class OracleLob {
   ///   wedged, and nothing is rolled back for you. Wrap the operation in a
   ///   transaction if partial data is unacceptable.
   ///
-  /// Throws [ArgumentError] synchronously, before any round trip, if [offset]
-  /// `<= 0`. Throws [OracleException] if the handle is closed, the connection is
-  /// closed/broken, or a WRITE fails.
-  Future<int> writeStream(Stream<Object> data, {int offset = 1}) async {
+  /// Throws [ArgumentError] synchronously, before any round trip and before the
+  /// stream is subscribed to, if [offset] `<= 0` — and [OracleException] the same
+  /// way if the handle is closed or the connection is closed/broken. A WRITE that
+  /// fails on the wire throws [OracleException] through the returned future.
+  Future<int> writeStream(Stream<Object> data, {int offset = 1}) {
+    // Deliberately NOT an `async` body: an `async` method delivers even an
+    // argument error as a rejected future, so `expect(() => …, throwsArgumentError)`
+    // would fail and an un-awaited call would surface as an unhandled async
+    // error instead of at the call site. Validate synchronously here — the same
+    // shape [textStream] / [byteStream] use via `_validateStreamArgs` — and only
+    // then enter the async body.
     _ensureOpen();
     if (offset <= 0) {
       throw ArgumentError.value(
@@ -668,6 +695,12 @@ class OracleLob {
         'must be >= 1 (LOB offsets are 1-based)',
       );
     }
+    return _writeStreamImpl(data, offset);
+  }
+
+  /// The async body behind [writeStream], entered only once its synchronous
+  /// validation has passed.
+  Future<int> _writeStreamImpl(Stream<Object> data, int offset) async {
     var written = 0;
     // CLOB/NCLOB only: a trailing high surrogate whose pair partner is expected
     // to open the NEXT chunk. Held back so the driver-owned chunk join can never

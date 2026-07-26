@@ -1504,6 +1504,44 @@ void main() {
       expect(conn.hasOpenLob, isFalse);
     });
 
+    test('closeLobs() DOES close an already-delivered handle Oracle aliased into '
+        'a still-buffered row (documented consequence, unlike rs.close())',
+        () async {
+      // The duplicate-column shape from the reap test above, run through the
+      // bulk-close remedy instead: `bufferedLobHandles()` carries no delivered
+      // filter, so the ONE deduped handle is reachable while row 2 is still
+      // buffered — and closeLobs() closes it even though the caller holds it.
+      // rs.close() is the delivery-aware operation; this is the blunt one, and
+      // both dartdocs now say so.
+      final shared = loc(4);
+      final t = _FakeResultSetTransport(
+        firstBatch: lobBatch([
+          [1, shared],
+          [2, shared],
+        ], more: false),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+      final result = await conn.execute(
+        'SELECT id, doc FROM t',
+        null,
+        const OracleExecuteOptions(resultSet: true, fetchLobs: true),
+      );
+      final rs = result.resultSet!;
+      final delivered = (await rs.getRow())!['DOC']! as OracleLob;
+      expect(await result.closeLobs(), equals(1),
+          reason: 'the aliased handle is deduped to one');
+      expect(delivered.isClosed, isTrue,
+          reason: 'closeLobs() closes everything the result can reach, '
+              'including a delivered handle aliased into a buffered row');
+      // Idempotent and non-wedging all the same: closing again is a no-op and the
+      // connection is immediately reusable.
+      await delivered.close();
+      await rs.close();
+      expect(conn.hasOpenLob, isFalse);
+      t.firstBatch = ExecuteResponse(isSuccess: true);
+      await conn.execute('SELECT 1 FROM dual');
+    });
+
     test('the reap is idempotent: rs.close() twice, plus closeLobs(), plus a '
         'caller close(), never double-frees or throws', () async {
       final t = _FakeResultSetTransport(

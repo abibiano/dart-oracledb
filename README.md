@@ -751,7 +751,8 @@ there. Still not available: BFILE and `trim()`.
 #### Streaming a LOB in and out
 
 `textStream()` / `byteStream()` deliver a LOB in bounded pieces — **one LOB READ
-round trip per piece** — and `writeStream()` feeds one in from a `Stream`, so a
+round trip per piece** (see the supplemental-character note below for the single
+exception) — and `writeStream()` feeds one in from a `Stream`, so a
 multi-megabyte value never has to exist whole in memory:
 
 ```dart
@@ -798,13 +799,20 @@ try {
 - **Emitted CLOB pieces are not guaranteed whole-character-aligned** (the driver
   picks the boundaries), but they are never corrupt: a split encoding sequence or
   a trailing unpaired high surrogate is held back and joined to the next piece, so
-  the **concatenation is always exact**.
+  the **concatenation is always exact**. That carry-over is why a supplemental
+  (astral) character straddling a boundary relaxes both piece-level guarantees: a
+  piece may be **one UCS-2 code unit longer than `pieceSize`**, and a piece may be
+  assembled from **more than one READ** (a READ whose payload is entirely held
+  back emits nothing). A LOB that itself ends with an unpaired high surrogate
+  emits it as the final piece, again to keep the concatenation exact. `byteStream`
+  has no carry-over and so no exceptions.
 - **`writeStream` issues one write per caller chunk** at the running offset —
   your chunk size is the wire piece size. An empty chunk costs no round trip, and
   a surrogate pair split across two chunks is stitched back together (that
   boundary is the driver's, unlike the caller-chosen boundaries `write()` stays
-  lenient about). It is **not atomic**: a bad chunk or a server error aborts the
-  rest and leaves what was already written in place.
+  lenient about); a chunk stream ending on a still-unpaired high surrogate costs
+  one extra write to flush it. It is **not atomic**: a bad chunk or a server error
+  aborts the rest and leaves what was already written in place.
 - **Cancelling a read stream mid-flight** leaves the connection immediately
   reusable; the handle stays open, so `close()` it as usual. Liveness is
   re-checked before every piece, so closing the handle (or losing the connection)

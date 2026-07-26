@@ -192,6 +192,15 @@ class OracleResultSet {
   /// [OracleResult.closeLobs] can reach these handles — without it, the
   /// documented bulk-close remedy would silently do nothing for a streaming
   /// result set, which is exactly the shape that holds the most handles.
+  ///
+  /// **The parenthetical is load-bearing:** this list is deliberately *not*
+  /// filtered by delivery, so when Oracle's duplicate-column optimization aliases
+  /// one wrapped handle into several rows of a batch (`SELECT doc, doc FROM …`),
+  /// a handle the caller already received appears here for as long as an
+  /// undelivered row still references it. `OracleResult.closeLobs()` therefore
+  /// closes that live handle — its documented "close everything reachable"
+  /// contract. [close] is the delivery-aware operation: it reaps exactly
+  /// `buffered − delivered` and never touches a handle the caller holds.
   @internal
   Iterable<OracleLob> bufferedLobHandles() =>
       _cursor.bufferedLobHandles().whereType<OracleLob>();

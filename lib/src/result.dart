@@ -231,10 +231,18 @@ class OracleResult {
   /// cursor wraps a handle for every LOB in each prefetched batch, so this walk
   /// reaches those buffered handles too (Story 12.3 AC5) — otherwise the
   /// documented bulk-close remedy would do nothing for the shape that holds the
-  /// most handles. Note the consequence: a handle still buffered for a row the
-  /// caller has NOT read yet is closed as well, so call this only when done
-  /// iterating (or rely on `resultSet.close()`, which reaps exactly the
-  /// undelivered ones).
+  /// most handles. Note the consequences, which make this a blunter instrument
+  /// than `resultSet.close()` (that one reaps exactly the *undelivered* handles):
+  ///
+  /// * a handle still buffered for a row the caller has NOT read yet is closed as
+  ///   well, so call this only when done iterating; and
+  /// * a handle the caller already **received** is closed too when Oracle's
+  ///   duplicate-column optimization aliased that one handle into a row still
+  ///   sitting in the prefetch buffer (`SELECT doc, doc FROM …` shapes — see
+  ///   [OracleResultSet.bufferedLobHandles]). This walk has no delivered-handle
+  ///   filter by design: it is the "close everything this result reached" remedy.
+  ///   If you need a still-live delivered handle to survive, close the result set
+  ///   instead of calling this.
   Future<int> closeLobs() async {
     final lobs = <OracleLob>{};
     _collectLobs(_rows, lobs);

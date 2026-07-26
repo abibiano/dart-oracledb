@@ -501,7 +501,8 @@ CHANGED (`lib/`):
   readLobRange` (the single read-continuation loop) + `@internal static
   copyBackLocator`; `_readClobAsString` / `_readBlobAsBytes` re-pointed at it;
   `verifyBlobReadLength` message + dartdoc corrected.
-- `lib/src/oracle_lob.dart` — `textStream()`, `byteStream()`, `writeStream()`, the
+- `lib/src/oracle_lob.dart` — `textStream()`, `byteStream()`, `writeStream()` (a
+  non-`async` validating wrapper over `_writeStreamImpl`, review iteration 1), the
   `_LobTextDecoder` carrying decoder, the `defaultLobStreamPieceSize` constant;
   `read()` re-pointed at the chunked seam; amended `read` / `write` / `chunkSize`
   / class dartdoc (round trips, cached-length staleness, sparse write, the
@@ -524,7 +525,9 @@ CHANGED (`lib/`):
 - `lib/src/result_set.dart` — `close()` reaps via `_cursor.close()`; `@internal
   bufferedLobHandles()`; class dartdoc gained the LOB-column section.
 - `lib/src/result.dart` — `_collectLobs` reaches an `OracleResultSet`;
-  `closeLobs()` walks `resultSet` and documents the buffered-handle consequence.
+  `closeLobs()` walks `resultSet` and documents both buffered-handle consequences
+  (undelivered rows, and a delivered handle aliased into a still-buffered row —
+  review iteration 1).
 - `lib/src/protocol/lob_locator.dart` — class dartdoc: the fourth (lazy,
   per-fetched-batch) escape route.
 - `lib/src/pool.dart` — comment only: the reclaim ordering is load-bearing and the
@@ -579,3 +582,85 @@ DELETED: `tool/probe_12_3.dart`, `tool/probe_ret.dart` (throwaway AC8 probes; th
 | Date | Change |
 |------|--------|
 | 2026-07-26 | Story 12.3 implemented: chunked LOB read continuation (`Transport.readLobRange`), `OracleLob.textStream()` / `byteStream()` / `writeStream()`, and `resultSet: true` + `fetchLobs: true` for a top-level SELECT with the complete lazy-handle reap lifecycle. Reject-path embedded-cursor leak fixed. Five AC8 measurements taken on 23ai + 21c and recorded above. Unit 1665/12-skip, integration 23ai 541/28-skip and 21c 542/27-skip, `dart analyze` clean, `dart doc` no new warnings. Ten deferred-work items closed/carried, six new ones docketed. Status → review. |
+| 2026-07-26 | Review iteration 1 fixes: all five `[Review][Patch]` items applied — `textStream` dartdoc + README corrected for the two supplemental-character carry-over exceptions (piece may exceed `pieceSize` by one UCS-2 unit; piece may span >1 READ) and for the end-of-LOB unpaired-surrogate flush; `writeStream` made a non-`async` wrapper over `_writeStreamImpl` so `offset`/liveness errors throw at the call site; `writeStream` dartdoc records the N+1'th flush WRITE; `closeLobs()` / `bufferedLobHandles()` dartdocs state the aliased-delivered-handle consequence. Two new unit cases (straddled-pair piece/READ counts, aliased `closeLobs()`) plus two converted to synchronous `expect`. Unit 1667/12-skip, integration 23ai 541/28-skip and 21c 542/27-skip (baseline, zero regressions), `dart analyze` clean, `dart doc` no new warnings. |
+
+### Review Findings
+
+#### Iteration 1
+
+Tier-A (THIN) review: Acceptance Auditor lens (reviewer `primary`) + the dedicated
+security review. Blind Hunter / Edge Case Hunter deliberately not run at story level
+(they run once over the whole-epic diff). Security review returned **0 findings**
+(0 HIGH / 0 MEDIUM / 0 LOW). 14 raw findings triaged → 5 Patch, 2 Defer, 6 dismissed
+as noise, 1 merged.
+
+- [x] [Review][Patch][Med] `textStream()`'s "pieces of at most `pieceSize` units, one round trip per piece" is false when a surrogate pair straddles a piece boundary [lib/src/oracle_lob.dart:404] — `_LobTextDecoder.add` prepends the held-back high surrogate to the next piece's text with no re-cap (`oracle_lob.dart:1024-1026`) and `_textPieces` yields it uncapped (`oracle_lob.dart:592`), so with `pieceSize: 3` over the story's own fixture a piece of **4** UCS-2 units is emitted, and at `pieceSize: 1` a single piece is assembled from **two** READs (the first emits nothing). The behaviour is the correct side of AC2's internal conflict — it is what keeps the concatenation equal to `read()` — but the contract text is wrong, and the ASCII integration case that asserts `piece.length <= pieceSize` / `reads == pieces + 1` deliberately drops both assertions in the supplemental-plane case, so nothing catches it. Fix: amend the `textStream` dartdoc (oracle_lob.dart:404-406 and the piece-boundary bullet at 436-444) and the README streaming claim (README.md:753-755) to state that a piece may exceed `pieceSize` by one UCS-2 code unit, and that a piece may span more than one READ, when a supplemental character straddles a boundary. `byteStream()` is unaffected (no carry) and needs no change.
+- [x] [Review][Patch][Low] `textStream()` dartdoc's absolute "never emits a piece ending in an unpaired high surrogate" is contradicted by the `finish()` flush [lib/src/oracle_lob.dart:439] — `_textPieces` yields `decoder.finish()` after the loop (`oracle_lob.dart:596-597`), so a LOB that genuinely ends with a lone high surrogate emits exactly such a piece; the dev's own unit test pins it (`pieces.join().codeUnits == [0x41, 0xD83D]`). Behaviour is right (it keeps the concatenation equal to `read()`); the absolute wording is not. Fix: qualify the sentence — "except a LOB that itself ends with an unpaired high surrogate, which is emitted so the concatenation stays exact".
+- [x] [Review][Patch][Low] `writeStream()`'s `offset <= 0` `ArgumentError` is delivered asynchronously, against AC3's "throws synchronously before any round trip" [lib/src/oracle_lob.dart:662] — the method is declared `async`, so the `ArgumentError.value` arrives as a rejected `Future`: `expect(() => lob.writeStream(..., offset: 0), throwsArgumentError)` fails, and an un-awaited call surfaces as an unhandled async error instead of at the call site. The load-bearing half ("before any round trip") IS satisfied. The AC2 read streams already use the correct shape. Fix: make `writeStream` a non-`async` wrapper that validates `offset` synchronously (mirroring `_validateStreamArgs`) and delegates to a private `_writeStreamImpl` async body.
+- [x] [Review][Patch][Low] `writeStream()` dartdoc's "One WRITE per caller chunk … the chunk size the caller emits IS the wire piece size" omits the N+1'th WRITE for a carry retained at end-of-stream [lib/src/oracle_lob.dart:642] — after the `await for` loop an extra `write()` flushes a still-unpaired trailing high surrogate (the dev's test asserts `lobWriteCalls == 2` for the single chunk `'A\uD83D'`). Required to preserve `write()`'s mandated leniency, so the behaviour stays; only the bullet is incomplete. Fix: record the one-extra-WRITE exception in that dartdoc bullet.
+- [x] [Review][Patch][Low] `closeLobs()` closes a handle the caller already RECEIVED when Oracle aliased it into a still-buffered row — undocumented and untested, unlike the `close()` reap [lib/src/result.dart:267] — `_collectLobs`'s `OracleResultSet` branch adds `value.bufferedLobHandles()` with no delivered filter, while `ResultSetCursor.close()` reaps exactly `buffered − delivered` (`result_set_cursor.dart:303-305`); `bufferedLobHandles()` deliberately includes "any delivered handle aliased into a still-buffered row" (`result_set_cursor.dart:265-267`). So for the exact duplicate-column shape AC5 calls out as non-negotiable, `result.closeLobs()` closes the caller's live handle. Distinct from the already-docketed "`closeLobs()` also closes not-yet-retrieved handles" edge: both existing tests (unit + integration) use distinct locators and assert `delivered.isClosed, isFalse`, which would fail on the aliased shape. Fix: state the aliased-delivered consequence in `closeLobs()`'s dartdoc (result.dart:229-237) and on `OracleResultSet.bufferedLobHandles()`, and add a unit case with an aliased locator.
+- [x] [Review][Defer][Low] Two AC6/AC7 "do not change" areas were touched by the `copyBackLocator` de-duplication [lib/src/transport/transport.dart:632] — deferred, behaviour-neutral and already self-disclosed. AC6 lists "any change to `Transport.createTemporaryLob`" as out of scope, and AC7's `_copyBackLocator` ledger item says "Do not touch the guard"; the diff replaced the inline copy inside `createTemporaryLob` with the new `@internal static Transport.copyBackLocator` (transport.dart:1642) and made `OracleConnection._copyBackLocator` (connection.dart:4699) a one-line delegate to it. The predicate is byte-identical (`updated != null && updated.length == source.length`), the change is justified by AC1's anti-duplication mandate, it is flagged in the Completion Notes and the ledger, and a new unit test pins that a differently-sized echo still neither truncates nor grows the live locator. Logged only so the epic-boundary reviewer does not read those two boundaries as untouched, and because the shared helper now couples an AC6 "frozen" call site to future edits of the guard. (Merged: Acceptance Auditor findings 3 and 4 — same refactor, same required action.)
+- [x] [Review][Defer][Low] Integration case named "a BLOB holding the **UTF-8 bytes** of supplemental text" actually builds little-endian **UTF-16** code-unit bytes [test/integration/lob_chunked_streaming_integration_test.dart:250] — deferred, cosmetic-with-real-misdirection. The fixture is `'…'.codeUnits.expand((u) => [u & 0xFF, u >> 8])`, i.e. UTF-16LE, not UTF-8. Harmless for the assertion (the BLOB path performs no charset conversion, which is exactly what the case proves, and supplemental-plane content is still covered per AC10 bullet 2), but the name and comment will mislead a future reader into thinking UTF-8 byte handling is proven here. Fix when the file is next touched: rename to "raw UTF-16 bytes" (or build real UTF-8 bytes).
+
+##### Iteration 1 — fixes applied (2026-07-26)
+
+All five `[Review][Patch]` items resolved; the two `[Review][Defer]` items were left
+deferred as triaged. No `[Review][Decision]` items existed. Four of the five were
+contract-text corrections (the reviewer explicitly confirmed each *behaviour* was the
+correct side of the trade-off and must not change), the fifth was a validation-shape
+fix; two behaviours the reviewer noted "nothing catches" are now pinned by tests.
+
+- **Patch 1 + 2 (`textStream` contract text).** Rewrote the piece-boundary bullet in
+  `textStream`'s dartdoc (`lib/src/oracle_lob.dart`) to state both carry-over
+  consequences explicitly — a piece may be **one UCS-2 code unit longer than
+  `pieceSize`**, and a piece may span **more than one READ** (a READ whose whole
+  payload is held back emits nothing; at `pieceSize: 1` over supplemental text that
+  is every piece) — and qualified the absolute "never emits a piece ending in an
+  unpaired high surrogate" with the `finish()` flush exception for a LOB that itself
+  ends with one. The lead sentence and the "One round trip per piece" bullet now
+  cross-reference that exception instead of asserting it unconditionally. Mirrored in
+  `README.md`'s streaming subsection (lead claim + the whole-character-alignment
+  bullet). `byteStream` untouched — no carry, no exceptions, and its dartdoc already
+  says so.
+- **Closing the "nothing catches it" gap** (the reviewer's own reason the wrong text
+  survived): new unit case in `test/src/oracle_lob_test.dart` — an NCLOB `'\u{1F600}A'`
+  streamed at `pieceSize: 1` asserts `pieces == ['\u{1F600}', 'A']`, the first piece's
+  `length == 2` against a `pieceSize` of 1, and `lobReadCalls == 4` for 2 emitted
+  pieces (i.e. `reads != pieces + 1`). The integration suite's deliberate dropping of
+  those two assertions in the supplemental case is now the *documented* shape rather
+  than an unverified one.
+- **Patch 3 (`writeStream` synchronous validation).** `writeStream` is no longer
+  `async`: it validates `_ensureOpen()` + `offset <= 0` in a plain body and delegates
+  to a new private `_writeStreamImpl(data, offset)` async body — the same shape
+  `textStream`/`byteStream` use via `_validateStreamArgs`. Its throws-clause dartdoc
+  now says "before the stream is subscribed to" and separates the synchronous
+  argument/liveness errors from a wire WRITE failure. Two existing unit cases were
+  converted from `expectLater(future, …)` to `expect(() => …, …)` (the `offset <= 0`
+  case, extended with `offset: -7`, and the closed-handle case), which is what pins
+  the fix — they pass only against the non-`async` shape.
+- **Patch 4 (`writeStream` WRITE-count text).** The "One WRITE per caller chunk"
+  bullet now records the N+1'th WRITE: a CLOB/NCLOB stream whose final chunk ends on
+  a still-unpaired high surrogate flushes it with one extra WRITE after the stream
+  closes, which is what preserves `write()`'s mandated leniency. Mirrored in the
+  README `writeStream` bullet.
+- **Patch 5 (`closeLobs()` vs an aliased delivered handle).** Documented the
+  consequence at both ends: `OracleResult.closeLobs()`'s dartdoc (`lib/src/result.dart`)
+  now lists the two ways it is blunter than `resultSet.close()` — undelivered-row
+  handles *and* a delivered handle Oracle aliased into a still-buffered row — and
+  points at `resultSet.close()` as the delivery-aware operation;
+  `OracleResultSet.bufferedLobHandles()`'s dartdoc (`lib/src/result_set.dart`) now
+  marks its "(plus any delivered handle aliased into a still-buffered row)"
+  parenthetical as load-bearing and states that the absence of a delivered filter is
+  deliberate. New unit case in `test/src/result_set_test.dart` drives the exact
+  duplicate-column shape AC5 calls out (one locator in two rows, row 1 delivered),
+  asserting `closeLobs()` returns `1`, `delivered.isClosed` is **true**, a second
+  `close()` is a no-op, and the next `execute()` succeeds — the counterpart to the
+  existing `rs.close()` case that asserts `isFalse` on distinct locators. No
+  behaviour changed: `closeLobs()` remains the "close everything reachable" remedy.
+
+Verification: `dart analyze lib test` clean; unit `test/src/` **1667 pass / 12 skip**
+(1665 baseline + 2 net new cases); integration **23ai 541 pass / 28 skip** and **21c
+542 pass / 27 skip** — both exactly the 12.3 baseline, zero regressions; `dart doc`
+still 3 pre-existing warnings (connection.dart:54/149), none new.
+
+

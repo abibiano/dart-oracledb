@@ -2075,6 +2075,34 @@ void main() {
         await lob.close();
       });
 
+      test('a straddled surrogate pair makes a piece EXCEED pieceSize and span '
+          'more than one READ (the documented carry-over exceptions)', () async {
+        // The dartdoc's two exceptions to "pieces of at most pieceSize units,
+        // one READ per piece" — both are the price of an exact concatenation, so
+        // pin them rather than leave the contract text unverifiable.
+        const text = '\u{1F600}A';
+        final all = encodeUtf16Be(text); // 3 UCS-2 units, 6 bytes
+        final (conn, t, lob) = await _fetchLob(_nclob(3));
+        t.lobReadReplies.addAll([
+          (data: Uint8List.sublistView(all, 0, 2), amount: 1), // high surrogate
+          (data: Uint8List.sublistView(all, 2, 4), amount: 1), // low surrogate
+          (data: Uint8List.sublistView(all, 4, 6), amount: 1), // 'A'
+        ]);
+        final pieces = await lob.textStream(pieceSize: 1).toList();
+        expect(pieces.join(), equals(text), reason: 'concatenation is exact');
+        // READ 1's whole payload was held back, so it emitted NOTHING and READ 2
+        // emitted a piece built from both round trips...
+        expect(pieces, equals(['\u{1F600}', 'A']));
+        // ...which is 2 UCS-2 units against a pieceSize of 1.
+        expect(pieces.first.length, equals(2),
+            reason: 'a straddled supplemental character exceeds pieceSize by one '
+                'UCS-2 code unit');
+        // 3 data READs + the terminating empty one, for only 2 emitted pieces —
+        // i.e. reads != pieces + 1 in this shape.
+        expect(t.lobReadCalls, equals(4));
+        await lob.close();
+      });
+
       test('bytes that can never complete a character fail loud (no U+FFFD '
           'substitution, no silent truncation)', () async {
         final (conn, t, lob) = await _fetchLob(_clob(4));
@@ -2236,14 +2264,30 @@ void main() {
       await lob.close();
     });
 
-    test('offset <= 0 throws ArgumentError before any round trip', () async {
+    test('offset <= 0 throws ArgumentError SYNCHRONOUSLY at the call site, '
+        'before any round trip', () async {
       final (conn, t, lob) = await _fetchLob(_clob(0));
-      await expectLater(
-        lob.writeStream(Stream<Object>.fromIterable(const ['a']), offset: 0),
+      // Deliberately `expect(() => …)` and not `expectLater(future, …)`: the
+      // method must not be `async`, or API misuse arrives as a rejected future
+      // (and an un-awaited call as an unhandled async error) instead of at the
+      // call site — same shape as textStream/byteStream above.
+      expect(
+        () => lob.writeStream(Stream<Object>.fromIterable(const ['a']),
+            offset: 0),
+        throwsArgumentError,
+      );
+      expect(
+        () => lob.writeStream(Stream<Object>.fromIterable(const ['a']),
+            offset: -7),
         throwsArgumentError,
       );
       expect(t.lobWriteCalls, equals(0));
       await lob.close();
+      // A closed handle likewise fails at the call site, not through the future.
+      expect(
+        () => lob.writeStream(Stream<Object>.fromIterable(const ['a'])),
+        throwsA(isA<OracleException>()),
+      );
     });
 
     test('a wrong-typed chunk throws ArgumentError from write(), aborts the '
@@ -2298,8 +2342,10 @@ void main() {
     test('a closed handle throws before consuming the stream', () async {
       final (conn, t, lob) = await _fetchLob(_clob(0));
       await lob.close();
-      await expectLater(
-        lob.writeStream(Stream<Object>.fromIterable(const ['a'])),
+      // Synchronous at the call site (writeStream is a non-async wrapper), not a
+      // rejected future — the whole point of the AC3 validation shape.
+      expect(
+        () => lob.writeStream(Stream<Object>.fromIterable(const ['a'])),
         throwsA(isA<OracleException>()
             .having((e) => e.message, 'message', contains('closed'))),
       );
