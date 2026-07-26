@@ -18,3 +18,7 @@
 - [Phase 7 — code review] The "non-ASCII test fixtures use explicit Dart escapes" rule has now been stated and not followed in two consecutive stories (12.1, 12.2). Its root cause is the 12.1 convention file itself, which still holds raw literals — enforce by lint, normalize that file, or drop the rule from the AC template.
 - [Phase 7 — code review] Do NOT port node-oracledb's TNS_LOB_LOC_FLAGS_ABSTRACT clause in a future parity pass: its JS operator-precedence bug marks every fetched BLOB temporary and would queue innocent locators for FREE_TEMP.
 - [Phase 7 — code review] In thin (Tier-A) mode the security lens routed two items to a code-quality reviewer that Tier A does not run; such handoffs land nowhere unless triage picks them up.
+
+## Story 12-3-chunked-streaming-transfer
+- [Phase 3 — create-story] 12.3's scope had to be SPLIT: the ledger targets the whole lazy-handle wrap at 12.3, but the nested-CURSOR()/REF-cursor-OUT half sits behind a pre-existing decode limitation that makes it unprovable under the dual-env mandate. Only the top-level resultSet cursor is deliverable; 12.4 is test-only and cannot absorb the remainder → needs an Epic 12 follow-up slot.
+- [Phase 3 — create-story] Two 12.3-targeted ledger items are resolvable only BECAUSE this story owns the driver-side chunk boundary (surrogate join on streamed write; stale-_length immunity via stop-on-empty-READ) — evidence that "revisit when X lands" targets do pay off.
