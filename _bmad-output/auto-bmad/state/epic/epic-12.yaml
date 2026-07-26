@@ -5,10 +5,10 @@ epic_num: 12
 story_num: null
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T16:38:27Z"
+updated_at: "2026-07-26T16:41:58Z"
 started_at: "2026-07-26T13:15:23Z"
 completed_at: null
-active_seconds: 12026
+active_seconds: 12232
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: false
@@ -27,7 +27,7 @@ hitl_halt: null
 external_review_iterations: 0
 convergence_unverified: false
 story_trace: null
-commits: [86a991a]
+commits: [c249963]
 phase8_steps:
   trace_gate: null
   nfr: null
@@ -52,9 +52,10 @@ blockers: []
 overrides: {}
 constraints: []
 epic_slug: lob-streaming-temporary-lobs
-active_story: 12-3-chunked-streaming-transfer
+active_story: 12-4-dual-env-integration-tests
 stories_landed:
   - 12-2-temporary-lob-lifecycle
+  - 12-3-chunked-streaming-transfer
 auto_decisions: []
 uat_items:
   - "[12-2-temporary-lob-lifecycle] Setup: 23ai up (docker context use desktop-linux; docker compose up -d); scratch script tool/uat_temp_lob.dart connecting to localhost:1521/FREEPDB1 as system/testpassword, run with dart run"
@@ -84,3 +85,38 @@ uat_items:
   - "[12-2-temporary-lob-lifecycle] Repeat every check against 21c (colima start; docker compose --profile oracle21c up -d oracle21c; localhost:1522/XEPDB1) -> identical behavior including ORA-22922 (message text differs by version)"
   - "[12-2-temporary-lob-lifecycle] Follow README's 'Temporary LOBs you create, fill, and bind' code block verbatim -> compiles and runs as written; createTemporary* is gone from the 'not yet available' list while Stream/BFILE/trim() remain"
   - "[12-2-temporary-lob-lifecycle] dart doc, then read createTemporaryClob / OracleLob.isTemporary / OracleLob.close pages -> each states session duration, mandatory close(), piggybacked free, 1-based char-vs-byte offsets, and created-vs-fetched slot behaviour"
+  - "[12-3-chunked-streaming-transfer] Setup: both fixtures healthy (23ai localhost:1521/FREEPDB1, 21c localhost:1522/XEPDB1); scratch bin/uat.dart importing package:oracledb/oracledb.dart, CREATE TABLE uat_lob (id NUMBER PRIMARY KEY, doc CLOB, ndoc NCLOB, bin BLOB) -> connects and DDL succeeds; RUN EVERY ITEM BELOW ON BOTH VERSIONS"
+  - "[12-3-chunked-streaming-transfer] ~200k-char ASCII CLOB fetched with fetchLobs: true, then textStream(pieceSize: 4096).toList() -> >1 piece, every piece length <= 4096, join() == read() char-for-char"
+  - "[12-3-chunked-streaming-transfer] debugLobReadOps before/after that same stream -> rises by exactly (piece count + 1), the +1 being the terminating empty READ"
+  - "[12-3-chunked-streaming-transfer] Same value with pieceSize omitted -> join() still == read(), pieces are chunkSize-sized (8132 for a table LOB), not 4096"
+  - "[12-3-chunked-streaming-transfer] textStream(offset: 1001) -> join() == read(offset: 1001) exactly (tail only)"
+  - "[12-3-chunked-streaming-transfer] byteStream(pieceSize: 8192) over a ~1MB BLOB -> concatenated bytes byte-identical to read() (compare length + hash)"
+  - "[12-3-chunked-streaming-transfer] Row with EMPTY_CLOB()/EMPTY_BLOB(): textStream().toList() and byteStream().toList() -> both empty, debugLobReadOps rises by exactly 1 each (no wasted loop)"
+  - "[12-3-chunked-streaming-transfer] CLOB 'A\\u{1F600}B' streamed at pieceSize: 2 -> no exception, join() exactly 'A<emoji>B' (first piece may be 3 UCS-2 units and take 2 READs — documented carry-over)"
+  - "[12-3-chunked-streaming-transfer] 500k-char CLOB: await lob.read() with no amount -> whole String returns; the old 'values this large are not yet supported' / round-trip-limit error must NOT appear"
+  - "[12-3-chunked-streaming-transfer] ~2MB BLOB: await lob.read() -> full Uint8List of the right length, no size-limit error"
+  - "[12-3-chunked-streaming-transfer] createTemporaryClob() then writeStream(Stream.fromIterable(['aaa','bbb','ccc'])) -> returns 9, length 9, read() == 'aaabbbccc'"
+  - "[12-3-chunked-streaming-transfer] README RETURNING ... INTO pattern (PL/SQL BEGIN/END + OracleBind.out clob under fetchLobs: true), writeStream 3 chunks, commit, re-select -> stored value == joined chunks exactly"
+  - "[12-3-chunked-streaming-transfer] SELECT ... FOR UPDATE under fetchLobs: true, writeStream(['ZZZ'], offset: 1), commit, re-select -> first 3 chars are ZZZ"
+  - "[12-3-chunked-streaming-transfer] writeStream(['A\\uD83D', '\\uDE00B']) into a fresh temp CLOB, read back -> exactly 'A<emoji>B' (split surrogate pair stitched, not corrupted)"
+  - "[12-3-chunked-streaming-transfer] writeStream(const Stream.empty()) and writeStream(['','']) -> returns 0, length stays 0, no round trip for the empty chunks"
+  - "[12-3-chunked-streaming-transfer] lob.writeStream(['x'], offset: 0) WITHOUT await inside try/catch -> ArgumentError thrown synchronously at the call site, not as an unhandled async error"
+  - "[12-3-chunked-streaming-transfer] writeStream(['ok', 42]) (wrong-typed chunk) -> throws ArgumentError, 'ok' remains written (length 2, not atomic), next execute('SELECT 1 FROM dual') still succeeds"
+  - "[12-3-chunked-streaming-transfer] Temp CLOB: write(1,'abc') then write(10,'XYZ') -> length 12, read() == 'abc' + 6 spaces + 'XYZ' (sparse write space-filled; DBMS_LOB.GETLENGTH agrees)"
+  - "[12-3-chunked-streaming-transfer] Handle from a plain read-only SELECT (no FOR UPDATE), write(1,'X') -> ORA-22920 row not locked; handle still readable, next execute() works"
+  - "[12-3-chunked-streaming-transfer] textStream() on a BLOB handle / byteStream() on a CLOB handle -> each throws StateError immediately at the call line, naming the correct sibling method"
+  - "[12-3-chunked-streaming-transfer] textStream(offset: 0), textStream(pieceSize: 0), byteStream(offset: -1) -> each throws ArgumentError synchronously at the call line"
+  - "[12-3-chunked-streaming-transfer] close() then textStream() -> throws immediately; separately close the handle mid-stream after the first piece -> the stream surfaces an error rather than ending silently short"
+  - "[12-3-chunked-streaming-transfer] Consume 2 pieces of a textStream then break (cancel the subscription) -> execute('SELECT 42 FROM dual') immediately after succeeds, and lob.close() still works"
+  - "[12-3-chunked-streaming-transfer] 7 rows with CLOBs via resultSet: true + fetchLobs: true + fetchSize: 2, looping getRow() and closing each handle -> every row['DOC'] is an OracleLob (never a String), each reads its own correct value, all 7 arrive in order across batches"
+  - "[12-3-chunked-streaming-transfer] In that loop, read()/textStream() each LOB BETWEEN getRow() calls -> both LOB content and row sequence stay correct (the READ does not disturb the open cursor)"
+  - "[12-3-chunked-streaming-transfer] Row with doc left SQL NULL under resultSet + fetchLobs -> row['DOC'] is Dart null, not a handle"
+  - "[12-3-chunked-streaming-transfer] 6 rows, getRow() once, read that handle, then rs.close() -> connection.hasOpenLob false and the next execute('SELECT 42 FROM dual') SUCCEEDS (no permanent wedge from the 5 undelivered handles)"
+  - "[12-3-chunked-streaming-transfer] In that same run after rs.close(), the already-delivered handle still reads its correct value, isClosed is false, and close() then succeeds"
+  - "[12-3-chunked-streaming-transfer] 5 rows, getRow() once, then result.closeLobs() -> returns 4 (the still-buffered handles); after closing the delivered handle + rs.close() the next execute() succeeds"
+  - "[12-3-chunked-streaming-transfer] With a streaming result set open, execute('SELECT 1 FROM dual') -> OracleException containing 'Concurrent'; after rs.close() with a delivered handle still open, same call fails naming OracleLob; after lob.close() it succeeds"
+  - "[12-3-chunked-streaming-transfer] Pool: borrow, open a streaming resultSet + fetchLobs query, keep one delivered handle, release() -> next borrow works normally and the retained handle's read() raises the pool-reclaim oraConnectionClosed error"
+  - "[12-3-chunked-streaming-transfer] PL/SQL block with resultSet: true + fetchLobs: true -> OracleException mentioning 'not supported for a PL/SQL block' and naming the two alternatives, BEFORE any wire round trip; connection stays usable"
+  - "[12-3-chunked-streaming-transfer] SYS_REFCURSOR OUT bind over a LOB column with fetchLobs: true, snapshotting debugPendingCloseCount -> fails loud with the cursor-embedded-LOB message, the counter ROSE (rejected cursor id requeued, not leaked), next execute() succeeds"
+  - "[12-3-chunked-streaming-transfer] executeStream / queryStream over the LOB column -> rows carry materialized String/Uint8List, never OracleLob handles (and no fetchLobs argument exists on those methods)"
+  - "[12-3-chunked-streaming-transfer] connection.close() while a fetched handle is still open -> handle isClosed true, read() throws oraConnectionClosed, close() on it is a silent no-op"
