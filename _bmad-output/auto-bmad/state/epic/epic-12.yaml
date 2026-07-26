@@ -5,10 +5,10 @@ epic_num: 12
 story_num: null
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T20:36:22Z"
+updated_at: "2026-07-26T21:41:26Z"
 started_at: "2026-07-26T13:15:23Z"
 completed_at: null
-active_seconds: 26175
+active_seconds: 30072
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: false
