@@ -522,6 +522,38 @@ class Transport {
   final List<Uint8List> _tempLobsToClose = [];
   int _tempLobsTotalSize = 0;
 
+  /// Content keys of every locator currently on [_tempLobsToClose], so
+  /// [queueTempLobToFree]'s dedupe backstop is O(1) instead of a linear scan.
+  ///
+  /// MUST be kept in lockstep with [_tempLobsToClose] at all three mutation
+  /// sites (queue, drain, and the drain's restore-on-bind-failure) — a stale key
+  /// would silently swallow a free that was genuinely needed, and a missing one
+  /// would let a double free through.
+  ///
+  /// Why a parallel index rather than a `Set` replacing the list: the piggyback
+  /// sends the locator BYTES in queue order and needs the original `Uint8List`
+  /// instances (which `copyBackLocator` may have updated in place — node-oracledb
+  /// likewise frees its copy-back-updated locator), so the list stays
+  /// authoritative for what is sent and this set answers only "is it already in
+  /// there?".
+  final Set<String> _tempLobKeysToClose = <String>{};
+
+  /// Content key for a locator buffer: its bytes as a `String` (every byte is a
+  /// valid UTF-16 code unit, so this is a lossless, cheap, hashable snapshot of
+  /// the 40-odd bytes — no allocation-heavy hex formatting).
+  ///
+  /// Snapshot semantics, deliberately: the key is derived when the locator is
+  /// QUEUED. That matches the live-scan behaviour it replaces on every measured
+  /// path, because nothing copies back INTO a buffer that is already pending —
+  /// `copyBackLocator` writes into the freshly decoded echo instance, which is a
+  /// different `Uint8List` than the one the create helper queued. Hardening the
+  /// comparison to a locator identity SUBRANGE (so in-place mutation could not
+  /// matter at all) is a tracked follow-up; if a pending buffer ever did mutate,
+  /// the stale key degrades to the same double-queue this backstop already
+  /// documents as its residual risk, not to something new.
+  static String _tempLobKey(Uint8List locator) =>
+      String.fromCharCodes(locator);
+
   /// Number of temp-LOB locators queued for the free piggyback. Exposed for
   /// integration tests (temp-LOB lifecycle) via
   /// `OracleConnection.debugPendingTempLobCount`; not a public API.
@@ -554,7 +586,7 @@ class Transport {
   ///
   /// Since Story 12.4 that caller obligation is the PRIMARY guarantee, not the
   /// only one: this method also dedupes at the locator level as a backstop,
-  /// skipping bytes that are already pending (see [_isTempLobAlreadyQueued] and
+  /// skipping bytes that are already pending (see [_tempLobKeysToClose] and
   /// the "Locator-level dedupe backstop" section below, which is the authority on
   /// why the backstop is both necessary and safe). The structural invariant the
   /// code is still designed around is **one temporary locator has exactly one
@@ -593,32 +625,19 @@ class Transport {
   /// LOB's unique server-side identity), and a locator can only be re-created
   /// after its free was actually SENT — i.e. after it left this list — so the
   /// dedupe can never swallow a free that was genuinely needed.
+  ///
+  /// The check is **O(1)**, via the [_tempLobKeysToClose] content index. It has
+  /// to be: the queue is NOT "at most a handful of entries" on every shape —
+  /// `_prepareBulkRowLobs` queues one locator per row BEFORE the single array
+  /// execute, so an N-row `executeMany()` with a CLOB/BLOB column would perform
+  /// ~N²/2 whole-locator byte comparisons under a linear scan (a real
+  /// bulk-load regression), and an application may likewise open many
+  /// `createTemporary*` handles between two executes.
   @internal
   void queueTempLobToFree(Uint8List locator) {
-    if (_isTempLobAlreadyQueued(locator)) return;
+    if (!_tempLobKeysToClose.add(_tempLobKey(locator))) return;
     _tempLobsToClose.add(locator);
     _tempLobsTotalSize += locator.length;
-  }
-
-  /// Whether [locator]'s bytes are already pending on [_tempLobsToClose].
-  ///
-  /// Compares CONTENT, not identity: the same server-side temporary LOB can be
-  /// presented as two different `Uint8List` instances (one created locally by
-  /// [_createTempClob], one decoded from the server's echo of the same locator).
-  /// The list holds at most a handful of entries, so the scan is negligible.
-  bool _isTempLobAlreadyQueued(Uint8List locator) {
-    for (final pending in _tempLobsToClose) {
-      if (pending.length != locator.length) continue;
-      var same = true;
-      for (var i = 0; i < pending.length; i++) {
-        if (pending[i] != locator[i]) {
-          same = false;
-          break;
-        }
-      }
-      if (same) return true;
-    }
-    return false;
   }
 
   /// Creates an EMPTY session-duration temporary LOB on the server and returns
@@ -826,6 +845,10 @@ class Transport {
     final lobsToFreeSize = _tempLobsTotalSize;
     _tempLobsToClose.clear();
     _tempLobsTotalSize = 0;
+    // Lockstep with the list (see _tempLobKeysToClose): once these locators are
+    // no longer pending, a re-created locator with the same bytes must be
+    // queueable again.
+    _tempLobKeysToClose.clear();
 
     // CLOB-typed String binds, BLOB-typed Uint8List binds
     // (and PL/SQL strings beyond the 32767-byte VARCHAR limit) travel as
@@ -858,8 +881,13 @@ class Transport {
         // drained locators back so the next execute frees them. (Temp LOBs
         // already created by THIS call queued themselves in the create
         // helpers' finally blocks, so they ride the same restored list.)
+        // Restore the drained locators AND their content keys together. Any
+        // locator this failed call already queued in a create helper's `finally`
+        // is on the list (and in the key set) too; `addAll` is idempotent, so a
+        // restored locator that is somehow already keyed stays single-entry.
         _tempLobsToClose.insertAll(0, lobsToFree);
         _tempLobsTotalSize += lobsToFreeSize;
+        _tempLobKeysToClose.addAll(lobsToFree.map(_tempLobKey));
         rethrow;
       }
     }
@@ -1916,9 +1944,6 @@ class Transport {
         // double-free (see queueTempLobToFree's ownership invariant).
         value = wrapLob(locator);
       } else {
-        value = locator.oracleType == oraTypeBlob
-            ? await _readBlobAsBytes(locator, timeout)
-            : await _readClobAsString(locator, timeout);
         // Story 12.4 AC4 — the MATERIALIZE path's temporary-locator free.
         //
         // Materializing reads the locator's content into a String/Uint8List and
@@ -1947,7 +1972,40 @@ class Transport {
         // method runs inside sendExecute AFTER that call already drained the
         // queue, so a locator can never be freed by the very execute that
         // produced it.
-        if (locator.isTemporary) queueTempLobToFree(locator.locator);
+        //
+        // EXCEPTION-SAFE by `try/finally`, not by ordering: the read below can
+        // throw (the strict truncation guard, a malformed UTF-8/UTF-16
+        // FormatException, a no-progress/overshoot fault in `readLobRange`'s
+        // piece loop). Queueing only after a SUCCESSFUL read would gate the free
+        // on "the read worked" and re-open exactly the leak this AC closed —
+        // every read-failure path would leak the temp LOB until session end. The
+        // `finally` gates it on "the read was attempted" instead, matching
+        // `_createTempClob`/`_createTempBlob` (`finally`) and
+        // `createTemporaryLob` (`catch`/rethrow). Queueing is not freeing: it
+        // only records the locator for the next execute's piggyback, so doing it
+        // for a locator whose read failed is correct — the server-side temp LOB
+        // exists either way.
+        //
+        // ORDERING (Story 12.3 interaction, recorded here because nothing else
+        // records it): `_readClobAsString`/`_readBlobAsBytes` now go through
+        // `readLobRange`, which calls `copyBackLocator(locator,
+        // response.updatedLocator)` after every piece. So both the
+        // `locator.isTemporary` DECISION and the BYTES queued are the server's
+        // post-READ echo of the locator, not the bytes the row delivered — the
+        // `finally` does not change that (a partial read may already have copied
+        // back). That is deliberate and matches node-oracledb, which frees its
+        // own copy-back-updated `_locator`; the echo of a temporary LOB stays
+        // temporary and keeps the same identity, and the dangerous direction
+        // would be a persistent locator whose echo flipped flag-4 bit 0 on,
+        // which is unobserved on both fixtures. See `queueTempLobToFree`'s
+        // dedupe-backstop note for the companion in-place-mutation caveat.
+        try {
+          value = locator.oracleType == oraTypeBlob
+              ? await _readBlobAsBytes(locator, timeout)
+              : await _readClobAsString(locator, timeout);
+        } finally {
+          if (locator.isTemporary) queueTempLobToFree(locator.locator);
+        }
       }
       materialized[locator] = value;
       return value;

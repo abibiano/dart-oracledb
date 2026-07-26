@@ -465,6 +465,114 @@ void main() {
         timeout: const Timeout(Duration(minutes: 3)),
       );
 
+      // ---------------------------------------------------------------------
+      // Epic 12 integration review (Med): a temporary-LOB round trip
+      // INTERLEAVED with an unrelated, partially-fetched result set.
+      //
+      // 12.2's slot exemption is what first makes this reachable:
+      // `_createTemporaryLob` deliberately bypasses `_rejectConcurrentOperation`
+      // and brackets only through `_runLobOp`, whose guard checks ONLY
+      // `_executeInProgress` — never `_openResultSet` / `_openImplicitResultSets`
+      // (the same is true of runLobRead / runLobReadPiece / runLobWrite). So a
+      // CREATE_TEMP + GET_CHUNK_SIZE + WRITE + READ sequence CAN be issued while
+      // a server cursor sits half-drained. The rest of this suite exercises every
+      // mode strictly sequentially, and 12.3 AC8 proved only the adjacent case (a
+      // LOB READ between two getRow()s on that SAME cursor's own delivered
+      // handle) — so nothing pinned this shape. Measured, not assumed, per the
+      // epic's ratified discipline: if it is ever unsafe on either fixture, the
+      // fix is to extend `_runLobOp`'s guard to the open-result-set fields and
+      // this test flips to expecting the rejection.
+      // ---------------------------------------------------------------------
+      test(
+        'a createTemporary CLOB round trip BETWEEN two getRow() calls on an '
+        'UNRELATED open result set leaves that cursor drainable intact',
+        () async {
+          final ids = [
+            nextTestId(),
+            nextTestId(),
+            nextTestId(),
+            nextTestId(),
+          ];
+          for (var k = 0; k < ids.length; k++) {
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:i, :d)',
+              {'i': ids[k], 'd': 'interleave-row$k'},
+            );
+          }
+          await connection.commit();
+          expectQuiescent('the seed inserts');
+
+          // Deliberately NOT a fetchLobs cursor and NOT a LOB column: the point
+          // is an UNRELATED cursor, so the temp LOB shares nothing with it.
+          // fetchSize 2 with 4 rows forces a real continuation FETCH to happen
+          // AFTER the interleaved LOB traffic.
+          final result = await connection.execute(
+            'SELECT id FROM $testTable WHERE id IN '
+            '(${ids.join(', ')}) ORDER BY id',
+            null,
+            const OracleExecuteOptions(resultSet: true, fetchSize: 2),
+          );
+          final rs = result.resultSet!;
+          expect(connection.hasOpenResultSet, isTrue);
+
+          final first = await rs.getRow();
+          expect(first!['ID'], equals(ids[0]));
+
+          // ---- the interleaved temporary-LOB round trips -------------------
+          // Each of these is a separate TTC request/response on the same stream
+          // while the server cursor is open and half-drained.
+          final temp = await connection.createTemporaryClob();
+          try {
+            expect(connection.hasOpenLob, isTrue);
+            expect(connection.hasOpenResultSet, isTrue,
+                reason: 'the cursor is still open — that is the whole point');
+            final payload = risingText(200);
+            await temp.write(1, payload);
+            expect(temp.length, equals(payload.length));
+            expect(await temp.read(), equals(payload),
+                reason: 'a full LOB write+read cycle completed while an '
+                    'unrelated cursor was mid-drain');
+            // A bounded piece read too, so more than one LOB op shape is proven.
+            expect(await temp.read(offset: 5, amount: 10),
+                equals(payload.substring(4, 14)));
+          } finally {
+            await temp.close();
+          }
+
+          // ---- the cursor must be completely undisturbed -------------------
+          // Rows 2..4 in order, including the continuation FETCH that happens
+          // after the LOB traffic. A sheared or misaligned cursor shows up here
+          // as a wrong id, a missing row, or a decode error.
+          final rest = <Object?>[];
+          for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
+            rest.add(row['ID']);
+          }
+          expect(rest, equals(ids.sublist(1)),
+              reason: 'every remaining row arrives, in order, after the '
+                  'interleaved LOB round trips');
+          await rs.close();
+          expectQuiescent('the interleaved sequence');
+
+          // The temp LOB's free rides the next execute, and that statement must
+          // succeed (a mis-queued locator would break HERE).
+          expect(connection.debugPendingTempLobCount, equals(1),
+              reason: 'close() queued exactly one free for the temp CLOB');
+          expect(
+            (await connection.execute('SELECT 11 AS V FROM dual'))
+                .rows
+                .single['V'],
+            equals(11),
+          );
+          expect(connection.debugPendingTempLobCount, equals(0));
+          final n = await tempLobCount(connection);
+          if (n != null) {
+            expect(n, equals(0),
+                reason: 'the interleaved temporary LOB really was freed');
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 2)),
+      );
+
       test(
         'the statement cache keeps its documented LOB exception exactly: a '
         'non-LOB SELECT is cursor-REUSED while a LOB SELECT is always RE-PARSED',
@@ -1042,6 +1150,72 @@ void main() {
                 .single['V'],
             equals(5),
           );
+        },
+      );
+
+      // -------------------------------------------------------------------
+      // Epic 12 integration review (Med): the `p := p` ALIAS on the WRAP path.
+      //
+      // The alias is the entire justification for the locator-level dedupe
+      // backstop, but it was live-proven only for `fetchLobs: false` (the
+      // echoProc / blobProc cases above). The `fetchLobs: true` test used
+      // appendProc, which allocates a NEW server LOB — so the wrap path's
+      // version of the alias was never exercised live. That is the ONE
+      // combination where byte-equality dedupe is the only protection, because
+      // "one temporary locator has exactly one owner" explicitly does not cover
+      // it: `_createTempClob` queued the INPUT locator, and the HANDLE wrapping
+      // the echoed OUT locator queues the same bytes again on close().
+      // -------------------------------------------------------------------
+      test(
+        'fetchLobs: true over an IN OUT body that returns the SAME locator '
+        '(p := p): close() before the next execute leaves ONE pending free and '
+        'the following statement is clean',
+        () async {
+          final baseline = await tempLobCount(connection);
+          final r = await connection.execute(
+            'BEGIN $echoProc(:p); END;',
+            {
+              'p': OracleBind.inOut(
+                value: 'wrapped-echo',
+                type: OracleDbType.clob,
+                maxSize: 4000,
+              ),
+            },
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+          final lob = r.outBinds['p']! as OracleLob;
+          // The echoed OUT locator is the driver's own input temp CLOB, so it is
+          // TEMP-flagged AND already pending from `_createTempClob`.
+          expect(lob.isTemporary, isTrue);
+          expect(connection.debugPendingTempLobCount, equals(1),
+              reason: 'the input temp CLOB; the wrap path queues nothing');
+          expect(await lob.read(), equals('wrapped-echo'));
+
+          // The handle closes BEFORE any further execute — i.e. while its
+          // locator is STILL pending — which is the exact window where the
+          // dedupe is load-bearing. Without it the count becomes 2 and the same
+          // locator is freed twice in ONE piggyback.
+          await lob.close();
+          expect(connection.debugPendingTempLobCount, equals(1),
+              reason: 'close() must NOT add a second entry for a locator the '
+                  'input conversion already queued — a double FREE_TEMP in one '
+                  'piggyback surfaces as an error on the statement it rides');
+
+          // That statement: a double free would fail HERE, not above.
+          final n = await tempLobCount(connection);
+          expect(connection.debugPendingTempLobCount, equals(0));
+          if (baseline != null && n != null) {
+            expect(n, equals(baseline),
+                reason: 'freed exactly once — nothing accreted, nothing '
+                    'double-freed');
+          }
+          expect(
+            (await connection.execute('SELECT 13 AS V FROM dual'))
+                .rows
+                .single['V'],
+            equals(13),
+          );
+          expect(connection.hasOpenLob, isFalse);
         },
       );
     },

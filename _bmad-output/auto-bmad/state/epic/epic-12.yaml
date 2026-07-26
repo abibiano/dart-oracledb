@@ -5,10 +5,10 @@ epic_num: 12
 story_num: null
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T18:18:59Z"
+updated_at: "2026-07-26T19:10:17Z"
 started_at: "2026-07-26T13:15:23Z"
 completed_at: null
-active_seconds: 17994
+active_seconds: 21028
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: false
@@ -21,7 +21,7 @@ tea_rationale: "TEA disabled (tea.enabled=false — no bmad-testarch-* skills in
 epic_story_count: 4
 stories_after_in_epic: null
 completed_phases: [0, 1, 2, 5, 81]
-code_review_iterations: 0
+code_review_iterations: 1
 code_review_loop_done: false
 hitl_halt: null
 external_review_iterations: 0

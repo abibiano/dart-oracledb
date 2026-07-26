@@ -147,13 +147,6 @@ class OracleLob {
   @internal
   bool get isCreatedTemporary => _createdTemporary;
 
-  /// The wrapped locator. Package-internal seam for the connection's bind-value
-  /// unwrap (an [OracleLob] binds as its LOB locator on the wire) and for
-  /// queueing the free-temp piggyback when a temporary handle closes. The raw
-  /// bytes are never exposed publicly.
-  @internal
-  LobLocator get internalLocator => _locator;
-
   /// Cached LOB length in the type's native units (characters for CLOB/NCLOB,
   /// bytes for BLOB). Seeded from the locator's prefetch metadata and advanced
   /// locally after a [write] (node-oracledb `write()` parity — there is no
@@ -853,19 +846,27 @@ class OracleLob {
         }
         bytes = Uint8List.fromList(data);
       } else {
-        throw ArgumentError.value(
-          data,
-          'data',
-          'a BLOB OracleLob.write requires Uint8List or List<int>',
+        // Reports the TYPE only, never the value. `ArgumentError.value` renders
+        // its value through `Error.safeToString`, so passing `data` here would
+        // embed the caller's whole payload in an exception applications routinely
+        // log verbatim — and `writeStream` deliberately funnels a rejected chunk
+        // into this branch to raise the real error, so the natural mistake
+        // (`byteStream`/`File(...).openRead()` into the wrong handle type) would
+        // leak a full piece of user content. Same policy as
+        // `OracleConnection._validateDefValue`. The element guard above is
+        // exempt: it reports one out-of-range int, not payload.
+        throw ArgumentError(
+          'a BLOB OracleLob.write requires Uint8List or List<int>, got '
+          '${data.runtimeType}',
         );
       }
       writtenUnits = bytes.length; // bytes for BLOB
     } else {
       if (data is! String) {
-        throw ArgumentError.value(
-          data,
-          'data',
-          'a CLOB/NCLOB OracleLob.write requires String',
+        // Type only, never the value — see the BLOB branch above.
+        throw ArgumentError(
+          'a CLOB/NCLOB OracleLob.write requires String, got '
+          '${data.runtimeType}',
         );
       }
       bytes = _isUtf16
@@ -983,6 +984,30 @@ class OracleLob {
     _connection.ensureUsableForLobOp();
   }
 }
+
+/// The [LobLocator] behind [lob]. Package-internal seam for the connection's
+/// bind-value unwrap (an [OracleLob] binds as its LOB locator on the wire) and
+/// for queueing the free-temp piggyback when a temporary handle closes.
+///
+/// Deliberately a **top-level function in this library, not a getter on
+/// [OracleLob]** — and deliberately NOT in `lib/oracledb.dart`'s `show` clause.
+/// `@internal` is a lint annotation only, so an internal *getter* on an exported
+/// class is reachable from any downstream code holding a handle
+/// (`(lob as dynamic).internalLocator.locator`), which handed out the live,
+/// mutable server locator buffer: a component given a handle but not the
+/// connection (a plugin, row mapper, or sanitizer callback) could overwrite those
+/// bytes and silently redirect the application's own later read/write to a
+/// different LOB in the same session — more authority than an opaque handle is
+/// meant to convey, and invisible to the cross-connection [OracleLob.isOwnedBy]
+/// guard. As a library-private top-level function there is no member to reach
+/// through the object and `_locator` stays private.
+///
+/// The bytes are still live and mutable BY DESIGN for the driver's own use
+/// (`copyBackLocator` updates a temporary locator in place after every LOB
+/// operation), so callers inside this package must treat the returned locator as
+/// owned by the handle: read it, ship it, never repoint it.
+@internal
+LobLocator lobLocatorOf(OracleLob lob) => lob._locator;
 
 /// Incremental, strict decoder for the pieces of an [OracleLob.textStream].
 ///

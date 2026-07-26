@@ -43,6 +43,9 @@ library;
 import 'dart:convert';
 
 import 'package:oracledb/oracledb.dart';
+// `lobLocatorOf` is a package-internal seam (not exported from oracledb.dart):
+// the locator buffer is deliberately unreachable from a public OracleLob.
+import 'package:oracledb/src/oracle_lob.dart' show lobLocatorOf;
 import 'package:test/test.dart';
 
 import 'test_helper.dart';
@@ -460,7 +463,7 @@ void main() {
         );
         final lob = await fetchDocHandle(id);
         try {
-          final locator = lob.internalLocator;
+          final locator = lobLocatorOf(lob);
           // The load-bearing guard: without this, every assertion below could
           // pass on the UTF-16 path and prove nothing about the UTF-8 branch.
           expect(locator.isNChar, isFalse,
@@ -487,7 +490,7 @@ void main() {
         );
         final lob = await fetchDocHandle(id);
         try {
-          expect(lob.internalLocator.usesVarLengthCharset, isFalse);
+          expect(lobLocatorOf(lob).usesVarLengthCharset, isFalse);
           final whole = await lob.read() as String;
           expect(whole, equals(utf8FormText));
 
@@ -531,7 +534,7 @@ void main() {
         );
         final lob = await fetchDocHandle(id);
         try {
-          expect(lob.internalLocator.usesVarLengthCharset, isFalse);
+          expect(lobLocatorOf(lob).usesVarLengthCharset, isFalse);
           expect(lob.length, equals(8), reason: '8 characters');
           for (final pieceSize in [1, 3]) {
             final pieces = await lob.textStream(pieceSize: pieceSize).toList();
@@ -558,7 +561,7 @@ void main() {
         );
         final lob = await fetchDocHandle(id);
         try {
-          expect(lob.internalLocator.usesVarLengthCharset, isFalse);
+          expect(lobLocatorOf(lob).usesVarLengthCharset, isFalse);
           final reference = await lob.read();
           expect(reference, equals(utf8FormText));
           for (final cap in [1, 4, 7]) {

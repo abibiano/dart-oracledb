@@ -24,6 +24,15 @@
 /// `FREE_TEMP | ARRAY` piggyback. The bytes are still never exposed publicly —
 /// the only public reference is the opaque `OracleLob`.
 ///
+/// "Never exposed publicly" is enforced by the shape of the seam, not by
+/// convention: the driver reaches a handle's locator through
+/// `lobLocatorOf(OracleLob)`, a top-level `@internal` function that
+/// `lib/oracledb.dart`'s `show` clause omits. It is deliberately NOT a getter on
+/// `OracleLob` — `@internal` is a lint annotation only, so a member on an
+/// exported class stays reachable by dynamic dispatch from any code holding a
+/// handle, which would hand out this live, mutable buffer (see `lobLocatorOf`'s
+/// own doc for the confused-deputy scenario that motivates the shape).
+///
 /// Story 12.3 adds the fourth escape route, and the only LAZY one: a locator
 /// wrapped **per FETCHED BATCH** by a streaming result set
 /// (`OracleExecuteOptions(resultSet: true, fetchLobs: true)`). `ResultSetCursor`

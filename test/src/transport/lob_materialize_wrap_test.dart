@@ -634,6 +634,92 @@ void main() {
           reason: 'the locator IS temporary and the materialize path discards '
               'it, so it still must be freed even though no READ was needed');
     });
+
+    // -----------------------------------------------------------------------
+    // The free must be gated on "the read was ATTEMPTED", never on "the read
+    // SUCCEEDED". Queueing only after a successful read re-opens the very leak
+    // AC4 closed, on every read-failure path: the server-side temporary LOB
+    // exists regardless of whether the driver managed to decode its content, and
+    // once `readLocator` throws, the locator is discarded and nothing else can
+    // ever free it. Each of these fails if the queue call is moved back below
+    // the read.
+    // -----------------------------------------------------------------------
+    test('a TEMP locator whose READ returns no data is STILL queued', () async {
+      // No canned replies => amount 0 on the first READ => readLobRange hands
+      // back an empty result and `_readBlobAsBytes` throws its "returned no
+      // data" guard.
+      final t = _ChunkedReadTransport([]);
+      final loc = _fetchedTempLocator(oracleType: oraTypeBlob, length: 3);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(isSuccess: true, rows: [
+            [loc],
+          ]),
+        ),
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.debugPendingTempLobCount, equals(1),
+          reason: 'the temp LOB exists server-side whether or not the read '
+              'worked; gating the free on success leaks it until session end');
+    });
+
+    test('a TEMP locator whose READ is SHORT (strict truncation guard) is '
+        'still queued', () async {
+      final t = _ChunkedReadTransport([
+        // Declares 2 units delivered but the locator says 5 => the read
+        // completes the loop and the caller's length verification throws.
+        (data: Uint8List.fromList([1, 2]), amount: 5),
+      ]);
+      final loc = _fetchedTempLocator(oracleType: oraTypeBlob, length: 5);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(isSuccess: true, rows: [
+            [loc],
+          ]),
+        ),
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.debugPendingTempLobCount, equals(1));
+    });
+
+    test('a TEMP locator whose READ faults MID-continuation (no progress) is '
+        'still queued', () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([1, 2]), amount: 2),
+        (data: null, amount: 0), // 0 units with 3 outstanding => fail loud
+      ]);
+      final loc = _fetchedTempLocator(oracleType: oraTypeBlob, length: 5);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(isSuccess: true, rows: [
+            [loc],
+          ]),
+        ),
+        throwsA(isA<OracleException>().having(
+          (e) => e.message,
+          'message',
+          contains('made no progress'),
+        )),
+      );
+      expect(t.debugPendingTempLobCount, equals(1));
+    });
+
+    test('a failing read on a NON-temporary locator queues nothing (the guard '
+        'is still content-driven, not failure-driven)', () async {
+      final t = _ChunkedReadTransport([]);
+      final loc = _fetchedPlainLocator(oracleType: oraTypeBlob, length: 3);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(isSuccess: true, rows: [
+            [loc],
+          ]),
+        ),
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.debugPendingTempLobCount, equals(0),
+          reason: 'exception-safety must not turn every failed read into a '
+              'FREE_TEMP for a persistent locator');
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -715,6 +801,48 @@ void main() {
       expect(afterDrain.debugPendingTempLobCount, equals(1),
           reason: 'a locator can only be re-created after its free was SENT, '
               'i.e. after it left the pending list');
+    });
+
+    test('an executeMany-scale queue stays correct AND cheap (the dedupe is '
+        'O(1), not a per-queue linear scan)', () {
+      // `_prepareBulkRowLobs` queues one locator PER ROW before the single array
+      // execute, so the queue is emphatically not "at most a handful of
+      // entries". A content scan on every queue attempt is ~N^2/2 whole-locator
+      // byte comparisons: 10k rows was measured as ~2e9 comparisons. The wall
+      // clock below is a coarse regression fence (a linear scan at this N takes
+      // orders of magnitude longer than the O(1) index); the count assertions
+      // are the real contract.
+      const n = 20000;
+      final t = _ChunkedReadTransport([]);
+      final sw = Stopwatch()..start();
+      for (var i = 0; i < n; i++) {
+        final b = Uint8List(tnsLobLocatorBufferSize);
+        b[tnsLobLocOffsetFlag4] |= tnsLobLocFlagsTemp;
+        // 4 distinguishing bytes so all N locators are distinct.
+        b[0] = i & 0xFF;
+        b[1] = (i >> 8) & 0xFF;
+        b[2] = (i >> 16) & 0xFF;
+        b[3] = (i >> 24) & 0xFF;
+        t.queueTempLobToFree(b);
+      }
+      sw.stop();
+      expect(t.debugPendingTempLobCount, equals(n),
+          reason: 'N distinct locators must all be queued — the fast path must '
+              'not have become a dedupe that swallows real frees');
+      // Re-queueing every one of them must still be fully deduped.
+      for (var i = 0; i < n; i++) {
+        final b = Uint8List(tnsLobLocatorBufferSize);
+        b[tnsLobLocOffsetFlag4] |= tnsLobLocFlagsTemp;
+        b[0] = i & 0xFF;
+        b[1] = (i >> 8) & 0xFF;
+        b[2] = (i >> 16) & 0xFF;
+        b[3] = (i >> 24) & 0xFF;
+        t.queueTempLobToFree(b);
+      }
+      expect(t.debugPendingTempLobCount, equals(n),
+          reason: 'byte-equal re-queues are still deduped at scale');
+      expect(sw.elapsed, lessThan(const Duration(seconds: 5)),
+          reason: 'queueing $n locators must not be quadratic');
     });
   });
 

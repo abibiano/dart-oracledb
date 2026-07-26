@@ -36,10 +36,15 @@ path additionally proven live against a `WE8MSWIN1252` database).
   temporary handle is exempt from the in-flight-slot rule, so it can be used
   and bound while open, and it survives `commit()` and `rollback()` (session
   duration, not transaction duration).
-- **`OracleLob` as a bind value** — pass a handle straight into `INSERT ...
-  VALUES (:v)`, a PL/SQL IN bind, or an `OracleBind.inOut` spec. Binding a
-  closed handle, or one belonging to another connection, fails before any wire
-  round trip.
+- **A created-temporary `OracleLob` as a bind value** — pass a
+  `createTemporaryClob()`/`createTemporaryNClob()`/`createTemporaryBlob()`
+  handle straight into `INSERT ... VALUES (:v)`, a PL/SQL IN bind, or an
+  `OracleBind.inOut` spec. Binding a closed handle, or one belonging to another
+  connection, fails before any wire round trip. A **fetched** handle (from
+  `fetchLobs: true`) cannot be bound: it holds the connection's single in-flight
+  slot while open, so the binding statement is rejected as a concurrent
+  operation, now with an error that names this restriction instead of the
+  generic concurrency text.
 - **Streaming transfer** — `textStream({offset, pieceSize})` (CLOB/NCLOB),
   `byteStream({offset, pieceSize})` (BLOB) and
   `writeStream(Stream<Object> data, {offset})`, with the exported
@@ -60,8 +65,11 @@ path additionally proven live against a `WE8MSWIN1252` database).
   including those buffered by a streaming result set.
 - **Fail-loud boundaries** (all before or instead of returning wrong data): a
   LOB column carried by a nested `CURSOR()` or a REF CURSOR OUT bind is
-  rejected under `fetchLobs` (and its server cursor is requeued for close
-  rather than leaked); `resultSet: true` + `fetchLobs: true` on a PL/SQL block
+  rejected under `fetchLobs` (and every nested server cursor in that batch is
+  requeued for close rather than leaked) — note this query shape is not usable
+  at all, `fetchLobs` or not: it fails with a protocol error on 23ai and 21c,
+  and on 21c the session is lost, so `fetchLobs: true` is the only way to meet
+  the boundary with the connection intact (see README "Known Limitations"); `resultSet: true` + `fetchLobs: true` on a PL/SQL block
   with lazily-drained implicit results is rejected pre-wire; `executeMany()`
   with an `OracleLob` bind value is rejected; writing through a read-only
   plain-`SELECT` locator surfaces the real Oracle error (ORA-22920) and leaves

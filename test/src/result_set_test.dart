@@ -22,6 +22,7 @@ class _FakeResultSetTransport extends Transport {
     required this.firstBatch,
     this.fetchBatches = const [],
     this.materializeThrowOnCall,
+    this.materializeWrapThenThrowOnCall,
     this.fetchGate,
     this.fetchBuilder,
   });
@@ -47,6 +48,16 @@ class _FakeResultSetTransport extends Transport {
   /// (call 1 is the first-batch materialize done at open), simulating a LOB-read
   /// failure mid-stream. All other calls pass the response through unchanged.
   final int? materializeThrowOnCall;
+
+  /// When set, [materializeLobs] wraps every locator in the batch and THEN
+  /// throws, on exactly this 1-based call number.
+  ///
+  /// This is the shape [materializeThrowOnCall] cannot express: the real
+  /// `_materializeLobValues` issues a LOB read round trip per locator, so it can
+  /// fail PART WAY through a batch, after `wrapLob` has already produced handles
+  /// and registered them on the connection — and it then returns no response at
+  /// all, so a reap driven off the returned `ExecuteResponse` sees nothing.
+  final int? materializeWrapThenThrowOnCall;
 
   /// When set, the FIRST [fetchRows] round suspends on this gate before
   /// returning, letting a test hold a `getRow()`/`getRows()` pull in flight
@@ -156,6 +167,15 @@ class _FakeResultSetTransport extends Transport {
           }
         }
       }
+    }
+    if (materializeWrapThenThrowOnCall != null &&
+        materializeCalls == materializeWrapThenThrowOnCall) {
+      // Handles now exist and are registered on the connection, but this call
+      // returns nothing — the exact window the wrap-time collection closes.
+      throw const OracleException(
+        errorCode: oraProtocolError,
+        message: 'simulated LOB read failure after part of the batch wrapped',
+      );
     }
     return response;
   }
@@ -1476,6 +1496,57 @@ void main() {
       expect(first.isClosed, isFalse);
       await first.close();
       expect(conn.hasOpenLob, isFalse);
+    });
+
+    // Epic 12 integration review (Med): the reap must be driven off the handles
+    // as they are WRAPPED, not off the response `materializeLobs` returns. That
+    // call does a LOB read round trip per locator and can throw after wrapping
+    // part of the batch — in which case there IS no returned response, so the
+    // old `_reapBatchHandles(materialized)` saw `null` and left those handles
+    // registered in the connection's `_openLobs` with nothing referencing them.
+    // A leftover fetched handle makes every later operation on the connection
+    // fail (the failure mode Story 12.1 reverted a feature over), so the
+    // `conn.execute()` at the end is the load-bearing assertion.
+    test('a throw from INSIDE materializeLobs still reaps the handles it had '
+        'already wrapped', () async {
+      final t = _FakeResultSetTransport(
+        firstBatch: lobBatch([
+          [1, loc(3)],
+        ], more: true),
+        fetchBatches: [
+          lobBatch([
+            [2, loc(3)],
+            [3, loc(3)],
+          ], more: false),
+        ],
+        // Call 1 is the first-batch materialize done at open; call 2 is the
+        // continuation batch, where two handles are wrapped before the throw.
+        materializeWrapThenThrowOnCall: 2,
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+      final result = await conn.execute(
+        'SELECT id, doc FROM t',
+        null,
+        const OracleExecuteOptions(
+          resultSet: true,
+          fetchLobs: true,
+          fetchSize: 1,
+        ),
+      );
+      final rs = result.resultSet!;
+      final first = (await rs.getRow())!['DOC']! as OracleLob;
+      await expectLater(rs.getRow(), throwsA(isA<OracleException>()));
+      await rs.close();
+      // The delivered handle is untouched — the caller owns it.
+      expect(first.isClosed, isFalse);
+      await first.close();
+      // The two handles the failed batch wrapped are gone: nothing is left
+      // holding the connection's in-flight slot.
+      expect(conn.hasOpenLob, isFalse,
+          reason: 'handles wrapped inside the failing materializeLobs call must '
+              'be reaped; otherwise the connection is wedged forever');
+      t.firstBatch = ExecuteResponse(isSuccess: true);
+      await conn.execute('SELECT 1 FROM dual');
     });
 
     test('closeLobs() reaches a streaming result set\'s BUFFERED handles',

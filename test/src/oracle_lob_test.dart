@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:oracledb/oracledb.dart';
+import 'package:oracledb/src/oracle_lob.dart' show lobLocatorOf;
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
@@ -666,6 +667,67 @@ void main() {
       await lob.close();
     });
 
+    // Epic 12 security review (LOW): a wrong-typed chunk must never put the
+    // caller's payload into the exception. `ArgumentError.value` renders its
+    // value through `Error.safeToString`, so the whole chunk used to land in
+    // `toString()` — and `writeStream` DELIBERATELY funnels a rejected chunk into
+    // `write()` for "the real ArgumentError", so the natural mistake
+    // (`File('patient-records.txt').openRead()` into a CLOB handle, or a
+    // Stream<String> into a BLOB handle) embedded a full piece of PII in a message
+    // applications routinely log verbatim.
+    test('a wrong-typed CLOB write reports the TYPE only, never the payload',
+        () async {
+      final (conn, t, lob) = await _fetchLob(_clob(1));
+      const secret = 'PATIENT 4471 SSN 123-45-6789';
+      final payload = Uint8List.fromList(utf8.encode(secret));
+      try {
+        await lob.write(1, payload);
+        fail('expected ArgumentError');
+      } on ArgumentError catch (e) {
+        final text = e.toString();
+        expect(text, contains('requires String'));
+        expect(text, contains('Uint8List'),
+            reason: 'the runtime type IS useful diagnostics');
+        expect(text, isNot(contains('123-45-6789')),
+            reason: 'payload bytes must not reach the message');
+        expect(text, isNot(contains('12, 51')),
+            reason: 'nor the byte-list rendering of the payload');
+      }
+      expect(t.lobWriteCalls, equals(0));
+      await lob.close();
+    });
+
+    test('a wrong-typed BLOB write reports the TYPE only, never the payload',
+        () async {
+      final (conn, t, lob) = await _fetchLob(_blob(1));
+      const secret = 'AKIA-SECRET-ACCESS-KEY-0001';
+      try {
+        await lob.write(1, secret);
+        fail('expected ArgumentError');
+      } on ArgumentError catch (e) {
+        final text = e.toString();
+        expect(text, contains('requires Uint8List or List<int>'));
+        expect(text, contains('String'));
+        expect(text, isNot(contains('AKIA-SECRET')));
+      }
+      expect(t.lobWriteCalls, equals(0));
+      await lob.close();
+    });
+
+    test('the BLOB element-range guard still names the offending int (it is not '
+        'payload)', () async {
+      final (conn, t, lob) = await _fetchLob(_blob(1));
+      try {
+        await lob.write(1, <int>[1, 2, 999]);
+        fail('expected ArgumentError');
+      } on ArgumentError catch (e) {
+        expect(e.toString(), contains('999'),
+            reason: 'one out-of-range element is diagnostics, not payload');
+      }
+      expect(t.lobWriteCalls, equals(0));
+      await lob.close();
+    });
+
     test('an empty write is a no-op (no wire round trip, no length change)',
         () async {
       final (conn, t, lob) = await _fetchLob(_clob(5));
@@ -863,6 +925,51 @@ void main() {
       expect(conn.hasOpenLob, isFalse);
       t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
       await conn.execute('SELECT 1 FROM dual'); // no throw
+    });
+
+    // Epic 12 integration review (Med): the CHANGELOG/README advertise
+    // "pass an OracleLob straight into INSERT ... VALUES (:v)", but a FETCHED
+    // handle trips the concurrency guard before `_validateLobBindValue` can say
+    // anything — so a user following that bullet got "concurrent operation ...
+    // is still in progress", which names no cause and suggests awaiting an
+    // operation that does not exist.
+    test('binding an OPEN FETCHED handle reports the fetched-handle rule, not '
+        'the generic concurrent-operation error', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(1));
+      await expectLater(
+        conn.execute('INSERT INTO t (doc) VALUES (:v)', [lob]),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+            .having((e) => e.message, 'message',
+                contains('fetched OracleLob cannot be bound'))
+            .having((e) => e.message, 'message',
+                contains('createTemporary'))),
+      );
+      // Named binds and OracleBind wrappers reach the same diagnosis.
+      await expectLater(
+        conn.execute('INSERT INTO t (doc) VALUES (:v)', {'v': lob}),
+        throwsA(isA<OracleException>().having((e) => e.message, 'message',
+            contains('fetched OracleLob cannot be bound'))),
+      );
+      await expectLater(
+        conn.execute('BEGIN p(:v); END;', [
+          OracleBind.inOut(value: lob, type: OracleDbType.clob, maxSize: 10),
+        ]),
+        throwsA(isA<OracleException>().having((e) => e.message, 'message',
+            contains('fetched OracleLob cannot be bound'))),
+      );
+      await lob.close();
+    });
+
+    test('an unrelated statement while a fetched handle is open still gets the '
+        'GENERIC concurrent-operation message', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(1));
+      await expectLater(
+        conn.execute('SELECT 1 FROM dual'),
+        throwsA(isA<OracleException>().having((e) => e.message, 'message',
+            contains('Concurrent operation'))),
+      );
+      await lob.close();
     });
 
     test('an in-flight read rejects an overlapping second read', () async {
@@ -1493,7 +1600,7 @@ void main() {
         sql: 'INSERT INTO t (doc) VALUES (:1)',
         bindValues: [
           BindVariable(
-            value: lob.internalLocator,
+            value: lobLocatorOf(lob),
             oraType: oraTypeClob,
             dir: BindDir.input,
           ),
@@ -1501,7 +1608,7 @@ void main() {
         isQuery: false,
       ).toBytes();
       // The 40 locator bytes appear verbatim in the encoded message.
-      expect(_containsSubsequence(encoded, lob.internalLocator.locator), isTrue);
+      expect(_containsSubsequence(encoded, lobLocatorOf(lob).locator), isTrue);
       await lob.close();
     });
 
@@ -1618,18 +1725,21 @@ void main() {
       // The bind unwrap accepts any OracleLob this connection owns. In practice
       // only a CREATED-temporary handle can reach an execute() while open,
       // because Story 12.1's rule that an open FETCHED handle makes the
-      // connection busy is deliberately unchanged (AC4) — so a fetched handle
-      // bind is rejected by the concurrency guard BEFORE the bind unwrap runs,
-      // and after close() the closed-handle guard rejects it. Pin both so a
-      // future reader does not read AC5's "temporary or fetched" as a claim that
-      // a live fetched handle is bindable today.
+      // connection busy is deliberately unchanged (AC4, and carried through the
+      // whole of Epic 12) — so a fetched handle bind is rejected by the
+      // concurrency guard BEFORE the bind unwrap runs, and after close() the
+      // closed-handle guard rejects it. Pin both so a future reader does not read
+      // AC5's "temporary or fetched" as a claim that a live fetched handle is
+      // bindable today. Since the Epic 12 integration review the guard reports
+      // this case SPECIFICALLY rather than as a generic concurrent operation.
       final (conn, t, lob) = await _fetchLob(_clob(4));
       expect(lob.isTemporary, isFalse);
       await expectLater(
         conn.execute('INSERT INTO t (doc) VALUES (:v)', {'v': lob}),
         throwsA(isA<OracleException>()
             .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-            .having((e) => e.message, 'message', contains('still in progress'))),
+            .having((e) => e.message, 'message',
+                contains('fetched OracleLob cannot be bound'))),
       );
       await lob.close();
       await expectLater(

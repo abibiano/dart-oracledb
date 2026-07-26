@@ -254,6 +254,23 @@ const Set<int> viewUnusableCodes = {
 /// A `null` return has already called [markTestSkipped], so the caller skips
 /// only the view-based assertions and keeps its driver-side
 /// (`debugPendingTempLobCount`) ones running.
+///
+/// **This probe is NOT inert: it MUTATES the state it reports.** It runs
+/// `connection.execute()`, and an execute is precisely what flushes the driver's
+/// pending FREE_TEMP piggyback — so by the time this returns, every temp LOB that
+/// was merely QUEUED has been freed server-side and
+/// `debugPendingTempLobCount` has drained to 0. Consequences for test authors:
+///
+/// * The count you get is the count AFTER the probe's own statement did its
+///   piggyback work, never the count at the moment you called.
+/// * A `debugPendingTempLobCount == 0` assertion written immediately after this
+///   probe is satisfied BY THE PROBE, not by the code under test. Sample the
+///   driver-side counter BEFORE calling this if you mean to assert on it.
+/// * Sampling the count before and after a `close()` is therefore meaningless —
+///   the "before" probe already drained whatever the `close()` had queued. To
+///   observe a close's effect, assert `debugPendingTempLobCount` around the
+///   close and use this probe only once, afterwards, as the unrelated statement
+///   the piggyback rides on.
 Future<int?> tempLobCount(OracleConnection connection) async {
   try {
     final r = await connection.execute(tempLobCountSql);

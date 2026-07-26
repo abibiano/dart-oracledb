@@ -461,12 +461,16 @@ class ResultSetCursor {
       _serverHasMoreRows = false;
       return;
     }
-    // Declared OUTSIDE the try so the catch can reach the materialized batch and
-    // reap the LOB handles it wrapped (AC5 site 2). `materializeLobs` returns a
-    // rebuilt response, so a throw from a LATER step (nested-cursor
-    // materialization) would otherwise leave those handles registered on the
-    // connection with nothing referencing them.
-    ExecuteResponse? materialized;
+    // Every handle wrapped for THIS batch, recorded as it is created (AC5 site
+    // 2). Collecting at wrap time — rather than scanning the response
+    // `materializeLobs` returns — is load-bearing: a throw from INSIDE
+    // `materializeLobs` (it does a LOB read round trip per locator, and can fail
+    // after wrapping part of the batch) never produces a response at all, so a
+    // reap driven off the return value would miss exactly those handles and leave
+    // them registered on the connection with nothing referencing them. A leftover
+    // fetched handle makes every later operation on the connection fail.
+    final wrappedThisBatch = <Object>[];
+    final wrap = _wrapLob;
     try {
       final batch = _materializePerBatch
           ? await _transport.materializeLobs(
@@ -474,10 +478,15 @@ class ResultSetCursor {
               timeout: _fetchTimeout,
               // Wrap instead of read when the connection asked for handles
               // (fetchLobs + resultSet). Null on every materialize path.
-              wrapLob: _wrapLob,
+              wrapLob: wrap == null
+                  ? null
+                  : (locator) {
+                      final handle = wrap(locator);
+                      wrappedThisBatch.add(handle);
+                      return handle;
+                    },
             )
           : fetched;
-      materialized = batch;
       // Eager nested-cursor materialization runs AFTER LOB materialization and
       // BEFORE buffering, so the replaced `List<OracleRow>` values are what
       // both `_buffer` and `_previousRoundLastRow` carry. Capturing a still-raw
@@ -509,8 +518,10 @@ class ResultSetCursor {
       _failed = true;
       _serverHasMoreRows = false;
       // Reap any handle this batch wrapped before it failed: the rows never
-      // reach the caller, so nothing else can ever close them.
-      await _reapBatchHandles(materialized);
+      // reach the caller, so nothing else can ever close them. Driven off the
+      // wrap-time collection, which covers a throw from inside `materializeLobs`
+      // as well as one from a later step.
+      await _reapBatchHandles(wrappedThisBatch);
       rethrow;
     }
   }
@@ -525,20 +536,21 @@ class ResultSetCursor {
     if (carried != null) _recordDelivered(carried);
   }
 
-  /// Closes the LOB handles a failed batch had already wrapped. Best-effort and
-  /// never masks the original failure: `close()` on a handle is exception-free,
-  /// but a defensive guard keeps a surprise from replacing the real error.
-  Future<void> _reapBatchHandles(ExecuteResponse? materialized) async {
+  /// Closes the LOB handles a failed batch had already wrapped ([wrapped], in
+  /// wrap order). Best-effort and never masks the original failure: `close()` on
+  /// a handle is exception-free, but a defensive guard keeps a surprise from
+  /// replacing the real error.
+  ///
+  /// A handle the caller ALREADY received is never reaped — Oracle's
+  /// duplicate-column optimization can alias one locator (hence one handle) into
+  /// the previous round's last row, and closing that would pull the rug out from
+  /// under a handle the caller owns.
+  Future<void> _reapBatchHandles(List<Object> wrapped) async {
     final closeHandles = _closeLobHandles;
-    final isHandle = _isLobHandle;
-    if (closeHandles == null || isHandle == null || materialized == null) return;
+    if (closeHandles == null || wrapped.isEmpty) return;
     final found = LinkedHashSet<Object>.identity();
-    for (final row in materialized.rows) {
-      for (final cell in row) {
-        if (cell != null && isHandle(cell) && !_deliveredHandles.contains(cell)) {
-          found.add(cell);
-        }
-      }
+    for (final handle in wrapped) {
+      if (!_deliveredHandles.contains(handle)) found.add(handle);
     }
     if (found.isEmpty) return;
     try {
