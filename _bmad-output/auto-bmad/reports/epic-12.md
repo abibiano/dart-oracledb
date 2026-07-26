@@ -90,3 +90,45 @@
 2. auto-bmad config drift (v0.25.2 -> v0.26.0) adds `code_review.verification_gap: true` + the `ab-verification` profile, but the `bmad-review-verification-gap` skill is NOT installed — decide whether to install the skill or set `code_review.verification_gap: false` before the next run.
 
 **Next:** Re-invoke `/auto-bmad epic --epic 12` once the tree is clean — it starts fresh at E0 (no state was written).
+
+## Report — 2026-07-26T13:08:42Z (halted — config-drift pause: required skill missing (bmad-review-verification-gap)
+
+**Epic:** `None` — stories.
+**Branch:** `(unknown)` (HEAD `unknown`).
+**Pipeline status:** ⛔ stopped at E0 preflight, before any branch/state/commit — the v0.26.0 default `code_review.verification_gap: true` requires the BMAD skill `bmad-review-verification-gap`, which is not installed in .claude/skills/. User chose "Stop — I'll install the skill" at the config-drift review pause. Nothing was written to config.yaml; no epic anchor, no branch, no commits.
+**Continues:** (none — first run)
+
+**Summary:** Epic 12 — LOB Streaming & Temporary LOBs (4 stories). Planned run: 12-2, 12-3, 12-4 fresh on one branch `epic/12-lob-streaming-temporary-lobs` off main; 12-1-public-lob-object already `done` and merged (no stale story branch, base-readiness guard clean). E0 completed: git preflight (clean tree, mode remote), enumerate + adopt, base-readiness, slug resolution. Stopped at the config-drift review pause before E1's anchor init.
+
+**Timing:** (none — started_at not recorded).
+
+**Stories:**
+1. (none landed — no story was entered)
+
+**Skipped (already done):** 12-1-public-lob-object — already `done`, assumed in base (E0 adopt rule)
+
+**Integration review:** not reached (E_review)
+
+**Epic gate:** not reached (E8a); TEA disabled anyway
+
+**TEA:** disabled (tea.enabled=false — no bmad-testarch-* skills installed)
+
+**UAT:** (none)
+
+**Overrides:** none
+
+**Open questions:**
+1. Config drift v0.25.2 → v0.26.0 is unapplied: profile `ab-verification`, mapping `code_review_verification → ab-verification`, setting `code_review.verification_gap = true`. The heal is append-only, so hand-edits made before re-invoking survive.
+
+**Deferred work:** (none)
+
+**Auto-decided (epic mode):** (none)
+
+**Planning drift:** (none — not epic-end)
+
+**⚠️ Needs human:**
+1. Install the BMAD skill `bmad-review-verification-gap` (BMAD installer / bmm module update), OR set `code_review.verification_gap: false` in _bmad-output/auto-bmad/config.yaml to skip the lens.
+2. If the install renders or changes any ab-* delegate agent, fully quit and relaunch Claude Code before re-invoking — a newly-rendered agent is not invokable in the running process.
+3. Re-invoke: `/auto-bmad epic --epic 12`
+
+**Next:** Epic 12 story 12-2-temporary-lob-lifecycle (backlog) would be the epic loop's first story — preview only, not started.
