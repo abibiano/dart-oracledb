@@ -6,7 +6,9 @@ Each CLI's hook config registers this script under its native event names
 agentStop for Stop) but always passes the CANONICAL event name as argv[1] — the
 orchestrator only ever sees canonical events. Payload keys vary too: snake_case
 (claude/codex), conversation_id (cursor), or camelCase (copilot's sessionId/
-transcriptPath); the field extraction below tries each. Reads the hook payload
+transcriptPath, agy's conversationId/transcriptPath — protojson encoding); the
+field extraction below tries each. agy alone carries no cwd, sending the
+workspacePaths list instead. Reads the hook payload
 from stdin and writes one event file
 into the orchestrator's run directory. No-ops (exit 0) unless the session was
 spawned by bmad-loop (detected via env vars set on the tmux window), so
@@ -17,6 +19,13 @@ import json
 import os
 import sys
 import time
+
+
+def _first_workspace(payload):
+    paths = payload.get("workspacePaths")
+    if isinstance(paths, list) and paths and isinstance(paths[0], str):
+        return paths[0]
+    return None
 
 
 def main() -> int:
@@ -38,12 +47,17 @@ def main() -> int:
         "event": event_name,
         "task_id": task_id,
         # Payload keys vary by CLI: snake_case (claude/codex), conversation_id
-        # (cursor), or camelCase (copilot's sessionId/transcriptPath). Try each.
+        # (cursor), or camelCase (copilot's sessionId/transcriptPath, agy's
+        # conversationId). Try each.
         "session_id": (
-            payload.get("session_id") or payload.get("conversation_id") or payload.get("sessionId")
+            payload.get("session_id")
+            or payload.get("conversation_id")
+            or payload.get("sessionId")
+            or payload.get("conversationId")
         ),
         "transcript_path": payload.get("transcript_path") or payload.get("transcriptPath"),
-        "cwd": payload.get("cwd"),
+        # agy sends no cwd — it sends workspacePaths, a list of workspace roots.
+        "cwd": payload.get("cwd") or _first_workspace(payload),
     }
     events_dir = os.path.join(run_dir, "events")
     os.makedirs(events_dir, exist_ok=True)
