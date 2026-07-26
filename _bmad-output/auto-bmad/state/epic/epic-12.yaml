@@ -5,10 +5,10 @@ epic_num: 12
 story_num: null
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T20:05:11Z"
+updated_at: "2026-07-26T20:36:22Z"
 started_at: "2026-07-26T13:15:23Z"
 completed_at: null
-active_seconds: 24311
+active_seconds: 26175
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: false
@@ -20,7 +20,7 @@ tea_selected: []
 tea_rationale: "TEA disabled (tea.enabled=false — no bmad-testarch-* skills installed in BMAD 6.10.0)"
 epic_story_count: 4
 stories_after_in_epic: null
-completed_phases: [0, 1, 2, 5, 7, 81]
+completed_phases: [0, 1, 2, 5, 7, 81, 82]
 code_review_iterations: 2
 code_review_loop_done: true
 hitl_halt: "auto-continued (epic — no halt)"
@@ -32,13 +32,13 @@ phase8_steps:
   trace_gate: done
   nfr: done
   test_review: done
-  project_context: null
-  reconcile: null
-  archive: null
-  retro: null
+  project_context: done
+  reconcile: done
+  archive: done
+  retro: done
 gate_decision: null
 gate_iterations: 0
-deferred_work_archived: 0
+deferred_work_archived: 42
 pr_url: null
 ci_run_url: null
 ci_status: unknown
