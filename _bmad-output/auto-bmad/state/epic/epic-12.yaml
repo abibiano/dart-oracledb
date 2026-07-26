@@ -5,10 +5,10 @@ epic_num: 12
 story_num: null
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T14:39:02Z"
+updated_at: "2026-07-26T14:41:57Z"
 started_at: "2026-07-26T13:15:23Z"
 completed_at: null
-active_seconds: 4901
+active_seconds: 5071
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: false
@@ -27,7 +27,7 @@ hitl_halt: null
 external_review_iterations: 0
 convergence_unverified: false
 story_trace: null
-commits: [27ac2f1]
+commits: [86a991a]
 phase8_steps:
   trace_gate: null
   nfr: null
@@ -52,7 +52,35 @@ blockers: []
 overrides: {}
 constraints: []
 epic_slug: lob-streaming-temporary-lobs
-active_story: 12-2-temporary-lob-lifecycle
-stories_landed: []
+active_story: 12-3-chunked-streaming-transfer
+stories_landed:
+  - 12-2-temporary-lob-lifecycle
 auto_decisions: []
-uat_items: []
+uat_items:
+  - "[12-2-temporary-lob-lifecycle] Setup: 23ai up (docker context use desktop-linux; docker compose up -d); scratch script tool/uat_temp_lob.dart connecting to localhost:1521/FREEPDB1 as system/testpassword, run with dart run"
+  - "[12-2-temporary-lob-lifecycle] createTemporaryClob() then print type/length/isTemporary/isClosed/chunkSize -> clob, 0, true, false, real chunk size (8132, never 0)"
+  - "[12-2-temporary-lob-lifecycle] read() a fresh temp handle -> returns '' immediately, no error"
+  - "[12-2-temporary-lob-lifecycle] write(1, 'hello temp clob') then length + read() on the SAME still-open handle -> 15 and the text back"
+  - "[12-2-temporary-lob-lifecycle] Append via write(length+1, ' more'), then read() and read(offset: 7, amount: 4) -> 'hello temp clob more' and 'temp' (1-based char offsets)"
+  - "[12-2-temporary-lob-lifecycle] Multibyte CLOB: write 'cafe(accent) <CJK> <emoji>' -> read() identical, length 10 (emoji = 2 UCS-2 units)"
+  - "[12-2-temporary-lob-lifecycle] createTemporaryNClob(): type nClob, isTemporary true, byte-exact multibyte round trip"
+  - "[12-2-temporary-lob-lifecycle] createTemporaryBlob(): write [0,1,250,255] -> length 4, read() returns those bytes with 0x00/0xFF intact"
+  - "[12-2-temporary-lob-lifecycle] CREATE TABLE uat_lob (id NUMBER PRIMARY KEY, doc CLOB, bin BLOB); INSERT with the temp handle as a named bind + commit -> SELECT returns exactly what was written"
+  - "[12-2-temporary-lob-lifecycle] Bind the same handle positionally (:1, :2) -> succeeds; SELECT returns the same text (both bind styles work)"
+  - "[12-2-temporary-lob-lifecycle] After commit() (and again after rollback()): isClosed false and full text still readable -> session duration, not transaction duration"
+  - "[12-2-temporary-lob-lifecycle] Insert a never-written temp handle vs an empty String -> temp-LOB row is an empty LOB (NOT NULL), empty-String row is NULL"
+  - "[12-2-temporary-lob-lifecycle] PL/SQL IN bind: BEGIN :len := DBMS_LOB.GETLENGTH(:v); END; -> outBinds['len'] equals the handle's length (server sees the content)"
+  - "[12-2-temporary-lob-lifecycle] IN OUT bind with DBMS_LOB.WRITEAPPEND -> outBinds['v'] is the appended String, and a later read() on the bound handle throws OracleException errorCode 22922 (the bind consumes the handle)"
+  - "[12-2-temporary-lob-lifecycle] V$TEMPORARY_LOBS for the session at baseline / after create / after close() / after one following execute() -> +1 on create, still elevated right after close(), back to baseline only after the next execute()"
+  - "[12-2-temporary-lob-lifecycle] debugPendingTempLobCount at those same four points -> 0, 0, 1, 0; a second close() keeps it at 1 (no double free)"
+  - "[12-2-temporary-lob-lifecycle] Close three temp handles then run SELECT 7 FROM dual -> pending count 3 -> 0 and the SELECT returns 7 (piggyback never disturbs its carrier)"
+  - "[12-2-temporary-lob-lifecycle] Bind a CLOSED handle -> OracleException saying the handle is closed; nothing hit the wire (row count 0) and the connection still executes"
+  - "[12-2-temporary-lob-lifecycle] Bind a handle from a DIFFERENT connection -> OracleException mentioning a different OracleConnection; both connections still usable afterwards"
+  - "[12-2-temporary-lob-lifecycle] executeMany with an OracleLob bind -> throws, message names OracleLob and points at execute()"
+  - "[12-2-temporary-lob-lifecycle] With a created temp handle open, execute('SELECT 1 FROM dual') succeeds; with a FETCHED handle open (fetchLobs: true) another execute fails with the concurrent-operation error, and succeeds after close()"
+  - "[12-2-temporary-lob-lifecycle] SELECT TO_CLOB('reclaim me') with fetchLobs: true -> isTemporary false, read() works, close() leaves pending count 0, next statement still succeeds"
+  - "[12-2-temporary-lob-lifecycle] Abandon a temp handle then close the connection -> isClosed true and a later close() is a silent no-op"
+  - "[12-2-temporary-lob-lifecycle] Pool with min/max 1: create a temp CLOB then release without closing -> handle closed, pending 1, read() throws the reclaim error, re-acquired connection returns 42 and pending is 0"
+  - "[12-2-temporary-lob-lifecycle] Repeat every check against 21c (colima start; docker compose --profile oracle21c up -d oracle21c; localhost:1522/XEPDB1) -> identical behavior including ORA-22922 (message text differs by version)"
+  - "[12-2-temporary-lob-lifecycle] Follow README's 'Temporary LOBs you create, fill, and bind' code block verbatim -> compiles and runs as written; createTemporary* is gone from the 'not yet available' list while Stream/BFILE/trim() remain"
+  - "[12-2-temporary-lob-lifecycle] dart doc, then read createTemporaryClob / OracleLob.isTemporary / OracleLob.close pages -> each states session duration, mandatory close(), piggybacked free, 1-based char-vs-byte offsets, and created-vs-fetched slot behaviour"

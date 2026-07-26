@@ -5,10 +5,10 @@ epic_num: 12
 story_num: 2
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T14:39:02Z"
+updated_at: "2026-07-26T14:41:57Z"
 started_at: "2026-07-26T13:15:49Z"
 completed_at: null
-active_seconds: 4900
+active_seconds: 5070
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: false
@@ -20,14 +20,14 @@ tea_selected: []
 tea_rationale: "TEA disabled for this run (tea.enabled=false)"
 epic_story_count: 4
 stories_after_in_epic: 2
-completed_phases: [0, 1, 3, 5]
+completed_phases: [0, 1, 3, 5, 7]
 code_review_iterations: 0
 code_review_loop_done: false
 hitl_halt: null
 external_review_iterations: 0
 convergence_unverified: false
 story_trace: null
-commits: [4980faf]
+commits: [86a991a]
 phase8_steps:
   trace_gate: null
   nfr: null

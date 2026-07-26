@@ -1,0 +1,54 @@
+# auto-bmad per-story state — written by scripts/state_update.py (full stable schema;
+# see references/state-and-resume.md). Prose belongs in reports/{key}.md, not here.
+story_key: 12-3-chunked-streaming-transfer
+epic_num: 12
+story_num: 3
+branch: epic/12-lob-streaming-temporary-lobs
+status: in-progress
+updated_at: "2026-07-26T14:42:09Z"
+started_at: "2026-07-26T14:42:09Z"
+completed_at: null
+active_seconds: 0
+timing_anchor: null
+is_first_in_epic: false
+is_last_in_epic: false
+needs_project_context_bootstrap: false
+git_mode: remote
+base_branch: main
+tea_risk: null
+tea_selected: []
+tea_rationale: "TEA disabled for this run (tea.enabled=false)"
+epic_story_count: 4
+stories_after_in_epic: 1
+completed_phases: [0, 1]
+code_review_iterations: 0
+code_review_loop_done: false
+hitl_halt: null
+external_review_iterations: 0
+convergence_unverified: false
+story_trace: null
+commits: []
+phase8_steps:
+  trace_gate: null
+  nfr: null
+  test_review: null
+  project_context: null
+  reconcile: null
+  archive: null
+  retro: null
+gate_decision: null
+gate_iterations: 0
+deferred_work_archived: 0
+pr_url: null
+ci_run_url: null
+ci_status: unknown
+pr_merged: false
+merge_method: null
+merge_commit: null
+branch_deleted: false
+open_questions: []
+deferred_work: []
+blockers: []
+overrides: {}
+constraints: []
+tier_a_base_sha: 86a991a4741d1d8ce2ed0e5035e57c848b7a464d
