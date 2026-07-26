@@ -435,6 +435,28 @@ class OracleConnection {
   @visibleForTesting
   int get debugLobReadOps => _transport.debugLobReadOps;
 
+  /// TEST-ONLY per-piece cap for the LOB read-continuation loop; `null` (off)
+  /// in production. **Never a public knob.**
+  ///
+  /// Setting it to N makes every `Transport.readLobRange` request at most N
+  /// units per `tnsLobOpRead`, so its continuation loop — which no live server
+  /// was ever measured to trigger, because a READ always delivers exactly what
+  /// it was asked for — can be driven against a real server (Story 12.4 AC5).
+  /// With it `null` the production path issues exactly one READ for a value that
+  /// fits, byte-for-byte as before.
+  ///
+  /// It reaches `OracleLob.read()` (through [runLobRead]) and the
+  /// `fetchLobs`-off materialize path, and deliberately **not**
+  /// [runLobReadPiece]: `textStream()` / `byteStream()` already pick their own
+  /// piece size and double-capping them would prove nothing. Throws
+  /// [ArgumentError] for a non-positive value.
+  @visibleForTesting
+  int? get debugLobReadPieceUnits => _transport.debugLobReadPieceUnits;
+
+  @visibleForTesting
+  set debugLobReadPieceUnits(int? units) =>
+      _transport.debugLobReadPieceUnits = units;
+
   /// Number of temporary-LOB locators queued for the free-temp piggyback on
   /// the next execute.
   ///

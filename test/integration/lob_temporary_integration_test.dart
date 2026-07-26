@@ -45,22 +45,11 @@ import 'package:test/test.dart';
 
 import 'test_helper.dart';
 
-/// Session-scoped temporary-LOB count from `V$TEMPORARY_LOBS`.
-///
-/// The fixtures connect as `system`, so the view is readable. `ABSTRACT_LOBS`
-/// is deliberately NOT summed (it does not exist on every supported line).
-const String _tempLobCountSql =
-    'SELECT NVL(SUM(CACHE_LOBS + NOCACHE_LOBS), 0) AS N FROM V\$TEMPORARY_LOBS '
-    "WHERE SID = SYS_CONTEXT('USERENV','SID')";
-
-/// Oracle errors that mean `V$TEMPORARY_LOBS` is simply not usable on this
-/// fixture (missing view / no privilege). Anything else is a real failure and is
-/// rethrown — mirroring the probe convention in
-/// `json_data_type_integration_test.dart`.
-const Set<int> _viewUnusableCodes = {
-  942, // ORA-00942: table or view does not exist
-  1031, // ORA-01031: insufficient privileges
-};
+// The `V$TEMPORARY_LOBS` count SQL, its view-unusable error codes and the
+// skip-not-fail `tempLobCount()` wrapper were hoisted into `test_helper.dart`
+// by Story 12.4 AC9 (they had been copy-pasted across suites); the
+// `nationalCharsetSupported()` probe likewise. Same SQL, same tolerated codes,
+// same `markTestSkipped` semantics.
 
 void main() {
   group(
@@ -80,35 +69,6 @@ void main() {
       // The first four UCS-2 units of [accented], for bounded reads on a clean
       // character boundary.
       const accentedFirst4 = 'caf\u{00E9}';
-
-      /// Whether the fixture's national character set supports NCLOB.
-      bool nationalCharsetSupported() {
-        if (connection.charsetInfo.supportsNationalCharacterSet) return true;
-        markTestSkipped(
-          'national charset is ${connection.charsetInfo.nationalCharset}, '
-          'not AL16UTF16 — NCLOB unsupported on this fixture',
-        );
-        return false;
-      }
-
-      /// This session's temporary-LOB count, or `null` when the view is not
-      /// usable on this fixture (the caller then skips only the view-based
-      /// assertions and keeps the `debugPendingTempLobCount` ones).
-      Future<int?> tempLobCount([OracleConnection? conn]) async {
-        try {
-          final r = await (conn ?? connection).execute(_tempLobCountSql);
-          final n = r.rows.single['N'];
-          return n is int ? n : (n as num).toInt();
-        } on OracleException catch (e) {
-          if (!_viewUnusableCodes.contains(e.errorCode)) rethrow;
-          markTestSkipped(
-            'V\$TEMPORARY_LOBS is unusable on this fixture '
-            '(ORA-${e.errorCode}); the server-side free assertions are skipped '
-            'while the debugPendingTempLobCount assertions still run',
-          );
-          return null;
-        }
-      }
 
       setUp(() async {
         connectionHandle = await connectForTest();
@@ -198,7 +158,7 @@ void main() {
 
       test('a created temporary NCLOB round-trips multibyte + supplemental '
           'text write-then-read on the same handle', () async {
-        if (!nationalCharsetSupported()) return;
+        if (!nationalCharsetSupported(connection)) return;
         final lob = await connection.createTemporaryNClob();
         try {
           expect(lob.type, equals(OracleDbType.nClob));
@@ -261,14 +221,14 @@ void main() {
 
       test('the server-side temporary LOB is created, then freed by close() + '
           'the next execute (V\$TEMPORARY_LOBS)', () async {
-        final baseline = await tempLobCount();
+        final baseline = await tempLobCount(connection);
         expect(connection.debugPendingTempLobCount, equals(0));
 
         final lob = await connection.createTemporaryClob();
         await lob.write(1, 'freed on close');
         // A created temp handle does NOT block other statements, so the view is
         // readable on this same session while the handle is open (AC4).
-        final whileOpen = await tempLobCount();
+        final whileOpen = await tempLobCount(connection);
         if (baseline != null && whileOpen != null) {
           expect(
             whileOpen,
@@ -289,7 +249,7 @@ void main() {
         expect(connection.debugPendingTempLobCount, equals(0));
 
         // ...and the server-side LOB is gone.
-        final afterFree = await tempLobCount();
+        final afterFree = await tempLobCount(connection);
         if (baseline != null && afterFree != null) {
           expect(afterFree, equals(baseline));
         }
@@ -297,11 +257,11 @@ void main() {
 
       test('three temp LOBs each queue once and all drain on one execute',
           () async {
-        final baseline = await tempLobCount();
+        final baseline = await tempLobCount(connection);
         final a = await connection.createTemporaryClob();
         final b = await connection.createTemporaryBlob();
         final c = await connection.createTemporaryClob();
-        final whileOpen = await tempLobCount();
+        final whileOpen = await tempLobCount(connection);
         if (baseline != null && whileOpen != null) {
           expect(whileOpen, equals(baseline + 3));
         }
@@ -314,7 +274,7 @@ void main() {
         final ok = await connection.execute('SELECT 7 AS V FROM dual');
         expect(ok.rows.single['V'], equals(7));
         expect(connection.debugPendingTempLobCount, equals(0));
-        final afterFree = await tempLobCount();
+        final afterFree = await tempLobCount(connection);
         if (baseline != null && afterFree != null) {
           expect(afterFree, equals(baseline));
         }
@@ -392,7 +352,7 @@ void main() {
 
       test('a written temp NCLOB binds into INSERT and SELECTs back byte-exact',
           () async {
-        if (!nationalCharsetSupported()) return;
+        if (!nationalCharsetSupported(connection)) return;
         final id = nextTestId();
         const text = '$accented $cjk $emoji';
         final lob = await connection.createTemporaryNClob();
@@ -520,11 +480,20 @@ void main() {
             reason: 'the bound handle is invalidated server-side by IN OUT');
         expect(caught!.errorCode, equals(22922));
 
+        // Story 12.4 AC4: the REPLACEMENT LOB Oracle put behind the IN OUT bind
+        // is itself TEMP-flagged, and the materialize path now queues it — the
+        // caller can never see or free it, so before 12.4 it leaked one session
+        // temporary LOB per call (the measured leak that story closes). It is
+        // already pending here, before close() is even called.
+        expect(connection.debugPendingTempLobCount, equals(1),
+            reason: 'the server replacement LOB is queued by materialize');
+
         // The critical safety property: closing the now-stale handle queues its
-        // locator for FREE_TEMP, and that piggyback must NOT poison the
+        // locator for FREE_TEMP too, and that piggyback must NOT poison the
         // unrelated statement it rides on.
         await lob.close();
-        expect(connection.debugPendingTempLobCount, equals(1));
+        expect(connection.debugPendingTempLobCount, equals(2),
+            reason: 'the server replacement LOB plus the caller original');
         final ok = await connection.execute('SELECT 11 AS V FROM dual');
         expect(ok.rows.single['V'], equals(11),
             reason: 'a stale FREE_TEMP locator must never break its carrier');
@@ -739,7 +708,7 @@ void main() {
 
       test('a FETCHED server-expression locator (TO_CLOB) matches the measured '
           'isTemporary reality, and the next execute still succeeds', () async {
-        final baseline = await tempLobCount();
+        final baseline = await tempLobCount(connection);
         final r = await connection.execute(
           "SELECT TO_CLOB('reclaim me') AS DOC FROM dual",
           null,
@@ -760,7 +729,7 @@ void main() {
         // The piggyback-poisoning guard: the next unrelated execute is intact.
         final ok = await connection.execute('SELECT 8 AS V FROM dual');
         expect(ok.rows.single['V'], equals(8));
-        final after = await tempLobCount();
+        final after = await tempLobCount(connection);
         if (baseline != null && after != null) {
           expect(after, equals(baseline));
         }
@@ -874,17 +843,10 @@ void main() {
             final ok = await reused.execute('SELECT 42 AS V FROM dual');
             expect(ok.rows.single['V'], equals(42));
             expect(reused.debugPendingTempLobCount, equals(0));
-            // And the session's temporary-LOB space really is back to zero.
-            try {
-              final n = await reused.execute(_tempLobCountSql);
-              expect(n.rows.single['N'], equals(0));
-            } on OracleException catch (e) {
-              if (!_viewUnusableCodes.contains(e.errorCode)) rethrow;
-              markTestSkipped(
-                'V\$TEMPORARY_LOBS unusable on this fixture '
-                '(ORA-${e.errorCode})',
-              );
-            }
+            // And the session's temporary-LOB space really is back to zero
+            // (shared skip-not-fail probe, hoisted in Story 12.4 AC9).
+            final n = await tempLobCount(reused);
+            if (n != null) expect(n, equals(0));
             await pool.release(reused);
           } finally {
             await pool.close();

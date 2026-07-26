@@ -63,14 +63,8 @@ void main() {
       late OracleConnection connection;
       final testTable = uniqueTableName('lobchunk');
 
-      bool nationalCharsetSupported() {
-        if (connection.charsetInfo.supportsNationalCharacterSet) return true;
-        markTestSkipped(
-          'national charset is ${connection.charsetInfo.nationalCharset}, '
-          'not AL16UTF16 — NCLOB unsupported on this fixture',
-        );
-        return false;
-      }
+      // `nationalCharsetSupported()` lives in `test_helper.dart` since Story
+      // 12.4 AC9 (it had been copy-pasted across four suites).
 
       setUp(() async {
         connectionHandle = await connectForTest();
@@ -152,7 +146,7 @@ void main() {
       });
 
       test('textStream over an NCLOB matches read() exactly', () async {
-        if (!nationalCharsetSupported()) return;
+        if (!nationalCharsetSupported(connection)) return;
         const text = '$accented $cjk alpha bravo charlie delta echo foxtrot';
         final id = await insertValue('ndoc', text);
         final lob = await lobFor('ndoc', id);
@@ -231,7 +225,7 @@ void main() {
 
       test('an NCLOB with multibyte + supplemental text survives every piece '
           'boundary', () async {
-        if (!nationalCharsetSupported()) return;
+        if (!nationalCharsetSupported(connection)) return;
         const text = '$accented$emoji$cjk$emoji!';
         final id = await insertValue('ndoc', text);
         final lob = await lobFor('ndoc', id);
@@ -247,11 +241,18 @@ void main() {
         }
       });
 
-      test('a BLOB holding the UTF-8 bytes of supplemental text streams '
+      // Story 12.4 AC9 corrects this case's name: the fixture builds
+      // little-endian UTF-16 CODE-UNIT bytes, not UTF-8 bytes. Harmless for the
+      // assertion (that is exactly the point — the BLOB path performs no charset
+      // conversion of any kind), but the old name claimed UTF-8 byte handling
+      // was proven here. The name now matches the bytes.
+      test('a BLOB holding the raw UTF-16LE bytes of supplemental text streams '
           'byte-exact at every piece size', () async {
         final bytes = Uint8List.fromList(
           // Raw bytes: the BLOB path performs no charset conversion at all, so
-          // any boundary is safe — assert that, rather than assuming it.
+          // any boundary is safe — assert that, rather than assuming it. Each
+          // UTF-16 code unit is emitted little-endian (low byte first), which is
+          // what makes these UTF-16LE bytes rather than UTF-8.
           '$accented$emoji$cjk$emoji'.codeUnits.expand((u) => [u & 0xFF, u >> 8]).toList(),
         );
         final id = await insertValue('bin', bytes);
@@ -485,7 +486,7 @@ void main() {
         );
         expect(back.rows.single['DOC'], equals(expected));
 
-        if (!nationalCharsetSupported()) return;
+        if (!nationalCharsetSupported(connection)) return;
         final nlob = await connection.createTemporaryNClob();
         try {
           expect(

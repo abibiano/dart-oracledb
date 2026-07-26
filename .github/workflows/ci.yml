@@ -61,13 +61,21 @@ jobs:
       # stale figure unchanged since the Epic 7 measurement of 2026-06-10
       # (measured 68.89% then). Fresh measured unit-test baseline: 80.85%
       # on 2026-07-12 (Story 12.1); the 73 floor keeps headroom.
+      #
+      # Raised 73 -> 80 by Story 12.4 (the Epic 12 closeout), whose 19 new
+      # fake-transport unit tests measured 81.95% on 2026-07-26 with the same
+      # command this gate runs. Per the ratified convention a floor bump rides
+      # the story diff that raises coverage, and 73 had again drifted ~9 points
+      # below reality. 80 (not 81) is deliberate: local and CI figures can differ
+      # slightly by platform-specific lines, so ~2 points of headroom keeps the
+      # gate strict without turning a platform difference into a red build.
       # Integration-tagged tests are excluded from coverage, so the protocol
       # paths they exercise don't count here. Ratchet the floor upward as
       # unit coverage grows.
       - name: Enforce coverage gate (line coverage floor)
         run: |
           set -eu
-          threshold=73
+          threshold=80
           total=$(awk -F: '/^LF:/ {lf += $2} /^LH:/ {lh += $2} END { if (lf == 0) print "no-data"; else printf "%.2f", (lh / lf) * 100 }' coverage/lcov.info)
           if [ "$total" = "no-data" ]; then
             echo "::error::Coverage gate: no LF records found in coverage/lcov.info"

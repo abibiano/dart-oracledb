@@ -1,6 +1,6 @@
 # Story 12.4: Dual-env integration tests — Epic 12 LOB closeout
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- FOURTH and FINAL story of Epic 12. baseline_commit is injected by the auto-bmad orchestrator (it owns git); do not fabricate it here. -->
@@ -109,42 +109,42 @@ so that LOB work behaves identically on both supported authentication/protocol p
 
 ## Tasks / Subtasks
 
-- [ ] **Audit before adding** (AC: 1, 9)
-  - [ ] Read the three Epic 12 integration files end to end and list what is already covered (see the inventory in Dev Notes). Do **not** duplicate an existing case — every new assertion must map to a cross-feature, scale, pool, or ledger gap in AC2-AC8.
-  - [ ] Confirm the literal `RUN_INTEGRATION_TESTS == 'true'` gate and the content-driven skip helpers are preserved; add no auth-path probe.
+- [x] **Audit before adding** (AC: 1, 9)
+  - [x] Read the three Epic 12 integration files end to end and list what is already covered (see the inventory in Dev Notes). Do **not** duplicate an existing case — every new assertion must map to a cross-feature, scale, pool, or ledger gap in AC2-AC8.
+  - [x] Confirm the literal `RUN_INTEGRATION_TESTS == 'true'` gate and the content-driven skip helpers are preserved; add no auth-path probe.
 
-- [ ] **New cross-feature file** (AC: 2, 3)
-  - [ ] Create `test/integration/lob_coexistence_integration_test.dart` (the 9.4 `ref_cursor_implicit_coexistence_integration_test.dart` precedent) holding the AC2 long-lived-connection sequence and the AC3 pool-cycle group.
-  - [ ] Assert exact counter values (never loose bounds) and the anti-wedge "the next `execute()` succeeds" after every discard path.
-  - [ ] Keep payloads modest — 21c runs under x86_64 emulation and a full-length single READ is super-linear (ledger).
+- [x] **New cross-feature file** (AC: 2, 3)
+  - [x] Create `test/integration/lob_coexistence_integration_test.dart` (the 9.4 `ref_cursor_implicit_coexistence_integration_test.dart` precedent) holding the AC2 long-lived-connection sequence and the AC3 pool-cycle group.
+  - [x] Assert exact counter values (never loose bounds) and the anti-wedge "the next `execute()` succeeds" after every discard path.
+  - [x] Keep payloads modest — 21c runs under x86_64 emulation and a full-length single READ is super-linear (ledger).
 
-- [ ] **AC4 leak: measure → fix → prove → or revert and carry** (AC: 4)
-  - [ ] Re-measure the `IN OUT` OUT-locator growth on both fixtures **before** touching code (throwaway probe under `tool/`, deleted after — the 12.2/12.3 convention).
-  - [ ] Queue TEMP-flagged locators in `_materializeLobValues`; confirm the per-call dedup makes a double queue impossible and re-read `queueTempLobToFree`'s ownership docstring.
-  - [ ] Proven-to-fail unit regression + dual-env `V$TEMPORARY_LOBS` case + piggyback-poisoning guard; full dual-env suite green, or revert and carry with the fresh measurement.
+- [x] **AC4 leak: measure → fix → prove → or revert and carry** (AC: 4)
+  - [x] Re-measure the `IN OUT` OUT-locator growth on both fixtures **before** touching code (throwaway probe under `tool/`, deleted after — the 12.2/12.3 convention).
+  - [x] Queue TEMP-flagged locators in `_materializeLobValues`; confirm the per-call dedup makes a double queue impossible and re-read `queueTempLobToFree`'s ownership docstring.
+  - [x] Proven-to-fail unit regression + dual-env `V$TEMPORARY_LOBS` case + piggyback-poisoning guard; full dual-env suite green, or revert and carry with the fresh measurement.
 
-- [ ] **AC5 live multi-piece READ seam** (AC: 5)
-  - [ ] Add the test-only piece cap reaching `readLobRange(pieceUnits:)`; default off; assert the one-READ fast path is unchanged when off.
-  - [ ] Dual-env cases: CLOB / NCLOB / BLOB multi-piece assembly byte-exact, a cap that splits a surrogate pair, empty LOB, exact-multiple boundary.
+- [x] **AC5 live multi-piece READ seam** (AC: 5)
+  - [x] Add the test-only piece cap reaching `readLobRange(pieceUnits:)`; default off; assert the one-READ fast path is unchanged when off.
+  - [x] Dual-env cases: CLOB / NCLOB / BLOB multi-piece assembly byte-exact, a cap that splits a surrogate pair, empty LOB, exact-multiple boundary.
 
-- [ ] **AC6 cached-`length` asymmetry** (AC: 6)
-  - [ ] Deterministic single-session case: `read(offset: length + 1)` → empty with `debugLobReadOps` **unchanged**; the same offset through `textStream`/`byteStream` → a real READ that terminates cleanly; both documented remedies work.
-  - [ ] Then the concurrent direction as a **measurement** (session B commits, session A reads): record what the stale handle observes on each fixture; assert only "correct data or fail-loud, never silent corruption".
+- [x] **AC6 cached-`length` asymmetry** (AC: 6)
+  - [x] Deterministic single-session case: `read(offset: length + 1)` → empty with `debugLobReadOps` **unchanged**; the same offset through `textStream`/`byteStream` → a real READ that terminates cleanly; both documented remedies work.
+  - [x] Then the concurrent direction as a **measurement** (session B commits, session A reads): record what the stale handle observes on each fixture; assert only "correct data or fail-loud, never silent corruption".
 
-- [ ] **AC7 non-`AL32UTF8` UTF-8-form proof** (AC: 7)
-  - [ ] Bring the `non-al32utf8` profile up; add the gated cases; assert the UTF-8 branch is actually taken; measure whether a split UTF-8 sequence is reachable and record it.
+- [x] **AC7 non-`AL32UTF8` UTF-8-form proof** (AC: 7)
+  - [x] Bring the `non-al32utf8` profile up; add the gated cases; assert the UTF-8 branch is actually taken; measure whether a split UTF-8 sequence is reachable and record it.
 
-- [ ] **AC8 cursor-embedded boundary** (AC: 8)
-  - [ ] Dedicated expendable connection; fail-loud assertion; fresh-connection-afterwards assertion; accept either post-failure fate of the poisoned session; ledger disposition written.
+- [x] **AC8 cursor-embedded boundary** (AC: 8)
+  - [x] Dedicated expendable connection; fail-loud assertion; fresh-connection-afterwards assertion; accept either post-failure fate of the poisoned session; ledger disposition written.
 
-- [ ] **AC9 hygiene + ledger + coverage** (AC: 9)
-  - [ ] Escape the 12.1 file's raw literals; hoist `nationalCharsetSupported()` and the `V$TEMPORARY_LOBS` helper into `test_helper.dart`; rename the "UTF-8 bytes" BLOB case.
-  - [ ] Walk every Epic 12 ledger section: close with evidence or carry with `target:` + epic-exit disposition; add the consolidated parity-gap entry; `target:` on every new deferral.
-  - [ ] Measure coverage; bump the CI floor in this diff only if it genuinely rose.
+- [x] **AC9 hygiene + ledger + coverage** (AC: 9)
+  - [x] Escape the 12.1 file's raw literals; hoist `nationalCharsetSupported()` and the `V$TEMPORARY_LOBS` helper into `test_helper.dart`; rename the "UTF-8 bytes" BLOB case.
+  - [x] Walk every Epic 12 ledger section: close with evidence or carry with `target:` + epic-exit disposition; add the consolidated parity-gap entry; `target:` on every new deferral.
+  - [x] Measure coverage; bump the CI floor in this diff only if it genuinely rose.
 
-- [ ] **AC10 release docs + final validation** (AC: 1, 10)
-  - [ ] `CHANGELOG.md` `## 1.4.0`; `pubspec.yaml`; README badge / install snippet / "As of 1.4" / Project Status row / remove the shipped roadmap row / Features bullet.
-  - [ ] `dart analyze`; `dart doc` (no new warnings); full unit suite; full integration suite on 23ai **and** 21c; record every count.
+- [x] **AC10 release docs + final validation** (AC: 1, 10)
+  - [x] `CHANGELOG.md` `## 1.4.0`; `pubspec.yaml`; README badge / install snippet / "As of 1.4" / Project Status row / remove the shipped roadmap row / Features bullet.
+  - [x] `dart analyze`; `dart doc` (no new warnings); full unit suite; full integration suite on 23ai **and** 21c; record every count.
 
 ## Dev Notes
 
@@ -341,19 +341,19 @@ dart doc   # must add no new warnings (3 pre-existing at connection.dart:54/149)
 
 ### Done criteria checklist
 
-- [ ] Focused Epic 12 LOB suite green on 23ai **and** 21c, no Epic 12-specific skip, no version branch; counts recorded.
-- [ ] Cross-feature long-lived-connection sequence green on both, with exact counter assertions and the rollback/commit LOB-write semantics proven.
-- [ ] ≥5 pool borrow/release cycles (some releasing without closing) leave the session and `V$TEMPORARY_LOBS` at baseline on both.
-- [ ] The `IN OUT` OUT-locator temp-LOB leak is fixed with a proven-to-fail unit regression + dual-env `V$TEMPORARY_LOBS` proof + piggyback-poisoning guard — or reverted and carried with fresh dual-env evidence and a stated reason.
-- [ ] `readLobRange`'s continuation loop has live multi-piece proof on both fixtures (CLOB/NCLOB/BLOB + a surrogate-splitting boundary), and the default single-READ fast path is asserted unchanged.
-- [ ] The cached-`length` asymmetry is pinned deterministically on both (`read()` short-circuits with no round trip; the streams issue a real READ), and the concurrent direction is measured with the "correct data or fail-loud" invariant asserted. No production behavior change.
-- [ ] The UTF-8-form CLOB path is live-proven on the `WE8MSWIN1252` fixture, or its unreachability is recorded with the measurement.
-- [ ] The cursor-embedded-LOB boundary is pinned version-agnostically on an expendable connection, and its ledger entry carries an epic-exit severity/handoff note. No decode fix attempted.
-- [ ] `lob_stream_integration_test.dart`'s raw non-ASCII literals are escaped; `nationalCharsetSupported()` and the `V$TEMPORARY_LOBS` helper exist once in `test_helper.dart`; the misnamed BLOB case is corrected.
-- [ ] Every Epic 12 ledger item is closed with evidence or carried with a `target:` + epic-exit disposition; the consolidated node-parity-gap entry exists; every new deferral has a `target:`.
-- [ ] Coverage measured with the CI command and the number recorded; the floor is bumped in this diff **only** if it genuinely rose (integration tests are excluded from coverage, so no movement is an acceptable, expected outcome — never weaken the gate).
-- [ ] `CHANGELOG.md` `## 1.4.0` written; `pubspec.yaml` + README badge/install/narrative/Project-Status/roadmap/Features are consistent; no tag or publish step.
-- [ ] `dart analyze` clean; `dart doc` no new warnings; full unit suite green; full integration suite green on 23ai **and** 21c with **zero** regressions vs the 12.3 baseline (unit 1667/12-skip; 23ai 541/28-skip; 21c 542/27-skip).
+- [x] Focused Epic 12 LOB suite green on 23ai **and** 21c, no Epic 12-specific skip, no version branch; counts recorded.
+- [x] Cross-feature long-lived-connection sequence green on both, with exact counter assertions and the rollback/commit LOB-write semantics proven.
+- [x] ≥5 pool borrow/release cycles (some releasing without closing) leave the session and `V$TEMPORARY_LOBS` at baseline on both.
+- [x] The `IN OUT` OUT-locator temp-LOB leak is fixed with a proven-to-fail unit regression + dual-env `V$TEMPORARY_LOBS` proof + piggyback-poisoning guard — or reverted and carried with fresh dual-env evidence and a stated reason.
+- [x] `readLobRange`'s continuation loop has live multi-piece proof on both fixtures (CLOB/NCLOB/BLOB + a surrogate-splitting boundary), and the default single-READ fast path is asserted unchanged.
+- [x] The cached-`length` asymmetry is pinned deterministically on both (`read()` short-circuits with no round trip; the streams issue a real READ), and the concurrent direction is measured with the "correct data or fail-loud" invariant asserted. No production behavior change.
+- [x] The UTF-8-form CLOB path is live-proven on the `WE8MSWIN1252` fixture, or its unreachability is recorded with the measurement.
+- [x] The cursor-embedded-LOB boundary is pinned version-agnostically on an expendable connection, and its ledger entry carries an epic-exit severity/handoff note. No decode fix attempted.
+- [x] `lob_stream_integration_test.dart`'s raw non-ASCII literals are escaped; `nationalCharsetSupported()` and the `V$TEMPORARY_LOBS` helper exist once in `test_helper.dart`; the misnamed BLOB case is corrected.
+- [x] Every Epic 12 ledger item is closed with evidence or carried with a `target:` + epic-exit disposition; the consolidated node-parity-gap entry exists; every new deferral has a `target:`.
+- [x] Coverage measured with the CI command and the number recorded; the floor is bumped in this diff **only** if it genuinely rose (integration tests are excluded from coverage, so no movement is an acceptable, expected outcome — never weaken the gate).
+- [x] `CHANGELOG.md` `## 1.4.0` written; `pubspec.yaml` + README badge/install/narrative/Project-Status/roadmap/Features are consistent; no tag or publish step.
+- [x] `dart analyze` clean; `dart doc` no new warnings; full unit suite green; full integration suite green on 23ai **and** 21c with **zero** regressions vs the 12.3 baseline (unit 1667/12-skip; 23ai 541/28-skip; 21c 542/27-skip).
 
 ### References
 
@@ -377,25 +377,232 @@ dart doc   # must add no new warnings (3 pre-existing at connection.dart:54/149)
 
 ### Agent Model Used
 
+Claude Opus 5 (`claude-opus-5[1m]`), auto-bmad dev-story delegate.
+
 ### Debug Log References
+
+Throwaway measurement probes under `tool/` (`probe_inout_temp_lob.dart`,
+`probe_12_4_measure.dart`, `probe_12_4_nonal32.dart`, `probe_dupe.dart`,
+`probe_out_copy.dart`), all **deleted** after use per the 12.2/12.3 convention;
+their findings are the measurement table below. `tool/` no longer exists.
+
+Validation commands (exact, as run):
+
+```bash
+dart analyze --fatal-infos --fatal-warnings          # the CI gate's own form
+scripts/sync_readme_version.sh --check               # the CI version gate
+dart test test/src/                                  # 1686 pass / 12 skip
+RUN_INTEGRATION_TESTS=true dart test test/integration/          # 23ai
+RUN_INTEGRATION_TESTS=true ORACLE_PORT=1522 ORACLE_SERVICE=XEPDB1 \
+  dart test test/integration/                                   # 21c
+RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
+  dart test test/integration/charset_non_al32utf8_integration_test.dart
+dart test --exclude-tags=integration --coverage-path=./coverage/lcov.info
+dart doc
+```
 
 ### Live measurements (Oracle 23ai **and** 21c — record before freezing the design)
 
 | # | Question (AC) | Oracle 23ai | Oracle 21c |
 |---|---------------|-------------|------------|
-| 1 | `IN OUT` CLOB/BLOB OUT-locator `V$TEMPORARY_LOBS` growth under `fetchLobs: false`, before and after the fix (AC4) | | |
-| 2 | Multi-piece READ with the test-only piece cap: piece count, `debugLobReadOps`, byte-exactness, surrogate-splitting boundary (AC5) | | |
-| 3 | Cached `length`: `read(offset: length+1)` no-round-trip short-circuit vs the streams' real READ; and what a stale handle observes after another session commits (AC6) | | |
-| 4 | Pooled-session accretion across N borrow/release cycles (AC3) | | |
-| 5 | `WE8MSWIN1252` fixture: is `_isUtf16` false (UTF-8 branch taken)? Can a piece boundary split a UTF-8 sequence there? (AC7) | | |
-| 6 | Cursor row carrying a LOB: failure shape and the fate of the session afterwards (AC8) | | |
+| 1 | `IN OUT` CLOB/BLOB OUT-locator `V$TEMPORARY_LOBS` growth under `fetchLobs: false`, before and after the fix (AC4) | **BEFORE:** 3× `inOut(value: String, clob)` (`p := p \|\| '-x'`) grows the session count **0 → 1 → 2 → 3**, exactly +1 per call — 12.2's leak reproduced verbatim. `IN OUT` **BLOB** (`p := p`), a plain PL/SQL CLOB **OUT** bind, and a `TO_CLOB` SELECT all stay **flat**. **AFTER:** count stays at **0** for every shape, every call; materialized values byte-identical. | Identical, byte for byte: **0 → 1 → 2 → 3** before, **0** throughout after; same flat shapes. |
+| 1b | Does the `IN OUT` OUT locator ALIAS the driver's own input temp locator? (the double-free question the fix raised) | `p := p` (CLOB **and** BLOB) → free-queue depth **1**: the server returns the SAME locator the driver created for the input value. `p := p \|\| '-x'` → depth **2**: a genuinely NEW temporary LOB. So the dedupe suppresses a REAL double free. | Identical (1 / 1 / 2). |
+| 2 | Multi-piece READ with the test-only piece cap: piece count, `debugLobReadOps`, byte-exactness, surrogate-splitting boundary (AC5) | Cap **off** → exactly **1** READ for every value (fast path unchanged). Cap **on** → `ceil(units/cap)` READs, exactly: 6-unit CLOB cap 3 → **2**, cap 1 → **6**; same for NCLOB; 19-byte BLOB cap 3 → **7**, cap 1 → **19**; 90-unit CLOB caps 1/7/30/89 → 90/13/3/2. Assembled value **byte-exact** at every cap, **including a cap that splits the surrogate pair** (`ab`+U+1F600+`cd`, cap 3 puts HI at the end of piece 1 and LO at the start of piece 2) — the live proof that pieces are joined as BYTES and decoded once. Materialize path (`fetchLobs` off) loops too: cap 2 over a 6-unit CLOB + 19-byte BLOB → **13** READs, values exact. Empty LOB under a cap → **0** READs (short-circuit). Exact multiple (48 units, cap 12) → exactly **4**, no trailing empty READ. Streams unaffected by the cap: cap 1 + `textStream(pieceSize: 10)` over 40 units → **5** READs, not 41. | Identical in every figure. |
+| 3 | Cached `length`: `read(offset: length+1)` no-round-trip short-circuit vs the streams' real READ; and what a stale handle observes after another session commits (AC6) | `read(offset: length+1)` → `''` with `debugLobReadOps` **+0** (no wire trip), with or without an explicit `amount`. `textStream`/`byteStream` at the same offset → `debugLobReadOps` **+1**, zero pieces, clean termination. **Concurrent (session B commits, then A reads — no sleeps):** A's stale handle returns the **OLD value IN FULL** for `read()` AND `textStream()`, in the **grown** direction *and* the **shrunk** direction; no error, no truncation. A locator is read-CONSISTENT. `read(offset:1, amount:40)` on a since-grown 10-char value also returns the old 10 chars (an explicit `amount` is capped at the cached length). A re-`SELECT` reports the true new length (29) and value. | Identical in every case. |
+| 4 | Pooled-session accretion across N borrow/release cycles (AC3) | 6 cycles on `maxConnections: 1`, cycles 2/4/6 releasing without closing (cycle 4 abandoning the FETCHED handle, 2/6 the temp LOB + result set + delivered handle): every cycle's post-first-execute baseline is `V$TEMPORARY_LOBS` **0**, `debugPendingTempLobCount` **0**, `debugPendingCloseCount` **0**, `hasOpenLob`/`hasOpenResultSet`/`isExecuting` all **false**. After all 6, still **0**. A handle held across the release → `oraConnectionClosed` + "reclaimed" for BOTH the delivered-streamed and the eagerly-fetched shape. **Sequencing confirmed:** the reading is only valid AFTER the new borrower's first `execute()` (trap 14). | Identical. |
+| 5 | `WE8MSWIN1252` fixture: is `_isUtf16` false (UTF-8 branch taken)? Can a piece boundary split a UTF-8 sequence there? (AC7) | **Fixture brought up successfully** (`docker compose --profile non-al32utf8 up -d oracle-non-al32`, healthy in ~10 min). A fetched CLOB locator reports `isNChar=false`, `usesVarLengthCharset=false`, `chunkSize=8132` ⇒ **`_isUtf16 == false`, the UTF-8 branch IS taken** — first live proof. `read()` whole and a 1-char bounded read of U+00E9 exact; `textStream()` join exact at pieceSize 1/2/3/4/7/100; the AC5 cap gives `ceil(chars/cap)` READs, byte-exact. **Split UTF-8 sequence: UNREACHABLE live.** With all-multibyte text (8 chars, 2 UTF-8 bytes each) `pieceSize: N` emits pieces of **exactly N characters** — the server bills `amount` in CHARACTERS and delivers WHOLE characters, so no partial sequence is ever handed back. `_LobTextDecoder`'s incomplete-sequence carry therefore stays **unit-proven**; recorded plainly rather than contorting the code. | n/a — this is a third, separate fixture (port 1523). The standard 23ai/21c runs are unaffected: the four new cases are double-gated and simply skip (the +4 skip delta in both full suites). |
+| 6 | Cursor row carrying a LOB: failure shape and the fate of the session afterwards (AC8) | `OracleException` **ORA-12547** "Protocol error: buffer underrun in execute response", cause `BufferException: Integer too large: size=114 exceeds maxSize=8`. `hasOpenLob`/`hasOpenResultSet`/`isExecuting` all false. Session **SURVIVES**: `isConnected` stays `true` and the next statement succeeds. | Same code/cause, different wrapper text ("Malformed TTC stream detected by the completion probe … Transport poisoned"). Session **POISONED**: `isConnected` `false`, next statement ORA-03113. **Both:** a FRESH connection afterwards reads the same tables (and the inner LOB) normally — no server-side damage. The test accepts EITHER fate and asserts neither. |
 
 ### Completion Notes List
 
+- **Three production touches, exactly the three the ACs name** — plus one they
+  implied. (1) AC4's queue-a-free in `Transport._materializeLobValues`;
+  (2) AC5's test-only piece cap (`Transport.debugLobReadPieceUnits`, `@internal`,
+  with a `@visibleForTesting` `OracleConnection` setter; `readLobRange` falls back
+  to it only when no explicit `pieceUnits` is passed); (3) AC10's
+  version/CHANGELOG/README text. The implied fourth is the dedupe in
+  `queueTempLobToFree` — see below. `lib/oracledb.dart` was checked and needs **no
+  change**: no new public type or export (the seam is `@visibleForTesting` on an
+  existing class). No new file under `lib/`.
+- **AC4 landed, and it uncovered a real double-free hazard that had to be fixed
+  with it.** Adding the materialize path as a second "owner" of a temporary
+  locator broke the invariant `queueTempLobToFree`'s docstring rests on. Measured:
+  a PL/SQL `IN OUT` bind whose body is `p := p` returns the *very* locator the
+  driver created for the INPUT value (already queued), while `p := p || '...'`
+  allocates a new one. Without a guard the same locator would go twice into ONE
+  FREE_TEMP piggyback — and because that piggyback rides an unrelated statement,
+  the failure would surface on *that* statement (trap 2). Fixed with the remedy
+  the docstring itself has always prescribed for this case: **locator-level
+  dedupe** comparing CONTENT (the same LOB arrives as two different `Uint8List`
+  instances). It cannot swallow a needed free — distinct temp LOBs never share
+  locator bytes, and a locator can only be re-created after its free was SENT,
+  i.e. after it left the pending list. Two proven-to-fail unit tests + a dual-env
+  integration case. The docstring was rewritten to name both owner classes and why
+  they are mutually exclusive.
+- **DECISION — AC4 deliberately overrides 12.2 AC7 / 12.3 AC6's "the
+  `fetchLobs`-off path stays byte-for-byte identical" mandate**, exactly as this
+  story's AC4 states: that was a per-story no-regression constraint, not a
+  permanent freeze. The **values** callers receive are byte-identical (asserted);
+  what changed on purpose is the free-temp queue **accounting**. Review should
+  read the changed counts as intended, not as a regression.
+- **DISCLOSED — four pre-existing `debugPendingTempLobCount` expectations moved
+  from 1 to 2** as a direct consequence (`clob_integration_test.dart` ×2,
+  `blob_integration_test.dart` ×1, `lob_temporary_integration_test.dart` ×1): a
+  large `String`/`Uint8List` IN bind + a PL/SQL `OUT CLOB/BLOB` assigned from it,
+  and a temp-`OracleLob` bound `IN OUT`. Measured both ways: in the plain-`OUT`
+  shapes the session count returns to 0 pre-fix *and* post-fix, so the driver's
+  extra free there is redundant-but-tolerated on both fixtures (and is
+  node-oracledb parity — node frees a TEMP-flagged OUT locator via its `Lob`
+  auto-close); in the `IN OUT` shape it closes a genuine leak. Every edited
+  expectation carries the explanation inline, and the ledger records it so the
+  numbers are not misread. No values changed anywhere.
+- **One fake-transport correction was required, and it was a modelling gap, not a
+  weakened assertion.** `oracle_lob_test.dart`'s `_tempCapableTransport()` echoes
+  ONE canned locator buffer for every CREATE_TEMP, so two temp handles looked like
+  the same LOB once the dedupe existed. A real CREATE_TEMP returns a distinct
+  locator per LOB (its bytes *are* the LOB's identity), so the "two distinct
+  handles each queue once" test now points the second create at a different
+  buffer, with the reason in a comment. The assertion is unchanged (`equals(2)`).
+- **AC6 diverged from the AC's expected shape, and the measurement won.** 12.3's
+  doc claimed "a since-shrunk LOB makes `read()` fail loud". It does not: a LOB
+  locator is read-CONSISTENT, so a stale handle keeps returning the OLD value in
+  full, in both directions, on both fixtures. The test therefore asserts only the
+  invariant that survives — correct COMPLETE data or a fail-loud
+  `OracleException`, never silently wrong or truncated data — pins no specific
+  ORA-, and uses no sleep-based synchronization. **This also exposed an inaccurate
+  documented remedy**, corrected in the same diff (doc-only, no behavior change,
+  per AC10's docs-accuracy sweep): an explicit `amount` is capped at the units
+  remaining from the *cached* length, so it can only shorten a read — it guards
+  the SHRUNK direction, while a re-`SELECT` is the remedy for the GROWN one.
+  `OracleLob.read`'s dartdoc and the README both said "pass an explicit `amount`
+  or re-select" as if either worked for the grown case.
+- **AC7 closed with a genuine, recorded negative result.** The UTF-8 branch is
+  proven live for the first time (the locator's charset form is asserted FIRST, so
+  nothing passes vacuously), but the split-UTF-8-sequence half is measured
+  **unreachable** on that fixture — the server delivers whole characters — so the
+  incomplete-sequence carry stays unit-proven. Said plainly rather than contorting
+  the code or faking evidence.
+- **AC8: nothing was fixed, on purpose.** The decode defect is pinned as a
+  boundary on a dedicated expendable connection, version-agnostically (the test
+  accepts either post-failure fate and asserts neither), and its ledger entry now
+  carries the epic-exit disposition: severity splits by version (on 21c the caller
+  loses the connection), it blocks wrapping cursor-embedded LOB columns as
+  handles, and it should become its own protocol/decode story.
+- **AC2's statement-cache assertions respect the documented LOB exception** and
+  prove it rather than working around it: on a dedicated connection (so every
+  number is exact, not "at least"), a non-LOB SELECT goes full-parse → cursor
+  REUSE, while the LOB SELECT is full-parse **every** time with `debugCacheSize`
+  fixed at 2 — the cache SLOT is reused, the cursor is not. The non-LOB statement
+  keeps reusing afterwards, so the exception is per-statement, not a cache-wide
+  downgrade. Nothing in the cache was touched.
+- **AC3's workflow order is FORCED by the in-flight-slot rule, and the test says
+  so.** An open FETCHED handle holds the connection's single slot, so neither
+  `createTemporaryClob()` nor a result-set open can run while it lives: the
+  fetched handle must come first and close before the temp LOB and the streaming
+  result set. The cycle that deliberately abandons a fetched handle therefore
+  skips the other two steps. This is the slot rule 12.4 explicitly does **not**
+  relax (its ledger entry is re-confirmed open, not silently satisfied).
+- **Coverage measured at 81.95%** with the CI command (LH 5383 / LF 6569); the
+  floor was `73`. Per the ratified convention (epic-11 retro action item 1) the
+  bump rides this diff, so `.github/workflows/ci.yml` moves to **80** — not 81 —
+  because local and CI figures can differ by a few platform-specific lines and
+  ~2 points of headroom keeps the gate strict without turning that into a red
+  build. Nothing else in `.github/` changed. Note the floor had again drifted ~9
+  points below reality, so most of this bump is catching up rather than this
+  story's own contribution (only the 19 new unit tests could move it; the
+  integration-heavy work contributes nothing, exactly as the AC predicted).
+- **Where the AC5/AC6/AC8 cases live:** all in the new
+  `lob_coexistence_integration_test.dart`, as one group each, so the whole 12.4
+  addition is in one place; the AC7 cases live in
+  `charset_non_al32utf8_integration_test.dart` because they are meaningless on an
+  `AL32UTF8` database and must inherit that file's double gate.
+- **No Epic 12-specific skip and no version branch** anywhere in the new code or
+  tests; the only skips are the pre-existing content-driven ones
+  (`nationalCharsetSupported()`, the `V$TEMPORARY_LOBS` view-unusable probe), now
+  shared from `test_helper.dart`. No `Transport.supportsFastAuth` probe was added.
+- **Final validation.** `dart analyze --fatal-infos --fatal-warnings`: clean.
+  `scripts/sync_readme_version.sh --check`: 1.4.0 consistent. `dart doc`: **3
+  warnings, 0 errors — the same 3 pre-existing unresolved doc references** on
+  `OracleExecuteOptions` / `OracleExecuteManyOptions` (`connection.dart:54` and
+  `:167`; the story's ":149" is the same declaration, shifted by 12.2/12.3's
+  additions). **No new warnings.** Unit **1686 pass / 12 skip** (baseline
+  1667/12 — +19 new). Focused Epic 12 LOB suite (6 files) **153 pass / 0 skip / 0
+  fail** on 23ai **and** 21c. Full integration **23ai 561 pass / 32 skip**,
+  **21c 562 pass / 31 skip** (baseline 541/28 and 542/27 → +20 pass each, the 20
+  new coexistence tests, and +4 skip each, the four double-gated AC7 cases).
+  Non-`AL32UTF8` fixture **24 pass / 0 skip**. **Zero regressions.**
+
 ### File List
+
+**NEW (tests)**
+
+- `test/integration/lob_coexistence_integration_test.dart` — AC2 (cross-feature
+  coexistence on one long-lived connection + the statement-cache LOB exception),
+  AC3 (pooled borrow/release cycles), AC4 (the leak, live), AC5 (live multi-piece
+  READ), AC6 (the cached-length asymmetry + the concurrent measurement), AC8 (the
+  cursor-embedded boundary). 20 tests.
+
+**CHANGED (`lib/`)**
+
+- `lib/src/transport/transport.dart` — AC4: queue a TEMP-flagged locator in
+  `_materializeLobValues`'s materialize branch; locator-level dedupe in
+  `queueTempLobToFree` (+ `_isTempLobAlreadyQueued`) and its rewritten ownership
+  docstring; AC5: `debugLobReadPieceUnits` (`@internal` get/set, validated,
+  default `null`) consulted by `readLobRange` only when no explicit `pieceUnits`
+  is given.
+- `lib/src/connection.dart` — AC5: the `@visibleForTesting`
+  `debugLobReadPieceUnits` getter/setter delegating to the transport.
+- `lib/src/oracle_lob.dart` — **doc-only**: `read()`'s cached-length caveat
+  corrected per the AC6 measurement (the two directions have different remedies;
+  a locator is read-consistent).
+
+**CHANGED (tests)**
+
+- `test/integration/test_helper.dart` — hoisted `nationalCharsetSupported()`,
+  `tempLobCountSql` / `tempLobCountForSid()` / `currentSidSql`,
+  `viewUnusableCodes`, `tempLobCount()`.
+- `test/integration/lob_stream_integration_test.dart` — raw non-ASCII literals →
+  explicit escapes (AC9, at its source), shared-helper call sites.
+- `test/integration/lob_temporary_integration_test.dart` — shared-helper call
+  sites (local duplicates removed); the `IN OUT` case's pending-count expectation
+  updated with the AC4 explanation.
+- `test/integration/lob_chunked_streaming_integration_test.dart` — shared-helper
+  call site; the misnamed "UTF-8 bytes" BLOB case renamed to "raw UTF-16LE bytes".
+- `test/integration/nchar_integration_test.dart` — shared-helper call sites via a
+  thin `nationalCharsetOk()` wrapper preserving this suite's skip wording.
+- `test/integration/charset_non_al32utf8_integration_test.dart` — AC7: four new
+  double-gated cases (the charset form is asserted first; `read()`/`textStream()`
+  exactness; the whole-character measurement; the piece cap on the UTF-8 form).
+- `test/integration/clob_integration_test.dart`,
+  `test/integration/blob_integration_test.dart` — three pending-count
+  expectations 1 → 2 with the AC4 explanation inline.
+- `test/src/transport/lob_materialize_wrap_test.dart` — 19 new unit tests (AC4
+  queue-a-free across every shape + the FLAG-THREADING audit, the dedupe, the AC5
+  seam).
+- `test/src/oracle_lob_test.dart` — the fake CREATE_TEMP now models distinct
+  locators per temporary LOB in the "two distinct handles" test.
+
+**CHANGED (docs / process)**
+
+- `CHANGELOG.md` — the `## 1.4.0` section (Features + Bug Fixes).
+- `pubspec.yaml` — `version: 1.4.0`.
+- `README.md` — pub badge, install snippet, the "As of 1.4, …" sentence, a new
+  Project Status row, the shipped "Public LOB streaming and temporary LOBs"
+  roadmap row removed (remaining priorities renumbered), a Features bullet, and
+  the corrected cached-`length` limitation.
+- `.github/workflows/ci.yml` — coverage floor `73` → `80` (measured 81.95%), with
+  the rationale in the existing comment block. Nothing else in `.github/`.
+- `_bmad-output/implementation-artifacts/deferred-work.md` — the Epic 12 closeout
+  section: 6 items closed with evidence, 2 new entries (the dedupe fix; the
+  disclosed count changes), and every carried item given a `target:` plus an
+  epic-exit disposition, including the consolidated node-parity-gap entry.
+
+**DELETED** — `tool/` (all five throwaway measurement probes; the directory no
+longer exists).
 
 ### Change Log
 
 | Date | Change |
 |------|--------|
 | 2026-07-26 | Story 12.4 context created: Epic 12 dual-env closeout — cross-feature coexistence, pooled-session accretion, the measured `IN OUT` temp-LOB leak, first live multi-piece READ proof, the stale-length window, the non-`AL32UTF8` UTF-8-form branch, the cursor-embedded boundary, ledger/hygiene/coverage closeout, and the Epic 12 release documentation. |
+| 2026-07-26 | dev-story implemented: all 10 ACs delivered. New `lob_coexistence_integration_test.dart` (20 dual-env tests: AC2/AC3/AC4/AC5/AC6/AC8). AC4's `IN OUT` temp-LOB leak re-measured live on both fixtures and FIXED in `_materializeLobValues`; the fix surfaced a real double-free hazard (`p := p` returns the driver's own input locator), fixed with locator-level dedupe in `queueTempLobToFree` — 12 unit regressions, 9+2 proven-to-fail. AC5's test-only piece cap added (`debugLobReadPieceUnits`, default off, `readLobRange` only) giving the continuation loop its first live multi-piece proof incl. a surrogate-splitting boundary. AC6's asymmetry pinned deterministically and the concurrent direction measured (read-consistent locator ⇒ old value in full, so a 12.3 doc claim and a documented remedy were corrected, doc-only). AC7 live-proven on the `WE8MSWIN1252` fixture (UTF-8 branch taken; a split UTF-8 sequence measured unreachable, left unit-proven). AC8 pinned version-agnostically, no decode fix. AC9 hygiene (escapes at their source, helpers hoisted, misnamed case renamed), the ledger closed out with `target:` + epic-exit dispositions, coverage 81.95% ⇒ CI floor 73 → 80. AC10 release docs (CHANGELOG 1.4.0, pubspec, README). Validation: analyze clean, `dart doc` no new warnings, unit 1686/12, focused LOB 153/0 on both, full integration 23ai 561/32 and 21c 562/31, non-AL32UTF8 24/0 — zero regressions. Status → review. |

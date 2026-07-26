@@ -270,13 +270,25 @@ class OracleLob {
   /// server (node-oracledb parity). Because a `fetchLobs` handle reads lazily —
   /// well after the SELECT/FETCH that produced it — a plain (non-`FOR UPDATE`)
   /// locator whose LOB another session modifies and commits in between can leave
-  /// that cached length stale in either direction: a since-shrunk LOB makes this
-  /// method fail loud (a length mismatch, or "made no progress"), and for a
+  /// that cached length stale in either direction: a since-shrunk LOB can make
+  /// this method fail loud (a length mismatch, or "made no progress"), and for a
   /// since-grown LOB a `read(offset: staleLength + 1)` short-circuits to the
-  /// empty value **without a round trip**. Pass an explicit [amount], or
-  /// re-select the value, when concurrent modification is possible. [textStream]
-  /// / [byteStream] are immune by construction: they stop on an empty server
-  /// READ rather than at the cached [length].
+  /// empty value **without a round trip**.
+  ///
+  /// The two directions have DIFFERENT remedies (measured on Oracle 23ai and
+  /// 21c, Story 12.4):
+  /// - **Grown:** re-**select** the value. An explicit [amount] does not help
+  ///   here — it is still capped at the units remaining from the cached [length],
+  ///   so it can only make a read shorter, never reach past the stale end.
+  /// - **Shrunk:** pass an explicit [amount] covering only units you know exist,
+  ///   so a read cannot ask for units that are gone.
+  ///
+  /// In practice a fetched locator is read-CONSISTENT, so a handle fetched before
+  /// another session's committed update was measured to keep returning the OLD
+  /// value in full on both fixtures — correct data, never silently truncated —
+  /// and a re-`SELECT` is what surfaces the new value. [textStream] /
+  /// [byteStream] are immune by construction: they stop on an empty server READ
+  /// rather than at the cached [length].
   ///
   /// **Supplemental-character caveat (CLOB/NCLOB):** a UCS-2 code unit is
   /// equivalent to a character for all but supplemental (astral) characters,

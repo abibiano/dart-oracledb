@@ -1,5 +1,93 @@
 # Changelog
 
+## 1.4.0
+
+Public LOB streaming and temporary LOBs — `OracleLob`. CLOB, NCLOB and BLOB
+values can now be worked with as server-backed handles instead of being
+materialized whole: read bounded ranges, write in place, stream a value in or
+out piece by piece, create session-duration temporary LOBs, and consume a
+streaming result set that hands back a handle per row. All additive — no
+breaking changes — and validated against Oracle 23ai and Oracle 21c (153/153
+focused LOB integration tests green on both, plus the full suites: 561 pass /
+32 skip on 23ai and 562 pass / 31 skip on 21c, and the UTF-8-form CLOB read
+path additionally proven live against a `WE8MSWIN1252` database).
+
+### Features
+
+- **`OracleLob` handle** — obtained with `OracleExecuteOptions(fetchLobs: true)`
+  instead of a materialized `String` / `Uint8List`. Exposes `read()` (alias
+  `getData()`) for a bounded, 1-based range in the type's native units
+  (characters for CLOB/NCLOB, bytes for BLOB), `write(offset, value)`,
+  `length`, `chunkSize`, `type`, `isTemporary`, `isClosed`, and `close()`.
+  Reads and writes are ordinary round trips on the owning connection, so an
+  open **fetched** handle holds that connection's single in-flight slot until
+  it is closed; liveness is consulted rather than mirrored, so a handle whose
+  connection closes, resets or breaks reports `isClosed == true` immediately.
+- **`read()` has no round-trip size ceiling** — a range that one round trip
+  cannot deliver continues with further READs at the advanced offset. Pieces
+  are assembled as **bytes** and decoded exactly once, so a piece boundary
+  falling inside a UTF-8 sequence or a UTF-16 surrogate pair can never corrupt
+  the value. Every size measured on 23ai (to 32 MB) and 21c (to 8 MB) still
+  arrives in exactly one READ, so the common case costs one round trip.
+- **Temporary LOBs** — `createTemporaryClob()`, `createTemporaryNClob()` and
+  `createTemporaryBlob()` create an empty session-duration LOB on the server
+  and hand back a caller-owned handle. `close()` frees the server-side LOB
+  through the existing free-temp piggyback, which rides the next statement. A
+  temporary handle is exempt from the in-flight-slot rule, so it can be used
+  and bound while open, and it survives `commit()` and `rollback()` (session
+  duration, not transaction duration).
+- **`OracleLob` as a bind value** — pass a handle straight into `INSERT ...
+  VALUES (:v)`, a PL/SQL IN bind, or an `OracleBind.inOut` spec. Binding a
+  closed handle, or one belonging to another connection, fails before any wire
+  round trip.
+- **Streaming transfer** — `textStream({offset, pieceSize})` (CLOB/NCLOB),
+  `byteStream({offset, pieceSize})` (BLOB) and
+  `writeStream(Stream<Object> data, {offset})`, with the exported
+  `defaultLobStreamPieceSize` (32,768) default. One READ per emitted piece, one
+  WRITE per caller chunk; `pieceSize` defaults to the server's `chunkSize`. The
+  read streams stop on the server's empty READ rather than at the cached
+  `length`, so they are immune to a stale prefetched length, and the driver
+  stitches its own piece boundaries — a split surrogate pair or multi-byte
+  sequence is carried over, never substituted. Cancelling a stream mid-flight
+  leaves the connection immediately reusable.
+- **`resultSet: true` + `fetchLobs: true`** for a top-level SELECT — a
+  streaming result set yields an `OracleLob` per row, and a LOB read between
+  two `getRow()` calls does not disturb the cursor. Handles wrapped for a
+  prefetched batch but never delivered are reaped by `OracleResultSet.close()`,
+  by a mid-stream FETCH failure, and by pool reclaim, so a caller that stops
+  iterating early can never wedge the connection.
+- **`OracleResult.closeLobs()`** — bulk-closes every handle a result carries,
+  including those buffered by a streaming result set.
+- **Fail-loud boundaries** (all before or instead of returning wrong data): a
+  LOB column carried by a nested `CURSOR()` or a REF CURSOR OUT bind is
+  rejected under `fetchLobs` (and its server cursor is requeued for close
+  rather than leaked); `resultSet: true` + `fetchLobs: true` on a PL/SQL block
+  with lazily-drained implicit results is rejected pre-wire; `executeMany()`
+  with an `OracleLob` bind value is rejected; writing through a read-only
+  plain-`SELECT` locator surfaces the real Oracle error (ORA-22920) and leaves
+  the handle and connection usable.
+
+### Bug Fixes
+
+- **A temporary LOB the server allocated for a materialized LOB value is now
+  freed** instead of leaking session temporary-LOB space until the session
+  ended. Measured on 23ai and 21c: three consecutive
+  `OracleBind.inOut(value: <String>, type: OracleDbType.clob)` PL/SQL calls
+  under the default `fetchLobs: false` grew `V$TEMPORARY_LOBS` by exactly one
+  per call, because the OUT locator was read into a `String` and then
+  discarded with nothing left to free it. The materialize path now queues a
+  locator whose flag byte marks it temporary onto the existing free-temp
+  piggyback. The values callers receive are byte-for-byte unchanged; only the
+  free accounting differs, and locators the server does not mark temporary
+  (table rows, `TO_CLOB(...)`, `FOR UPDATE` locators, plain PL/SQL OUT binds)
+  are unaffected.
+- **A temporary locator can no longer be freed twice.** A PL/SQL `IN OUT` LOB
+  bind whose body does not allocate a new LOB (`p := p`) returns the very
+  locator the driver created for the input value, which was already queued for
+  the free piggyback. Because that piggyback rides an unrelated statement's
+  message, a double free would have surfaced as an error on *that* statement.
+  The queue now skips a locator whose bytes are already pending.
+
 ## 1.3.0
 
 Bulk DML — `executeMany()`. A single wire round trip now executes one statement

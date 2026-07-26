@@ -34,6 +34,50 @@ LobLocator _clob(int length) => LobLocator(
       chunkSize: 0,
     );
 
+/// A FETCHED locator whose flag byte 4 carries the TEMP bit — the shape an
+/// `IN OUT` LOB bind's server-returned OUT locator was measured to have on both
+/// Oracle 23ai and 21c (Story 12.4 AC4). `isTemporary` is derived from the
+/// bytes, NOT passed to the constructor, so this exercises the same read path
+/// production does.
+LobLocator _fetchedTempLocator({
+  required int oracleType,
+  required int length,
+  int? tag,
+}) {
+  final bytes = Uint8List(tnsLobLocatorBufferSize);
+  bytes[tnsLobLocOffsetFlag4] |= tnsLobLocFlagsTemp;
+  // A distinguishing byte so two locators are not byte-identical (the queue
+  // stores raw bytes; identity assertions must not depend on content equality).
+  if (tag != null) bytes[0] = tag;
+  final loc = LobLocator(
+    locator: bytes,
+    oracleType: oracleType,
+    length: length,
+    chunkSize: 0,
+  );
+  // Guard the fixture itself: if this ever stops reporting temporary, every
+  // assertion below would pass vacuously.
+  expect(loc.isTemporary, isTrue,
+      reason: 'fixture must carry the TEMP flag bit');
+  return loc;
+}
+
+/// A FETCHED locator with no flag bits set (a plain table row locator — measured
+/// non-temporary on both fixtures).
+LobLocator _fetchedPlainLocator({
+  required int oracleType,
+  required int length,
+}) {
+  final loc = LobLocator(
+    locator: Uint8List(tnsLobLocatorBufferSize),
+    oracleType: oracleType,
+    length: length,
+    chunkSize: 0,
+  );
+  expect(loc.isTemporary, isFalse);
+  return loc;
+}
+
 /// A [Transport] whose `sendLobOp` replays a queue of canned READ replies.
 ///
 /// Live servers never short-read on demand (measured: no size up to 32 MB on
@@ -404,6 +448,382 @@ void main() {
       await t.readLobRange(locator: live, offset: 1, amount: 1);
       expect(live, everyElement(equals(0)));
       expect(live, hasLength(tnsLobLocatorBufferSize));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Story 12.4 AC4 — the MATERIALIZE path frees a TEMP-flagged locator.
+  //
+  // Under `fetchLobs: false` there is no `OracleLob` to own the locator: the
+  // value is read into a String/Uint8List and the locator discarded, so a
+  // server-allocated TEMPORARY LOB would leak session temp-LOB space until the
+  // session ended (measured live: three `OracleBind.inOut(type: clob)` calls
+  // grew V$TEMPORARY_LOBS 0 -> 1 -> 2 -> 3 on 23ai AND 21c). Each of these
+  // fails without the `queueTempLobToFree` call in `_materializeLobValues`.
+  //
+  // The FLAG-THREADING audit (Epic 11 retro action item 2) is what the group
+  // covers site by site: rows, scalar OUT-bind values, PL/SQL `outBindRows`, the
+  // deeper DML-RETURNING nesting, the aliased duplicate-column locator, the
+  // `wrapLob != null` path, and the non-temporary control.
+  // -------------------------------------------------------------------------
+  group('materializeLobs queues a TEMP-flagged materialized locator (AC4)', () {
+    /// Replies with [length] bytes of BLOB payload, so `_readBlobAsBytes`
+    /// completes its strict length check.
+    _ChunkedReadTransport blobTransport(int length) => _ChunkedReadTransport([
+          for (var i = 0; i < 4; i++)
+            (
+              data: Uint8List.fromList(
+                List<int>.generate(length, (j) => (j + 1) & 0xFF),
+              ),
+              amount: length,
+            ),
+        ]);
+
+    test('a scalar OUT-bind TEMP locator is queued exactly ONCE (the measured '
+        'IN OUT shape)', () async {
+      final t = blobTransport(3);
+      final loc = _fetchedTempLocator(oracleType: oraTypeBlob, length: 3);
+      expect(t.debugPendingTempLobCount, equals(0));
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindValues: [loc],
+          outBindIndices: const [0],
+        ),
+      );
+      // The observable materialized value is UNCHANGED — only the free-temp
+      // queue accounting differs (AC4 overrides 12.2 AC7 / 12.3 AC6's
+      // "byte-for-byte identical" mandate for the accounting, never the value).
+      expect(out.outBindValues.single, equals([1, 2, 3]));
+      expect(t.debugPendingTempLobCount, equals(1));
+    });
+
+    test('a TEMP locator in a result ROW is queued', () async {
+      final t = blobTransport(2);
+      final loc = _fetchedTempLocator(oracleType: oraTypeBlob, length: 2);
+      final out = await t.materializeLobs(
+        ExecuteResponse(isSuccess: true, rows: [
+          [loc, 'other'],
+        ]),
+      );
+      expect(out.rows.single[0], equals([1, 2]));
+      expect(out.rows.single[1], equals('other'));
+      expect(t.debugPendingTempLobCount, equals(1));
+    });
+
+    test('TEMP locators in outBindRows (PL/SQL scalar shape) are each queued',
+        () async {
+      final t = blobTransport(1);
+      final a = _fetchedTempLocator(oracleType: oraTypeBlob, length: 1, tag: 1);
+      final b = _fetchedTempLocator(oracleType: oraTypeBlob, length: 1, tag: 2);
+      await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindRows: [
+            [a],
+            [b],
+          ],
+          outBindIndices: const [0],
+        ),
+      );
+      expect(t.debugPendingTempLobCount, equals(2),
+          reason: 'two DISTINCT locators, one free each');
+    });
+
+    test('a TEMP locator in the deeper DML-RETURNING nesting inherits the queue '
+        '(not a second implementation)', () async {
+      final t = blobTransport(1);
+      final loc = _fetchedTempLocator(oracleType: oraTypeBlob, length: 1);
+      await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindRows: [
+            [
+              [loc],
+            ],
+          ],
+          outBindIndices: const [0],
+        ),
+        dmlReturning: true,
+      );
+      expect(t.debugPendingTempLobCount, equals(1));
+    });
+
+    test('an ALIASED TEMP locator (duplicate-column dedup) is queued at most '
+        'ONCE per response', () async {
+      final t = blobTransport(2);
+      final loc = _fetchedTempLocator(oracleType: oraTypeBlob, length: 2);
+      final out = await t.materializeLobs(
+        ExecuteResponse(isSuccess: true, rows: [
+          [loc],
+          [loc], // Oracle aliases one locator instance into several rows
+          [loc],
+        ]),
+      );
+      expect(t.debugPendingTempLobCount, equals(1),
+          reason: 'a double queue would send the same locator twice in one '
+              'piggyback and surface as an error on an unrelated statement');
+      expect(t.requests, hasLength(1), reason: 'and it is read once too');
+      expect(out.rows[0][0], equals(out.rows[2][0]));
+    });
+
+    test('a NON-temporary locator queues nothing (row / TO_CLOB / FOR UPDATE / '
+        'plain PL-SQL-OUT shapes stay unaffected)', () async {
+      final t = blobTransport(3);
+      final loc = _fetchedPlainLocator(oracleType: oraTypeBlob, length: 3);
+      final out = await t.materializeLobs(
+        ExecuteResponse(isSuccess: true, rows: [
+          [loc],
+        ]),
+      );
+      expect(out.rows.single.single, equals([1, 2, 3]));
+      expect(t.debugPendingTempLobCount, equals(0));
+    });
+
+    test('the WRAP path (fetchLobs: true) queues NOTHING — the handle frees it '
+        'on close(), so queueing here would double-free', () async {
+      // No canned replies: a wrap must issue no READ at all.
+      final t = _ChunkedReadTransport([]);
+      final loc = _fetchedTempLocator(oracleType: oraTypeBlob, length: 5);
+      final out = await t.materializeLobs(
+        ExecuteResponse(isSuccess: true, rows: [
+          [loc],
+        ]),
+        wrapLob: _WrapMarker.new,
+      );
+      expect(out.rows.single.single, isA<_WrapMarker>());
+      expect(t.requests, isEmpty);
+      expect(t.debugPendingTempLobCount, equals(0));
+    });
+
+    test('a CLOB TEMP locator is queued too (the type only picks the decode)',
+        () async {
+      const text = 'temp clob out';
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList(text.codeUnits), amount: text.length),
+      ]);
+      final loc =
+          _fetchedTempLocator(oracleType: oraTypeClob, length: text.length);
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindValues: [loc],
+          outBindIndices: const [0],
+        ),
+      );
+      expect(out.outBindValues.single, equals(text));
+      expect(t.debugPendingTempLobCount, equals(1));
+    });
+
+    test('a ZERO-length TEMP locator issues NO READ yet is still queued (an '
+        'empty temporary LOB is still a server resource)', () async {
+      // `_readBlobAsBytes` short-circuits EMPTY_BLOB()/EMPTY_CLOB() before any
+      // round trip, but the queue point sits AFTER it in `readLocator`, so the
+      // free still lands. Pinned rather than assumed, because the two halves of
+      // this boundary pull in opposite directions.
+      final t = _ChunkedReadTransport([]);
+      final loc = _fetchedTempLocator(oracleType: oraTypeBlob, length: 0);
+      final out = await t.materializeLobs(
+        ExecuteResponse(isSuccess: true, rows: [
+          [loc],
+        ]),
+      );
+      expect(out.rows.single.single, isEmpty);
+      expect(t.requests, isEmpty);
+      expect(t.debugPendingTempLobCount, equals(1),
+          reason: 'the locator IS temporary and the materialize path discards '
+              'it, so it still must be freed even though no READ was needed');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Story 12.4 AC4 — the free-temp queue's locator-level dedupe.
+  //
+  // Adding a SECOND owner class (the materialize path, which has no OracleLob)
+  // made one live shape able to present the SAME server LOB twice: a PL/SQL
+  // `IN OUT` bind whose body is `p := p` returns the very locator the driver
+  // created for the INPUT value, which `_createTempClob`/`_createTempBlob`
+  // already queued. MEASURED on 23ai AND 21c. Queueing it again would put the
+  // same locator twice in ONE FREE_TEMP piggyback, and because that piggyback
+  // rides an unrelated statement's message the double free would surface as an
+  // error on THAT statement.
+  // -------------------------------------------------------------------------
+  group('queueTempLobToFree dedupes an already-pending locator (AC4)', () {
+    Uint8List locatorBytes(int tag) {
+      final b = Uint8List(tnsLobLocatorBufferSize);
+      b[tnsLobLocOffsetFlag4] |= tnsLobLocFlagsTemp;
+      b[0] = tag;
+      return b;
+    }
+
+    test('a byte-EQUAL but distinct instance is not queued twice', () {
+      final t = _ChunkedReadTransport([]);
+      t.queueTempLobToFree(locatorBytes(1));
+      expect(t.debugPendingTempLobCount, equals(1));
+      // A different Uint8List INSTANCE with identical content — exactly what the
+      // server's echo of the driver's own locator looks like.
+      t.queueTempLobToFree(locatorBytes(1));
+      expect(t.debugPendingTempLobCount, equals(1),
+          reason: 'the same server LOB must be freed once, not twice');
+      // A genuinely different locator still queues.
+      t.queueTempLobToFree(locatorBytes(2));
+      expect(t.debugPendingTempLobCount, equals(2));
+    });
+
+    test('the materialize path does not re-queue a locator already pending '
+        '(the p := p IN OUT shape)', () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([1, 2, 3]), amount: 3),
+      ]);
+      // Stand in for `_createTempClob` having queued the INPUT temp locator.
+      final inputLocator = locatorBytes(9);
+      t.queueTempLobToFree(inputLocator);
+      expect(t.debugPendingTempLobCount, equals(1));
+
+      // The server echoes the SAME locator bytes back as the OUT value.
+      final echoed = LobLocator(
+        locator: locatorBytes(9),
+        oracleType: oraTypeBlob,
+        length: 3,
+        chunkSize: 0,
+      );
+      expect(echoed.isTemporary, isTrue);
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindValues: [echoed],
+          outBindIndices: const [0],
+        ),
+      );
+      expect(out.outBindValues.single, equals([1, 2, 3]),
+          reason: 'the value is still materialized normally');
+      expect(t.debugPendingTempLobCount, equals(1),
+          reason: 'no double free of the input locator');
+    });
+
+    test('the dedupe only spans the PENDING window, so a locator freed and '
+        'later re-created is queued again', () async {
+      final t = _ChunkedReadTransport([]);
+      t.queueTempLobToFree(locatorBytes(3));
+      expect(t.debugPendingTempLobCount, equals(1));
+      // Simulate the piggyback having been sent: the drain happens inside
+      // sendExecute, which an unconnected transport cannot run, so assert the
+      // property that matters — after the list is empty the same bytes queue
+      // again — via a fresh transport standing in for the post-drain state.
+      final afterDrain = _ChunkedReadTransport([]);
+      afterDrain.queueTempLobToFree(locatorBytes(3));
+      expect(afterDrain.debugPendingTempLobCount, equals(1),
+          reason: 'a locator can only be re-created after its free was SENT, '
+              'i.e. after it left the pending list');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Story 12.4 AC5 — the test-only piece cap that makes the continuation loop
+  // reachable against a real server. Default off ⇒ the production single-READ
+  // fast path is byte-for-byte unchanged.
+  // -------------------------------------------------------------------------
+  group('Transport.debugLobReadPieceUnits (AC5 test-only seam)', () {
+    final locator = Uint8List(tnsLobLocatorBufferSize);
+
+    test('defaults to null, and a default read of a value that fits issues '
+        'exactly ONE READ', () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([1, 2, 3, 4, 5, 6]), amount: 6),
+      ]);
+      expect(t.debugLobReadPieceUnits, isNull);
+      final read = await t.readLobRange(locator: locator, offset: 1, amount: 6);
+      expect(read.bytes, equals([1, 2, 3, 4, 5, 6]));
+      expect(t.requests, hasLength(1));
+      expect(t.requests.single, equals((offset: 1, amount: 6)));
+    });
+
+    test('with the cap set, the SAME read is split into capped pieces at the '
+        'advanced offset and assembles byte-exact', () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([1, 2]), amount: 2),
+        (data: Uint8List.fromList([3, 4]), amount: 2),
+        (data: Uint8List.fromList([5, 6]), amount: 2),
+      ])
+        ..debugLobReadPieceUnits = 2;
+      final read = await t.readLobRange(locator: locator, offset: 1, amount: 6);
+      expect(read.bytes, equals([1, 2, 3, 4, 5, 6]));
+      expect(read.unitsRead, equals(6));
+      expect(
+        t.requests,
+        equals([
+          (offset: 1, amount: 2),
+          (offset: 3, amount: 2),
+          (offset: 5, amount: 2),
+        ]),
+      );
+    });
+
+    test('an exact multiple of the cap terminates cleanly (off-by-one at the '
+        'boundary)', () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([1, 2]), amount: 2),
+        (data: Uint8List.fromList([3, 4]), amount: 2),
+        // A third reply exists but must never be requested.
+        (data: Uint8List.fromList([9, 9]), amount: 2),
+      ])
+        ..debugLobReadPieceUnits = 2;
+      final read = await t.readLobRange(locator: locator, offset: 1, amount: 4);
+      expect(read.bytes, equals([1, 2, 3, 4]));
+      expect(t.requests, hasLength(2));
+    });
+
+    test('an EXPLICIT pieceUnits argument wins over the cap', () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([1, 2, 3]), amount: 3),
+        (data: Uint8List.fromList([4]), amount: 1),
+      ])
+        ..debugLobReadPieceUnits = 1;
+      await t.readLobRange(
+        locator: locator,
+        offset: 1,
+        amount: 4,
+        pieceUnits: 3,
+      );
+      expect(
+        t.requests,
+        equals([(offset: 1, amount: 3), (offset: 4, amount: 1)]),
+      );
+    });
+
+    test('a zero-unit read still issues no round trip with the cap set',
+        () async {
+      final t = _ChunkedReadTransport([])..debugLobReadPieceUnits = 4;
+      final read = await t.readLobRange(locator: locator, offset: 1, amount: 0);
+      expect(read.bytes, isEmpty);
+      expect(t.requests, isEmpty);
+    });
+
+    test('the fail-loud guards still fire under the cap (no-progress)',
+        () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([1]), amount: 1),
+        (data: null, amount: 0),
+      ])
+        ..debugLobReadPieceUnits = 1;
+      await expectLater(
+        t.readLobRange(locator: locator, offset: 1, amount: 4),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('made no progress'))),
+      );
+    });
+
+    test('the cap is validated: a non-positive value throws and leaves the '
+        'seam off', () async {
+      final t = _ChunkedReadTransport([]);
+      expect(() => t.debugLobReadPieceUnits = 0, throwsArgumentError);
+      expect(() => t.debugLobReadPieceUnits = -1, throwsArgumentError);
+      expect(t.debugLobReadPieceUnits, isNull);
+      // And it can be turned back off.
+      t.debugLobReadPieceUnits = 3;
+      expect(t.debugLobReadPieceUnits, equals(3));
+      t.debugLobReadPieceUnits = null;
+      expect(t.debugLobReadPieceUnits, isNull);
     });
   });
 }

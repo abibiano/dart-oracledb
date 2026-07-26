@@ -526,12 +526,14 @@ class Transport {
   /// integration tests (temp-LOB lifecycle) via
   /// `OracleConnection.debugPendingTempLobCount`; not a public API.
   ///
-  /// Two kinds of locator land on the queue: the driver's own bind-conversion
+  /// Three kinds of locator land on the queue: the driver's own bind-conversion
   /// temp LOBs ([_createTempClob] / [_createTempBlob], queued right after the
-  /// execute that bound them) and — since Story 12.2 — a **caller-owned**
-  /// temporary LOB whose public `OracleLob.close()` released it (queued via
-  /// [queueTempLobToFree]). Either way the count drains to zero on the next
-  /// [sendExecute].
+  /// execute that bound them); since Story 12.2, a **caller-owned** temporary
+  /// LOB whose public `OracleLob.close()` released it (queued via
+  /// [queueTempLobToFree]); and since Story 12.4, a **server-allocated**
+  /// temporary locator the `fetchLobs`-off materialize path read and discarded
+  /// ([_materializeLobValues], the `IN OUT` LOB-bind OUT locator). Either way the
+  /// count drains to zero on the next [sendExecute].
   int get debugPendingTempLobCount => _tempLobsToClose.length;
 
   /// Queues [locator]'s raw bytes for the free-temporary-LOB piggyback that
@@ -552,21 +554,68 @@ class Transport {
   ///
   /// Nothing dedupes at the locator level: this method appends whatever bytes it
   /// is given. The at-most-once property therefore rests on a structural
-  /// invariant the CALLER must preserve — **one temporary locator is owned by
-  /// exactly one `OracleLob`**. Given that, `OracleLob.close()`'s idempotency
-  /// (it queues only on the first call, via
-  /// `OracleConnection.releaseLob`) makes a double free impossible. Today the
-  /// invariant holds by construction: every created-temporary handle owns a
-  /// locator freshly returned by [createTemporaryLob], and the only FETCHED
-  /// shape measured to carry the TEMP flag is an `IN OUT` bind's returned OUT
-  /// locator, which is wrapped once. A future change that lets two handles share
-  /// one temporary locator's bytes (e.g. duplicate-column carry under
-  /// `fetchLobs`, Story 12.3) breaks the guarantee and must add locator-level
-  /// dedupe here or ownership transfer at the wrap site.
+  /// invariant the CALLER must preserve — **one temporary locator has exactly one
+  /// owner responsible for queueing it**, and there are exactly two kinds of
+  /// owner:
+  ///
+  /// 1. **An `OracleLob` handle** (`wrapLob != null`, i.e. `fetchLobs: true`, and
+  ///    every `createTemporary*` handle). `OracleLob.close()` is idempotent — it
+  ///    queues only on the first call, via `OracleConnection.releaseLob` — so a
+  ///    double free is impossible. Every created-temporary handle owns a locator
+  ///    freshly returned by [createTemporaryLob], and the only FETCHED shape
+  ///    measured to carry the TEMP flag is an `IN OUT` bind's returned OUT
+  ///    locator, which is wrapped exactly once.
+  /// 2. **The materialize path** (`wrapLob == null`, i.e. `fetchLobs: false`),
+  ///    since Story 12.4: there is no handle at all, so `_materializeLobValues`
+  ///    queues the locator itself right after reading it. It runs behind that
+  ///    method's per-response `materialized` dedup map, so an aliased locator
+  ///    (Oracle's duplicate-column optimization) is queued at most once per
+  ///    response.
+  ///
+  /// The two are **mutually exclusive by construction** — one `materializeLobs`
+  /// call either wraps a locator or materializes it, never both — which is what
+  /// keeps a locator from being queued twice, once by each owner class.
+  ///
+  /// **Locator-level dedupe backstop (Story 12.4).** Because owner class 2 is a
+  /// path with no handle, one case CAN present the same LOB to both: a PL/SQL
+  /// `IN OUT` LOB bind whose body does not allocate a new LOB (`p := p`) returns
+  /// the very locator the driver created for the INPUT value — which
+  /// [_createTempClob] / [_createTempBlob] already queued. Queueing it again
+  /// would put the same locator twice in ONE piggyback, and because that
+  /// piggyback rides an unrelated statement's message the resulting double free
+  /// would surface as an error on THAT statement. So this method now skips a
+  /// locator whose bytes are already pending — exactly the "locator-level
+  /// dedupe here" this docstring has always prescribed for that situation.
+  /// Distinct temporary LOBs never share locator bytes (a locator encodes the
+  /// LOB's unique server-side identity), and a locator can only be re-created
+  /// after its free was actually SENT — i.e. after it left this list — so the
+  /// dedupe can never swallow a free that was genuinely needed.
   @internal
   void queueTempLobToFree(Uint8List locator) {
+    if (_isTempLobAlreadyQueued(locator)) return;
     _tempLobsToClose.add(locator);
     _tempLobsTotalSize += locator.length;
+  }
+
+  /// Whether [locator]'s bytes are already pending on [_tempLobsToClose].
+  ///
+  /// Compares CONTENT, not identity: the same server-side temporary LOB can be
+  /// presented as two different `Uint8List` instances (one created locally by
+  /// [_createTempClob], one decoded from the server's echo of the same locator).
+  /// The list holds at most a handful of entries, so the scan is negligible.
+  bool _isTempLobAlreadyQueued(Uint8List locator) {
+    for (final pending in _tempLobsToClose) {
+      if (pending.length != locator.length) continue;
+      var same = true;
+      for (var i = 0; i < pending.length; i++) {
+        if (pending[i] != locator[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return true;
+    }
+    return false;
   }
 
   /// Creates an EMPTY session-duration temporary LOB on the server and returns
@@ -665,6 +714,52 @@ class Transport {
   /// Oracle views. Surfaced to tests via `OracleConnection.debugLobReadOps`;
   /// not a public API.
   int get debugLobReadOps => _lobReadOps;
+
+  /// TEST-ONLY per-piece cap for [readLobRange], `null` (off) in production.
+  ///
+  /// **Never a public knob**, and deliberately not a caller-facing `pieceSize`
+  /// for `OracleLob.read()` — see [debugLobReadPieceUnits] for why it exists.
+  int? _debugLobReadPieceUnits;
+
+  /// TEST-ONLY: forces [readLobRange] to request at most this many units per
+  /// `tnsLobOpRead`, making its continuation loop reachable against a real
+  /// server. `null` (the default) leaves the production single-READ fast path
+  /// **byte-for-byte unchanged**.
+  ///
+  /// Why it exists (Story 12.4 AC5): no live server was ever measured to
+  /// short-read a LOB READ — the server's SB8 `amount` always equalled the
+  /// request, up to 33.5 M units on 23ai and 8.4 M on 21c — so [readLobRange]'s
+  /// continuation loop, its no-progress throw and its overshoot throw were
+  /// provable only by fake transports. `readLobRange(pieceUnits:)` already
+  /// existed but was reachable from no caller. This seam makes it reachable from
+  /// a test without adding a wire message, a queue or a shape-specific branch.
+  ///
+  /// **Reach is deliberate.** It applies to [readLobRange] and therefore to both
+  /// callers that need it — `OracleLob.read()` (via
+  /// `OracleConnection.runLobRead`) and the `fetchLobs`-off materialize path
+  /// ([_readClobAsString] / [_readBlobAsBytes]). It does **not** reach
+  /// `OracleConnection.runLobReadPiece`, which issues its own single READ
+  /// directly: `textStream()` / `byteStream()` already choose their own piece
+  /// size, so double-capping them would prove nothing.
+  ///
+  /// An explicit `pieceUnits` argument always wins over this cap (the argument
+  /// is the caller's own choice; the cap is only a default for callers that pass
+  /// none). Surfaced to tests via `OracleConnection.debugLobReadPieceUnits`.
+  @internal
+  int? get debugLobReadPieceUnits => _debugLobReadPieceUnits;
+
+  @internal
+  set debugLobReadPieceUnits(int? units) {
+    if (units != null && units <= 0) {
+      throw ArgumentError.value(
+        units,
+        'units',
+        'the test-only LOB read piece cap must be a positive number of units; '
+            'pass null to turn it off',
+      );
+    }
+    _debugLobReadPieceUnits = units;
+  }
 
   Future<ExecuteResponse> sendExecute(
     String sql, {
@@ -1694,14 +1789,18 @@ class Transport {
     Duration? timeout = const Duration(minutes: 2),
   }) async {
     if (amount <= 0) return LobRangeRead(bytes: Uint8List(0), unitsRead: 0);
+    // An explicit argument wins; otherwise the test-only cap applies (null in
+    // production, which keeps the single-READ fast path byte-for-byte
+    // unchanged). See [debugLobReadPieceUnits].
+    final effectivePieceUnits = pieceUnits ?? _debugLobReadPieceUnits;
     final pieces = <Uint8List>[];
     var unitsRead = 0;
     var totalBytes = 0;
     while (unitsRead < amount) {
       final outstanding = amount - unitsRead;
       final request =
-          pieceUnits != null && pieceUnits < outstanding
-              ? pieceUnits
+          effectivePieceUnits != null && effectivePieceUnits < outstanding
+              ? effectivePieceUnits
               : outstanding;
       final response = await sendLobOp(
         operation: tnsLobOpRead,
@@ -1807,11 +1906,46 @@ class Transport {
     Future<Object> readLocator(LobLocator locator) async {
       final existing = materialized[locator];
       if (existing != null) return existing;
-      final Object value = wrapLob != null
-          ? wrapLob(locator)
-          : locator.oracleType == oraTypeBlob
-              ? await _readBlobAsBytes(locator, timeout)
-              : await _readClobAsString(locator, timeout);
+      final Object value;
+      if (wrapLob != null) {
+        // fetchLobs: true — the handle owns the locator and frees it itself on
+        // close() via OracleConnection.releaseLob. Queueing here too would
+        // double-free (see queueTempLobToFree's ownership invariant).
+        value = wrapLob(locator);
+      } else {
+        value = locator.oracleType == oraTypeBlob
+            ? await _readBlobAsBytes(locator, timeout)
+            : await _readClobAsString(locator, timeout);
+        // Story 12.4 AC4 — the MATERIALIZE path's temporary-locator free.
+        //
+        // Materializing reads the locator's content into a String/Uint8List and
+        // then DISCARDS the locator, so nothing else can ever free it. For a
+        // locator the server allocated as a session-duration TEMPORARY LOB that
+        // is a real resource leak: measured live on Oracle 23ai and 21c, three
+        // consecutive `OracleBind.inOut(value: <String>, type: clob)` PL/SQL
+        // calls under `fetchLobs: false` grew this session's V$TEMPORARY_LOBS
+        // count 0 -> 1 -> 2 -> 3, exactly one per call, until session end.
+        //
+        // The decision is CONTENT-driven, never shape- or version-driven: the
+        // locator's own TEMP flag bit (LobLocator.isTemporary, flag byte 4 bit
+        // 0x01) is the only input. Every shape measured non-temporary — a plain
+        // table row locator, `SELECT TO_CLOB(...)`, a `FOR UPDATE` locator, a
+        // plain PL/SQL CLOB OUT bind — therefore keeps queueing nothing and is
+        // byte-for-byte unaffected. Only the free-temp queue ACCOUNTING changes;
+        // the materialized value the caller receives is untouched.
+        //
+        // At most once per locator per response: this closure runs behind the
+        // `materialized` dedup map above, so an aliased locator (Oracle's
+        // duplicate-column optimization) is materialized — and hence queued —
+        // exactly once, preserving queueTempLobToFree's at-most-once contract.
+        // There is no `OracleLob` on this path, so no handle can queue it too.
+        //
+        // The queued free rides the NEXT sendExecute's FREE_TEMP piggyback: this
+        // method runs inside sendExecute AFTER that call already drained the
+        // queue, so a locator can never be freed by the very execute that
+        // produced it.
+        if (locator.isTemporary) queueTempLobToFree(locator.locator);
+      }
       materialized[locator] = value;
       return value;
     }

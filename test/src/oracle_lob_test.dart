@@ -1253,10 +1253,21 @@ void main() {
       final t = _tempCapableTransport();
       final conn = _connFor(t);
       final a = await conn.createTemporaryClob();
+      // A real CREATE_TEMP returns a DISTINCT locator per temporary LOB — the
+      // locator bytes ARE the LOB's server-side identity. This fake echoes one
+      // canned buffer for every CREATE_TEMP, so the second create is pointed at
+      // a different buffer to model that. It matters since Story 12.4: the free
+      // queue dedupes byte-EQUAL locators (so a PL/SQL `p := p` IN OUT bind,
+      // whose OUT locator is the driver's own input locator, is not freed
+      // twice), and without this the two handles would look like one LOB.
+      t.opUpdatedLocator[tnsLobOpCreateTemp] =
+          Uint8List(tnsLobLocatorBufferSize)
+            ..fillRange(0, tnsLobLocatorBufferSize, 0x3C);
       final b = await conn.createTemporaryBlob();
       await a.close();
       await b.close();
-      expect(conn.debugPendingTempLobCount, equals(2));
+      expect(conn.debugPendingTempLobCount, equals(2),
+          reason: 'two distinct server LOBs need two distinct frees');
     });
 
     test('close() on a CLOSED connection skips the queue silently', () async {

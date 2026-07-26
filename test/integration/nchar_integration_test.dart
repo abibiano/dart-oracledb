@@ -111,15 +111,11 @@ void main() {
 
       // Standard 23ai/21c fixtures always use AL16UTF16 (confirmed Story 10.1).
       // Guard the data tests anyway so a misconfigured fixture skips with a
-      // clear reason instead of failing loud inside every case.
-      bool nationalCharsetSupported() {
-        if (connection.charsetInfo.supportsNationalCharacterSet) return true;
-        markTestSkipped(
-          'national charset is ${connection.charsetInfo.nationalCharset}, '
-          'not AL16UTF16 — national types unsupported on this fixture',
-        );
-        return false;
-      }
+      // clear reason instead of failing loud inside every case. The probe itself
+      // lives in `test_helper.dart` since Story 12.4 AC9 (it had been
+      // copy-pasted across four suites); `subject:` keeps this suite's wording.
+      bool nationalCharsetOk() =>
+          nationalCharsetSupported(connection, subject: 'national types');
 
       // -----------------------------------------------------------------
       // AC8 — both fixtures report AL16UTF16
@@ -150,7 +146,7 @@ void main() {
           'supplementary-plane (emoji)': emoji,
         }.entries) {
           test('round-trips ${entry.key}', () async {
-            if (!nationalCharsetSupported()) return;
+            if (!nationalCharsetOk()) return;
             final id = nextTestId();
             await connection.execute(
               'INSERT INTO $testTable (id, nv) VALUES ($id, :v)',
@@ -163,7 +159,7 @@ void main() {
         }
 
         test('SQL NULL NVARCHAR2 decodes to null', () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final id = nextTestId();
           await connection.execute(
               'INSERT INTO $testTable (id, nv) VALUES ($id, NULL)');
@@ -175,7 +171,7 @@ void main() {
 
       test('NCHAR column decodes UTF-16BE (blank-padded to its width)',
           () async {
-        if (!nationalCharsetSupported()) return;
+        if (!nationalCharsetOk()) return;
         final id = nextTestId();
         await connection.execute(
           'INSERT INTO $testTable (id, nc) VALUES ($id, :v)',
@@ -197,7 +193,7 @@ void main() {
 
       group('NCLOB SELECT round-trip (LOB path, UTF-16BE)', () {
         test('small NCLOB round-trips', () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final id = nextTestId();
           const text = '$cjk nclob $accented';
           await connection.execute(
@@ -210,7 +206,7 @@ void main() {
         });
 
         test('SQL NULL NCLOB decodes to null', () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final id = nextTestId();
           await connection.execute(
               'INSERT INTO $testTable (id, ndoc) VALUES ($id, NULL)');
@@ -220,7 +216,7 @@ void main() {
         });
 
         test('EMPTY_CLOB() NCLOB decodes to the empty string', () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final id = nextTestId();
           await connection.execute(
               'INSERT INTO $testTable (id, ndoc) VALUES ($id, EMPTY_CLOB())');
@@ -231,7 +227,7 @@ void main() {
 
         test('multi-chunk (>32 KB) NCLOB drains over multiple LOB read chunks',
             () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final id = nextTestId();
           // 35,000 chars > 32 KB and far beyond the ~8060-char server chunk
           // size, so the value streams back in several UTF-16BE LOB_DATA
@@ -258,7 +254,7 @@ void main() {
         });
 
         test('multibyte NCLOB survives chunk boundaries', () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final id = nextTestId();
           // 2-byte-per-unit CJK across multiple read chunks.
           final text = (cjk * 4000); // 20,000 chars, several chunks
@@ -278,7 +274,7 @@ void main() {
 
       group('NVARCHAR2 PL/SQL binds', () {
         test('OUT bind returns an NVARCHAR2 value (UTF-16BE decode)', () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final result = await connection.execute(
             'BEGIN $nvCopyProc(:p_in, :p_out); END;',
             {
@@ -290,7 +286,7 @@ void main() {
         });
 
         test('OUT-only NVARCHAR2 with a NULL result decodes to null', () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final result = await connection.execute(
             'BEGIN $nvCopyProc(NULL, :p_out); END;',
             {
@@ -302,7 +298,7 @@ void main() {
 
         test('IN OUT bind sends a value as UTF-16BE and reads it back modified',
             () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final result = await connection.execute(
             'BEGIN $nvApndProc(:p); END;',
             {
@@ -315,7 +311,7 @@ void main() {
 
         test('IN OUT bind with null input is seen as NULL by the procedure',
             () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final result = await connection.execute(
             'BEGIN $nvApndProc(:p); END;',
             {
@@ -329,7 +325,7 @@ void main() {
 
       group('NCLOB PL/SQL binds', () {
         test('OUT bind returns an NCLOB value (LOB path, UTF-16BE)', () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final result = await connection.execute(
             'BEGIN $nclCopyProc(:p_src, :p_out); END;',
             {
@@ -342,7 +338,7 @@ void main() {
 
         test('IN OUT bind round-trips a value through a temporary NCLOB',
             () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final result = await connection.execute(
             'BEGIN $nclApndProc(:p); END;',
             {
@@ -355,7 +351,7 @@ void main() {
 
         test('IN OUT NCLOB with null input is seen as NULL by the procedure',
             () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           final result = await connection.execute(
             'BEGIN $nclApndProc(:p); END;',
             {
@@ -368,7 +364,7 @@ void main() {
 
         test('large NCLOB IN OUT round-trips through temp NCLOB + read-back',
             () async {
-          if (!nationalCharsetSupported()) return;
+          if (!nationalCharsetOk()) return;
           // An nClob bind always travels through a temporary NCLOB; this large
           // value also forces a multi-chunk UTF-16BE read on the OUT side.
           // Each unit is a fixed 5 chars ('q' + 4 digits) so the length is
