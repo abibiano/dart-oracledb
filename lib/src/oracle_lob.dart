@@ -24,6 +24,18 @@ import 'oracle_bind.dart';
 import 'protocol/constants.dart';
 import 'protocol/lob_locator.dart';
 
+/// Piece size (in the LOB's native units) that [OracleLob.textStream] and
+/// [OracleLob.byteStream] fall back to when the handle reports no server chunk
+/// size (`chunkSize == 0`).
+///
+/// The default is [OracleLob.chunkSize] whenever the server reported one —
+/// node-oracledb `lob.pieceSize` parity, whose default is also `chunkSize`, with
+/// a multiple of `chunkSize` recommended for efficiency. Every fetched and
+/// created-temporary handle carries a real chunk size (measured: 8,132 units for
+/// a table LOB, 32,600 for a temporary one), so this constant is only reached by
+/// a handle whose prefetch metadata omitted it.
+const int defaultLobStreamPieceSize = 32768;
+
 /// A handle to a CLOB / NCLOB / BLOB value that reads and writes its data in
 /// bounded pieces, holding its connection open until [close]d.
 ///
@@ -61,6 +73,19 @@ import 'protocol/lob_locator.dart';
 /// **characters (UCS-2 code units) for CLOB/NCLOB** and in **bytes for BLOB** —
 /// node-oracledb `lob.js` parity. A CLOB/NCLOB read returns a `String`; a BLOB
 /// read returns a `Uint8List`.
+///
+/// ## Bounded pull vs. streaming
+///
+/// Two ways to move a value, both incremental on the wire:
+///
+/// * **[read] / [getData]** — a bounded pull. Ask for a range, get it back as one
+///   `String` / `Uint8List`. The range is fetched in as many round trips as it
+///   takes (so no value is too large), but the result is materialized in memory.
+/// * **[textStream] / [byteStream] / [writeStream]** — a `Stream` surface, one
+///   round trip per piece, nothing whole ever held in memory. Read streams end
+///   when the server reports no more data (so they are immune to a stale cached
+///   [length]); [writeStream] writes one piece per caller chunk at the running
+///   offset.
 ///
 /// ## One operation at a time
 ///
@@ -156,13 +181,21 @@ class OracleLob {
   /// for CLOB/NCLOB, bytes for BLOB. Advanced locally after a [write].
   int get length => _length;
 
-  /// The server LOB-prefetch chunk size in the same units as [length], or `0`
-  /// when unknown. Diagnostic metadata; it does not bound [read] / [write]
-  /// amounts.
+  /// The server LOB-prefetch chunk size in the same units as [length]
+  /// (characters for CLOB/NCLOB, bytes for BLOB), or `0` when unknown.
+  ///
+  /// It does **not** bound [read] / [write] amounts, but it IS the default piece
+  /// size for [textStream] / [byteStream] (node-oracledb `lob.pieceSize` parity),
+  /// and a multiple of it is the recommended explicit `pieceSize`: Oracle stores
+  /// and transfers a LOB in chunks, so piece boundaries aligned to them avoid
+  /// re-reading a partially consumed chunk. When it is `0` the streams fall back
+  /// to [defaultLobStreamPieceSize].
   ///
   /// A handle from `OracleConnection.createTemporary*()` seeds this from a real
   /// server GET_CHUNK_SIZE issued right after creation (node-oracledb
-  /// `lob.js create()` parity), so it is `> 0` there.
+  /// `lob.js create()` parity), so it is `> 0` there. Measured values: 8,132
+  /// units for a table LOB and 32,600 for a temporary one, on both Oracle 23ai
+  /// and 21c.
   int get chunkSize => _locator.chunkSize;
 
   /// Whether this handle references a **temporary** LOB — one occupying session
@@ -220,10 +253,30 @@ class OracleLob {
   /// [offset] is **1-based** and counted in the type's native units (characters
   /// for CLOB/NCLOB, bytes for BLOB). [amount] is the number of units to read;
   /// when omitted (or `null`) the read runs from [offset] to the end of the LOB
-  /// (`read()` with defaults returns the whole value). The requested sub-range
-  /// is read in a single TTC LOB READ round trip and its bytes are decoded once
-  /// (UTF-16BE for NCLOB / variable-length CLOB, UTF-8 for a plain CLOB, raw for
-  /// a BLOB).
+  /// (`read()` with defaults returns the whole value). The requested sub-range's
+  /// bytes are assembled and then decoded **once** (UTF-16BE for NCLOB /
+  /// variable-length CLOB, UTF-8 for a plain CLOB, raw for a BLOB).
+  ///
+  /// **Round trips.** The range is requested in one TTC LOB READ and, if one
+  /// round trip cannot deliver it all, the read **continues** with further READs
+  /// at the advanced offset until the requested units arrive or the LOB ends —
+  /// so no value is too large for this method. Every size measured on Oracle
+  /// 23ai (to 32 MB) and 21c (to 8 MB) still arrives in exactly one READ, so the
+  /// common case costs one round trip. Use [textStream] / [byteStream] instead
+  /// when the point is to avoid holding the whole value in memory.
+  ///
+  /// **Cached-length caveat.** The LOB's [length] is seeded from the locator's
+  /// prefetch metadata when the handle is created and is never re-read from the
+  /// server (node-oracledb parity). Because a `fetchLobs` handle reads lazily —
+  /// well after the SELECT/FETCH that produced it — a plain (non-`FOR UPDATE`)
+  /// locator whose LOB another session modifies and commits in between can leave
+  /// that cached length stale in either direction: a since-shrunk LOB makes this
+  /// method fail loud (a length mismatch, or "made no progress"), and for a
+  /// since-grown LOB a `read(offset: staleLength + 1)` short-circuits to the
+  /// empty value **without a round trip**. Pass an explicit [amount], or
+  /// re-select the value, when concurrent modification is possible. [textStream]
+  /// / [byteStream] are immune by construction: they stop on an empty server
+  /// READ rather than at the cached [length].
   ///
   /// **Supplemental-character caveat (CLOB/NCLOB):** a UCS-2 code unit is
   /// equivalent to a character for all but supplemental (astral) characters,
@@ -260,11 +313,27 @@ class OracleLob {
     if (_length == 0 || offset > _length || effectiveAmount <= 0) {
       return _isBlob ? Uint8List(0) : '';
     }
-    final bytes = await _connection.runLobRead(
+    // The number of units the in-range request should yield: the caller's
+    // requested amount, capped at what actually remains from [offset]
+    // (`_length - offset + 1`). An EXPLICIT `amount` may deliberately overshoot
+    // the end — that reads to the end and is not a truncation (node-oracledb
+    // parity, `lob.getData(offset, amount)`); the null-amount path already
+    // resolves to exactly the remaining count.
+    //
+    // The cap is also what makes the chunked seam safe to use here: it satisfies
+    // exactly the units asked for and treats a no-progress piece as a fault, so
+    // asking for units that cannot exist (a deliberate overshoot) would fail
+    // loud. Requesting only the units that DO exist keeps the overshoot contract
+    // intact and never issues a needless READ past the end.
+    final remaining = _length - offset + 1;
+    final expectedUnits =
+        effectiveAmount < remaining ? effectiveAmount : remaining;
+    final bytes = (await _connection.runLobRead(
       sourceLocator: _locator.locator,
       offset: offset,
-      amount: effectiveAmount,
-    );
+      amount: expectedUnits,
+    ))
+        .bytes;
     // A legitimate in-range READ that comes back empty is a fault, not a valid
     // empty value (the empty cases were short-circuited above) — fail loud
     // rather than silently substituting an empty result, the same policy the
@@ -277,21 +346,14 @@ class OracleLob {
             '$offset, amount $effectiveAmount)',
       );
     }
-    // The number of units the in-range request should yield: the caller's
-    // requested amount, capped at what actually remains from [offset]
-    // (`_length - offset + 1`). An EXPLICIT `amount` may deliberately overshoot
-    // the end — that reads to the end and is not a truncation (node-oracledb
-    // parity, `lob.getData(offset, amount)`); the null-amount path already
-    // resolves to exactly the remaining count.
-    final remaining = _length - offset + 1;
-    final expectedUnits =
-        effectiveAmount < remaining ? effectiveAmount : remaining;
     if (_isBlob) {
-      // Strict truncation guard, mirroring the materialize path's
-      // `verifyBlobReadLength`: a short (fewer-units-than-expected) non-empty
-      // read is a real truncation — most likely the requested piece exceeds
-      // what one READ round trip can deliver (read a smaller `amount`), never a
-      // valid result to return silently. Fail loud rather than substituting.
+      // Strict truncation guard over the COMPLETED (possibly multi-piece) read,
+      // mirroring the materialize path's `verifyBlobReadLength`: a short
+      // (fewer-units-than-expected) non-empty read is a real truncation — size
+      // is no longer an explanation now that the read continues across round
+      // trips, so this means the LOB delivered fewer bytes than its cached
+      // length advertises (most often a stale length). Never a valid result to
+      // return silently: fail loud rather than substituting.
       if (bytes.length != expectedUnits) {
         throw OracleException(
           errorCode: oraProtocolError,
@@ -339,6 +401,331 @@ class OracleLob {
   Future<Object> getData([int offset = 1, int? amount]) =>
       read(offset: offset, amount: amount);
 
+  /// Streams this CLOB/NCLOB's text from 1-based [offset] to the end of the LOB
+  /// in pieces of at most [pieceSize] **characters** (UCS-2 code units), one
+  /// TTC LOB READ round trip per piece.
+  ///
+  /// The BLOB sibling is [byteStream]. Use these instead of [read] when the
+  /// point is never to hold the whole value in memory:
+  ///
+  /// ```dart
+  /// final sink = File('out.txt').openWrite();
+  /// try {
+  ///   await for (final piece in lob.textStream()) {
+  ///     sink.write(piece);
+  ///   }
+  /// } finally {
+  ///   await sink.close();
+  ///   await lob.close();          // ALWAYS close the handle
+  /// }
+  /// ```
+  ///
+  /// * **Exactness.** The concatenation of every emitted piece equals
+  ///   `read(offset: offset)` character for character.
+  /// * **[pieceSize]** defaults to [chunkSize] when the server reported one
+  ///   (`> 0`) and otherwise to [defaultLobStreamPieceSize]. A multiple of
+  ///   [chunkSize] is recommended for efficiency (node-oracledb `lob.pieceSize`
+  ///   parity, whose default is also `chunkSize`). Units are characters — the
+  ///   type's native units, exactly as for [read] and [length].
+  /// * **One round trip per piece**, and the stream ends when a READ comes back
+  ///   with **no data** (node-oracledb `lob.js _read()`: `data == null` →
+  ///   `push(null)`) — deliberately NOT when the cached [length] is reached, so
+  ///   the stream is immune to a stale prefetched length (see [read]) and never
+  ///   loops past the end. That terminating empty READ costs one extra round
+  ///   trip; an empty LOB therefore yields **no pieces** after a single READ.
+  /// * **Pieces are not guaranteed whole-character-aligned.** The driver — not
+  ///   the caller — picks the boundaries here, and a supplemental (astral)
+  ///   character occupies two UCS-2 code units, so a boundary can fall between
+  ///   the two halves of a surrogate pair. The driver never emits a piece ending
+  ///   in an unpaired high surrogate (it is held back and joined to the next
+  ///   piece), and never splits a multi-byte encoding sequence, so the
+  ///   **concatenation is always exact**; an individual piece may still begin
+  ///   with a low surrogate whose pair partner ended the previous emission only
+  ///   if the LOB itself stores unpaired surrogates.
+  /// * **Liveness is re-checked before every piece**, so closing the handle,
+  ///   losing the connection, or a pool reclaim mid-stream surfaces a fail-loud
+  ///   error on the stream rather than silently truncating it. Each piece also
+  ///   goes through the connection's LOB bracket, so an overlapping operation is
+  ///   rejected exactly as for [read].
+  /// * **Cancellation is safe.** Cancelling the subscription mid-stream leaves
+  ///   the connection immediately reusable (no in-flight flag is held across a
+  ///   piece boundary) — the next `execute()` on that connection succeeds. The
+  ///   handle itself stays open; [close] it as usual.
+  ///
+  /// Throws **synchronously**, before any stream is returned and before any wire
+  /// round trip: [StateError] if this handle is a BLOB (use [byteStream]),
+  /// [ArgumentError] if [offset] `<= 0` or [pieceSize] is given and `<= 0`, and
+  /// [OracleException] if the handle is closed or the connection is
+  /// closed/broken. API misuse is never delivered as a delayed stream error.
+  Stream<String> textStream({int offset = 1, int? pieceSize}) {
+    _ensureOpen();
+    if (_isBlob) {
+      throw StateError(
+        'textStream() is only available on a CLOB/NCLOB OracleLob; this handle '
+        'is a BLOB — use byteStream() instead.',
+      );
+    }
+    final units = _validateStreamArgs(offset, pieceSize);
+    return _textPieces(offset, units);
+  }
+
+  /// Streams this BLOB's bytes from 1-based [offset] to the end of the LOB in
+  /// pieces of at most [pieceSize] **bytes**, one TTC LOB READ round trip per
+  /// piece.
+  ///
+  /// The CLOB/NCLOB sibling is [textStream]; every contract described there
+  /// applies here with bytes as the unit (BLOB offsets, amounts and [length] are
+  /// byte counts), minus the character-boundary caveat — raw bytes have none:
+  /// the concatenation of the emitted pieces equals `read(offset: offset)` byte
+  /// for byte, [pieceSize] defaults to [chunkSize] (or
+  /// [defaultLobStreamPieceSize] when unknown), the stream ends on an empty
+  /// server READ, liveness is re-checked per piece, and cancelling leaves the
+  /// connection immediately reusable.
+  ///
+  /// The element type deliberately narrows to `Uint8List` (a subtype of
+  /// `Stream<List<int>>`) — it is what the READ path already produces, and it
+  /// spares every subscriber a cast.
+  ///
+  /// Throws **synchronously**: [StateError] if this handle is a CLOB/NCLOB (use
+  /// [textStream]), [ArgumentError] for a non-positive [offset] / [pieceSize],
+  /// and [OracleException] for a closed handle or a closed/broken connection.
+  Stream<Uint8List> byteStream({int offset = 1, int? pieceSize}) {
+    _ensureOpen();
+    if (!_isBlob) {
+      throw StateError(
+        'byteStream() is only available on a BLOB OracleLob; this handle is a '
+        '${type == OracleDbType.nClob ? 'NCLOB' : 'CLOB'} — use textStream() '
+        'instead.',
+      );
+    }
+    final units = _validateStreamArgs(offset, pieceSize);
+    return _bytePieces(offset, units);
+  }
+
+  /// Shared synchronous validation for [textStream] / [byteStream], returning
+  /// the effective piece size in units.
+  ///
+  /// Deliberately a plain (non-generator) step: a `Stream` returned from an
+  /// `async*` body defers every throw to the first `listen`, and API misuse must
+  /// surface at the call site instead.
+  int _validateStreamArgs(int offset, int? pieceSize) {
+    if (offset <= 0) {
+      throw ArgumentError.value(
+        offset,
+        'offset',
+        'must be >= 1 (LOB offsets are 1-based)',
+      );
+    }
+    if (pieceSize != null && pieceSize <= 0) {
+      throw ArgumentError.value(
+        pieceSize,
+        'pieceSize',
+        'must be a positive number of units; omit (pass null) to use the '
+            'handle chunkSize (or the driver default when unknown)',
+      );
+    }
+    if (pieceSize != null) return pieceSize;
+    // node-oracledb `lob.pieceSize` defaults to `chunkSize`; fall back to the
+    // documented driver constant only when the server reported none.
+    final chunk = _locator.chunkSize;
+    return chunk > 0 ? chunk : defaultLobStreamPieceSize;
+  }
+
+  /// The [byteStream] generator: one raw READ per piece, terminating on the
+  /// first reply with no data.
+  Stream<Uint8List> _bytePieces(int offset, int pieceUnits) async* {
+    var next = offset;
+    while (true) {
+      // Per-piece liveness consultation (never a mirrored flag): a handle closed
+      // or a connection broken mid-stream fails the stream loud instead of
+      // truncating it silently.
+      _ensureOpen();
+      final piece = await _connection.runLobReadPiece(
+        sourceLocator: _locator.locator,
+        offset: next,
+        amount: pieceUnits,
+      );
+      if (piece.bytes.isEmpty) return; // empty READ == end of LOB
+      // Advance by the server's own unit count; for a BLOB units ARE bytes, so
+      // the payload length is an exact fallback when a reply omits the SB8.
+      next += _requireProgress(piece.units ?? piece.bytes.length, next);
+      yield piece.bytes;
+    }
+  }
+
+  /// Guards the stream loop against a piece that delivers data but claims to have
+  /// advanced nothing — the only shape that could spin forever.
+  ///
+  /// Never observed: on 23ai and 21c a READ either reports the units it delivered
+  /// or reports `0` with an empty payload (end of LOB), which the callers handle
+  /// as termination before reaching here. So this is a bounded fail-loud backstop,
+  /// deliberately an [OracleException] rather than a silent `break` — silently
+  /// stopping would truncate the caller's data.
+  static int _requireProgress(int units, int offset) {
+    if (units > 0) return units;
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message: 'LOB stream made no progress: the server returned data at offset '
+          '$offset but reported $units units delivered',
+    );
+  }
+
+  /// The [textStream] generator: one raw READ per piece, decoded through a
+  /// carrying decoder so a piece boundary can never corrupt a split encoding
+  /// sequence or surrogate pair.
+  Stream<String> _textPieces(int offset, int pieceUnits) async* {
+    final decoder = _LobTextDecoder(isUtf16: _isUtf16);
+    var next = offset;
+    while (true) {
+      _ensureOpen();
+      final piece = await _connection.runLobReadPiece(
+        sourceLocator: _locator.locator,
+        offset: next,
+        amount: pieceUnits,
+      );
+      if (piece.bytes.isEmpty) break; // empty READ == end of LOB
+      final decoded = decoder.add(piece.bytes);
+      // The offset MUST advance by the units the SERVER reported, never by what
+      // was decoded or emitted: bytes held back for the next piece were still
+      // delivered by this READ, so re-reading them would duplicate data.
+      next += _requireProgress(piece.units ?? decoded.units, next);
+      if (decoded.text.isNotEmpty) yield decoded.text;
+    }
+    // Flush anything deliberately held back (a trailing unpaired high surrogate
+    // the LOB really ends with), so the concatenation stays exact.
+    final tail = decoder.finish();
+    if (tail.isNotEmpty) yield tail;
+  }
+
+  /// Writes every chunk of [data] into the LOB, one `write()` per chunk at the
+  /// running offset, and returns the **total units written**.
+  ///
+  /// This is the streamed counterpart of [write] and the natural sink for a
+  /// multi-megabyte value the caller does not want to materialize. Chunk *k*
+  /// lands at `offset + (units already written)`, so the pieces are stored
+  /// contiguously and [length] ends at `max(length, (offset - 1) + total)` —
+  /// exactly where repeated [write] calls would leave it.
+  ///
+  /// The canonical shape for a streamed insert is node-oracledb's
+  /// `RETURNING INTO` pattern — wrapped in a `BEGIN ... END;` block, because this
+  /// driver accepts `OracleBind` specs only inside PL/SQL:
+  ///
+  /// ```dart
+  /// final result = await connection.execute(
+  ///   'BEGIN INSERT INTO articles (id, doc) VALUES (:id, EMPTY_CLOB()) '
+  ///   'RETURNING doc INTO :out; END;',
+  ///   {
+  ///     'id': 1,
+  ///     'out': OracleBind.out(type: OracleDbType.clob, maxSize: 1),
+  ///   },
+  ///   const OracleExecuteOptions(fetchLobs: true),
+  /// );
+  /// final lob = result.outBinds['out']! as OracleLob;
+  /// try {
+  ///   await lob.writeStream(pieces); // Stream<String>
+  ///   await connection.commit();
+  /// } finally {
+  ///   await lob.close();
+  /// }
+  /// ```
+  ///
+  /// A `SELECT ... FOR UPDATE` locator and a created temporary LOB
+  /// (`connection.createTemporaryClob()` and friends) work the same way.
+  ///
+  /// * **Chunk types.** Each chunk must be a `String` for a CLOB/NCLOB handle,
+  ///   or a `Uint8List` / `List<int>` (every element in `0..255`) for a BLOB —
+  ///   the same per-chunk validation, charset encoding and length advance
+  ///   [write] performs, because this method is implemented on top of it. The
+  ///   `Stream<Object>` parameter accepts `Stream<String>` and
+  ///   `Stream<List<int>>` by covariance and mirrors [write]'s own `Object`
+  ///   contract.
+  /// * **One WRITE per caller chunk** (node-oracledb `lob.js _write()` parity):
+  ///   the chunk size the caller emits IS the wire piece size. An **empty**
+  ///   chunk is skipped with no round trip, and an empty stream writes nothing
+  ///   and returns `0`.
+  /// * **Surrogate pairs split across chunks are joined, not corrupted.** For a
+  ///   CLOB/NCLOB a trailing unpaired high surrogate is held back and prepended
+  ///   to the next chunk, because the boundary between two chunks is one the
+  ///   *driver* stitches. [write]'s documented caller-facing unpaired-surrogate
+  ///   leniency is unchanged: a surrogate still unpaired at end of stream is
+  ///   written exactly as [write] would write it (U+FFFD for a UTF-8-form CLOB,
+  ///   raw UTF-16BE otherwise).
+  /// * **Not atomic.** A wrong-typed chunk ([ArgumentError] from [write]) or a
+  ///   server error aborts the remaining stream and leaves the chunks already
+  ///   written in place; the handle stays usable, the connection is never
+  ///   wedged, and nothing is rolled back for you. Wrap the operation in a
+  ///   transaction if partial data is unacceptable.
+  ///
+  /// Throws [ArgumentError] synchronously, before any round trip, if [offset]
+  /// `<= 0`. Throws [OracleException] if the handle is closed, the connection is
+  /// closed/broken, or a WRITE fails.
+  Future<int> writeStream(Stream<Object> data, {int offset = 1}) async {
+    _ensureOpen();
+    if (offset <= 0) {
+      throw ArgumentError.value(
+        offset,
+        'offset',
+        'must be >= 1 (LOB offsets are 1-based)',
+      );
+    }
+    var written = 0;
+    // CLOB/NCLOB only: a trailing high surrogate whose pair partner is expected
+    // to open the NEXT chunk. Held back so the driver-owned chunk join can never
+    // ship half a supplemental character.
+    String? highSurrogateCarry;
+    await for (final chunk in data) {
+      Object piece = chunk;
+      if (!_isBlob && chunk is String) {
+        var text = chunk;
+        final carry = highSurrogateCarry;
+        if (carry != null) {
+          text = carry + text;
+          highSurrogateCarry = null;
+        }
+        if (text.isNotEmpty &&
+            _isHighSurrogate(text.codeUnitAt(text.length - 1))) {
+          highSurrogateCarry = text.substring(text.length - 1);
+          text = text.substring(0, text.length - 1);
+        }
+        piece = text;
+      }
+      // An empty piece has nothing to ship: skip it without a round trip
+      // (write()'s own empty-write no-op), and advance nothing.
+      final units = _unitsOf(piece);
+      if (units == 0) continue;
+      // Deliberately routed through write(): same type validation, same 0..255
+      // element guard, same charset encoding, same length advance. No duplicate
+      // encode/validate logic lives here.
+      await write(offset + written, piece);
+      written += units;
+    }
+    final tail = highSurrogateCarry;
+    if (tail != null) {
+      // End of stream with the pair never completed. write()'s documented
+      // leniency applies unchanged (user decision 2026-07-15, node parity): the
+      // lone surrogate is written as write() would write it, not rejected here.
+      await write(offset + written, tail);
+      written += 1;
+    }
+    return written;
+  }
+
+  /// Units [piece] represents for the length bookkeeping [writeStream] keeps —
+  /// UCS-2 code units for text, bytes for binary. A value [write] would reject
+  /// reports `-1` so the caller still hands it to [write] for the real
+  /// [ArgumentError] (this method never duplicates that validation).
+  int _unitsOf(Object piece) {
+    if (_isBlob) {
+      if (piece is Uint8List) return piece.length;
+      if (piece is List<int>) return piece.length;
+      return -1;
+    }
+    if (piece is String) return piece.length;
+    return -1;
+  }
+
+  static bool _isHighSurrogate(int unit) => unit >= 0xD800 && unit <= 0xDBFF;
+
   /// Writes [data] into the LOB starting at 1-based [offset] in a single WRITE
   /// round trip.
   ///
@@ -346,8 +733,9 @@ class OracleLob {
   /// `List<int>` for a BLOB handle. CLOB/NCLOB text is encoded UTF-16BE for an
   /// NCLOB / variable-length CLOB and UTF-8 otherwise (matching the read path);
   /// BLOB bytes are written raw. Regardless of size the value is written in one
-  /// `LOB_OP_WRITE` — wire-level fragmentation is handled underneath (there is
-  /// no client-side chunking loop in this release).
+  /// `LOB_OP_WRITE` — wire-level fragmentation is handled underneath. Use
+  /// [writeStream] to feed a value in from a `Stream` instead of holding it all
+  /// in memory; it issues one of these writes per chunk at the running offset.
   ///
   /// **Unpaired-surrogate caveat (CLOB/NCLOB):** no pre-wire validation of the
   /// UTF-16 code units is performed (node-oracledb parity). For a plain CLOB the
@@ -355,7 +743,17 @@ class OracleLob {
   /// substituted with U+FFFD; for an NCLOB / variable-length CLOB the code units
   /// are written raw as UTF-16BE, so a lone surrogate ships as invalid UTF-16BE
   /// to the server. Callers slicing a `String` at arbitrary boundaries should
-  /// split only at whole-character boundaries to avoid splitting a surrogate pair.
+  /// split only at whole-character boundaries to avoid splitting a surrogate
+  /// pair. This leniency is deliberate and applies to boundaries the CALLER
+  /// chooses; a boundary the **driver** chooses — the join between two
+  /// [writeStream] chunks — is stitched back together there instead.
+  ///
+  /// **Sparse write (`offset > length + 1`).** Writing past the current end is
+  /// allowed and extends the LOB, with the gap filled by the server: measured on
+  /// Oracle 23ai and 21c, writing `'XYZ'` at offset 10 of a 3-character CLOB
+  /// yields a 12-character value whose gap is spaces (`0x00` bytes for a BLOB),
+  /// and the server's own `DBMS_LOB.GETLENGTH` agrees exactly with the local
+  /// `max(length, (offset - 1) + writtenUnits)` advance below.
   ///
   /// The value is written through the wrapped locator, so the handle must wrap a
   /// **writable** locator: a LOB OUT / IN OUT bind, or a `SELECT ... FOR UPDATE`
@@ -538,5 +936,159 @@ class OracleLob {
     // path's connection check — fail loud on every invalidation path (AC5:
     // "closed OR broken"), not just a borrower-initiated close().
     _connection.ensureUsableForLobOp();
+  }
+}
+
+/// Incremental, strict decoder for the pieces of an [OracleLob.textStream].
+///
+/// [OracleLob.read] and the internal materialize path can decode ONCE over a
+/// fully assembled buffer, which is why they are always exact. A stream cannot —
+/// not materializing the whole value is the entire feature — so the two ways a
+/// driver-chosen piece boundary could corrupt text are handled here, without
+/// ever relaxing to `allowMalformed` or substituting U+FFFD (this driver chooses
+/// fail-loud over silent corruption):
+///
+/// 1. **A split encoding sequence.** Trailing bytes that cannot yet form a
+///    complete character are held back and prepended to the next piece — the
+///    odd byte of a UTF-16BE code unit, or an incomplete UTF-8 sequence.
+/// 2. **A split surrogate pair.** A decoded piece ending in an unpaired HIGH
+///    surrogate holds that code unit back and prepends it to the next piece, so
+///    no emitted piece ever ends mid-supplemental-character.
+///
+/// Neither holdback affects the stream's READ offset: the server already
+/// delivered those units, so the offset always advances by the server's own unit
+/// count (see [OracleLob._textPieces]). [finish] flushes a legitimately trailing
+/// lone surrogate (a LOB really can end with one) and fails loud on bytes that
+/// can never complete.
+class _LobTextDecoder {
+  _LobTextDecoder({required this.isUtf16});
+
+  /// Whether pieces arrive as UTF-16BE (NCLOB, or a CLOB the server marked
+  /// variable-length charset — measured to be EVERY CLOB on an AL32UTF8
+  /// database) rather than the negotiated UTF-8.
+  final bool isUtf16;
+
+  /// Bytes carried over because they cannot yet form a complete character.
+  Uint8List _byteCarry = Uint8List(0);
+
+  /// A decoded high surrogate held back awaiting its pair partner.
+  String _charCarry = '';
+
+  /// Longest byte sequence that can legitimately be incomplete: a 4-byte UTF-8
+  /// sequence missing three continuation bytes. Anything longer means the bytes
+  /// are malformed rather than merely split, and must fail loud instead of
+  /// accumulating forever.
+  static const int _maxCarryBytes = 3;
+
+  /// Feeds one piece's raw bytes in and returns the text that is safe to emit
+  /// now, plus the number of UCS-2 units the piece's COMPLETE bytes represent
+  /// (used only as a fallback when a server reply omits its SB8 unit count).
+  ({String text, int units}) add(Uint8List piece) {
+    final bytes = _byteCarry.isEmpty ? piece : _join(_byteCarry, piece);
+    final int completeBytes;
+    final int units;
+    if (isUtf16) {
+      // Two bytes per UCS-2 code unit: an odd trailing byte is half a unit.
+      completeBytes = bytes.length - (bytes.length & 1);
+      units = completeBytes >> 1;
+    } else {
+      final scan = _scanUtf8(bytes);
+      completeBytes = scan.completeBytes;
+      units = scan.units;
+    }
+    _byteCarry = completeBytes == bytes.length
+        ? Uint8List(0)
+        : Uint8List.sublistView(bytes, completeBytes);
+    if (_byteCarry.length > _maxCarryBytes) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'LOB stream returned malformed '
+            '${isUtf16 ? 'UTF-16' : 'UTF-8'} data: ${_byteCarry.length} '
+            'trailing bytes cannot start a valid character sequence',
+      );
+    }
+    final complete = completeBytes == bytes.length
+        ? bytes
+        : Uint8List.sublistView(bytes, 0, completeBytes);
+    String text;
+    try {
+      text = isUtf16 ? decodeUtf16Be(complete) : utf8.decode(complete);
+    } on FormatException catch (e) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'LOB stream returned malformed '
+            '${isUtf16 ? 'UTF-16' : 'UTF-8'} data',
+        cause: e,
+      );
+    }
+    if (_charCarry.isNotEmpty) {
+      text = _charCarry + text;
+      _charCarry = '';
+    }
+    if (text.isNotEmpty &&
+        OracleLob._isHighSurrogate(text.codeUnitAt(text.length - 1))) {
+      _charCarry = text.substring(text.length - 1);
+      text = text.substring(0, text.length - 1);
+    }
+    return (text: text, units: units);
+  }
+
+  /// Flushes whatever is still held back at end of stream.
+  ///
+  /// A held-back high surrogate is emitted as-is: the LOB genuinely ends with an
+  /// unpaired surrogate, and dropping (or substituting) it would make the
+  /// stream's concatenation differ from [OracleLob.read]. Held-back BYTES,
+  /// however, are an incomplete character the LOB can never complete — fail
+  /// loud, exactly as the single-decode path does.
+  String finish() {
+    if (_byteCarry.isNotEmpty) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'LOB stream ended mid-character: ${_byteCarry.length} '
+            'trailing ${isUtf16 ? 'UTF-16' : 'UTF-8'} byte(s) do not complete '
+            'a character',
+      );
+    }
+    final tail = _charCarry;
+    _charCarry = '';
+    return tail;
+  }
+
+  static Uint8List _join(Uint8List a, Uint8List b) {
+    final out = Uint8List(a.length + b.length);
+    out.setRange(0, a.length, a);
+    out.setRange(a.length, out.length, b);
+    return out;
+  }
+
+  /// Walks [bytes] as UTF-8, returning how many leading bytes form complete
+  /// sequences and how many UCS-2 code units they represent (a 4-byte sequence
+  /// is a supplemental character: two units).
+  ///
+  /// Stops at the first byte that cannot begin a sequence, leaving the rest as
+  /// carry — the strict `utf8.decode` of the complete prefix, or [finish]'s
+  /// carry guard, then reports the malformed data.
+  static ({int completeBytes, int units}) _scanUtf8(Uint8List bytes) {
+    var i = 0;
+    var units = 0;
+    while (i < bytes.length) {
+      final lead = bytes[i];
+      final int sequence;
+      if (lead < 0x80) {
+        sequence = 1;
+      } else if (lead >= 0xC2 && lead <= 0xDF) {
+        sequence = 2;
+      } else if (lead >= 0xE0 && lead <= 0xEF) {
+        sequence = 3;
+      } else if (lead >= 0xF0 && lead <= 0xF4) {
+        sequence = 4;
+      } else {
+        break; // not a valid lead byte — let the strict decode report it
+      }
+      if (i + sequence > bytes.length) break; // split sequence: carry it
+      units += sequence == 4 ? 2 : 1;
+      i += sequence;
+    }
+    return (completeBytes: i, units: units);
   }
 }

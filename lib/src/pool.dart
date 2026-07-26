@@ -855,6 +855,15 @@ class OraclePool {
       // reclaimedByPool: a stream subscriber still iterating this result set
       // must see a clear pool-reclaim error on its next fetch, not the generic
       // "OracleResultSet is closed" detail (the borrower never closed it).
+      //
+      // ORDERING IS LOAD-BEARING (Story 12.3): this runs BEFORE the open-LOB
+      // sweep below, and `OracleResultSet.close()` reaps the handles its cursor
+      // wrapped for prefetched-but-undelivered rows. Those handles are closed
+      // here WITHOUT `markReclaimedByPool()` — a deliberate decision, not an
+      // accident of call order: the borrower never received them, so the plain
+      // "OracleLob is closed" detail is the accurate one, and only handles the
+      // borrower actually holds (still in `_openLobs` when the sweep below runs)
+      // get the pool-reclaim error.
       await connection.forceCloseOpenResultSet(reclaimedByPool: true);
     }
 

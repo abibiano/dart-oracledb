@@ -23,6 +23,16 @@
 /// `close()` queues the locator bytes for the transport's existing
 /// `FREE_TEMP | ARRAY` piggyback. The bytes are still never exposed publicly —
 /// the only public reference is the opaque `OracleLob`.
+///
+/// Story 12.3 adds the fourth escape route, and the only LAZY one: a locator
+/// wrapped **per FETCHED BATCH** by a streaming result set
+/// (`OracleExecuteOptions(resultSet: true, fetchLobs: true)`). `ResultSetCursor`
+/// threads the same `wrapLob` callback into `Transport.materializeLobs` on every
+/// continuation FETCH, so each batch's locators become `OracleLob` handles as the
+/// batch is prefetched — i.e. BEFORE the caller has retrieved those rows. The
+/// cursor therefore also tracks which handles it has delivered and closes the
+/// rest when the result set closes; see `ResultSetCursor`'s constructor doc for
+/// the aliasing rule that keeps a delivered handle from being reaped.
 library;
 
 import 'dart:typed_data';

@@ -22,7 +22,36 @@ class _FakeLobTransport extends Transport {
 
   /// Bytes returned by a `tnsLobOpRead` (already in the wire charset the test
   /// expects the handle to decode). Null yields a `null` data response.
+  ///
+  /// Used for every READ unless [lobReadReplies] is non-empty, which takes
+  /// precedence.
   Uint8List? lobReadData;
+
+  /// Per-call canned READ replies, consumed in order — the seam for the chunked
+  /// read loop and the piece streams (Story 12.3).
+  ///
+  /// Each entry supplies that READ's payload AND the server's SB8 `amount` (the
+  /// units it claims to have delivered), so a test can drive a deterministic
+  /// SHORT read (`amount` < requested) or a terminating EMPTY reply
+  /// (`amount: 0`, no data) that no live server produces on demand. Once the
+  /// queue is exhausted, further READs fall back to an empty reply with
+  /// `amount: 0` — i.e. end of LOB — so a stream test never has to enumerate the
+  /// terminator explicitly unless it wants to.
+  ///
+  /// A `null` `amount` reproduces a reply that omits the SB8 entirely (the
+  /// [lobReadData] default), which the read loop must treat as "the request was
+  /// satisfied".
+  final List<({Uint8List? data, int? amount})> lobReadReplies =
+      <({Uint8List? data, int? amount})>[];
+
+  /// Whether the reply queue was drained (so a test can assert it consumed
+  /// exactly as many READs as it queued).
+  bool get lobReadRepliesExhausted => _lobReadReplyIndex >= lobReadReplies.length;
+  int _lobReadReplyIndex = 0;
+
+  /// Every (offset, amount) pair a READ requested, in order.
+  final List<({int offset, int amount})> readRequests =
+      <({int offset, int amount})>[];
 
   /// When true, every `sendLobOp` throws — simulating a server-side LOB error
   /// (e.g. writing through a read-only locator).
@@ -155,6 +184,27 @@ class _FakeLobTransport extends Transport {
       lobReadCalls++;
       lastReadOffset = sourceOffset;
       lastReadAmount = amount;
+      readRequests.add((offset: sourceOffset, amount: amount));
+      if (lobReadReplies.isNotEmpty) {
+        // Queued per-call replies: drive short reads, multi-piece streams and the
+        // terminating empty reply deterministically. Past the end of the queue the
+        // LOB is exhausted (empty payload, 0 units) — what a real server returns
+        // for a READ starting past the end (measured on 23ai and 21c).
+        if (_lobReadReplyIndex >= lobReadReplies.length) {
+          return LobOpResponse(
+            isSuccess: true,
+            amount: 0,
+            updatedLocator: echo,
+          );
+        }
+        final reply = lobReadReplies[_lobReadReplyIndex++];
+        return LobOpResponse(
+          isSuccess: true,
+          data: reply.data,
+          amount: reply.amount,
+          updatedLocator: echo,
+        );
+      }
       return LobOpResponse(
         isSuccess: true,
         data: lobReadData,
@@ -275,24 +325,35 @@ void main() {
       await blob.close();
     });
 
-    test('resultSet: true combined with fetchLobs: true is rejected pre-wire',
-        () async {
+    // Story 12.3 AC6: the blanket `resultSet + fetchLobs` rejection was LIFTED
+    // for a top-level SELECT (see result_set_test.dart's streaming-fetchLobs
+    // group) but deliberately NOT deleted — the PL/SQL lazy-implicit-results path
+    // keeps its own, distinct rejection, because that path returns a GROUP of
+    // lazy result sets none of which is wired for the wrap + reap lifecycle.
+    test('resultSet: true + fetchLobs: true on a PL/SQL block is rejected '
+        'pre-wire with its own distinct message', () async {
       final t = _FakeLobTransport();
       final conn = OracleConnection.forTesting(transport: t);
       await expectLater(
         conn.execute(
-          'SELECT doc FROM t',
+          'BEGIN NULL; END;',
           null,
           const OracleExecuteOptions(resultSet: true, fetchLobs: true),
         ),
         throwsA(
           isA<OracleException>()
               .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('Story 12.3')),
+              .having((e) => e.message, 'message', contains('PL/SQL block'))
+              .having((e) => e.message, 'message',
+                  contains('IS supported for a top-level SELECT')),
         ),
       );
       // Rejected before any wire round trip.
       expect(t.nextResponses, isEmpty);
+      // ...and the connection is left clean and usable.
+      expect(conn.isExecuting, isFalse);
+      expect(conn.hasOpenResultSet, isFalse);
+      expect(conn.hasOpenLob, isFalse);
     });
   });
 
@@ -1584,6 +1645,665 @@ void main() {
             )),
       );
       await lob.close();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Story 12.3 AC1 — read() survives a value larger than one READ round trip
+  //
+  // No live server short-reads (measured to 32 MB on 23ai and 8 MB on 21c), so
+  // the continuation loop can ONLY be proven with a fake that reports a
+  // deterministic short `amount`. Each test here fails without the loop.
+  // -------------------------------------------------------------------------
+  group('OracleLob.read chunked continuation (AC1)', () {
+    test('a short first READ continues at the advanced offset until the '
+        'requested units arrive', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(9));
+      // 9 chars delivered as 4 + 3 + 2 (plain CLOB -> UTF-8 on the wire).
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList(utf8.encode('abcd')), amount: 4),
+        (data: Uint8List.fromList(utf8.encode('efg')), amount: 3),
+        (data: Uint8List.fromList(utf8.encode('hi')), amount: 2),
+      ]);
+      expect(await lob.read(), equals('abcdefghi'));
+      // Three READs at the advancing offset, each asking for what is still
+      // outstanding.
+      expect(t.readRequests, hasLength(3));
+      expect(t.readRequests[0], equals((offset: 1, amount: 9)));
+      expect(t.readRequests[1], equals((offset: 5, amount: 5)));
+      expect(t.readRequests[2], equals((offset: 8, amount: 2)));
+      expect(t.lobReadRepliesExhausted, isTrue);
+      await lob.close();
+    });
+
+    test('assembled pieces are decoded ONCE, so a boundary splitting a UTF-8 '
+        'sequence and a surrogate pair still decodes exactly', () async {
+      // 'caf\u{00E9}\u{1F600}' = 'c','a','f' (1 byte each), U+00E9 (2 UTF-8
+      // bytes, 1 UCS-2 unit) and U+1F600 (4 UTF-8 bytes, 2 UCS-2 units)
+      // => 6 UCS-2 units in 9 bytes.
+      const text = 'caf\u{00E9}\u{1F600}';
+      final all = Uint8List.fromList(utf8.encode(text));
+      expect(text.length, equals(6));
+      expect(all, hasLength(9));
+      final (conn, t, lob) = await _fetchLob(_clob(6));
+      // Split mid-U+00E9 (byte 4) and mid-U+1F600 (byte 7): neither piece is
+      // independently decodable, so a per-piece decode would throw or corrupt.
+      // Units per piece are what the server reports.
+      t.lobReadReplies.addAll([
+        (data: Uint8List.sublistView(all, 0, 4), amount: 3),
+        (data: Uint8List.sublistView(all, 4, 7), amount: 2),
+        (data: Uint8List.sublistView(all, 7, 9), amount: 1),
+      ]);
+      expect(await lob.read(), equals(text));
+      expect(t.lobReadCalls, equals(3));
+      await lob.close();
+    });
+
+    test('a BLOB read continues across pieces and concatenates byte-exact',
+        () async {
+      final (conn, t, blob) = await _fetchLob(_blob(6));
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList([1, 2]), amount: 2),
+        (data: Uint8List.fromList([3, 4, 5]), amount: 3),
+        (data: Uint8List.fromList([6]), amount: 1),
+      ]);
+      expect(await blob.read(), equals([1, 2, 3, 4, 5, 6]));
+      expect(t.lobReadCalls, equals(3));
+      await blob.close();
+    });
+
+    test('a piece reporting ZERO units with work outstanding throws, naming '
+        'the offset and amount (no infinite loop)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(9));
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList(utf8.encode('abcd')), amount: 4),
+        (data: null, amount: 0), // no progress while 5 units outstanding
+      ]);
+      await expectLater(
+        lob.read(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+            .having((e) => e.message, 'message',
+                allOf(contains('made no progress'), contains('offset 5')))),
+      );
+      // Bounded: exactly the two queued READs were issued, then it gave up.
+      expect(t.lobReadCalls, equals(2));
+      await lob.close();
+    });
+
+    test('a piece reporting MORE units than were outstanding throws', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(4));
+      t.lobReadReplies
+          .add((data: Uint8List.fromList(utf8.encode('abcdefgh')), amount: 8));
+      await expectLater(
+        lob.read(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+            .having((e) => e.message, 'message', contains('overshot'))),
+      );
+      await lob.close();
+    });
+
+    test('the single-READ fast path is preserved: one tnsLobOpRead for a value '
+        'that fits, with no extra probe', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(11));
+      t.lobReadReplies
+          .add((data: Uint8List.fromList(utf8.encode('hello world')), amount: 11));
+      expect(await lob.read(), equals('hello world'));
+      expect(t.lobReadCalls, equals(1), reason: 'exactly one round trip');
+      expect(t.readRequests.single, equals((offset: 1, amount: 11)));
+      await lob.close();
+    });
+
+    test('a reply that OMITS the SB8 amount is treated as satisfying the '
+        'request (pre-12.3 single-READ behavior, guards still fire)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(11));
+      // No `amount` at all, and a short payload: the loop must not spin, and the
+      // truncation guard must be what reports the problem.
+      t.lobReadReplies.add((data: Uint8List.fromList(utf8.encode('abc')), amount: null));
+      await expectLater(
+        lob.read(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('length mismatch'))),
+      );
+      expect(t.lobReadCalls, equals(1));
+      await lob.close();
+    });
+
+    test('a deliberate read past the end still reads to the end without '
+        'tripping the no-progress guard', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(11));
+      t.lobReadReplies
+          .add((data: Uint8List.fromList(utf8.encode('world')), amount: 5));
+      // amount 100 from offset 7 overshoots: only 5 units remain. The seam must
+      // be asked for 5, not 100, so it never waits for units that cannot exist.
+      expect(await lob.read(offset: 7, amount: 100), equals('world'));
+      expect(t.readRequests.single, equals((offset: 7, amount: 5)));
+      await lob.close();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Story 12.3 AC2 — textStream() / byteStream()
+  // -------------------------------------------------------------------------
+  group('OracleLob.textStream / byteStream (AC2)', () {
+    test('textStream yields pieces whose concatenation equals read()', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(9));
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList(utf8.encode('abcd')), amount: 4),
+        (data: Uint8List.fromList(utf8.encode('efgh')), amount: 4),
+        (data: Uint8List.fromList(utf8.encode('i')), amount: 1),
+      ]);
+      final pieces = await lob.textStream(pieceSize: 4).toList();
+      expect(pieces, equals(['abcd', 'efgh', 'i']));
+      // One READ per piece PLUS the terminating empty READ.
+      expect(t.lobReadCalls, equals(4));
+      expect(
+        t.readRequests,
+        equals([
+          (offset: 1, amount: 4),
+          (offset: 5, amount: 4),
+          (offset: 9, amount: 4),
+          (offset: 10, amount: 4),
+        ]),
+      );
+      await lob.close();
+    });
+
+    test('byteStream yields byte pieces and terminates on the empty READ',
+        () async {
+      final (conn, t, blob) = await _fetchLob(_blob(5));
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList([1, 2]), amount: 2),
+        (data: Uint8List.fromList([3, 4]), amount: 2),
+        (data: Uint8List.fromList([5]), amount: 1),
+      ]);
+      final pieces = await blob.byteStream(pieceSize: 2).toList();
+      expect(pieces.map((p) => p.toList()).toList(),
+          equals([[1, 2], [3, 4], [5]]));
+      expect(t.lobReadCalls, equals(4)); // 3 pieces + terminator
+      await blob.close();
+    });
+
+    test('an offset > 1 streams only the tail', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(9));
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList(utf8.encode('fg')), amount: 2),
+        (data: Uint8List.fromList(utf8.encode('hi')), amount: 2),
+      ]);
+      expect(await lob.textStream(offset: 6, pieceSize: 2).toList(),
+          equals(['fg', 'hi']));
+      expect(t.readRequests.first, equals((offset: 6, amount: 2)));
+      await lob.close();
+    });
+
+    test('an empty LOB yields NO pieces after exactly one READ (no useless '
+        'loop, and no _length short-circuit)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      expect(await lob.textStream().toList(), isEmpty);
+      expect(t.lobReadCalls, equals(1));
+      await lob.close();
+    });
+
+    test('the stream is immune to a STALE cached length (it stops on an empty '
+        'READ, not at _length)', () async {
+      // _length says 2 but the LOB really holds 6 units: read() would stop
+      // short, the stream must deliver everything the server sends.
+      final (conn, t, lob) = await _fetchLob(_clob(2));
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList(utf8.encode('abc')), amount: 3),
+        (data: Uint8List.fromList(utf8.encode('def')), amount: 3),
+      ]);
+      expect(await lob.textStream(pieceSize: 3).toList(), equals(['abc', 'def']));
+      await lob.close();
+    });
+
+    test('pieceSize defaults to chunkSize, and to the documented constant when '
+        'chunkSize is 0', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(3)); // chunkSize 8132
+      t.lobReadReplies
+          .add((data: Uint8List.fromList(utf8.encode('abc')), amount: 3));
+      await lob.textStream().toList();
+      expect(t.readRequests.first.amount, equals(8132));
+      await lob.close();
+
+      final (conn2, t2, nclob) = await _fetchLob(_nclob(2)); // chunkSize 0
+      t2.lobReadReplies.add((data: encodeUtf16Be('hi'), amount: 2));
+      await nclob.textStream().toList();
+      expect(t2.readRequests.first.amount, equals(defaultLobStreamPieceSize));
+      await nclob.close();
+    });
+
+    group('synchronous validation (never a delayed stream error)', () {
+      test('textStream on a BLOB throws StateError at the call site', () async {
+        final (conn, t, blob) = await _fetchLob(_blob(4));
+        expect(() => blob.textStream(), throwsStateError);
+        expect(t.lobReadCalls, equals(0));
+        await blob.close();
+      });
+
+      test('byteStream on a CLOB/NCLOB throws StateError at the call site',
+          () async {
+        final (conn, t, lob) = await _fetchLob(_clob(4));
+        expect(() => lob.byteStream(), throwsStateError);
+        final (conn2, t2, nclob) = await _fetchLob(_nclob(4));
+        expect(() => nclob.byteStream(), throwsStateError);
+        expect(t.lobReadCalls, equals(0));
+        await lob.close();
+        await nclob.close();
+      });
+
+      test('a non-positive offset or pieceSize throws ArgumentError at the call '
+          'site', () async {
+        final (conn, t, lob) = await _fetchLob(_clob(4));
+        expect(() => lob.textStream(offset: 0), throwsArgumentError);
+        expect(() => lob.textStream(offset: -1), throwsArgumentError);
+        expect(() => lob.textStream(pieceSize: 0), throwsArgumentError);
+        expect(() => lob.textStream(pieceSize: -5), throwsArgumentError);
+        final (conn2, t2, blob) = await _fetchLob(_blob(4));
+        expect(() => blob.byteStream(offset: 0), throwsArgumentError);
+        expect(() => blob.byteStream(pieceSize: 0), throwsArgumentError);
+        expect(t.lobReadCalls, equals(0));
+        await lob.close();
+        await blob.close();
+      });
+
+      test('a closed handle throws at the call site, before any stream exists',
+          () async {
+        final (conn, t, lob) = await _fetchLob(_clob(4));
+        await lob.close();
+        expect(
+          () => lob.textStream(),
+          throwsA(isA<OracleException>()
+              .having((e) => e.message, 'message', contains('closed'))),
+        );
+      });
+
+      test('a broken connection throws at the call site', () async {
+        final (conn, t, lob) = await _fetchLob(_clob(4));
+        t.connected = false;
+        expect(
+          () => lob.textStream(),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+        );
+      });
+    });
+
+    test('closing the handle MID-stream fails the stream loud rather than '
+        'truncating it silently', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(9));
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList(utf8.encode('abc')), amount: 3),
+        (data: Uint8List.fromList(utf8.encode('def')), amount: 3),
+      ]);
+      final seen = <String>[];
+      await expectLater(
+        () async {
+          await for (final piece in lob.textStream(pieceSize: 3)) {
+            seen.add(piece);
+            await lob.close(); // pulled out from under the live stream
+          }
+        }(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('closed'))),
+      );
+      expect(seen, equals(['abc']));
+    });
+
+    test('losing the connection MID-stream fails the stream loud', () async {
+      final (conn, t, lob) = await _fetchLob(_blob(9));
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList([1, 2, 3]), amount: 3),
+        (data: Uint8List.fromList([4, 5, 6]), amount: 3),
+      ]);
+      await expectLater(
+        () async {
+          await for (final _ in lob.byteStream(pieceSize: 3)) {
+            t.connected = false;
+          }
+        }(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+      );
+    });
+
+    test('cancelling mid-stream leaves the connection immediately reusable',
+        () async {
+      final (conn, t, lob) = await _fetchLob(_clob(12));
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList(utf8.encode('abc')), amount: 3),
+        (data: Uint8List.fromList(utf8.encode('def')), amount: 3),
+        (data: Uint8List.fromList(utf8.encode('ghi')), amount: 3),
+      ]);
+      final received = <String>[];
+      final sub = lob.textStream(pieceSize: 3).listen(received.add);
+      // Let one piece through, then cancel.
+      await Future<void>.delayed(Duration.zero);
+      await sub.cancel();
+      expect(received, isNotEmpty);
+      // No stuck in-flight flag, no half-read state.
+      expect(conn.isExecuting, isFalse);
+      await lob.close();
+      final ok = await conn.execute('SELECT 1 FROM dual');
+      expect(ok.rows, isEmpty); // the fake returns a bare successful response
+    });
+
+    test('an overlapping operation is rejected per piece via the LOB bracket',
+        () async {
+      final (conn, t, lob) = await _fetchLob(_clob(6));
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList(utf8.encode('abc')), amount: 3),
+        (data: Uint8List.fromList(utf8.encode('def')), amount: 3),
+      ]);
+      await expectLater(
+        () async {
+          await for (final _ in lob.textStream(pieceSize: 3)) {
+            // A second LOB op while this piece's yield is pending is fine (the
+            // bracket has already cleared), but an execute() is still rejected
+            // because the handle holds the connection's slot.
+            await conn.execute('SELECT 1 FROM dual');
+          }
+        }(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('OracleLob'))),
+      );
+      await lob.close();
+    });
+
+    group('character-boundary correctness', () {
+      test('a UTF-16 piece boundary splitting a surrogate pair is joined, and '
+          'the concatenation is exact', () async {
+        // 'A' + U+1F600 + 'B' == 4 UCS-2 units. Measured server behavior: a READ
+        // for 2 units at offset 1 returns 'A' plus the LONE HIGH SURROGATE as raw
+        // UTF-16BE bytes (00 41 d8 3d), and the next READ returns the low
+        // surrogate. A naive per-piece emit would hand the caller half a
+        // character.
+        const text = 'A\u{1F600}B';
+        final all = encodeUtf16Be(text);
+        final (conn, t, lob) = await _fetchLob(_nclob(4));
+        t.lobReadReplies.addAll([
+          (data: Uint8List.sublistView(all, 0, 4), amount: 2), // 'A' + high
+          (data: Uint8List.sublistView(all, 4, 8), amount: 2), // low + 'B'
+        ]);
+        final pieces = await lob.textStream(pieceSize: 2).toList();
+        expect(pieces.join(), equals(text), reason: 'concatenation is exact');
+        // The high surrogate was held back, so no emitted piece ends mid-pair.
+        expect(pieces.first, equals('A'));
+        expect(pieces[1], equals('\u{1F600}B'));
+        await lob.close();
+      });
+
+      test('a UTF-8 piece boundary splitting a multi-byte sequence is joined',
+          () async {
+        // 'caf\u{00E9}' — U+00E9 is 2 UTF-8 bytes; split between them.
+        const text = 'caf\u{00E9}';
+        final all = Uint8List.fromList(utf8.encode(text));
+        final (conn, t, lob) = await _fetchLob(_clob(4));
+        t.lobReadReplies.addAll([
+          (data: Uint8List.sublistView(all, 0, 4), amount: 3),
+          (data: Uint8List.sublistView(all, 4, 5), amount: 1),
+        ]);
+        final pieces = await lob.textStream(pieceSize: 3).toList();
+        expect(pieces.join(), equals(text));
+        expect(pieces.first, equals('caf'),
+            reason: 'the half sequence is held back, never emitted');
+        await lob.close();
+      });
+
+      test('a UTF-8 boundary splitting a 4-byte (supplemental) sequence is '
+          'joined', () async {
+        const text = 'x\u{1F600}y';
+        final all = Uint8List.fromList(utf8.encode(text)); // 1 + 4 + 1 bytes
+        final (conn, t, lob) = await _fetchLob(_clob(4));
+        t.lobReadReplies.addAll([
+          (data: Uint8List.sublistView(all, 0, 3), amount: 2),
+          (data: Uint8List.sublistView(all, 3, 6), amount: 2),
+        ]);
+        expect((await lob.textStream(pieceSize: 2).toList()).join(),
+            equals(text));
+        await lob.close();
+      });
+
+      test('a LOB that really ENDS with an unpaired high surrogate still emits '
+          'it, so the stream matches read()', () async {
+        final all = encodeUtf16Be('A\u{D83D}'); // deliberately unpaired
+        final (conn, t, lob) = await _fetchLob(_nclob(2));
+        t.lobReadReplies.add((data: all, amount: 2));
+        final pieces = await lob.textStream(pieceSize: 2).toList();
+        expect(pieces.join().codeUnits, equals([0x41, 0xD83D]));
+        await lob.close();
+      });
+
+      test('bytes that can never complete a character fail loud (no U+FFFD '
+          'substitution, no silent truncation)', () async {
+        final (conn, t, lob) = await _fetchLob(_clob(4));
+        // 0xFF is not a valid UTF-8 lead byte and can never be completed.
+        t.lobReadReplies.add((data: Uint8List.fromList([0xFF, 0xFF, 0xFF, 0xFF]), amount: 4));
+        await expectLater(
+          lob.textStream(pieceSize: 4).toList(),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('malformed'))),
+        );
+        await lob.close();
+      });
+
+      test('a piece that returns DATA but reports zero units fails loud instead '
+          'of spinning forever', () async {
+        // Never observed live (a 0-unit reply always comes with an empty payload,
+        // i.e. end of LOB), so this bounded backstop needs a fake to reach.
+        final (conn, t, lob) = await _fetchLob(_clob(6));
+        t.lobReadReplies
+            .add((data: Uint8List.fromList(utf8.encode('abc')), amount: 0));
+        await expectLater(
+          lob.textStream(pieceSize: 3).toList(),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message',
+                  contains('stream made no progress'))),
+        );
+        expect(t.lobReadCalls, equals(1), reason: 'bounded: no second READ');
+        await lob.close();
+
+        final (conn2, t2, blob) = await _fetchLob(_blob(6));
+        t2.lobReadReplies
+            .add((data: Uint8List.fromList([1, 2, 3]), amount: 0));
+        await expectLater(
+          blob.byteStream(pieceSize: 3).toList(),
+          throwsA(isA<OracleException>().having(
+              (e) => e.message, 'message', contains('stream made no progress'))),
+        );
+        expect(t2.lobReadCalls, equals(1));
+        await blob.close();
+      });
+
+      test('a stream that ends mid-character fails loud rather than dropping '
+          'the partial bytes', () async {
+        final (conn, t, lob) = await _fetchLob(_clob(4));
+        // A lone lead byte of a 2-byte sequence, then end of LOB.
+        t.lobReadReplies.add((data: Uint8List.fromList([0x63, 0xC3]), amount: 2));
+        await expectLater(
+          lob.textStream(pieceSize: 2).toList(),
+          throwsA(isA<OracleException>()
+              .having((e) => e.message, 'message', contains('mid-character'))),
+        );
+        await lob.close();
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Story 12.3 AC3 — writeStream()
+  // -------------------------------------------------------------------------
+  group('OracleLob.writeStream (AC3)', () {
+    test('writes one WRITE per chunk at the running offset and returns the '
+        'total units', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      final total = await lob.writeStream(
+        Stream<Object>.fromIterable(const ['abc', 'de', 'fghi']),
+      );
+      expect(total, equals(9));
+      expect(t.lobWriteCalls, equals(3));
+      expect(lob.length, equals(9)); // max(0, (1-1) + 9)
+      expect(t.lastWriteOffset, equals(6)); // chunk 3 at 1 + 3 + 2
+      await lob.close();
+    });
+
+    test('honors a non-1 start offset in the running arithmetic', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      final total = await lob.writeStream(
+        Stream<Object>.fromIterable(const ['ab', 'cd']),
+        offset: 5,
+      );
+      expect(total, equals(4));
+      expect(t.lastWriteOffset, equals(7)); // 5 + 2
+      expect(lob.length, equals(8)); // (5 - 1) + 4
+      await lob.close();
+    });
+
+    test('an empty chunk is skipped with NO round trip; an empty stream writes '
+        'nothing and returns 0', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      expect(
+        await lob.writeStream(
+          Stream<Object>.fromIterable(const ['a', '', 'b']),
+        ),
+        equals(2),
+      );
+      expect(t.lobWriteCalls, equals(2));
+      expect(await lob.writeStream(const Stream<Object>.empty()), equals(0));
+      expect(t.lobWriteCalls, equals(2), reason: 'no extra round trip');
+      await lob.close();
+    });
+
+    test('a BLOB stream writes bytes and counts them', () async {
+      final (conn, t, blob) = await _fetchLob(_blob(0));
+      final total = await blob.writeStream(
+        Stream<Object>.fromIterable(<Object>[
+          Uint8List.fromList([1, 2, 3]),
+          const <int>[4, 5],
+        ]),
+      );
+      expect(total, equals(5));
+      expect(t.lobWriteCalls, equals(2));
+      expect(blob.length, equals(5));
+      await blob.close();
+    });
+
+    test('a surrogate pair split across two chunks is JOINED, not corrupted '
+        '(the driver owns this boundary)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      // Chunk 1 ends with the high surrogate, chunk 2 opens with the low one.
+      const high = '\u{D83D}';
+      const low = '\u{DE00}';
+      final total = await lob.writeStream(
+        Stream<Object>.fromIterable(const <Object>['A$high', '${low}B']),
+      );
+      expect(total, equals(4)); // 'A' + 2 pair units + 'B'
+      // The first WRITE shipped only 'A' (the high surrogate was held back), and
+      // the second shipped the WHOLE pair plus 'B' — so no U+FFFD anywhere.
+      expect(t.lobWriteCalls, equals(2));
+      expect(t.lastWriteData, equals(utf8.encode('\u{1F600}B')));
+      expect(lob.length, equals(4));
+      await lob.close();
+    });
+
+    test('a surrogate still unpaired at END of stream keeps write()\'s '
+        'documented leniency', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      const high = '\u{D83D}';
+      final total = await lob.writeStream(
+        Stream<Object>.fromIterable(const <Object>['A$high']),
+      );
+      expect(total, equals(2));
+      // Two WRITEs: 'A', then the lone surrogate through write() unchanged —
+      // UTF-8 substitutes U+FFFD exactly as write() documents. Not rejected.
+      expect(t.lobWriteCalls, equals(2));
+      expect(t.lastWriteData, equals(utf8.encode(high)));
+      await lob.close();
+    });
+
+    test('an NCLOB chunk join also stitches the pair (UTF-16BE form)', () async {
+      final (conn, t, lob) = await _fetchLob(_nclob(0));
+      const high = '\u{D83D}';
+      const low = '\u{DE00}';
+      final total = await lob.writeStream(
+        Stream<Object>.fromIterable(const <Object>['A$high', '${low}B']),
+      );
+      expect(total, equals(4));
+      expect(t.lastWriteData, equals(encodeUtf16Be('\u{1F600}B')));
+      await lob.close();
+    });
+
+    test('offset <= 0 throws ArgumentError before any round trip', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      await expectLater(
+        lob.writeStream(Stream<Object>.fromIterable(const ['a']), offset: 0),
+        throwsArgumentError,
+      );
+      expect(t.lobWriteCalls, equals(0));
+      await lob.close();
+    });
+
+    test('a wrong-typed chunk throws ArgumentError from write(), aborts the '
+        'rest, and leaves earlier chunks written', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      await expectLater(
+        lob.writeStream(
+          Stream<Object>.fromIterable(<Object>['ok', 42, 'never']),
+        ),
+        throwsArgumentError,
+      );
+      expect(t.lobWriteCalls, equals(1), reason: 'first chunk landed');
+      expect(lob.length, equals(2), reason: 'not atomic: partial data stays');
+      // The connection is not wedged.
+      expect(conn.isExecuting, isFalse);
+      await lob.close();
+      final ok = await conn.execute('SELECT 1 FROM dual');
+      expect(ok.rows, isEmpty); // the fake returns a bare successful response
+    });
+
+    test('a BLOB chunk with an out-of-range element throws from write()',
+        () async {
+      final (conn, t, blob) = await _fetchLob(_blob(0));
+      await expectLater(
+        blob.writeStream(
+          Stream<Object>.fromIterable(<Object>[
+            const <int>[1, 2],
+            const <int>[300],
+          ]),
+        ),
+        throwsArgumentError,
+      );
+      expect(t.lobWriteCalls, equals(1));
+      await blob.close();
+    });
+
+    test('a server error mid-stream propagates and does not wedge the '
+        'in-flight flag', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      t.failOperations.add(tnsLobOpWrite);
+      await expectLater(
+        lob.writeStream(Stream<Object>.fromIterable(const ['abc'])),
+        throwsA(isA<OracleException>()),
+      );
+      expect(conn.isExecuting, isFalse);
+      // The handle stays usable: a later successful write still works.
+      t.failOperations.clear();
+      await lob.write(1, 'ok');
+      await lob.close();
+    });
+
+    test('a closed handle throws before consuming the stream', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      await lob.close();
+      await expectLater(
+        lob.writeStream(Stream<Object>.fromIterable(const ['a'])),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('closed'))),
+      );
+      expect(t.lobWriteCalls, equals(0));
     });
   });
 }

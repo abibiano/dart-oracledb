@@ -629,10 +629,7 @@ class Transport {
       );
       // Keep the live locator buffer tracking the server's latest echo, exactly
       // like every other LOB op (lobOp.js processReturnParameter).
-      final updated = chunk.updatedLocator;
-      if (updated != null && updated.length == locator.length) {
-        locator.setRange(0, locator.length, updated);
-      }
+      copyBackLocator(locator, chunk.updatedLocator);
       final amount = chunk.amount;
       if (amount == null) {
         throw const OracleException(
@@ -1608,12 +1605,17 @@ class Transport {
     return bindMetadata[bindIdx].maxSize;
   }
 
-  /// Fail-loud guard for single-round-trip BLOB reads: the locator's
-  /// prefetch metadata reports the exact byte length, so a mismatch means
-  /// the value cannot be returned whole — never truncate or pad. A short
-  /// read most likely means the value exceeds what one READ round trip can
-  /// deliver (multi-round-trip streaming is a post-1.0 roadmap item), not
-  /// that the wire stream is corrupt.
+  /// Fail-loud guard for a completed BLOB range read: the locator's prefetch
+  /// metadata reports the exact byte length, so a mismatch means the value
+  /// cannot be returned whole — never truncate or pad.
+  ///
+  /// Since Story 12.3 the read behind this guard is a **chunked continuation
+  /// loop** ([readLobRange]), so size alone no longer explains a short result:
+  /// a value larger than one round trip is read across as many READs as it
+  /// takes. A mismatch here therefore means the LOB really delivered fewer
+  /// bytes than its locator advertised — most often a locator whose cached
+  /// prefetch length went stale (the LOB shrank in another session between the
+  /// fetch and the read), or a corrupt stream.
   @visibleForTesting
   static void verifyBlobReadLength(int received, int locatorLength) {
     if (received == locatorLength) return;
@@ -1621,10 +1623,147 @@ class Transport {
       errorCode: oraProtocolError,
       message:
           'BLOB read returned $received bytes but the locator reports '
-          '$locatorLength${received < locatorLength ? ' — the value may '
-                    'exceed the single round-trip read limit; values this large '
-                    'are not yet supported' : ''}',
+          '$locatorLength${received < locatorLength ? ' — the LOB delivered '
+                    'fewer bytes than its locator advertises (the value may '
+                    'have shrunk since it was fetched)' : ''}',
     );
+  }
+
+  /// Copies the server's echoed (post-op) locator bytes back into [source] in
+  /// place, guarded on an equal length.
+  ///
+  /// node-oracledb's `lobOp.processReturnParameter` copies the returned locator
+  /// into `sourceLobImpl._locator` after EVERY LOB op, so a follow-on op
+  /// references post-op state rather than stale bytes. Single implementation
+  /// shared by [readLobRange], `createTemporaryLob` and the connection's
+  /// read/write seams. A differently-sized echo is ignored (never truncates or
+  /// grows the live locator).
+  @internal
+  static void copyBackLocator(Uint8List source, Uint8List? updated) {
+    if (updated != null && updated.length == source.length) {
+      source.setRange(0, source.length, updated);
+    }
+  }
+
+  /// Reads [amount] units starting at 1-based [offset] from the LOB [locator]
+  /// references, issuing **as many** `tnsLobOpRead` round trips as it takes,
+  /// and returns the concatenated payload bytes plus the total units the server
+  /// reported delivering.
+  ///
+  /// This is the driver's single LOB read-continuation loop (Story 12.3 AC1):
+  /// `_readClobAsString`, `_readBlobAsBytes` and the connection's `runLobRead`
+  /// seam (behind `OracleLob.read()`) all route through it, so the "keep reading
+  /// at the advanced offset" logic exists in exactly one place.
+  ///
+  /// * **Units, not bytes.** [offset] and [amount] are in the LOB's native
+  ///   units — characters (UCS-2 code units) for CLOB/NCLOB, bytes for BLOB —
+  ///   while the returned buffer is always BYTES. Per-piece progress is taken
+  ///   from the server's own SB8 reply (`LobOpResponse.amount`, decoded for
+  ///   every `sendAmount: true` READ), never inferred from byte counts: a
+  ///   CLOB has no fixed bytes-per-unit ratio.
+  /// * **Single-READ fast path.** With [pieceUnits] null the first READ requests
+  ///   the whole [amount], so a value that fits one round trip (measured: every
+  ///   size up to 32 MB on 23ai and 8 MB on 21c) costs exactly **one**
+  ///   `tnsLobOpRead` — byte-for-byte the pre-12.3 behavior. The loop only
+  ///   engages if a server actually short-reads.
+  /// * **Assemble bytes, decode once.** Pieces are concatenated as bytes and
+  ///   handed back undecoded, because a piece boundary can split a UTF-8
+  ///   sequence or a UTF-16 surrogate pair — which a per-piece decode cannot
+  ///   reassemble but a single decode over the assembled buffer always can.
+  /// * **Bounded and fail-loud.** A piece the server reports as **zero units**
+  ///   while units are still outstanding cannot make progress, so it throws
+  ///   [OracleException] naming the offset/amount rather than spinning. The one
+  ///   exception is a first piece that delivers nothing at all: that returns an
+  ///   empty result so the caller's own "read returned no data" guard produces
+  ///   its established message. A piece reporting MORE units than were
+  ///   outstanding is likewise a protocol fault.
+  /// * **Missing SB8 amount.** If a READ reply omits the amount (never observed
+  ///   for a `sendAmount: true` READ on either tested server version), the piece
+  ///   is treated as having satisfied the whole outstanding request — i.e. the
+  ///   read degrades to exactly the pre-12.3 single-round-trip behavior, and the
+  ///   caller's strict truncation guard still catches a short payload.
+  ///
+  /// The server's echoed post-op locator is copied back after every piece
+  /// ([copyBackLocator]), exactly as a single READ did.
+  @internal
+  Future<LobRangeRead> readLobRange({
+    required Uint8List locator,
+    required int offset,
+    required int amount,
+    int? pieceUnits,
+    Duration? timeout = const Duration(minutes: 2),
+  }) async {
+    if (amount <= 0) return LobRangeRead(bytes: Uint8List(0), unitsRead: 0);
+    final pieces = <Uint8List>[];
+    var unitsRead = 0;
+    var totalBytes = 0;
+    while (unitsRead < amount) {
+      final outstanding = amount - unitsRead;
+      final request =
+          pieceUnits != null && pieceUnits < outstanding
+              ? pieceUnits
+              : outstanding;
+      final response = await sendLobOp(
+        operation: tnsLobOpRead,
+        sourceLocator: locator,
+        sourceOffset: offset + unitsRead,
+        sendAmount: true,
+        amount: request,
+        timeout: timeout,
+      );
+      copyBackLocator(locator, response.updatedLocator);
+      final data = response.data;
+      if (data != null && data.isNotEmpty) {
+        pieces.add(data);
+        totalBytes += data.length;
+      }
+      // Progress in UNITS comes from the server's SB8 reply. A reply without one
+      // is treated as having satisfied the request (see the dartdoc), which
+      // reduces this loop to the pre-12.3 single READ.
+      final delivered = response.amount ?? outstanding;
+      if (delivered <= 0) {
+        if (unitsRead == 0) {
+          // Nothing at all was delivered: hand back the empty result so the
+          // caller's own "read returned no data" guard reports it.
+          break;
+        }
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'LOB read made no progress: the server delivered 0 units at '
+              'offset ${offset + unitsRead} with ${amount - unitsRead} of '
+              '$amount units still outstanding (read started at offset $offset)',
+        );
+      }
+      if (delivered > outstanding) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'LOB read overshot: the server reported $delivered units at '
+              'offset ${offset + unitsRead} but only $outstanding of $amount '
+              'were outstanding',
+        );
+      }
+      unitsRead += delivered;
+    }
+    return LobRangeRead(
+      bytes: _concatPieces(pieces, totalBytes),
+      unitsRead: unitsRead,
+    );
+  }
+
+  /// Concatenates [pieces] into one buffer, avoiding a copy in the (dominant)
+  /// single-piece case.
+  static Uint8List _concatPieces(List<Uint8List> pieces, int totalBytes) {
+    if (pieces.isEmpty) return Uint8List(0);
+    if (pieces.length == 1) return pieces.single;
+    final out = Uint8List(totalBytes);
+    var at = 0;
+    for (final piece in pieces) {
+      out.setRange(at, at + piece.length, piece);
+      at += piece.length;
+    }
+    return out;
   }
 
   /// Replaces every [LobLocator] in a successful response's rows and OUT
@@ -1809,23 +1948,26 @@ class Transport {
     );
   }
 
-  /// Reads a CLOB locator's full value as a Dart String via a single TTC LOB
-  /// READ operation.
+  /// Reads a CLOB locator's full value as a Dart String.
   ///
-  /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`: one
-  /// READ requesting the entire LOB length at 1-based offset 1. The server
-  /// streams the content back as one or more `LOB_DATA` messages inside the
-  /// single response, which [decodeLobOpResponse] concatenates into one byte
-  /// buffer.
+  /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`: the
+  /// entire LOB length requested at 1-based offset 1. The server streams the
+  /// content back as one or more `LOB_DATA` messages inside a single response,
+  /// which [decodeLobOpResponse] concatenates into one byte buffer — and since
+  /// Story 12.3 the request itself continues across further READs at the
+  /// advanced offset ([readLobRange]) if one round trip cannot deliver the whole
+  /// range, so there is no size at which this path gives up. Every measured
+  /// value (up to 32 MB on 23ai, 8 MB on 21c) still arrives in exactly one READ.
   ///
-  /// Reading the whole length at once — rather than looping with a per-chunk
-  /// character offset — keeps multibyte and supplementary-plane (surrogate
-  /// pair) text correct: a chunk boundary can split a UTF-8 sequence or a
-  /// surrogate pair, which a per-piece decode cannot reassemble but a single
-  /// decode over the fully assembled bytes always can. It also avoids
-  /// reconstructing a character offset from a decoded String's length, which
-  /// counts UTF-16 code units and desynced from Oracle's character offsets on
-  /// astral text.
+  /// Requesting the whole length — rather than looping with a per-chunk
+  /// character offset and decoding each chunk — keeps multibyte and
+  /// supplementary-plane (surrogate pair) text correct: a chunk boundary can
+  /// split a UTF-8 sequence or a surrogate pair, which a per-piece decode cannot
+  /// reassemble but a single decode over the fully assembled bytes always can.
+  /// [readLobRange] therefore concatenates pieces as BYTES and this method
+  /// decodes exactly once. It also avoids reconstructing a character offset from
+  /// a decoded String's length, which counts UTF-16 code units and desynced from
+  /// Oracle's character offsets on astral text.
   Future<String> _readClobAsString(
     LobLocator locator,
     Duration? timeout,
@@ -1839,16 +1981,14 @@ class Transport {
     // whose data is stored as UCS-2). Server-created NCLOB locators do NOT
     // always set the flag bit, so the declared NCHAR form must be honored too.
     final isUtf16 = locator.isNChar || locator.usesVarLengthCharset;
-    final response = await sendLobOp(
-      operation: tnsLobOpRead,
-      sourceLocator: locator.locator,
-      sourceOffset: 1, // 1-based: read from the start of the LOB
-      sendAmount: true,
-      amount: locator.length, // entire LOB length in one round trip
+    final read = await readLobRange(
+      locator: locator.locator,
+      offset: 1, // 1-based: read from the start of the LOB
+      amount: locator.length, // the entire LOB length
       timeout: timeout,
     );
-    final bytes = response.data;
-    if (bytes == null || bytes.isEmpty) {
+    final bytes = read.bytes;
+    if (bytes.isEmpty) {
       throw OracleException(
         errorCode: oraProtocolError,
         message:
@@ -1886,16 +2026,19 @@ class Transport {
     return text;
   }
 
-  /// Reads a BLOB locator's full value as a Dart `Uint8List` via a single
-  /// TTC LOB READ operation.
+  /// Reads a BLOB locator's full value as a Dart `Uint8List`.
   ///
-  /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`:
-  /// one READ requesting the entire LOB byte length at 1-based offset 1. The
-  /// server streams the content back as one or more `LOB_DATA` messages
-  /// inside the single response, which [decodeLobOpResponse] concatenates
-  /// into one byte buffer. BLOB `LOB_DATA` bytes pass through unchanged — no
-  /// character set conversion of any kind (node-oracledb lobOp.js
-  /// processMessage keeps BLOB data as a raw Buffer).
+  /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`: the
+  /// entire LOB byte length requested at 1-based offset 1. The server streams
+  /// the content back as one or more `LOB_DATA` messages inside a single
+  /// response, which [decodeLobOpResponse] concatenates into one byte buffer —
+  /// and since Story 12.3 the request continues across further READs at the
+  /// advanced offset ([readLobRange]) if one round trip cannot deliver the whole
+  /// range, so there is no size at which this path gives up. Every measured
+  /// value (up to 32 MB on 23ai, 8 MB on 21c) still arrives in exactly one READ.
+  /// BLOB `LOB_DATA` bytes pass through unchanged — no character set conversion
+  /// of any kind (node-oracledb lobOp.js processMessage keeps BLOB data as a raw
+  /// Buffer).
   Future<Uint8List> _readBlobAsBytes(
     LobLocator locator,
     Duration? timeout,
@@ -1903,16 +2046,14 @@ class Transport {
     if (locator.length == 0) {
       return Uint8List(0); // EMPTY_BLOB() — no LOB_DATA round trip needed
     }
-    final response = await sendLobOp(
-      operation: tnsLobOpRead,
-      sourceLocator: locator.locator,
-      sourceOffset: 1, // 1-based: read from the start of the LOB (bytes)
-      sendAmount: true,
-      amount: locator.length, // entire LOB byte length in one round trip
+    final read = await readLobRange(
+      locator: locator.locator,
+      offset: 1, // 1-based: read from the start of the LOB (bytes)
+      amount: locator.length, // the entire LOB byte length
       timeout: timeout,
     );
-    final bytes = response.data;
-    if (bytes == null || bytes.isEmpty) {
+    final bytes = read.bytes;
+    if (bytes.isEmpty) {
       throw OracleException(
         errorCode: oraProtocolError,
         message:
@@ -3632,4 +3773,26 @@ class Transport {
     }
     return response.payload.sublist(2);
   }
+}
+
+/// Result of one [Transport.readLobRange] range read: the assembled payload
+/// **bytes** plus the total **units** the server reported delivering.
+///
+/// The two counts are deliberately distinct (Story 12.3): a BLOB's units are
+/// bytes, an NCLOB / variable-length-charset CLOB's units are half its byte
+/// count (UTF-16BE), and a UTF-8-form CLOB has no fixed ratio at all — so a
+/// caller that needs to reason about progress or truncation must use
+/// [unitsRead], never `bytes.length`.
+@internal
+class LobRangeRead {
+  /// Creates a range-read result.
+  const LobRangeRead({required this.bytes, required this.unitsRead});
+
+  /// The concatenated LOB_DATA payload bytes, undecoded (CLOB/NCLOB text is
+  /// decoded ONCE by the caller over this whole buffer).
+  final Uint8List bytes;
+
+  /// Total units the server reported delivering across every piece — characters
+  /// (UCS-2 code units) for CLOB/NCLOB, bytes for BLOB.
+  final int unitsRead;
 }

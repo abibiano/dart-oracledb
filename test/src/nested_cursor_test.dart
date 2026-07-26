@@ -629,15 +629,18 @@ void main() {
     );
   });
 
-  // Story 12.1 review finding (Decision, High — iter 3): a LOB nested inside a
-  // CURSOR() result column arrives through a LAZY per-batch result-set drain
-  // whose OracleLob handle lifecycle is not yet complete (force-close on
-  // result-set close / pool-reclaim / decode-throw; closeLobs() reaching a
-  // result-set OUT bind). Wrapping it would orphan handles that permanently
-  // wedge the connection, so Story 12.1 REJECTS such cursor-embedded LOB columns
-  // pre-wire (fail loud) rather than silently materializing (which would break
-  // AC2) — the wrap is deferred to Story 12.3. This reverses the iter-1 wrap
-  // decision. fetchLobs OFF still materializes unchanged.
+  // Story 12.1 review finding (Decision, High — iter 3), CARRIED by Story 12.3:
+  // a LOB nested inside a CURSOR() result column stays fail-loud under
+  // fetchLobs. 12.3 lifted the equivalent rejection for a TOP-LEVEL
+  // `resultSet: true` cursor (which now wraps per batch, with the reap
+  // lifecycle), but kept this one because the shape is not live-reachable at
+  // all: measured on 23ai and 21c, a cursor row carrying a LOB fails inside
+  // decodeExecuteResponse ("buffer underrun in execute response" / "Integer too
+  // large: size=114 exceeds maxSize=8") WITHOUT fetchLobs, so a wrap could only
+  // ever be proven by fake transports. What 12.3 DOES fix here is the reject
+  // path's cursor leak: the embedded cursor id is now queued for the
+  // close-cursor piggyback before the throw. fetchLobs OFF still materializes
+  // unchanged.
   group('nested-CURSOR() LOB columns fail loud under fetchLobs (review '
       'Decision fix, iter 3)', () {
     const nestedLobColumns = [
@@ -677,8 +680,7 @@ void main() {
         );
 
     test(
-      'a CLOB inside a CURSOR() column fails loud under fetchLobs: true '
-      '(deferred to Story 12.3)',
+      'a CLOB inside a CURSOR() column fails loud under fetchLobs: true',
       () async {
         final clob = _clobLocator();
         final t = buildTransport(clob);
@@ -691,13 +693,47 @@ void main() {
           ),
           throwsA(isA<OracleException>()
               .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('Story 12.3'))
-              .having((e) => e.message, 'message', contains('CURSOR'))),
+              .having((e) => e.message, 'message', contains('CURSOR'))
+              .having((e) => e.message, 'message',
+                  contains('cannot be decoded by this driver yet'))),
         );
         // No handle was registered for the cursor-embedded LOB: the reject
         // fires before it could be wrapped, so nothing wedges the connection.
         // (The parent row carries no top-level LOB, so the eager top-level
         // materialize registers nothing either.)
+        expect(conn.hasOpenLob, isFalse);
+      },
+    );
+
+    // Story 12.3 AC6: the REJECT path must not leak the server cursor it
+    // rejects. `_materializeNestedCursorsInBatch` throws BEFORE
+    // `_drainNestedCursor`'s reaping `finally` ever runs, so without an explicit
+    // requeue the nested cursor id is abandoned — one leaked server cursor per
+    // rejected call, an ORA-01000 hazard on a pooled connection (measured live on
+    // 23ai and 21c as a MISSING pendingClose increment).
+    test(
+      'the rejected nested cursor id IS queued for the close-cursor piggyback',
+      () async {
+        final clob = _clobLocator();
+        final t = buildTransport(clob);
+        final conn = OracleConnection.forTesting(transport: t);
+        expect(conn.debugPendingCloseCount, equals(0));
+        await expectLater(
+          conn.execute(
+            'SELECT id, nc FROM t',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          ),
+          throwsA(isA<OracleException>()),
+        );
+        // Both the rejected nested cursor (id 100) and the top-level statement
+        // cursor (id 7, reaped by the execute path's catch) are queued.
+        expect(
+          conn.debugPendingCloseCount,
+          equals(2),
+          reason: 'the rejected embedded cursor must be reaped, not leaked',
+        );
+        expect(conn.hasOpenResultSet, isFalse);
         expect(conn.hasOpenLob, isFalse);
       },
     );

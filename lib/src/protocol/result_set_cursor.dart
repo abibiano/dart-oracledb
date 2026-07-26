@@ -25,6 +25,7 @@ import 'package:meta/meta.dart';
 
 import '../errors.dart';
 import '../transport/transport.dart';
+import 'lob_locator.dart';
 import 'messages/execute_message.dart';
 
 /// Drives incremental row delivery over one open server cursor.
@@ -55,6 +56,43 @@ class ResultSetCursor {
   /// `numBytes + cursorId` that the decoder shears on. 23ai is tolerant (inline
   /// describe even on OFETCH). See `spec-nested-cursor-materialization.md`
   /// "S0 RECONCILIATION".
+  ///
+  /// ## Lazy LOB handles ([wrapLob] / [isLobHandle] / [closeLobHandles])
+  ///
+  /// Supplying `wrapLob` switches this cursor's per-batch LOB handling from
+  /// *materialize* to *wrap*: it is handed straight to
+  /// `Transport.materializeLobs`, so every `LobLocator` in every fetched batch is
+  /// replaced by whatever the callback returns — an opaque handle object — with
+  /// no LOB READ round trip (Story 12.3 AC4, the `resultSet: true` +
+  /// `fetchLobs: true` combination). The three parameters traffic in
+  /// `LobLocator` / `Object` and callbacks precisely so this file never imports
+  /// `connection.dart` or `oracle_lob.dart`, exactly like
+  /// `Transport.materializeLobs`. Every other construction site passes
+  /// `wrapLob: null` deliberately: those shapes stay on the materialize path.
+  ///
+  /// A wrapped handle is a **server resource the caller must close**, and this
+  /// cursor prefetches up to `prefetchRows` rows — so it wraps handles for rows
+  /// the caller has not yet retrieved, and may never retrieve. `isLobHandle` and
+  /// `closeLobHandles` are how those undelivered handles get reaped (AC5): the
+  /// cursor records every handle-valued cell of each **delivered** row and, on
+  /// [close] (or when a fetched batch fails after materializing), closes
+  /// `buffered handles − delivered handles`.
+  ///
+  /// **The aliasing rule is non-negotiable: a DELIVERED handle is never reaped.**
+  /// Two paths alias one handle into rows the caller may partly own:
+  /// `materializeLobs` dedups per batch, so Oracle's duplicate-column
+  /// optimization can put ONE handle in several rows of a batch; and
+  /// `_previousRoundLastRow` carries the previous (already delivered) batch's
+  /// last row into the next batch's first row as the duplicate-column dedup
+  /// source. Reaping "everything left in the buffer" would therefore close a
+  /// handle the caller is actively reading. Hence the delivered set is seeded
+  /// from `_previousRoundLastRow` at the start of every continuation batch, and
+  /// is otherwise per batch — the buffer is always empty before a continuation
+  /// FETCH, so every earlier row was already delivered, which keeps the retained
+  /// set bounded by one batch.
+  ///
+  /// All three must be supplied together or not at all; they are unused on the
+  /// eager drain path ([drainRemaining]), which never wraps.
   ResultSetCursor({
     required Transport transport,
     required int cursorId,
@@ -66,6 +104,9 @@ class ResultSetCursor {
     required bool materializePerBatch,
     bool requiresFullExecute = false,
     Future<void> Function(List<List<Object?>> batch)? onBatchDecoded,
+    Object Function(LobLocator locator)? wrapLob,
+    bool Function(Object? value)? isLobHandle,
+    Future<void> Function(Iterable<Object> handles)? closeLobHandles,
     Duration? fetchTimeout = const Duration(minutes: 2),
   })  : _transport = transport,
         _cursorId = cursorId,
@@ -76,6 +117,9 @@ class ResultSetCursor {
         _preserveTimestampTimeZone = preserveTimestampTimeZone,
         _materializePerBatch = materializePerBatch,
         _onBatchDecoded = onBatchDecoded,
+        _wrapLob = wrapLob,
+        _isLobHandle = isLobHandle,
+        _closeLobHandles = closeLobHandles,
         _fetchTimeout = fetchTimeout,
         _buffer = Queue<List<Object?>>.of(firstBatch),
         _previousRoundLastRow =
@@ -87,6 +131,25 @@ class ResultSetCursor {
   final int _prefetchRows;
   final bool _preserveTimestampTimeZone;
   final bool _materializePerBatch;
+
+  /// Replaces each per-batch [LobLocator] with a caller-owned handle instead of
+  /// reading it into a `String` / `Uint8List`. Null on every materialize path.
+  final Object Function(LobLocator locator)? _wrapLob;
+
+  /// Recognizes a cell produced by [_wrapLob], so the cursor can track and reap
+  /// handles without knowing their type. Null when [_wrapLob] is.
+  final bool Function(Object? value)? _isLobHandle;
+
+  /// Closes handles the caller never received. Null when [_wrapLob] is.
+  final Future<void> Function(Iterable<Object> handles)? _closeLobHandles;
+
+  /// Handles from the CURRENT batch that were handed to the caller, tracked by
+  /// identity so an aliased handle counts as delivered for every row it appears
+  /// in. Never reaped. Unused unless [_wrapLob] is set.
+  Set<Object> _deliveredHandles = LinkedHashSet<Object>.identity();
+
+  /// Set once [close] has run, so a second close reaps nothing twice.
+  bool _closed = false;
 
   /// Optional per-batch post-processor invoked on every freshly fetched batch
   /// (after per-batch LOB materialization, before the rows are buffered) on the
@@ -181,7 +244,68 @@ class ResultSetCursor {
       if (failure != null) throw _failureException(failure);
       if (_buffer.isEmpty) return null;
     }
-    return _buffer.removeFirst();
+    final row = _buffer.removeFirst();
+    // The SINGLE row-delivery choke point (nextRowsData / nextAllRowsData both
+    // funnel through here), so this is the only place delivered LOB handles are
+    // recorded. Once recorded, a handle is the caller's and is never reaped.
+    _recordDelivered(row);
+    return row;
+  }
+
+  /// Remembers every LOB handle in a row the caller now owns, so [close] cannot
+  /// reap it. No-op unless this cursor wraps handles.
+  void _recordDelivered(List<Object?> row) {
+    final isHandle = _isLobHandle;
+    if (isHandle == null) return;
+    for (final cell in row) {
+      if (cell != null && isHandle(cell)) _deliveredHandles.add(cell);
+    }
+  }
+
+  /// Every LOB handle still sitting in the prefetch buffer — i.e. wrapped but
+  /// not yet handed to the caller, PLUS any delivered handle aliased into a
+  /// still-buffered row. Deduped by identity.
+  ///
+  /// Exposed so `OracleResult.closeLobs()` can reach a streaming result set's
+  /// buffered handles (its documented bulk-close remedy is otherwise a no-op for
+  /// this shape). Empty unless this cursor wraps handles.
+  Iterable<Object> bufferedLobHandles() {
+    final isHandle = _isLobHandle;
+    if (isHandle == null) return const <Object>[];
+    final found = LinkedHashSet<Object>.identity();
+    for (final row in _buffer) {
+      for (final cell in row) {
+        if (cell != null && isHandle(cell)) found.add(cell);
+      }
+    }
+    return found;
+  }
+
+  /// Closes every wrapped-but-**undelivered** LOB handle this cursor is holding,
+  /// then forgets its handle bookkeeping.
+  ///
+  /// Called by `OracleResultSet.close()` before the cursor is released. Without
+  /// it, a cursor that prefetched (say) 50 rows with a LOB column would leave 50
+  /// registered handles behind when the caller read one row and closed the result
+  /// set — permanently wedging the connection, with no public API to find them.
+  ///
+  /// Reaps exactly `buffered − delivered`, so a handle the caller already
+  /// received stays usable afterwards even when Oracle's duplicate-column
+  /// optimization also left it in an undelivered row (the aliasing rule in this
+  /// class's constructor doc). Idempotent and exception-free — `close()` on a LOB
+  /// handle is — so a handle reaped here and closed again by the caller, by
+  /// `closeLobs()`, or by a pool reclaim is never double-freed.
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    final closeHandles = _closeLobHandles;
+    if (closeHandles == null) return;
+    final undelivered = bufferedLobHandles()
+        .where((handle) => !_deliveredHandles.contains(handle))
+        .toList(growable: false);
+    _deliveredHandles.clear();
+    if (undelivered.isEmpty) return;
+    await closeHandles(undelivered);
   }
 
   /// Returns up to [count] rows' raw value lists, fetching as needed. Returns
@@ -337,13 +461,23 @@ class ResultSetCursor {
       _serverHasMoreRows = false;
       return;
     }
+    // Declared OUTSIDE the try so the catch can reach the materialized batch and
+    // reap the LOB handles it wrapped (AC5 site 2). `materializeLobs` returns a
+    // rebuilt response, so a throw from a LATER step (nested-cursor
+    // materialization) would otherwise leave those handles registered on the
+    // connection with nothing referencing them.
+    ExecuteResponse? materialized;
     try {
       final batch = _materializePerBatch
           ? await _transport.materializeLobs(
               fetched,
               timeout: _fetchTimeout,
+              // Wrap instead of read when the connection asked for handles
+              // (fetchLobs + resultSet). Null on every materialize path.
+              wrapLob: _wrapLob,
             )
           : fetched;
+      materialized = batch;
       // Eager nested-cursor materialization runs AFTER LOB materialization and
       // BEFORE buffering, so the replaced `List<OracleRow>` values are what
       // both `_buffer` and `_previousRoundLastRow` carry. Capturing a still-raw
@@ -355,6 +489,13 @@ class ResultSetCursor {
         await onBatch(batch.rows);
       }
       if (batch.rows.isNotEmpty) {
+        // A new batch starts a new delivered set, keeping the retained set
+        // bounded by one batch. It is SEEDED from the previous round's last row,
+        // which was necessarily delivered (the buffer is empty before a
+        // continuation FETCH) and which Oracle's duplicate-column optimization
+        // may have copied into this batch's first row — reaping such a carried
+        // alias would close a handle the caller already owns.
+        _resetDeliveredForNewBatch();
         _buffer.addAll(batch.rows);
         _previousRoundLastRow = batch.rows.last;
       }
@@ -367,7 +508,43 @@ class ResultSetCursor {
       // caller sees a fail-loud error instead of corrupt or skipped rows.
       _failed = true;
       _serverHasMoreRows = false;
+      // Reap any handle this batch wrapped before it failed: the rows never
+      // reach the caller, so nothing else can ever close them.
+      await _reapBatchHandles(materialized);
       rethrow;
+    }
+  }
+
+  /// Starts a fresh per-batch delivered set, carrying over the handles of
+  /// [_previousRoundLastRow] (an already-delivered row Oracle may alias into the
+  /// new batch's first row). No-op unless this cursor wraps handles.
+  void _resetDeliveredForNewBatch() {
+    if (_isLobHandle == null) return;
+    _deliveredHandles = LinkedHashSet<Object>.identity();
+    final carried = _previousRoundLastRow;
+    if (carried != null) _recordDelivered(carried);
+  }
+
+  /// Closes the LOB handles a failed batch had already wrapped. Best-effort and
+  /// never masks the original failure: `close()` on a handle is exception-free,
+  /// but a defensive guard keeps a surprise from replacing the real error.
+  Future<void> _reapBatchHandles(ExecuteResponse? materialized) async {
+    final closeHandles = _closeLobHandles;
+    final isHandle = _isLobHandle;
+    if (closeHandles == null || isHandle == null || materialized == null) return;
+    final found = LinkedHashSet<Object>.identity();
+    for (final row in materialized.rows) {
+      for (final cell in row) {
+        if (cell != null && isHandle(cell) && !_deliveredHandles.contains(cell)) {
+          found.add(cell);
+        }
+      }
+    }
+    if (found.isEmpty) return;
+    try {
+      await closeHandles(found);
+    } catch (_) {
+      // Swallow: the batch failure below is the error the caller must see.
     }
   }
 

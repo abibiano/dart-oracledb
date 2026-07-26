@@ -650,9 +650,12 @@ both Oracle 23ai and 21c: a 1,000,000-byte BLOB and 500,000-character CLOBs
 (ASCII and mixed multibyte/emoji — ~1 MB as the on-wire UTF-16BE payload) as
 IN binds and IN OUT round trips, plus IN binds straddling the 64 KiB
 wire-chunk boundary exactly (BLOB at 65,535/65,536/65,537 payload bytes; CLOB
-at the nearest even UTF-16BE sizes 65,534/65,536/65,538). Unbounded/multi-gigabyte LOBs are
-still not claimed: values are materialized in memory as a single `String` /
-`Uint8List`. NCLOB columns are supported as Dart `String` (the national
+at the nearest even UTF-16BE sizes 65,534/65,536/65,538). On this **default**
+path values are still materialized in memory as a single `String` / `Uint8List`,
+so unbounded/multi-gigabyte LOBs are not claimed for it — use
+[`fetchLobs`](#incremental-lob-access-with-fetchlobs) and
+`OracleLob.textStream()` / `byteStream()` / `writeStream()` to move a value in
+bounded pieces instead. NCLOB columns are supported as Dart `String` (the national
 `AL16UTF16` charset — see [Character Set Support](#character-set-support)); BFILE
 columns are not supported and fail with a clear `OracleException`.
 
@@ -689,10 +692,20 @@ try {
   variable-length-charset CLOB** (decoded UTF-16BE) returns a lone surrogate as a
   partial character, while a **plain CLOB** (decoded UTF-8) fails loud with an
   `OracleException` because the split leaves an incomplete UTF-8 sequence.
+- **No size ceiling on `read()`** — the requested range is fetched in one LOB
+  READ round trip and, if one cannot carry it all, the read **continues** at the
+  advanced offset until the range arrives. The bytes are assembled first and
+  decoded exactly once, so a round-trip boundary can never corrupt multibyte or
+  supplemental-plane text. (Measured: every value up to 32 MB on 23ai and 8 MB on
+  21c still arrives in a single READ.) Use the streams below when the point is to
+  avoid holding the whole value in memory.
 - **Writing** — `write(offset, data)` (a `String` for CLOB/NCLOB, `Uint8List` /
   `List<int>` for BLOB) requires a **writable** locator: a LOB OUT/IN OUT bind or
   a `SELECT ... FOR UPDATE` locator. Writing through a read-only plain-`SELECT`
-  locator surfaces the Oracle server error (it is not blocked client-side).
+  locator surfaces the Oracle server error (it is not blocked client-side —
+  measured: `ORA-22920`, with the handle and connection left usable). Writing
+  past `length + 1` extends the LOB and the server fills the gap; the local
+  `length` advance matches the server's own `DBMS_LOB.GETLENGTH`.
 - **Lifecycle** — each open handle holds the connection's single in-flight slot:
   the connection rejects other operations (and the pool force-closes any
   still-open handle on release) until every handle is `close()`d. `close()` is
@@ -724,15 +737,120 @@ try {
   }
   ```
 
-`fetchLobs` wraps only the **eager** shapes: top-level `execute()` SELECT rows
-and scalar OUT / IN OUT binds. A CLOB/NCLOB/BLOB carried by a **lazily-streamed**
-handle is not wrapped in this release and is deferred to Story 12.3: combining
-`resultSet: true` with `fetchLobs: true` throws before any wire round trip, and a
-CLOB/BLOB nested in a `CURSOR(...)` column or carried by a REF CURSOR OUT bind
-**fails loud** under `fetchLobs` (rather than silently materializing) — run those
-statements without `fetchLobs` and the LOB materializes to a `String` /
-`Uint8List` as before. Also not yet available: a `Stream` surface, BFILE, and
-`trim()`.
+`fetchLobs` wraps top-level `execute()` SELECT rows, scalar OUT / IN OUT binds,
+eager PL/SQL implicit-result rows, and a **streaming** `resultSet: true` cursor
+(see below). It does **not** reach a CLOB/NCLOB/BLOB carried by a nested
+`CURSOR(...)` column or a REF CURSOR OUT bind: those **fail loud** under
+`fetchLobs` (rather than silently materializing), because a cursor row carrying a
+LOB cannot be decoded by this driver at all yet — such statements fail with a
+protocol error even *without* `fetchLobs`. `resultSet: true` + `fetchLobs: true`
+on a **PL/SQL block** (whose implicit results come back as a group of lazy result
+sets) also throws before any wire round trip; use the eager `execute()` path
+there. Still not available: BFILE and `trim()`.
+
+#### Streaming a LOB in and out
+
+`textStream()` / `byteStream()` deliver a LOB in bounded pieces — **one LOB READ
+round trip per piece** — and `writeStream()` feeds one in from a `Stream`, so a
+multi-megabyte value never has to exist whole in memory:
+
+```dart
+// Read: one round trip per piece, nothing materialized whole.
+final sink = File('article.txt').openWrite();
+try {
+  await for (final piece in lob.textStream(pieceSize: 64 * 1024)) {
+    sink.write(piece);              // Stream<Uint8List> for a BLOB (byteStream)
+  }
+} finally {
+  await sink.close();
+  await lob.close();
+}
+```
+
+```dart
+// Write: node-oracledb's canonical streamed insert. This driver accepts
+// OracleBind specs only inside PL/SQL, so the DML RETURNING is wrapped in a block.
+final result = await connection.execute(
+  'BEGIN INSERT INTO articles (id, doc) VALUES (:id, EMPTY_CLOB()) '
+  'RETURNING doc INTO :out; END;',
+  {'id': 1, 'out': OracleBind.out(type: OracleDbType.clob, maxSize: 1)},
+  OracleExecuteOptions(fetchLobs: true),
+);
+final lob = result.outBinds['out'] as OracleLob;
+try {
+  final written = await lob.writeStream(pieces); // Stream<String>; returns units
+  await connection.commit();
+} finally {
+  await lob.close();
+}
+```
+
+- **Units** are the type's native ones: characters (UCS-2 code units) for
+  CLOB/NCLOB, bytes for BLOB — same as `read` / `write` / `length`.
+- **`pieceSize`** defaults to `chunkSize` when the server reported one and
+  otherwise to `defaultLobStreamPieceSize`; a multiple of `chunkSize` is
+  recommended. The concatenation of the emitted pieces equals
+  `read(offset: offset)` exactly.
+- **A read stream ends when a READ returns no data**, not when the cached
+  `length` is reached — so it is immune to a `length` that went stale after the
+  fetch, and it never loops past the end. That terminating empty READ costs one
+  extra round trip, and an **empty** LOB yields no pieces at all.
+- **Emitted CLOB pieces are not guaranteed whole-character-aligned** (the driver
+  picks the boundaries), but they are never corrupt: a split encoding sequence or
+  a trailing unpaired high surrogate is held back and joined to the next piece, so
+  the **concatenation is always exact**.
+- **`writeStream` issues one write per caller chunk** at the running offset —
+  your chunk size is the wire piece size. An empty chunk costs no round trip, and
+  a surrogate pair split across two chunks is stitched back together (that
+  boundary is the driver's, unlike the caller-chosen boundaries `write()` stays
+  lenient about). It is **not atomic**: a bad chunk or a server error aborts the
+  rest and leaves what was already written in place.
+- **Cancelling a read stream mid-flight** leaves the connection immediately
+  reusable; the handle stays open, so `close()` it as usual. Liveness is
+  re-checked before every piece, so closing the handle (or losing the connection)
+  mid-stream fails the stream loud rather than truncating it silently.
+- **`executeStream()` / `queryStream()` are unrelated** — they stream *rows* and
+  always materialize LOB columns; they take no `fetchLobs` argument.
+
+#### Streaming result sets that yield LOB handles
+
+Combine `resultSet: true` with `fetchLobs: true` and each batch's LOB columns are
+wrapped as handles **as the batch is prefetched**, so a huge result set never
+holds a handle per row up front:
+
+```dart
+final result = await connection.execute(
+  'SELECT id, doc FROM articles',
+  null,
+  OracleExecuteOptions(resultSet: true, fetchLobs: true, fetchSize: 100),
+);
+final rs = result.resultSet!;
+try {
+  for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
+    final lob = row['DOC'] as OracleLob?;
+    if (lob == null) continue;               // SQL NULL LOB
+    try {
+      await for (final piece in lob.textStream()) { process(piece); }
+    } finally {
+      await lob.close();                     // close every handle you receive
+    }
+  }
+} finally {
+  await rs.close();      // reaps any handle prefetched but never delivered
+}
+```
+
+- **Close every handle you receive** — each holds the connection's in-flight
+  slot, and only one can be read at a time. Reading a LOB *between* two
+  `getRow()` calls is fine and does not disturb the cursor (verified on Oracle
+  23ai and 21c).
+- **`rs.close()` is the safety net** — it force-closes every handle the cursor
+  wrapped for a prefetched row you never retrieved, so abandoning iteration early
+  cannot wedge the connection. A handle you already **received** survives
+  `rs.close()` and stays readable, which makes the "collect the rows, close the
+  result set, then read the LOBs" pattern work.
+- **`result.closeLobs()`** also reaches a streaming result set's buffered
+  handles, and the pool force-closes everything on release.
 
 #### Temporary LOBs you create, fill, and bind
 

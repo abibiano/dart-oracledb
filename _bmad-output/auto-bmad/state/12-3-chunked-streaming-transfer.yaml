@@ -5,10 +5,10 @@ epic_num: 12
 story_num: 3
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T15:03:43Z"
+updated_at: "2026-07-26T16:10:36Z"
 started_at: "2026-07-26T14:42:09Z"
 completed_at: null
-active_seconds: 1290
+active_seconds: 5293
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: false
@@ -20,14 +20,14 @@ tea_selected: []
 tea_rationale: "TEA disabled for this run (tea.enabled=false)"
 epic_story_count: 4
 stories_after_in_epic: 1
-completed_phases: [0, 1, 3]
+completed_phases: [0, 1, 3, 5]
 code_review_iterations: 0
 code_review_loop_done: false
 hitl_halt: null
 external_review_iterations: 0
 convergence_unverified: false
 story_trace: null
-commits: [feff06e]
+commits: [59ab955]
 phase8_steps:
   trace_gate: null
   nfr: null
@@ -48,7 +48,13 @@ merge_commit: null
 branch_deleted: false
 open_questions:
   - "AC8 mandates live measurement on BOTH fixtures for five unknowns rather than guessing: whether READ's SB8 amount is the units actually delivered; whether a single READ ever short-reads (and at what size); what the server returns when a piece boundary splits a surrogate pair in UTF-8 vs UTF-16 form; whether a LOB READ between two FETCHes disturbs an open cursor; the exact failure point of the pre-existing cursor-row-with-LOB decode limitation."
-deferred_work: []
+deferred_work:
+  - "Cursor rows carrying a LOB are undecodable (ORA-12547 / BufferException 'Integer too large: size=114 exceeds maxSize=8' in decodeExecuteResponse) on BOTH versions; on 21c it POISONS THE TRANSPORT. Diagnosed per AC8, not fixed — blocks wrapping nested-CURSOR()/REF-CURSOR LOB columns. target: Epic 12 follow-up (protocol/decode story)."
+  - "Full-length single READ scales super-linearly (33.5M-unit CLOB = 141s on 23ai; doubling size ~quadruples time) — LOB_DATA accumulate/concat path. Perf follow-up; streams are the linear alternative."
+  - "Bare (non-PL/SQL) execute() rejects OracleBind specs, so node's canonical RETURNING INTO needs a BEGIN/END wrapper."
+  - "The UTF-8-form CLOB stream branch is unreachable on both AL32UTF8 fixtures — needs the optional non-AL32UTF8 fixture for coverage."
+  - "closeLobs() on a streaming result set also closes not-yet-delivered handles (documented sharp edge)."
+  - "No live proof for the read-continuation loop: no server short-reads were observed."
 blockers: []
 overrides: {}
 constraints: []

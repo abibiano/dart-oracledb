@@ -17,6 +17,7 @@ import 'package:meta/meta.dart';
 
 import 'connection.dart';
 import 'errors.dart';
+import 'oracle_lob.dart';
 import 'protocol/messages/execute_message.dart';
 import 'protocol/result_set_cursor.dart';
 import 'result.dart';
@@ -54,6 +55,44 @@ import 'statement_cache.dart';
 /// on the same connection until this one is closed — the driver rejects such
 /// overlap with a concurrent-operation [OracleException] rather than corrupting
 /// the stream. Always `await` each [getRow] / [getRows] before the next.
+///
+/// ## LOB columns
+///
+/// By default a CLOB/NCLOB/BLOB column materializes to a `String` /
+/// `Uint8List` as each batch is fetched. Add `fetchLobs: true` and every LOB
+/// column instead arrives as an [OracleLob] handle, wrapped **lazily per fetched
+/// batch** so a large result set never holds handles for rows it has not reached:
+///
+/// ```dart
+/// final result = await connection.execute(
+///   'SELECT id, doc FROM articles',
+///   null,
+///   const OracleExecuteOptions(resultSet: true, fetchLobs: true),
+/// );
+/// final rs = result.resultSet!;
+/// try {
+///   for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
+///     final lob = row['DOC'] as OracleLob?;
+///     if (lob == null) continue;            // SQL NULL LOB
+///     try {
+///       await for (final piece in lob.textStream()) { process(piece); }
+///     } finally {
+///       await lob.close();                  // close each handle you receive
+///     }
+///   }
+/// } finally {
+///   await rs.close();                       // reaps any handle never delivered
+/// }
+/// ```
+///
+/// Two obligations, and one safety net: close every handle you **receive**
+/// (each holds the connection's in-flight slot), read only one at a time, and
+/// know that [close] reaps every handle wrapped for a prefetched row you never
+/// retrieved — so abandoning iteration early cannot wedge the connection. A
+/// handle you already received survives [close] and stays readable.
+///
+/// LOB columns carried by a nested `CURSOR(...)` still fail loud under
+/// `fetchLobs: true`; see `OracleExecuteOptions.fetchLobs`.
 class OracleResultSet {
   /// Internal constructor used by `OracleConnection` to wrap an open cursor.
   /// Not for external use — obtain a result set through the connection.
@@ -144,6 +183,19 @@ class OracleResultSet {
     return rows.map(_rowBuilder.build).toList();
   }
 
+  /// Every [OracleLob] handle this result set has wrapped but not yet delivered
+  /// (plus any delivered handle Oracle aliased into a still-buffered row).
+  ///
+  /// Only ever non-empty under
+  /// `OracleExecuteOptions(resultSet: true, fetchLobs: true)`, where each batch's
+  /// LOB columns are wrapped as the batch is prefetched. Package-internal seam so
+  /// [OracleResult.closeLobs] can reach these handles — without it, the
+  /// documented bulk-close remedy would silently do nothing for a streaming
+  /// result set, which is exactly the shape that holds the most handles.
+  @internal
+  Iterable<OracleLob> bufferedLobHandles() =>
+      _cursor.bufferedLobHandles().whereType<OracleLob>();
+
   /// Closes the result set, queuing its server cursor for cleanup and releasing
   /// the connection's in-flight slot so the next statement can run.
   ///
@@ -151,9 +203,20 @@ class OracleResultSet {
   /// standalone RPC). Idempotent and exception-free: calling [close] again — or
   /// closing an already fully-drained result set — queues no duplicate cursor
   /// close and throws nothing.
+  ///
+  /// Under `fetchLobs: true` this ALSO reaps every [OracleLob] handle the cursor
+  /// wrapped for a prefetched row the caller never retrieved (Story 12.3 AC5).
+  /// That reap is what keeps the connection usable: a prefetched batch can hold
+  /// dozens of registered handles, and each one blocks the next `execute()` until
+  /// closed. A handle the caller already **received** is deliberately left alone
+  /// — it stays readable and closeable after this call, so the natural "collect
+  /// the rows, close the result set, then read the LOBs" pattern works.
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    // Reap undelivered LOB handles BEFORE releasing the cursor, so the
+    // connection's in-flight slot is genuinely free once release completes.
+    await _cursor.close();
     _connection.releaseResultSet(
       this,
       cacheEntry: _cacheEntry,
