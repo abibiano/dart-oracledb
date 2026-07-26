@@ -5,10 +5,10 @@ epic_num: 12
 story_num: 4
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T16:42:07Z"
+updated_at: "2026-07-26T16:59:46Z"
 started_at: "2026-07-26T16:42:07Z"
 completed_at: null
-active_seconds: 0
+active_seconds: 1043
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: true
@@ -20,14 +20,14 @@ tea_selected: []
 tea_rationale: "TEA disabled for this run (tea.enabled=false)"
 epic_story_count: 4
 stories_after_in_epic: 0
-completed_phases: [0, 1]
+completed_phases: [0, 1, 3]
 code_review_iterations: 0
 code_review_loop_done: false
 hitl_halt: null
 external_review_iterations: 0
 convergence_unverified: false
 story_trace: null
-commits: []
+commits: [5f44a1e]
 phase8_steps:
   trace_gate: null
   nfr: null
@@ -46,7 +46,9 @@ pr_merged: false
 merge_method: null
 merge_commit: null
 branch_deleted: false
-open_questions: []
+open_questions:
+  - "Two cross-AC conflicts were resolved at authoring time rather than left to dev: (a) AC4's queue-a-free deliberately overrides 12.2 AC7 / 12.3 AC6's 'fetchLobs-off stays byte-for-byte identical' (materialized values unchanged; free-temp queue accounting changes); (b) AC5's piece cap defaults off so 12.3's single-READ fast path stays byte-for-byte preserved."
+  - "AC7's live run depends on the optional non-al32utf8 container being startable — the AC requires a genuine attempt and records the blocker otherwise, without affecting the standard suites."
 deferred_work: []
 blockers: []
 overrides: {}
