@@ -36,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-07-12  # Story 12.1 dev-story: OracleLob + fetchLobs implemented, dual-env green, 12-1 -> review
+last_updated: 2026-07-26  # Story 12.2 create-story: temporary-LOB lifecycle context created, 12-2 -> ready-for-dev
 project: dart-oracledb
 project_key: NOKEY
 tracking_system: file-system
@@ -200,7 +200,7 @@ development_status:
   # Epic 12: LOB Streaming & Temporary LOBs [extends Epic 4]
   epic-12: in-progress
   12-1-public-lob-object: done
-  12-2-temporary-lob-lifecycle: backlog
+  12-2-temporary-lob-lifecycle: ready-for-dev  # 2026-07-26 — create-story: 9 ACs authored from source + node-oracledb 7.0.1 reference (epics.md carries only a one-line summary). Scope: public createTemporaryClob/NClob/Blob (CREATE_TEMP + GET_CHUNK_SIZE, session duration), OracleLob.isTemporary (locator TEMP-bit decode; node's ABSTRACT clause deliberately not ported — JS precedence bug), free-on-close via the existing FREE_TEMP piggyback, created-temp handles exempted from the in-flight-slot guard so they can be BOUND (5-site _openLobs audit incl. the now-broken execute-failure-cleanup invariant), OracleLob as a bind value (execute() only; executeMany fails loud), pool-reclaim free, docs. Closes the 12.1 ledger item targeting 12.2 (fetched TO_CLOB temp locators never freed) + 2 evidence gaps (write-then-read on one live handle; multibyte CLOB/NCLOB write on a real server) + 2 stale-doc items in-diff.
   12-3-chunked-streaming-transfer: backlog
   12-4-dual-env-integration-tests: backlog
   epic-12-retrospective: optional

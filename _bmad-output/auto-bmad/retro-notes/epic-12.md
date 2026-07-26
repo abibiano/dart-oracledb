@@ -7,3 +7,7 @@
 - [Phase 7 — code review] 4 review iterations (2 config + 2 user-extended) to converge. Iter-1's node-parity cursor-wrap decision was REVERSED in iter-3 (reject cursor-embedded LOBs pre-wire, defer lazy handle + lifecycle to 12.3) — lesson: a wrap/materialize decision must carry its full close/force-close/bulk-close lifecycle in the same pass, or the next review flags it as a leak.
 - [Phase 7 — code review] AC5 liveness was fixed twice (iter-2 clean-close path, iter-3 broken/reset path) — the durable fix was connection-liveness CONSULTATION in the handle, not marking handles closed at each invalidation site.
 - [Phase 7 — code review] CLOB/NCLOB write() stays surrogate-lenient per user (node parity, dartdoc caveat added); revisit at 12.3 (ledger entry). Security review was clean 0-finding in all 4 iterations.
+
+## Story 12-2-temporary-lob-lifecycle
+- [Phase 3 — create-story] 12.1's slot-holding-handle model is structurally incompatible with binding a created temp LOB; 12.2 must narrow it for created-temp handles — an epic-level design tension the architecture's "one lifecycle model for all server-backed handles" note did not anticipate.
+- [Phase 3 — create-story] node-oracledb thin/lob.js init() temp-detection has a JS operator-precedence bug (a & B === B); taking the reference literally would mark every fetched BLOB temporary. Port only the TEMP bit and measure live.
