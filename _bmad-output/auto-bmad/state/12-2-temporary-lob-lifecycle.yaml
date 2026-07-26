@@ -5,10 +5,10 @@ epic_num: 12
 story_num: 2
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T13:34:17Z"
+updated_at: "2026-07-26T14:15:24Z"
 started_at: "2026-07-26T13:15:49Z"
 completed_at: null
-active_seconds: 1079
+active_seconds: 3501
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: false
@@ -20,14 +20,14 @@ tea_selected: []
 tea_rationale: "TEA disabled for this run (tea.enabled=false)"
 epic_story_count: 4
 stories_after_in_epic: 2
-completed_phases: [0, 1, 3]
+completed_phases: [0, 1, 3, 5]
 code_review_iterations: 0
 code_review_loop_done: false
 hitl_halt: null
 external_review_iterations: 0
 convergence_unverified: false
 story_trace: null
-commits: [1f78ee8]
+commits: [9d3202f]
 phase8_steps:
   trace_gate: null
   nfr: null
@@ -49,7 +49,11 @@ branch_deleted: false
 open_questions:
   - "Measure-then-decide (dev-story, documented fallback in ACs): do fetched server-expression / PL-SQL-OUT locators actually set the locator TEMP bit?"
   - "Measure-then-decide (dev-story): is V$TEMPORARY_LOBS queryable on both 23ai and 21c fixtures (tests connect as system, so expected yes)?"
-deferred_work: []
+deferred_work:
+  - "Pre-existing leak: an IN OUT CLOB/BLOB bind's server-returned OUT locator is never freed under fetchLobs: false (measured +1 session temp LOB per call). Fixing it would violate AC7's byte-for-byte materialize-path rule → epic 12 follow-up."
+  - "An IN OUT OracleLob bind CONSUMES the handle (Oracle replaces the LOB; later read() raises ORA-22922). Documented + tested; marking the handle consumed is deferred."
+  - "Fetched-handle binding stays unreachable until 12.3 (an open fetched handle still makes the connection busy)."
+  - "Repeated named binds in a PL/SQL block fail with ORA-01006 — pre-existing, LOB-independent, worked around in tests, not investigated."
 blockers: []
 overrides: {}
 constraints: []

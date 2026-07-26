@@ -37,6 +37,29 @@ class _FakeLobTransport extends Transport {
   /// handle's live locator buffer tracks it.
   Uint8List? lobUpdatedLocator;
 
+  /// Per-operation canned `updatedLocator` echoes, overriding
+  /// [lobUpdatedLocator] for that operation code. CREATE_TEMP must echo the
+  /// "real" server locator, while GET_CHUNK_SIZE echoes it back unchanged.
+  final Map<int, Uint8List> opUpdatedLocator = <int, Uint8List>{};
+
+  /// Per-operation canned SB8 `amount` replies (GET_CHUNK_SIZE / GET_LENGTH).
+  final Map<int, int> opAmount = <int, int>{};
+
+  /// Every `operation` code passed to `sendLobOp`, in order.
+  final List<int> sentOperations = <int>[];
+
+  /// Recorded CREATE_TEMP arguments (charset form, Oracle type, duration).
+  int? createTempCsfrm;
+  int? createTempOraType;
+  int? createTempDuration;
+
+  /// Recorded `sendAmount` flag of the last GET_CHUNK_SIZE.
+  bool? chunkSizeSentAmount;
+
+  /// Operation codes that must throw when sent (simulates a server rejecting
+  /// one specific step, e.g. GET_CHUNK_SIZE after a successful CREATE_TEMP).
+  final Set<int> failOperations = <int>{};
+
   int lobReadCalls = 0;
   int lobWriteCalls = 0;
   int lastReadOffset = -1;
@@ -103,14 +126,30 @@ class _FakeLobTransport extends Transport {
       lobOpGate = null; // only the first op parks
       await gate.future;
     }
-    if (failLobOp) {
+    if (failLobOp || failOperations.contains(operation)) {
       throw const OracleException(
         errorCode: oraProtocolError,
         message: 'simulated LOB operation failure',
       );
     }
+    sentOperations.add(operation);
     if (sourceLocator != null) {
       sentLocators.add(Uint8List.fromList(sourceLocator));
+    }
+    final echo = opUpdatedLocator[operation] ?? lobUpdatedLocator;
+    if (operation == tnsLobOpCreateTemp) {
+      createTempCsfrm = sourceOffset;
+      createTempOraType = destOffset;
+      createTempDuration = destLength;
+      return LobOpResponse(isSuccess: true, updatedLocator: echo);
+    }
+    if (operation == tnsLobOpGetChunkSize) {
+      chunkSizeSentAmount = sendAmount;
+      return LobOpResponse(
+        isSuccess: true,
+        updatedLocator: echo,
+        amount: opAmount[operation],
+      );
     }
     if (operation == tnsLobOpRead) {
       lobReadCalls++;
@@ -119,15 +158,41 @@ class _FakeLobTransport extends Transport {
       return LobOpResponse(
         isSuccess: true,
         data: lobReadData,
-        updatedLocator: lobUpdatedLocator,
+        updatedLocator: echo,
       );
     }
     lobWriteCalls++;
     lastWriteOffset = sourceOffset;
     lastWriteData = data;
-    return LobOpResponse(isSuccess: true, updatedLocator: lobUpdatedLocator);
+    return LobOpResponse(isSuccess: true, updatedLocator: echo);
   }
 }
+
+/// A fake whose CREATE_TEMP echoes a distinctive 40-byte locator and whose
+/// GET_CHUNK_SIZE reports [chunkSize], so `createTemporary*()` succeeds.
+_FakeLobTransport _tempCapableTransport({
+  int chunkSize = 8132,
+  int locatorFill = 0x5A,
+}) {
+  final serverLocator = Uint8List(tnsLobLocatorBufferSize)
+    ..fillRange(0, tnsLobLocatorBufferSize, locatorFill);
+  return _FakeLobTransport()
+    ..opUpdatedLocator[tnsLobOpCreateTemp] = serverLocator
+    ..opAmount[tnsLobOpGetChunkSize] = chunkSize;
+}
+
+/// A connection whose charset info reports (or not) AL16UTF16 national support.
+OracleConnection _connFor(
+  Transport t, {
+  String nationalCharset = 'AL16UTF16',
+}) =>
+    OracleConnection.forTesting(
+      transport: t,
+      charsetInfo: OracleCharsetInfo(
+        databaseCharset: 'AL32UTF8',
+        nationalCharset: nationalCharset,
+      ),
+    );
 
 /// Builds a single-row query response whose one column holds [loc].
 ExecuteResponse _lobRow(LobLocator loc, {String col = 'DOC'}) => ExecuteResponse(
@@ -872,4 +937,666 @@ void main() {
       expect(conn.hasOpenLob, isFalse);
     });
   });
+
+  // =====================================================================
+  // Story 12.2 — temporary LOB lifecycle
+  // =====================================================================
+
+  group('createTemporary* wire shape (AC1)', () {
+    test('createTemporaryClob issues CREATE_TEMP then GET_CHUNK_SIZE and '
+        'returns an empty handle seeded with the server chunk size', () async {
+      final t = _tempCapableTransport(chunkSize: 8132);
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+
+      // Exactly two ops, in node-oracledb `lob.js create()` order.
+      expect(t.sentOperations,
+          equals([tnsLobOpCreateTemp, tnsLobOpGetChunkSize]));
+      // CREATE_TEMP argument placement: charset form in the source offset,
+      // Oracle type in the dest offset, session duration in the dest length.
+      expect(t.createTempCsfrm, equals(ttcCsfrmImplicit));
+      expect(t.createTempOraType, equals(oraTypeClob));
+      expect(t.createTempDuration, equals(tnsDurationSession));
+      // The CREATE_TEMP source locator is a fresh zeroed 40-byte buffer.
+      expect(t.sentLocators.first.length, equals(tnsLobLocatorBufferSize));
+      expect(t.sentLocators.first, everyElement(equals(0)));
+      // GET_CHUNK_SIZE targets the ECHOED locator and requests the amount.
+      expect(t.sentLocators[1], everyElement(equals(0x5A)));
+      expect(t.chunkSizeSentAmount, isTrue);
+
+      expect(lob.type, equals(OracleDbType.clob));
+      expect(lob.length, equals(0));
+      expect(lob.chunkSize, equals(8132));
+      expect(lob.isTemporary, isTrue);
+      expect(lob.isClosed, isFalse);
+      await lob.close();
+    });
+
+    test('createTemporaryBlob uses charset form 0 and the BLOB type', () async {
+      final t = _tempCapableTransport(chunkSize: 4000);
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryBlob();
+      expect(t.createTempCsfrm, equals(0));
+      expect(t.createTempOraType, equals(oraTypeBlob));
+      expect(t.createTempDuration, equals(tnsDurationSession));
+      expect(lob.type, equals(OracleDbType.blob));
+      expect(lob.length, equals(0));
+      expect(lob.chunkSize, equals(4000));
+      expect(lob.isTemporary, isTrue);
+      await lob.close();
+    });
+
+    test('createTemporaryNClob uses the NCHAR charset form and reports nClob',
+        () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryNClob();
+      expect(t.createTempCsfrm, equals(ttcCsfrmNChar));
+      expect(t.createTempOraType, equals(oraTypeClob));
+      expect(lob.type, equals(OracleDbType.nClob));
+      expect(lob.isTemporary, isTrue);
+      await lob.close();
+    });
+
+    test('createTemporaryNClob fails loud pre-wire when the national charset '
+        'is unsupported', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t, nationalCharset: 'UTF8');
+      await expectLater(
+        conn.createTemporaryNClob(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+            .having((e) => e.message, 'message', contains('AL16UTF16'))),
+      );
+      // No wire round trip at all.
+      expect(t.sentOperations, isEmpty);
+      expect(conn.hasOpenLob, isFalse);
+      // A plain CLOB / BLOB is unaffected by the national charset.
+      final clob = await conn.createTemporaryClob();
+      expect(clob.isTemporary, isTrue);
+      await clob.close();
+    });
+
+    test('a CREATE_TEMP that returns no locator fails loud and queues nothing',
+        () async {
+      // No echoed locator at all — the server response is malformed.
+      final t = _FakeLobTransport()
+        ..opAmount[tnsLobOpGetChunkSize] = 8132;
+      final conn = _connFor(t);
+      await expectLater(
+        conn.createTemporaryClob(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('no locator'))),
+      );
+      // Nothing to free: there is no locator to queue.
+      expect(conn.debugPendingTempLobCount, equals(0));
+      expect(conn.hasOpenLob, isFalse);
+      // The connection is not wedged.
+      expect(conn.isExecuting, isFalse);
+    });
+
+    test('a failure AFTER CREATE_TEMP still queues the locator for the free '
+        'piggyback (no leak)', () async {
+      final t = _tempCapableTransport()..failOperations.add(tnsLobOpGetChunkSize);
+      final conn = _connFor(t);
+      await expectLater(
+        conn.createTemporaryClob(),
+        throwsA(isA<OracleException>()),
+      );
+      // The temp LOB exists server-side; its locator must already be queued.
+      expect(conn.debugPendingTempLobCount, equals(1));
+      // No half-registered handle wedges the connection.
+      expect(conn.hasOpenLob, isFalse);
+      expect(conn.isExecuting, isFalse);
+      // The connection still runs the next statement. (The queue DRAIN itself
+      // lives in the real Transport.sendExecute, which this fake replaces, so
+      // draining is proven live in lob_temporary_integration_test.dart.)
+      t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      await conn.execute('SELECT 1 FROM dual');
+    });
+
+    test('a GET_CHUNK_SIZE with no amount fails loud and queues the free',
+        () async {
+      // Locator echoed, but no SB8 amount came back.
+      final serverLocator = Uint8List(tnsLobLocatorBufferSize)
+        ..fillRange(0, tnsLobLocatorBufferSize, 0x33);
+      final t = _FakeLobTransport()
+        ..opUpdatedLocator[tnsLobOpCreateTemp] = serverLocator;
+      final conn = _connFor(t);
+      await expectLater(
+        conn.createTemporaryClob(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('no amount'))),
+      );
+      expect(conn.debugPendingTempLobCount, equals(1));
+    });
+
+    test('creation is bracketed by the in-flight guard, not the '
+        'concurrent-operation guard', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      // A second creation while the first is still in flight is rejected...
+      final gate = Completer<void>();
+      t.lobOpGate = gate;
+      final first = conn.createTemporaryClob();
+      await Future<void>.delayed(Duration.zero);
+      await expectLater(
+        conn.createTemporaryClob(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+      );
+      gate.complete();
+      final lob1 = await first;
+      // ...but a SECOND temp LOB created sequentially is fine (this is why the
+      // creation path must not use _rejectConcurrentOperation).
+      final lob2 = await conn.createTemporaryClob();
+      expect(identical(lob1, lob2), isFalse);
+      expect(conn.hasOpenLob, isTrue);
+      await lob1.close();
+      await lob2.close();
+      expect(conn.hasOpenLob, isFalse);
+    });
+
+    test('read/write work on a created handle (length advances, UTF-8)',
+        () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      // A freshly created temp LOB is empty: read() short-circuits.
+      expect(await lob.read(), equals(''));
+      expect(t.lobReadCalls, equals(0));
+      await lob.write(1, 'hello');
+      expect(lob.length, equals(5));
+      t.lobReadData = Uint8List.fromList(utf8.encode('hello'));
+      expect(await lob.read(), equals('hello'));
+      await lob.close();
+    });
+
+    test('a created NCLOB writes UTF-16BE', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryNClob();
+      await lob.write(1, 'héllo');
+      expect(t.lastWriteData, equals(encodeUtf16Be('héllo')));
+      expect(lob.length, equals(5)); // UCS-2 code units
+      await lob.close();
+    });
+  });
+
+  group('OracleLob.isTemporary (AC2)', () {
+    test('is false for a plain fetched locator', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(3));
+      expect(lob.isTemporary, isFalse);
+      await lob.close();
+      // A non-temporary close queues nothing.
+      expect(conn.debugPendingTempLobCount, equals(0));
+    });
+
+    test('is true for a fetched locator carrying the server TEMP flag',
+        () async {
+      final bytes = Uint8List(tnsLobLocatorBufferSize)
+        ..[tnsLobLocOffsetFlag4] = tnsLobLocFlagsTemp;
+      final loc = LobLocator(
+        locator: bytes,
+        oracleType: oraTypeClob,
+        length: 3,
+        chunkSize: 0,
+      );
+      final (conn, t, lob) = await _fetchLob(loc);
+      expect(lob.isTemporary, isTrue);
+      // A fetched handle still holds the in-flight slot (12.1 unchanged).
+      expect(conn.hasOpenLob, isTrue);
+      await expectLater(
+        conn.execute('SELECT 1 FROM dual'),
+        throwsA(isA<OracleException>()),
+      );
+      await lob.close();
+      // ...and its temp locator IS queued for the free piggyback.
+      expect(conn.debugPendingTempLobCount, equals(1));
+    });
+  });
+
+  group('close() frees a temporary LOB (AC3)', () {
+    // NOTE: the free list DRAIN happens inside the real
+    // `Transport.sendExecute`, which `_FakeLobTransport` replaces wholesale, so
+    // these unit tests pin the QUEUEING side only (rise by exactly one per
+    // distinct handle, never twice, never on a dead session). "Drains to 0 after
+    // the next execute()" is proven against a real server in
+    // test/integration/lob_temporary_integration_test.dart.
+    test('close() queues exactly one locator for the free piggyback', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      expect(conn.debugPendingTempLobCount, equals(0),
+          reason: 'creation itself must not queue a free');
+      await lob.close();
+      expect(conn.debugPendingTempLobCount, equals(1));
+      // The connection is immediately reusable.
+      t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      await conn.execute('SELECT 1 FROM dual');
+    });
+
+    test('a double close queues the locator only once (no double free)',
+        () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      await lob.close();
+      await lob.close();
+      await lob.close();
+      expect(conn.debugPendingTempLobCount, equals(1));
+      expect(lob.isClosed, isTrue);
+    });
+
+    test('two distinct handles each queue once', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final a = await conn.createTemporaryClob();
+      final b = await conn.createTemporaryBlob();
+      await a.close();
+      await b.close();
+      expect(conn.debugPendingTempLobCount, equals(2));
+    });
+
+    test('close() on a CLOSED connection skips the queue silently', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      await conn.close();
+      await lob.close(); // no throw
+      expect(lob.isClosed, isTrue);
+      // The session is gone; the server frees session-duration temp LOBs at
+      // teardown, and there is no next execute to carry a piggyback.
+      expect(conn.debugPendingTempLobCount, equals(0));
+    });
+
+    test('close() on a BROKEN transport skips the queue silently', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      t.connected = false;
+      await lob.close(); // no throw
+      expect(conn.debugPendingTempLobCount, equals(0));
+    });
+
+    test('a non-temporary handle close is unchanged: no wire effect', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      final opsBefore = t.sentOperations.length;
+      await lob.close();
+      expect(t.sentOperations.length, equals(opsBefore));
+      expect(conn.debugPendingTempLobCount, equals(0));
+    });
+  });
+
+  group('created-temp handles and the concurrency guard (AC4)', () {
+    test('execute() proceeds while a created temp handle is open', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      expect(conn.hasOpenLob, isTrue); // pool reclaim must still see it
+      t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      await conn.execute('SELECT 1 FROM dual'); // no throw
+      await lob.close();
+    });
+
+    test('a created temp handle open alongside a FETCHED handle still rejects '
+        'execute()', () async {
+      final t = _FakeLobTransport()
+        ..opUpdatedLocator[tnsLobOpCreateTemp] =
+            (Uint8List(tnsLobLocatorBufferSize)
+              ..fillRange(0, tnsLobLocatorBufferSize, 0x5A))
+        ..opAmount[tnsLobOpGetChunkSize] = 8132
+        ..nextResponses.add(_lobRow(_clob(4)));
+      final conn = _connFor(t);
+      final result = await conn.execute(
+        'SELECT doc FROM t',
+        null,
+        const OracleExecuteOptions(fetchLobs: true),
+      );
+      final fetched = result.rows.single['DOC'] as OracleLob;
+      // A temp LOB can still be created while a fetched handle is open (the
+      // creation path uses _runLobOp, not _rejectConcurrentOperation).
+      final temp = await conn.createTemporaryClob();
+      await expectLater(
+        conn.execute('SELECT 1 FROM dual'),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('OracleLob'))),
+      );
+      // Closing only the FETCHED handle frees the connection.
+      await fetched.close();
+      t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      await conn.execute('SELECT 1 FROM dual'); // no throw
+      await temp.close();
+    });
+
+    test('an in-flight LOB op still rejects an overlapping execute()',
+        () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      final gate = Completer<void>();
+      t.lobOpGate = gate;
+      final writing = lob.write(1, 'abc');
+      await Future<void>.delayed(Duration.zero);
+      await expectLater(
+        conn.execute('SELECT 1 FROM dual'),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)),
+      );
+      gate.complete();
+      await writing;
+      await lob.close();
+    });
+
+    test('the execute-failure cleanup spares a created temp handle but reaps a '
+        'fetched one', () async {
+      // A fetchLobs execute that wraps a top-level LOB and THEN throws (its
+      // nested CURSOR() column carries a LOB, which Story 12.1 rejects). The
+      // caller's created-temp handle was legitimately open at entry — the
+      // concurrency guard exempts it — so it must survive; the fetched handle
+      // this call registered must be reaped.
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final temp = await conn.createTemporaryClob();
+      await temp.write(1, 'precious');
+      expect(temp.length, equals(8));
+
+      t.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          cursorId: 0,
+          columnMetadata: const [
+            ColumnMetadata(name: 'DOC', oracleType: oraTypeClob, maxLength: 0),
+            ColumnMetadata(name: 'NC', oracleType: oraTypeCursor, maxLength: 0),
+          ],
+          rows: [
+            [
+              _clob(2),
+              const DecodedCursorResult(
+                columns: [
+                  ColumnMetadata(
+                    name: 'INNER',
+                    oracleType: oraTypeClob,
+                    maxLength: 0,
+                  ),
+                ],
+                cursorId: 100,
+              ),
+            ],
+          ],
+          moreRowsToFetch: false,
+        ),
+      );
+      await expectLater(
+        conn.execute(
+          'SELECT doc, CURSOR(SELECT inner FROM u) nc FROM t',
+          null,
+          const OracleExecuteOptions(fetchLobs: true),
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.message, 'message', contains('CURSOR'))),
+      );
+
+      // The caller's temp handle survived, unfreed, with its data intact.
+      expect(temp.isClosed, isFalse,
+          reason: 'a caller-created temp handle must survive the reap');
+      expect(temp.length, equals(8));
+      expect(conn.debugPendingTempLobCount, equals(0),
+          reason: 'the spared handle must not have been freed');
+      // ...and it is the ONLY handle left: the fetched one was reaped, so the
+      // connection is not wedged.
+      expect(conn.hasOpenLob, isTrue);
+      t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      await conn.execute('SELECT 1 FROM dual'); // no concurrent-op rejection
+      await temp.close();
+      expect(conn.debugPendingTempLobCount, equals(1));
+      expect(conn.hasOpenLob, isFalse);
+    });
+
+    test('forceCloseOpenLobs (pool reclaim) closes AND frees a created temp '
+        'handle', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      await conn.forceCloseOpenLobs(reclaimedByPool: true);
+      expect(lob.isClosed, isTrue);
+      expect(conn.hasOpenLob, isFalse);
+      expect(conn.debugPendingTempLobCount, equals(1),
+          reason: 'a forgetful borrower must not leak session temp-LOB space');
+      // The borrower's next read still surfaces the clear pool-reclaim error.
+      await expectLater(
+        lob.read(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)
+            .having((e) => e.message, 'message', contains('pool'))),
+      );
+      // No double free: an explicit close() after the reclaim queues nothing.
+      await lob.close();
+      expect(conn.debugPendingTempLobCount, equals(1));
+    });
+  });
+
+  group('OracleLob as a bind value (AC5)', () {
+    /// Extracts the bind values the fake transport last saw for [sql].
+    test('a positional OracleLob bind reaches the wire as its locator',
+        () async {
+      final t = _tempCapableTransport(locatorFill: 0x7C);
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      await conn.execute('INSERT INTO t (doc) VALUES (:1)', [lob]);
+      // The bind slot carries the locator, so the ExecuteRequest encoder's
+      // oraTypeClob branch writes `UB4 length + locator bytes`.
+      final encoded = ExecuteRequest(
+        sql: 'INSERT INTO t (doc) VALUES (:1)',
+        bindValues: [
+          BindVariable(
+            value: lob.internalLocator,
+            oraType: oraTypeClob,
+            dir: BindDir.input,
+          ),
+        ],
+        isQuery: false,
+      ).toBytes();
+      // The 40 locator bytes appear verbatim in the encoded message.
+      expect(_containsSubsequence(encoded, lob.internalLocator.locator), isTrue);
+      await lob.close();
+    });
+
+    test('a named OracleLob bind is accepted', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryBlob();
+      t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      await conn.execute('INSERT INTO t (bin) VALUES (:v)', {'v': lob});
+      await lob.close();
+    });
+
+    test('an OracleBind.inOut OracleLob value is accepted in PL/SQL', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      await conn.execute(
+        'BEGIN p(:v); END;',
+        {
+          'v': OracleBind.inOut(
+            value: lob,
+            type: OracleDbType.clob,
+            maxSize: 4000,
+          ),
+        },
+      );
+      await lob.close();
+    });
+
+    test('binding does NOT queue the locator for the free piggyback', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      await conn.execute('INSERT INTO t (doc) VALUES (:v)', {'v': lob});
+      // The handle's lifetime is the caller's: only close() frees it.
+      expect(conn.debugPendingTempLobCount, equals(0));
+      expect(lob.isClosed, isFalse);
+      await lob.close();
+      expect(conn.debugPendingTempLobCount, equals(1));
+    });
+
+    test('binding a CLOSED handle fails loud before any wire round trip',
+        () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      await lob.close();
+      final opsBefore = t.sentOperations.length;
+      await expectLater(
+        conn.execute('INSERT INTO t (doc) VALUES (:v)', {'v': lob}),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+            .having((e) => e.message, 'message', contains('closed'))),
+      );
+      // No execute was sent (the canned response list is untouched) and no LOB
+      // op either.
+      expect(t.nextResponses, isEmpty);
+      expect(t.sentOperations.length, equals(opsBefore));
+      // The connection stays usable.
+      t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      await conn.execute('SELECT 1 FROM dual');
+    });
+
+    test('binding a FOREIGN connection handle fails loud before the wire',
+        () async {
+      final tA = _tempCapableTransport();
+      final connA = _connFor(tA);
+      final foreign = await connA.createTemporaryClob();
+
+      final tB = _tempCapableTransport();
+      final connB = _connFor(tB);
+      await expectLater(
+        connB.execute('INSERT INTO t (doc) VALUES (:v)', {'v': foreign}),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+            .having((e) => e.message, 'message', contains('DIFFERENT'))),
+      );
+      expect(tB.sentOperations, isEmpty);
+      // connB stays usable, and the foreign handle is untouched.
+      tB.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+      await connB.execute('SELECT 1 FROM dual');
+      expect(foreign.isClosed, isFalse);
+      await foreign.close();
+    });
+
+    test('an OracleBind declaring the WRONG LOB type fails loud', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final blob = await conn.createTemporaryBlob();
+      await expectLater(
+        conn.execute(
+          'BEGIN p(:v); END;',
+          {
+            'v': OracleBind.inOut(
+              value: blob,
+              type: OracleDbType.clob,
+              maxSize: 100,
+            ),
+          },
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+            .having((e) => e.message, 'message', contains('blob'))),
+      );
+      expect(t.nextResponses, isEmpty);
+      await blob.close();
+    });
+
+    test('the unwrap is category-agnostic, but an OPEN fetched handle is still '
+        'stopped by the 12.1 concurrency guard (documented consequence)',
+        () async {
+      // The bind unwrap accepts any OracleLob this connection owns. In practice
+      // only a CREATED-temporary handle can reach an execute() while open,
+      // because Story 12.1's rule that an open FETCHED handle makes the
+      // connection busy is deliberately unchanged (AC4) — so a fetched handle
+      // bind is rejected by the concurrency guard BEFORE the bind unwrap runs,
+      // and after close() the closed-handle guard rejects it. Pin both so a
+      // future reader does not read AC5's "temporary or fetched" as a claim that
+      // a live fetched handle is bindable today.
+      final (conn, t, lob) = await _fetchLob(_clob(4));
+      expect(lob.isTemporary, isFalse);
+      await expectLater(
+        conn.execute('INSERT INTO t (doc) VALUES (:v)', {'v': lob}),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+            .having((e) => e.message, 'message', contains('still in progress'))),
+      );
+      await lob.close();
+      await expectLater(
+        conn.execute('INSERT INTO t (doc) VALUES (:v)', {'v': lob}),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+            .having((e) => e.message, 'message', contains('closed'))),
+      );
+    });
+
+    test('an OracleLob in executeMany rows fails loud naming execute()',
+        () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      await expectLater(
+        conn.executeMany('INSERT INTO t (doc) VALUES (:1)', [
+          [lob],
+        ]),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+            .having(
+              (e) => e.message,
+              'message',
+              allOf(contains('OracleLob'), contains('execute()')),
+            )),
+      );
+      await lob.close();
+    });
+
+    test('an OracleLob in an OracleBindDef-declared executeMany slot fails '
+        'loud naming execute()', () async {
+      final t = _tempCapableTransport();
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      await expectLater(
+        conn.executeMany(
+          'BEGIN p(:v); END;',
+          [
+            {'v': lob},
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: {
+              'v': OracleBindDef.input(type: OracleDbType.clob, maxSize: 4000),
+            },
+          ),
+        ),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+            .having(
+              (e) => e.message,
+              'message',
+              allOf(contains('OracleLob'), contains('execute()')),
+            )),
+      );
+      await lob.close();
+    });
+  });
+}
+
+/// Whether [haystack] contains [needle] as a contiguous subsequence.
+bool _containsSubsequence(Uint8List haystack, Uint8List needle) {
+  if (needle.isEmpty || needle.length > haystack.length) return false;
+  outer:
+  for (var i = 0; i <= haystack.length - needle.length; i++) {
+    for (var j = 0; j < needle.length; j++) {
+      if (haystack[i + j] != needle[j]) continue outer;
+    }
+    return true;
+  }
+  return false;
 }

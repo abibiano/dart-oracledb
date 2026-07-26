@@ -525,7 +525,122 @@ class Transport {
   /// Number of temp-LOB locators queued for the free piggyback. Exposed for
   /// integration tests (temp-LOB lifecycle) via
   /// `OracleConnection.debugPendingTempLobCount`; not a public API.
+  ///
+  /// Two kinds of locator land on the queue: the driver's own bind-conversion
+  /// temp LOBs ([_createTempClob] / [_createTempBlob], queued right after the
+  /// execute that bound them) and — since Story 12.2 — a **caller-owned**
+  /// temporary LOB whose public `OracleLob.close()` released it (queued via
+  /// [queueTempLobToFree]). Either way the count drains to zero on the next
+  /// [sendExecute].
   int get debugPendingTempLobCount => _tempLobsToClose.length;
+
+  /// Queues [locator]'s raw bytes for the free-temporary-LOB piggyback that
+  /// rides the NEXT [sendExecute], keeping [_tempLobsTotalSize] in step (that
+  /// total is a single UB4 in the piggyback header covering the concatenated
+  /// locator bytes, so the two must never diverge).
+  ///
+  /// Package-internal seam for `OracleConnection.releaseLob`, so a caller-owned
+  /// temporary `OracleLob` frees its server-side resource on `close()` without
+  /// `oracle_lob.dart` ever reaching into the transport. Issues no wire traffic
+  /// and cannot fail — safe to call from a `close()` that is contractually
+  /// exception-free, and from the pool's reclaim path.
+  ///
+  /// Callers must queue each locator at most once (a double queue would send the
+  /// same locator twice in one piggyback); `OracleLob.close()`'s idempotency
+  /// guarantees that.
+  @internal
+  void queueTempLobToFree(Uint8List locator) {
+    _tempLobsToClose.add(locator);
+    _tempLobsTotalSize += locator.length;
+  }
+
+  /// Creates an EMPTY session-duration temporary LOB on the server and returns
+  /// its locator, seeded with the server's real chunk size.
+  ///
+  /// Mirrors node-oracledb `thin/lob.js create()` exactly: one CREATE_TEMP over
+  /// a zeroed 40-byte source locator with the charset form in the source offset
+  /// ([csfrm] — [ttcCsfrmImplicit] for CLOB, [ttcCsfrmNChar] for NCLOB, `0` for
+  /// BLOB), the Oracle type in the dest offset ([oraType]) and
+  /// [tnsDurationSession] in the dest length, followed by one GET_CHUNK_SIZE
+  /// (`sendAmount: true`, whose SB8 reply carries the chunk size —
+  /// `_getChunkSizeAsync()`). The returned locator is marked
+  /// `isTemporary: true` and reports `length: 0`: a temp LOB is created empty
+  /// and filled by later WRITEs.
+  ///
+  /// This is the sibling of [_createTempClob] / [_createTempBlob] (the IMPLICIT
+  /// bind conversion, which creates AND fills AND self-queues for the free
+  /// piggyback). Here the caller owns the lifetime: nothing is queued on the
+  /// success path — `OracleConnection.releaseLob` queues it when the public
+  /// `OracleLob` closes. If any step AFTER a successful CREATE_TEMP throws, the
+  /// just-created locator IS queued before the exception propagates, so a
+  /// partially-created temp LOB can never leak (same discipline as the create
+  /// helpers' `finally`).
+  ///
+  /// Throws [OracleException] when the server rejects the operation or returns
+  /// no locator.
+  @internal
+  Future<LobLocator> createTemporaryLob({
+    required int oraType,
+    required int csfrm,
+    Duration? timeout = const Duration(minutes: 2),
+  }) async {
+    final created = await sendLobOp(
+      operation: tnsLobOpCreateTemp,
+      sourceLocator: Uint8List(tnsLobLocatorBufferSize),
+      sourceOffset: csfrm,
+      destOffset: oraType,
+      destLength: tnsDurationSession,
+      timeout: timeout,
+    );
+    final locator = created.updatedLocator;
+    if (locator == null) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'Temporary '
+            '${oraType == oraTypeBlob ? 'BLOB' : 'CLOB'} creation returned no '
+            'locator',
+      );
+    }
+    try {
+      // node-oracledb `create()` follows CREATE_TEMP with _getChunkSizeAsync()
+      // so the handle reports the server's real chunk size instead of 0. No
+      // wire-format change is needed: `sendAmount` alone drives both the
+      // trailing UB8 on the request and the SB8 amount in the reply.
+      final chunk = await sendLobOp(
+        operation: tnsLobOpGetChunkSize,
+        sourceLocator: locator,
+        sendAmount: true,
+        timeout: timeout,
+      );
+      // Keep the live locator buffer tracking the server's latest echo, exactly
+      // like every other LOB op (lobOp.js processReturnParameter).
+      final updated = chunk.updatedLocator;
+      if (updated != null && updated.length == locator.length) {
+        locator.setRange(0, locator.length, updated);
+      }
+      final amount = chunk.amount;
+      if (amount == null) {
+        throw const OracleException(
+          errorCode: oraProtocolError,
+          message: 'Temporary LOB creation: GET_CHUNK_SIZE returned no amount',
+        );
+      }
+      return LobLocator(
+        locator: locator,
+        oracleType: oraType,
+        length: 0, // a temporary LOB is created empty
+        chunkSize: amount,
+        isNChar: csfrm == ttcCsfrmNChar,
+        isTemporary: true,
+      );
+    } catch (_) {
+      // The temp LOB already exists on the server. Queue it for the free
+      // piggyback BEFORE propagating, so a half-created handle the caller never
+      // receives cannot leak session temp-LOB space.
+      queueTempLobToFree(locator);
+      rethrow;
+    }
+  }
 
   /// Count of TTC LOB READ operations sent (one per [sendLobOp] call with
   /// `tnsLobOpRead`). See [debugLobReadOps].
@@ -1368,8 +1483,9 @@ class Transport {
         locator.setRange(0, locator.length, updated);
       }
     } finally {
-      _tempLobsToClose.add(locator);
-      _tempLobsTotalSize += locator.length;
+      // Same two-line accounting as queueTempLobToFree (single writer of the
+      // free list + its UB4 total size).
+      queueTempLobToFree(locator);
     }
     return LobLocator(
       locator: locator,
@@ -1425,8 +1541,9 @@ class Transport {
         }
       }
     } finally {
-      _tempLobsToClose.add(locator);
-      _tempLobsTotalSize += locator.length;
+      // Same two-line accounting as queueTempLobToFree (single writer of the
+      // free list + its UB4 total size).
+      queueTempLobToFree(locator);
     }
     return LobLocator(
       locator: locator,

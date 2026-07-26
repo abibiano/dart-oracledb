@@ -20,6 +20,11 @@ library;
 import 'dart:typed_data';
 
 import 'errors.dart';
+// A LOB-typed bind may carry an OracleLob handle as its value (Story 12.2), so
+// the construction-time type check needs the type. `oracle_lob.dart` imports
+// this library back for OracleDbType — the same benign library cycle
+// `connection.dart` <-> `oracle_lob.dart` already forms.
+import 'oracle_lob.dart';
 import 'oracle_timestamp_tz.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/messages/execute_message.dart' show BindDir;
@@ -298,28 +303,35 @@ class OracleBind {
             'OracleBind(type: raw) requires Uint8List or null',
           );
         }
+      // A LOB-typed bind also accepts an OracleLob handle (Story 12.2): the
+      // handle binds as its server-side LOB locator instead of a materialized
+      // value. Whether the HANDLE's own LOB kind matches [type], whether it is
+      // still open, and whether it belongs to the connection running the
+      // statement are all checked pre-wire by the connection's bind unwrap —
+      // that layer owns the handle's identity and lifetime, this one only knows
+      // the declared shape.
       case OracleDbType.clob:
-        if (value is! String) {
+        if (value is! String && value is! OracleLob) {
           throw ArgumentError.value(
             value,
             'value',
-            'OracleBind(type: clob) requires String or null',
+            'OracleBind(type: clob) requires String, OracleLob, or null',
           );
         }
       case OracleDbType.nClob:
-        if (value is! String) {
+        if (value is! String && value is! OracleLob) {
           throw ArgumentError.value(
             value,
             'value',
-            'OracleBind(type: nClob) requires String or null',
+            'OracleBind(type: nClob) requires String, OracleLob, or null',
           );
         }
       case OracleDbType.blob:
-        if (value is! Uint8List) {
+        if (value is! Uint8List && value is! OracleLob) {
           throw ArgumentError.value(
             value,
             'value',
-            'OracleBind(type: blob) requires Uint8List or null',
+            'OracleBind(type: blob) requires Uint8List, OracleLob, or null',
           );
         }
       case OracleDbType.json:

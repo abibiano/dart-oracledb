@@ -801,7 +801,8 @@ class OraclePool {
     _draining++;
 
     if (connection.isExecuting) {
-      // A wire round trip (an execute, or a result-set open/fetch) is still in
+      // A wire round trip (an execute, a result-set open/fetch, or an OracleLob
+      // read/write — including a temporary-LOB creation) is still in
       // flight. Rollback or any other TTC traffic would interleave with it and
       // corrupt the stream — this is a genuine mid-RPC race, not a recoverable
       // state — so destroy the connection and fail loudly. (An open-but-idle
@@ -859,11 +860,20 @@ class OraclePool {
 
     if (connection.hasOpenLob) {
       // Same disposition for an OracleLob the borrower left open (Story 12.1):
-      // no round trip is in flight (caught above), and a fetched non-temporary
-      // LOB has no server resource to free, so force-close the handle(s) to
-      // clear the in-flight slot and recycle the session. reclaimedByPool: a
+      // no round trip is in flight (caught above), so force-close the handle(s)
+      // to clear the in-flight slot and recycle the session. reclaimedByPool: a
       // borrower still holding the handle sees a clear pool-reclaim error on its
       // next read/write rather than the generic "OracleLob is closed" detail.
+      //
+      // Whether closing frees a server resource depends on the handle (Story
+      // 12.2): a NON-temporary fetched LOB has none, but a TEMPORARY one — a
+      // caller-created createTemporary*() handle, or a fetched locator carrying
+      // the server's TEMP flag — occupies session temp-LOB space, and its
+      // release is queued for the free-temp piggyback that rides the NEXT
+      // borrower's first execute. Either way no wire traffic is issued here, so
+      // the rollback below cannot interleave with an active stream. Every kind is
+      // reaped (no onlyFetched), so a forgetful borrower cannot leak temp-LOB
+      // space.
       _log.warning(
         'Connection released with an open OracleLob; closing it and '
         'reclaiming the session. Always close() LOB handles before release.',

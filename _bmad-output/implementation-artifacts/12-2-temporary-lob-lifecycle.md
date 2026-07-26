@@ -1,6 +1,6 @@
 # Story 12.2: Temporary LOB lifecycle — public creation, binding, and free-on-close
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- SECOND story of Epic 12. baseline_commit is injected by the auto-bmad orchestrator (it owns git); do not fabricate it here. -->
@@ -112,29 +112,29 @@ so that I can build and pass large LOB values (including values above the 32 KB 
 
 ## Tasks / Subtasks
 
-- [ ] **Locator-level temp detection** (AC: 2)
-  - [ ] `lib/src/protocol/constants.dart`: add `tnsLobLocOffsetFlag1 = 4`, `tnsLobLocOffsetFlag4 = 7`, `tnsLobLocFlagsTemp = 0x01` with reference-citing dartdoc.
-  - [ ] `lib/src/protocol/lob_locator.dart`: add `bool get isTemporary` (bounds-guarded, TEMP bit only) + the node ABSTRACT-precedence-bug comment; add an explicit `isTemporary` constructor override/flag for driver-created locators (a freshly CREATE_TEMP'd locator must report `true` even if the server's echoed flag bytes are inspected differently). Amend the class dartdoc (AC8).
-- [ ] **Transport seams** (AC: 1, 3)
-  - [ ] New `@internal` `Transport.createTemporaryLob({required int oraType, required int csfrm, Duration? timeout})` → `LobLocator`: CREATE_TEMP (zeroed `Uint8List(tnsLobLocatorBufferSize)` source locator), then GET_CHUNK_SIZE with `sourceLocator: <the echoed locator>` and `sendAmount: true` (the existing decoder then reads the echoed locator followed by the SB8 amount — no decoder change), returning a locator with `length: 0`, `chunkSize: <amount>`, `isNChar: csfrm == ttcCsfrmNChar`, marked temporary. **Implement it in terms of the existing virtual `sendLobOp`** so the existing `_FakeLobTransport` unit harness drives it without new overrides. On any post-CREATE_TEMP throw, queue the locator for free before rethrowing.
-  - [ ] New `@internal Transport.queueTempLobToFree(Uint8List locator)` maintaining `_tempLobsToClose` + `_tempLobsTotalSize` exactly like `_createTempClob`'s `finally`.
-  - [ ] Do NOT change `_createTempClob`/`_createTempBlob`/`_prepareLobBinds`/`_buildFreeTempLobsPiggyback` behavior.
-- [ ] **Connection API + lifecycle** (AC: 1, 3, 4, 6)
-  - [ ] `createTemporaryClob()` / `createTemporaryNClob()` / `createTemporaryBlob()` on `OracleConnection`: national-charset gate (NCLOB), `_runLobOp` bracket, register the handle, return `OracleLob`.
-  - [ ] `OracleLob`: `isTemporary` getter, `@internal` locator accessor for the bind path, `close()` → free-queue for temp handles (idempotent, exception-free, skip on dead connection).
-  - [ ] Apply the five `_openLobs` dispositions from the AC4 table (guard, execute-failure cleanup + its stale comment, `hasOpenLob`, `forceCloseOpenLobs`, `close()`).
-  - [ ] Fix the two stale docs (AC6): `isExecuting` docstring; `OraclePool.release` in-flight comment + the "no server resource to free" reclaim comment.
-- [ ] **Bind an `OracleLob`** (AC: 5)
-  - [ ] `_prepareStatement`: unwrap a raw `OracleLob` bind value AND an `OracleBind.value` `OracleLob` into `BindVariable` + `BindMetadata`; pre-wire fail-loud for a closed handle and for a foreign-connection handle.
-  - [ ] `_buildInferredSlots` / `OracleBindDef` paths: explicit fail-loud message for an `OracleLob` in `executeMany` naming `execute()` as the supported route.
-- [ ] **Export + docs** (AC: 8)
-  - [ ] No new exported type is needed (`OracleLob` and `OracleConnection` are already exported) — verify.
-  - [ ] README temp-LOB subsection + "Also not yet available" list update; dartdoc per AC8.
-- [ ] **Tests** (AC: 1-9)
-  - [ ] Unit (`test/src/oracle_lob_test.dart`, extend `_FakeLobTransport` with per-operation canned `updatedLocator` + `amount`): create-temp shape (operation codes, csfrm/oraType/duration args, GET_CHUNK_SIZE issued, chunkSize seeded), `isTemporary` true/false, NCLOB national-charset reject, close() queues exactly once (`debugPendingTempLobCount`), close() on a dead connection is a silent no-op, create-fails-after-CREATE_TEMP still queues the free, `execute()` allowed with an open created-temp handle but still rejected with an open fetched handle, bind unwrap (locator bytes on the wire via the existing byte-level `ExecuteRequest` test harness), closed-handle bind reject, foreign-connection bind reject, executeMany `OracleLob` reject message.
-  - [ ] Unit: `LobLocator.isTemporary` flag decode (bit set / clear / short buffer / the ABSTRACT bit deliberately NOT triggering it).
-  - [ ] Integration per AC9, `test_helper.dart` getters only.
-  - [ ] Run focused + FULL suites on **both** 23ai and 21c; `dart analyze` clean (lib + test); confirm zero regressions vs the pre-story baseline (12.1 closed at 23ai 486/28-skip, 21c 487/27-skip).
+- [x] **Locator-level temp detection** (AC: 2)
+  - [x] `lib/src/protocol/constants.dart`: add `tnsLobLocOffsetFlag1 = 4`, `tnsLobLocOffsetFlag4 = 7`, `tnsLobLocFlagsTemp = 0x01` with reference-citing dartdoc.
+  - [x] `lib/src/protocol/lob_locator.dart`: add `bool get isTemporary` (bounds-guarded, TEMP bit only) + the node ABSTRACT-precedence-bug comment; add an explicit `isTemporary` constructor override/flag for driver-created locators (a freshly CREATE_TEMP'd locator must report `true` even if the server's echoed flag bytes are inspected differently). Amend the class dartdoc (AC8).
+- [x] **Transport seams** (AC: 1, 3)
+  - [x] New `@internal` `Transport.createTemporaryLob({required int oraType, required int csfrm, Duration? timeout})` → `LobLocator`: CREATE_TEMP (zeroed `Uint8List(tnsLobLocatorBufferSize)` source locator), then GET_CHUNK_SIZE with `sourceLocator: <the echoed locator>` and `sendAmount: true` (the existing decoder then reads the echoed locator followed by the SB8 amount — no decoder change), returning a locator with `length: 0`, `chunkSize: <amount>`, `isNChar: csfrm == ttcCsfrmNChar`, marked temporary. **Implement it in terms of the existing virtual `sendLobOp`** so the existing `_FakeLobTransport` unit harness drives it without new overrides. On any post-CREATE_TEMP throw, queue the locator for free before rethrowing.
+  - [x] New `@internal Transport.queueTempLobToFree(Uint8List locator)` maintaining `_tempLobsToClose` + `_tempLobsTotalSize` exactly like `_createTempClob`'s `finally`.
+  - [x] Do NOT change `_createTempClob`/`_createTempBlob`/`_prepareLobBinds`/`_buildFreeTempLobsPiggyback` behavior. (Both create helpers' two-line `finally` now calls the identical `queueTempLobToFree` seam so the free list + its UB4 total size have a single writer — behavior byte-for-byte unchanged.)
+- [x] **Connection API + lifecycle** (AC: 1, 3, 4, 6)
+  - [x] `createTemporaryClob()` / `createTemporaryNClob()` / `createTemporaryBlob()` on `OracleConnection`: national-charset gate (NCLOB), `_runLobOp` bracket, register the handle, return `OracleLob`.
+  - [x] `OracleLob`: `isTemporary` getter, `@internal` locator accessor for the bind path, `close()` → free-queue for temp handles (idempotent, exception-free, skip on dead connection).
+  - [x] Apply the five `_openLobs` dispositions from the AC4 table (guard, execute-failure cleanup + its stale comment, `hasOpenLob`, `forceCloseOpenLobs`, `close()`).
+  - [x] Fix the two stale docs (AC6): `isExecuting` docstring; `OraclePool.release` in-flight comment + the "no server resource to free" reclaim comment.
+- [x] **Bind an `OracleLob`** (AC: 5)
+  - [x] `_prepareStatement`: unwrap a raw `OracleLob` bind value AND an `OracleBind.value` `OracleLob` into `BindVariable` + `BindMetadata`; pre-wire fail-loud for a closed handle and for a foreign-connection handle. (Also required relaxing `OracleBind._validate` to accept an `OracleLob` for a clob/nClob/blob-typed bind — otherwise the IN OUT entry point threw at CONSTRUCTION, before `_prepareStatement` ever ran.)
+  - [x] `_buildInferredSlots` / `OracleBindDef` paths: explicit fail-loud message for an `OracleLob` in `executeMany` naming `execute()` as the supported route.
+- [x] **Export + docs** (AC: 8)
+  - [x] No new exported type is needed (`OracleLob` and `OracleConnection` are already exported) — verified: `lib/oracledb.dart:46` already exports `OracleLob`; no change made.
+  - [x] README temp-LOB subsection + "Also not yet available" list update; dartdoc per AC8.
+- [x] **Tests** (AC: 1-9)
+  - [x] Unit (`test/src/oracle_lob_test.dart`, extend `_FakeLobTransport` with per-operation canned `updatedLocator` + `amount`): create-temp shape (operation codes, csfrm/oraType/duration args, GET_CHUNK_SIZE issued, chunkSize seeded), `isTemporary` true/false, NCLOB national-charset reject, close() queues exactly once (`debugPendingTempLobCount`), close() on a dead connection is a silent no-op, create-fails-after-CREATE_TEMP still queues the free, `execute()` allowed with an open created-temp handle but still rejected with an open fetched handle, bind unwrap (locator bytes on the wire via the existing byte-level `ExecuteRequest` test harness), closed-handle bind reject, foreign-connection bind reject, executeMany `OracleLob` reject message.
+  - [x] Unit: `LobLocator.isTemporary` flag decode (bit set / clear / short buffer / the ABSTRACT bit deliberately NOT triggering it) — new `test/src/protocol/lob_locator_test.dart`.
+  - [x] Integration per AC9, `test_helper.dart` getters only — new `test/integration/lob_temporary_integration_test.dart` (25 tests).
+  - [x] Run focused + FULL suites on **both** 23ai and 21c; `dart analyze` clean (lib + test); confirm zero regressions vs the pre-story baseline (12.1 closed at 23ai 486/28-skip, 21c 487/27-skip) → now 23ai **511/28-skip**, 21c **512/27-skip** (exactly +25 on each, no skip-count change, no regressions).
 
 ## Dev Notes
 
@@ -252,14 +252,95 @@ Second, smaller checklist — every place an `OracleLob` can arrive as a **bind 
 
 ### Agent Model Used
 
-_(to be filled by dev-story)_
+Claude Opus 5 (`claude-opus-5[1m]`) via the BMAD `dev-story` workflow, 2026-07-26.
 
 ### Debug Log References
 
+**Live measurement (AC2 / AC3 / AC9) — throwaway probes under `tool/`, run against both fixtures and then deleted.** Sources: `tool/temp_lob_probe.dart` (locator TEMP-flag + `V$TEMPORARY_LOBS` sweep, incl. a SECOND observer connection filtering on the first session's `SID` so a fetched handle can be observed *while open* — the same-session query is blocked by the 12.1 concurrency guard) and `tool/inout_probe.dart` (IN vs IN OUT bind aftermath). All findings below reproduced **identically** on Oracle 23ai (`FREEPDB1`:1521, "Oracle AI Database 26ai Free Release 23.26.1.0.0") and Oracle 21c (`XEPDB1`:1522, "Oracle Database 21c Express Edition Release 21.0.0.0.0"); both report national charset `AL16UTF16`.
+
+| shape | `isTemporary` | `V$TEMPORARY_LOBS` (this SID) | `close()` queues? |
+|---|---|---|---|
+| `createTemporaryClob()` | **true** | baseline → +1 on create → baseline after `close()` + 1 execute | yes (1) |
+| `createTemporaryNClob()` | **true** | same | yes (1) |
+| `createTemporaryBlob()` | **true** | same | yes (1) |
+| fetched `SELECT TO_CLOB('x') FROM dual` | **false** | **no change** — 0 while open, 0 after `read()`, 0 after close | no |
+| fetched PL/SQL CLOB OUT bind (`BEGIN :ret := :src; END;`) | **false** | **no change** | no |
+| fetched table CLOB | false | n/a | no |
+| fetched `SELECT ... FOR UPDATE` CLOB | false | n/a | no |
+| fetched table BLOB | false | n/a | no |
+| **`IN OUT` bind's RETURNED locator** (under `fetchLobs: true`) | **true** | +1, freed by its own `close()` | yes (1) |
+
+`chunkSize` from the post-CREATE_TEMP GET_CHUNK_SIZE = **8132** for CLOB, NCLOB and BLOB on both versions (a fetched `TO_CLOB` locator's prefetch chunkSize is 32600 — different metric, unrelated).
+
+**Findings that changed the plan:**
+
+1. **No fetched shape sets the TEMP bit, and no fetched shape allocates session temp-LOB space** — so AC3's "narrow free-on-close to driver-created only" fallback never triggered. The implementation stays generic (keyed on `LobLocator.isTemporary`), which is what makes the one shape that *does* set the bit — an IN OUT bind's returned locator under `fetchLobs: true` — free itself correctly.
+2. **An `IN OUT` `OracleLob` bind CONSUMES the caller's handle.** Oracle replaces the LOB behind the bind: the returned OUT value is correct, but a later `read()` on the bound handle raises **ORA-22922** ("LOB value does not exist" on 23ai / "nonexistent LOB value" on 21c — same code, different text, so tests assert the code). Documented on `createTemporary*` + README, pinned by integration tests, docketed for a follow-up (mark the handle consumed). The safety half is verified: closing the stale handle queues its locator and that stale FREE_TEMP piggyback does **not** poison the unrelated statement it rides on, on either version.
+3. **A pre-existing leak, deliberately not fixed here:** three consecutive `OracleBind.inOut(value: <String>, type: clob)` calls (the Epic 4 path, no `OracleLob` involved) grow this session's temp-LOB count 2→3→4→5 — one per call — because `materializeLobs` reads the server's OUT locator and discards it without queueing a free. Reproduces with zero Story 12.2 code in play; fixing it would change the `fetchLobs`-off materialize path that AC7 requires to stay byte-for-byte identical. Docketed with a `target:`.
+4. **Repeated named binds are unusable in a PL/SQL block** (`BEGIN :v := :v || 'x'; END;` → ORA-01006) — a pre-existing, LOB-independent driver limitation hit while drafting the IN OUT test. Worked around by using `DBMS_LOB.WRITEAPPEND(:v, ...)` (one placeholder) and by splitting the two-observation IN-bind test into two blocks. Not investigated further; out of scope.
+
+**Unit-test scope note:** the free-list DRAIN lives inside the real `Transport.sendExecute`, which `_FakeLobTransport` overrides wholesale, so the unit tests pin the QUEUEING side only (rises by exactly one per distinct handle, never twice, never on a dead session). "Drains to 0 after the next `execute()`" is proven against real servers in `lob_temporary_integration_test.dart` (both versions), which is where AC9 asks for it anyway.
+
 ### Completion Notes List
+
+**What landed**
+
+- **`createTemporaryClob()` / `createTemporaryNClob()` / `createTemporaryBlob()`** on `OracleConnection` — each returns a caller-owned `OracleLob` over a fresh, EMPTY session-duration temporary LOB. Wire shape is node-oracledb `lob.js create()` byte-for-byte: one `CREATE_TEMP` (charset form in `sourceOffset`, Oracle type in `destOffset`, `tnsDurationSession` in `destLength`, zeroed 40-byte source locator) immediately followed by one `GET_CHUNK_SIZE` with `sendAmount: true`, whose SB8 reply seeds a real `chunkSize` (8132, measured) instead of `0`. **No wire-format change was needed** — `sendAmount` alone drives both the trailing UB8 on the request and the SB8 in the reply, exactly as the Dev Notes predicted.
+- **`OracleLob.isTemporary`** — decodes bit `0x01` of locator flag byte 4, bounds-guarded like `usesVarLengthCharset`, plus an explicit constructor override for driver-created locators (a locator we just CREATE_TEMP'd is known temporary from the REQUEST, never inferred from the server's echo). node-oracledb's second clause is deliberately NOT ported, with the reason recorded in-code and pinned by two unit tests (the ABSTRACT bit must not trigger it; the BLOB bit — which node's `a & B === B` precedence bug actually tests — must not either, or every fetched BLOB would be queued for FREE_TEMP on an innocent statement's piggyback).
+- **Free-on-`close()`** through the existing `FREE_TEMP | ARRAY` piggyback. No new wire format, no standalone round trip. Routed through **one** choke point: `OracleConnection.releaseLob` queues the locator when `lob.isTemporary`, so `close()`, `forceCloseOpenLobs()` and pool reclaim all get it from a single code path, and `close()`'s existing idempotency makes double-free impossible by construction. `oracle_lob.dart`'s import set is unchanged (still no transport import); the new `@internal Transport.queueTempLobToFree` is the seam.
+- **AC4's five `_openLobs` dispositions**, all applied and each pinned by a unit test: the concurrency guard ignores created-temp handles but still trips on fetched ones; the execute-failure cleanup reaps fetched handles only (`forceCloseOpenLobs(onlyFetched: true)`) and its now-false "anything open now belongs to this call" invariant comment is corrected; `hasOpenLob` includes both kinds so pool reclaim cannot miss a temp LOB; `forceCloseOpenLobs` closes both and frees temporaries; `close()`'s `_openLobs.clear()` is unchanged with its rationale documented. Representation is the preferred one — a single set plus an `@internal bool` on the handle — with the whole five-way audit written into the `_openLobs` field docstring so the next reader inherits the checklist.
+- **`OracleLob` as a bind value** — unwrapped at the connection layer (`_prepareStatement`) into `BindVariable(value: <its LobLocator>, ...)` + matching `BindMetadata` (`csfrm: ttcCsfrmNChar` for NCLOB) so the bind signature / cache key and OUT sizing stay correct, then written by the already-working `ExecuteRequest` `LobLocator` branch. All five arrival paths from the story's second checklist are threaded: positional `List`, named `Map`, `OracleBind.inOut(value:)`, `executeMany` rows (fail loud), `OracleBindDef` slots (fail loud) — the last two share one message naming `execute()` as the route. Three pre-wire rejections: closed handle, foreign-connection handle, and a declared LOB type that does not match the handle's. Binding never queues a free — the caller owns the lifetime (node's `internalTempLobs`-only distinction).
+- **Docs** — dartdoc on all three factories, `isTemporary`, `close()`, `chunkSize`, the `OracleLob` class ("one operation at a time" now distinguishes the two categories), `lob_locator.dart`'s class dartdoc (third locator origin: driver-created, caller-owned), and both `debugPendingTempLobCount` getters. README gains a "Temporary LOBs you create, fill, and bind" subsection with the end-to-end pattern and drops `createTemporary*` from "Also not yet available".
+
+**Architecture-compliance decisions (stated explicitly so review reads them as decisions, not drift)**
+
+- **AC4 is a documented, bounded refinement of `architecture.md` cross-cutting note 1**, not a departure. Note 1's "hold the slot" clause is narrowed *only* for a handle that owns no cursor and no fetch state, because binding it into an `execute()` is its entire purpose (`connection.rst`: "Data can be streamed to the LOB, which can then be passed into PL/SQL blocks, or inserted into the database"; node-oracledb serializes each round trip, never a handle's lifetime). The other halves of note 1 are honored **in full**: the server resource IS closed on `close()` (AC3, proven via `V$TEMPORARY_LOBS` on both versions) and the pool DOES force-close + warn on release **and** free the LOB (AC6). Fail-fast concurrency is preserved per round trip via `_runLobOp`. Story 12.1's model for FETCHED handles is untouched — every 12.1 unit and integration regression stayed green, unmodified.
+- **`OracleBind._validate` had to be relaxed** to accept an `OracleLob` for a clob/nClob/blob-typed bind. This was not in the task list and is a real flag-threading site the story's checklist missed: `OracleBind.inOut(value: lob, ...)` threw an `ArgumentError` at **construction**, so AC5's IN OUT entry point was unreachable before `_prepareStatement` ever ran. The handle's identity/lifetime checks (closed, foreign, type match) stay at the connection layer where they belong, so `_validate` only widens the accepted shape. This adds an `oracle_bind.dart` → `oracle_lob.dart` import, i.e. a second edge in the benign library cycle `connection.dart` ↔ `oracle_lob.dart` already forms; `oracle_lob.dart`'s own imports are unchanged.
+- **AC5's "temporary or fetched" is only half-reachable today, by design.** The unwrap is category-agnostic, but an open FETCHED handle still makes the connection busy (AC4's explicit "unchanged" mandate), so `_rejectConcurrentOperation` fires before the unwrap; after `close()` the closed-handle guard rejects it. AC4's mandate overrides AC5's wording. Both halves are pinned by a unit test and the consequence is documented in `_validateLobBindValue`'s dartdoc and docketed for 12.3 — no bind-code change will be needed when the lazy-handle lifecycle lands.
+- **Scope boundaries held (AC7):** no `Stream` surface, no chunked read/write loop, no `_readClobAsString`/`_readBlobAsBytes` refactor, no `trim()`, no BFILE, no `destroy()` alias, no generic `createTemporaryLob(OracleDbType)`, no initial-value parameter, no length/`chunkSize` refresh API, no `executeMany` LOB binds, no piggyback emission from `commit()`/`rollback()`/`ping()`, no change to the `resultSet: true` + `fetchLobs` or `_rejectCursorEmbeddedLob()` rejections. `OracleResult.closeLobs()` / `_collectLobs` untouched. `_createTempClob`/`_createTempBlob`/`_prepareLobBinds`/`_buildFreeTempLobsPiggyback` behavior unchanged. CI coverage floor still `threshold=73`.
+
+**Ledger** — three entries closed with evidence (the 12.2-targeted fetched-temp-LOB item, plus the write-then-read-on-one-live-handle and multibyte-CLOB/NCLOB-write evidence gaps), two stale-doc items fixed in-diff, three new entries added with `target:`s (pre-existing IN OUT OUT-locator leak; IN OUT consumes the handle; fetched-handle binding unreachable until 12.3).
+
+**Validation** — `dart analyze` clean across lib + test (zero issues). `dart doc` adds no new warnings (the 3 reported are pre-existing, at connection.dart:54/149). Unit: 1597 pass / 12 skip. Integration: **23ai 511 pass / 28 skip** and **21c 512 pass / 27 skip** — exactly +25 over the 12.1 baselines (486/28 and 487/27) with no change in skip counts, i.e. every new test passes on **both** versions and nothing regressed.
+
+**No breaking changes.** Everything is additive: three new methods and one new getter on already-exported types, plus one widened `OracleBind` value-type check (previously-valid calls all still compile and behave identically).
 
 ### File List
 
+**Modified — `lib/`**
+
+- `lib/src/protocol/constants.dart` — new `tnsLobLocOffsetFlag1`, `tnsLobLocOffsetFlag4`, `tnsLobLocFlagsTemp` with reference-citing dartdoc.
+- `lib/src/protocol/lob_locator.dart` — `isTemporary` getter (TEMP bit + driver-created override) with the node-precedence-bug rationale; `isTemporary` constructor flag; `toString()` reports it; class dartdoc amended for the caller-owned driver-created origin.
+- `lib/src/transport/transport.dart` — new `@internal createTemporaryLob(...)` and `@internal queueTempLobToFree(...)`; both existing create helpers' `finally` now use that single seam; `debugPendingTempLobCount` dartdoc widened.
+- `lib/src/connection.dart` — `createTemporaryClob/NClob/Blob()` + shared `_createTemporaryLob`; `releaseLob` queues the temp free; `forceCloseOpenLobs({onlyFetched})`; `_rejectConcurrentOperation` exempts created-temp; execute-failure cleanup reaps fetched only (+ corrected invariant comment); `_openLobs` field docstring carries the five-way audit; `hasOpenLob`, `isExecuting`, `debugPendingTempLobCount`, `close()` docs updated; `_prepareStatement` unwraps both `OracleLob` bind entry points; new `_validateLobBindValue`; `_lobInExecuteManyMessage` + rejects in `_buildInferredSlots` and `_validateDefValue`.
+- `lib/src/oracle_lob.dart` — `createdTemporary` constructor flag, `isCreatedTemporary`, `internalLocator`, `isOwnedBy`, public `isTemporary`; `close()` and `chunkSize` dartdoc; class dartdoc covers both acquisition routes and the two concurrency categories.
+- `lib/src/oracle_bind.dart` — clob/nClob/blob-typed binds accept an `OracleLob` value; imports `oracle_lob.dart`.
+- `lib/src/pool.dart` — in-flight comment names a LOB read/write; reclaim comment corrected (a temporary LOB *does* have a server resource to free).
+
+**Modified — docs / tracking**
+
+- `README.md` — new "Temporary LOBs you create, fill, and bind" subsection; `createTemporary*` removed from "Also not yet available".
+- `_bmad-output/implementation-artifacts/deferred-work.md` — 3 entries resolved with measurements, 2 stale-doc entries resolved in-diff, new "Deferred from: dev-story of 12-2-temporary-lob-lifecycle (2026-07-26)" section with 3 entries.
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — `12-2-temporary-lob-lifecycle`: `ready-for-dev` → `in-progress` → `review`.
+- `_bmad-output/implementation-artifacts/12-2-temporary-lob-lifecycle.md` — this record.
+
+**Modified — tests**
+
+- `test/src/oracle_lob_test.dart` — `_FakeLobTransport` extended (per-operation canned `updatedLocator`/`amount`, recorded operation codes + CREATE_TEMP args, per-operation failure injection) plus 33 new tests across 5 groups (AC1 create shape, AC2 `isTemporary`, AC3 free-on-close, AC4 concurrency dispositions, AC5 bind).
+
+**New**
+
+- `test/src/protocol/lob_locator_test.dart` — 11 tests for the TEMP-flag decode (set / masked among other bits / clear / short-buffer bounds guard / ABSTRACT and BLOB bits deliberately inert / driver-created override / orthogonality with `usesVarLengthCharset`) plus a constants-match-node check.
+- `test/integration/lob_temporary_integration_test.dart` — 25 dual-env tests covering all of AC9.
+
+**Created then deleted** (throwaway live-measurement probes, see Debug Log): `tool/temp_lob_probe.dart`, `tool/inout_probe.dart`.
+
 ### Change Log
+
+| Date | Change |
+|------|--------|
+| 2026-07-26 | Story 12.2 implemented: public temporary-LOB creation (`createTemporaryClob`/`createTemporaryNClob`/`createTemporaryBlob`), `OracleLob.isTemporary`, free-on-`close()` via the existing FREE_TEMP piggyback, created-temp handles exempted from the in-flight-slot guard (5-site `_openLobs` audit), `OracleLob` as an `execute()` bind value with three pre-wire rejections and fail-loud `executeMany` guidance, pool-reclaim free, dartdoc + README. Status → review. |
+| 2026-07-26 | Live dual-env measurement recorded (AC2/AC3/AC9): no fetched LOB shape sets the locator TEMP bit or allocates session temp-LOB space on 23ai or 21c; an `IN OUT` bind consumes the caller's handle (ORA-22922) and its returned locator IS temporary. Closed 3 deferred-work entries, fixed 2 stale-doc entries in-diff, added 3 new entries. |
+| 2026-07-26 | Zero regressions: unit 1597/12-skip; integration 23ai 511/28-skip and 21c 512/27-skip (+25 each over the 12.1 baseline). `dart analyze` clean; no new `dart doc` warnings. |
 
 ### Review Findings

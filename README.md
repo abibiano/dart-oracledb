@@ -731,8 +731,84 @@ handle is not wrapped in this release and is deferred to Story 12.3: combining
 CLOB/BLOB nested in a `CURSOR(...)` column or carried by a REF CURSOR OUT bind
 **fails loud** under `fetchLobs` (rather than silently materializing) — run those
 statements without `fetchLobs` and the LOB materializes to a `String` /
-`Uint8List` as before. Also not yet available: a `Stream` surface,
-`createTemporary*` LOB creation, BFILE, and `trim()`.
+`Uint8List` as before. Also not yet available: a `Stream` surface, BFILE, and
+`trim()`.
+
+#### Temporary LOBs you create, fill, and bind
+
+`createTemporaryClob()`, `createTemporaryNClob()` and `createTemporaryBlob()`
+create a new, **empty** session-duration temporary LOB on the server and return
+it as a caller-owned `OracleLob`. Fill it with `write()`, bind it into an
+`INSERT` or a PL/SQL block, then `close()` it — this is how you build a value
+above the 32 KB inline bind limit without materializing one giant
+`String`/`Uint8List`:
+
+```dart
+final lob = await connection.createTemporaryClob();
+try {
+  await lob.write(1, firstChunk);             // 1-based offsets
+  await lob.write(lob.length + 1, nextChunk); // append after what you wrote
+  print(lob.length);        // characters (UCS-2 code units); bytes for BLOB
+  print(lob.isTemporary);   // true
+  print(lob.chunkSize);     // real server chunk size
+
+  await connection.execute(
+    'INSERT INTO articles (id, doc) VALUES (:id, :doc)',
+    {'id': 1, 'doc': lob},  // binds as the server-side LOB locator
+  );
+  await connection.commit(); // the temp LOB survives commit()
+} finally {
+  await lob.close();         // ALWAYS close
+}
+```
+
+- **Units and offsets** — identical to a fetched handle: 1-based offsets, counted
+  in **characters (UCS-2 code units)** for CLOB/NCLOB and in **bytes** for BLOB.
+  `createTemporaryNClob()` stores/transfers its data as UTF-16BE and requires the
+  `AL16UTF16` national character set (it throws before any wire round trip
+  otherwise).
+- **You must `close()` it** — Oracle holds session resources for every unclosed
+  temporary LOB (visible in `V$TEMPORARY_LOBS`). `close()` is idempotent and
+  never throws. The actual server-side free travels as a **piggyback on the next
+  `execute()`** on that session, matching node-oracledb: a `close()` followed
+  only by `connection.close()` relies on session teardown, and a pooled
+  connection's pending frees are flushed by the next borrower's first
+  `execute()`. `commit()` / `rollback()` / `ping()` do not flush them.
+- **It does not block other statements** — unlike a fetched handle, an open
+  created-temporary handle leaves the connection free to run statements (binding
+  it is the whole point). Individual LOB round trips are still serialized, so
+  `await` each `read()` / `write()`.
+- **Session duration, not transaction duration** — the LOB survives `commit()`
+  and `rollback()`.
+- **An empty temporary LOB is not SQL `NULL`** — binding a created-but-unwritten
+  handle stores an **empty LOB**, deliberately unlike binding an empty `String`
+  (which Oracle's `'' IS NULL` semantics store as `NULL`).
+- **Binding** — pass the handle positionally (`[lob]`), by name
+  (`{'doc': lob}`), or as
+  `OracleBind.inOut(value: lob, type: OracleDbType.clob, maxSize: ...)` in a
+  PL/SQL block. Binding never frees the handle: its lifetime is yours. Binding a
+  **closed** handle, or one belonging to a **different** connection, throws
+  before any wire round trip. `executeMany()` does not accept `OracleLob` values
+  (it fails loud naming `execute()`); pass plain `String` / `Uint8List` values
+  there and the driver creates a temporary LOB per iteration.
+- **An `IN OUT` bind consumes the handle** — validated on Oracle 23ai and 21c:
+  the server replaces the LOB behind an `IN OUT` bind, so the returned value in
+  `result.outBinds` is correct but a later `read()` on the **bound** handle
+  raises `ORA-22922`. Read the returned value (a `String` / `Uint8List`, or a
+  fresh `OracleLob` under `fetchLobs: true`) and treat the bound handle as spent;
+  you still `close()` it. A plain **IN** bind leaves the handle fully usable.
+- **Cached `length`** — `length` is advanced locally by `write()` and never
+  re-read from the server (node-oracledb parity). If the LOB grows server-side, a
+  `read()` with a default `amount` can stop short; pass an explicit `amount` or
+  re-select the value.
+
+`OracleLob.isTemporary` reports whether a handle references a temporary LOB —
+always `true` for a created one, and `true` for a fetched locator that carries
+the server's temporary flag. Measured on 23ai and 21c: a plain table LOB, a
+`SELECT ... FOR UPDATE` locator, a `SELECT TO_CLOB(...)` expression and a PL/SQL
+CLOB OUT bind all report `false` (their locators carry no temporary flag and
+allocate no session temp-LOB space), while an `IN OUT` bind's returned locator
+reports `true` and frees itself on `close()`.
 
 ### JSON support
 

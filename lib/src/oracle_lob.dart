@@ -27,11 +27,18 @@ import 'protocol/lob_locator.dart';
 /// A handle to a CLOB / NCLOB / BLOB value that reads and writes its data in
 /// bounded pieces, holding its connection open until [close]d.
 ///
-/// Obtain one only through the connection — pass
-/// `OracleExecuteOptions(fetchLobs: true)` to `OracleConnection.execute()` and
-/// each CLOB/NCLOB/BLOB in [OracleResult.rows] / [OracleResult.outBinds] arrives
-/// as an [OracleLob] instead of a materialized value. There is no public
-/// constructor; the one that exists is `@internal`.
+/// Obtain one only through the connection — either
+///
+/// * **fetched:** pass `OracleExecuteOptions(fetchLobs: true)` to
+///   `OracleConnection.execute()` and each CLOB/NCLOB/BLOB in
+///   [OracleResult.rows] / [OracleResult.outBinds] arrives as an [OracleLob]
+///   instead of a materialized value; or
+/// * **created:** call `OracleConnection.createTemporaryClob()` /
+///   `createTemporaryNClob()` / `createTemporaryBlob()` for a new, empty
+///   session-duration temporary LOB you fill with [write] and can pass as an
+///   `execute()` bind value.
+///
+/// There is no public constructor; the one that exists is `@internal`.
 ///
 /// ```dart
 /// final result = await connection.execute(
@@ -57,23 +64,38 @@ import 'protocol/lob_locator.dart';
 ///
 /// ## One operation at a time
 ///
-/// An open [OracleLob] owns its connection's single TTC byte stream, exactly
-/// like an open [OracleResultSet]. While any handle is open the connection is
-/// considered busy: starting another `execute()` / `executeMany()` /
-/// `openResultSet()` / `executeStream()` / `queryStream()`, or opening another
+/// An open **fetched** [OracleLob] owns its connection's single TTC byte stream,
+/// exactly like an open [OracleResultSet]. While any fetched handle is open the
+/// connection is considered busy: starting another `execute()` / `executeMany()`
+/// / `openResultSet()` / `executeStream()` / `queryStream()`, or opening another
 /// result set, fails fast with a concurrent-operation [OracleException]. Always
 /// [close] every handle when done so the connection can run the next statement.
+///
+/// A handle from `createTemporaryClob()` / `createTemporaryNClob()` /
+/// `createTemporaryBlob()` is the deliberate exception: it owns no cursor and no
+/// fetch state, and binding it into a statement is its whole purpose, so it does
+/// **not** make the connection busy. Each individual [read] / [write] round trip
+/// is still serialized — two overlapping LOB ops, or a LOB op overlapping an
+/// in-flight `execute()`, still fail fast.
 class OracleLob {
   /// Internal constructor used by `OracleConnection` to wrap a fetched
-  /// [LobLocator]. Not for external use — obtain a handle through the
-  /// connection (`OracleExecuteOptions(fetchLobs: true)`).
+  /// [LobLocator], or a temporary one the driver just created. Not for external
+  /// use — obtain a handle through the connection
+  /// (`OracleExecuteOptions(fetchLobs: true)` or `createTemporary*()`).
+  ///
+  /// [createdTemporary] marks the second category: a temporary LOB THIS driver
+  /// created on behalf of the caller (see [isCreatedTemporary]). It is
+  /// deliberately distinct from [isTemporary], which is also true for a fetched
+  /// locator whose bytes carry the server's TEMP flag.
   @internal
   OracleLob.fromLocator({
     required OracleConnection connection,
     required LobLocator locator,
+    bool createdTemporary = false,
   })  : _connection = connection,
         _locator = locator,
-        _length = locator.length;
+        _length = locator.length,
+        _createdTemporary = createdTemporary;
 
   final OracleConnection _connection;
 
@@ -81,6 +103,31 @@ class OracleLob {
   /// for every READ/WRITE round trip; its metadata drives [type], [chunkSize],
   /// and the charset decode/encode path.
   final LobLocator _locator;
+
+  /// Whether this handle wraps a temporary LOB THIS driver created for the
+  /// caller (`OracleConnection.createTemporary*()`), as opposed to a locator
+  /// that arrived from the server through a fetch.
+  ///
+  /// This is the handle **category**, not the LOB's temporary-ness: a fetched
+  /// locator can itself be temporary (see [isTemporary]) while still belonging
+  /// to the fetch category. The category is what decides whether the handle
+  /// holds the connection's in-flight slot and whether an execute-failure
+  /// cleanup may reap it — a created handle is caller-owned and neither.
+  final bool _createdTemporary;
+
+  /// Whether this handle was produced by `OracleConnection.createTemporary*()`
+  /// rather than by a `fetchLobs` wrap. Package-internal seam for the
+  /// connection's `_openLobs` dispositions (concurrency guard,
+  /// execute-failure cleanup, force-close).
+  @internal
+  bool get isCreatedTemporary => _createdTemporary;
+
+  /// The wrapped locator. Package-internal seam for the connection's bind-value
+  /// unwrap (an [OracleLob] binds as its LOB locator on the wire) and for
+  /// queueing the free-temp piggyback when a temporary handle closes. The raw
+  /// bytes are never exposed publicly.
+  @internal
+  LobLocator get internalLocator => _locator;
 
   /// Cached LOB length in the type's native units (characters for CLOB/NCLOB,
   /// bytes for BLOB). Seeded from the locator's prefetch metadata and advanced
@@ -110,9 +157,27 @@ class OracleLob {
   int get length => _length;
 
   /// The server LOB-prefetch chunk size in the same units as [length], or `0`
-  /// when unknown (e.g. an internally created temporary LOB). Diagnostic
-  /// metadata; it does not bound [read] / [write] amounts.
+  /// when unknown. Diagnostic metadata; it does not bound [read] / [write]
+  /// amounts.
+  ///
+  /// A handle from `OracleConnection.createTemporary*()` seeds this from a real
+  /// server GET_CHUNK_SIZE issued right after creation (node-oracledb
+  /// `lob.js create()` parity), so it is `> 0` there.
   int get chunkSize => _locator.chunkSize;
+
+  /// Whether this handle references a **temporary** LOB — one occupying session
+  /// temp-LOB space (visible in `V$TEMPORARY_LOBS`) that must be freed rather
+  /// than a persistent, table-backed value.
+  ///
+  /// `true` for every handle from `OracleConnection.createTemporaryClob()` /
+  /// `createTemporaryNClob()` / `createTemporaryBlob()`, and also for a FETCHED
+  /// locator whose bytes carry the server's temporary flag (Oracle sets it for
+  /// some server-expression and PL/SQL-produced LOBs, e.g.
+  /// `SELECT TO_CLOB('x') FROM dual`).
+  ///
+  /// When `true`, [close] queues the LOB's server-side release; when `false`,
+  /// [close] is local bookkeeping only. See [close].
+  bool get isTemporary => _locator.isTemporary;
 
   /// Whether this handle can no longer be read or written — because [close] was
   /// called, the pool force-closed it on connection reclaim, or the owning
@@ -361,17 +426,44 @@ class OracleLob {
   }
 
   /// Closes the handle, releasing the connection's in-flight slot once no
-  /// [OracleLob] (and no [OracleResultSet]) remains open.
+  /// fetched [OracleLob] (and no [OracleResultSet]) remains open, and freeing
+  /// the server-side LOB when [isTemporary] is `true`.
   ///
   /// Idempotent and exception-free: a second [close] — or closing an
-  /// already-drained handle — does nothing and throws nothing. For a fetched,
-  /// non-temporary LOB there is no server resource to free (the locator is
-  /// transaction-scoped), so this only releases the local slot bookkeeping.
+  /// already-drained handle — does nothing and throws nothing (so a temporary
+  /// LOB can never be double-freed).
+  ///
+  /// * **Non-temporary handle** ([isTemporary] `false`): there is no server
+  ///   resource to free (the locator references a persistent value), so this is
+  ///   local bookkeeping only, with zero wire effect.
+  /// * **Temporary handle** ([isTemporary] `true`): the locator is queued for
+  ///   the driver's free-temporary-LOB piggyback. **The free is deferred to the
+  ///   next `execute()` on that session** — Oracle's temp-LOB release travels as
+  ///   a piggyback on another message (node-oracledb's model), never as a
+  ///   standalone round trip. So `close()` followed only by
+  ///   `connection.close()` relies on session teardown to reclaim the space
+  ///   (Oracle frees session-duration temp LOBs when the session ends), and on a
+  ///   pooled connection the queue is flushed by the next borrower's first
+  ///   execute. `commit()` / `rollback()` / `ping()` do **not** flush it in this
+  ///   release.
+  ///
+  /// Closing a temporary handle when the owning connection is already closed or
+  /// broken skips the queue silently and still throws nothing: the session (and
+  /// with it the temp LOB) is gone.
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
     _connection.releaseLob(this);
   }
+
+  /// Whether [connection] is the connection that produced this handle.
+  ///
+  /// A LOB locator is session-scoped: sending it on a different session is
+  /// undefined behavior on the server, so the bind path rejects a foreign handle
+  /// before any wire round trip. Package-internal seam for that check.
+  @internal
+  bool isOwnedBy(OracleConnection connection) =>
+      identical(_connection, connection);
 
   /// Marks this handle as force-closed by the connection pool on connection
   /// reclaim, so a subsequent [read]/[write] surfaces a clear pool-reclaim

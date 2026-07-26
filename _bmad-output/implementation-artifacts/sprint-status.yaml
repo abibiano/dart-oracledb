@@ -36,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-07-26  # Story 12.2 create-story: temporary-LOB lifecycle context created, 12-2 -> ready-for-dev
+last_updated: 2026-07-26  # Story 12.2 dev-story complete: temporary-LOB lifecycle implemented + dual-env validated, 12-2 -> review
 project: dart-oracledb
 project_key: NOKEY
 tracking_system: file-system
@@ -200,7 +200,7 @@ development_status:
   # Epic 12: LOB Streaming & Temporary LOBs [extends Epic 4]
   epic-12: in-progress
   12-1-public-lob-object: done
-  12-2-temporary-lob-lifecycle: ready-for-dev  # 2026-07-26 — create-story: 9 ACs authored from source + node-oracledb 7.0.1 reference (epics.md carries only a one-line summary). Scope: public createTemporaryClob/NClob/Blob (CREATE_TEMP + GET_CHUNK_SIZE, session duration), OracleLob.isTemporary (locator TEMP-bit decode; node's ABSTRACT clause deliberately not ported — JS precedence bug), free-on-close via the existing FREE_TEMP piggyback, created-temp handles exempted from the in-flight-slot guard so they can be BOUND (5-site _openLobs audit incl. the now-broken execute-failure-cleanup invariant), OracleLob as a bind value (execute() only; executeMany fails loud), pool-reclaim free, docs. Closes the 12.1 ledger item targeting 12.2 (fetched TO_CLOB temp locators never freed) + 2 evidence gaps (write-then-read on one live handle; multibyte CLOB/NCLOB write on a real server) + 2 stale-doc items in-diff.
+  12-2-temporary-lob-lifecycle: review  # 2026-07-26 — dev-story complete: all 9 ACs implemented; unit 1597/12-skip, integration 23ai 511/28-skip + 21c 512/27-skip (+25 each, zero regressions); dart analyze clean. Live dual-env measurement: no fetched LOB shape sets the locator TEMP bit or allocates session temp-LOB space (closes the 12.1 ledger item targeting 12.2); an IN OUT OracleLob bind CONSUMES the handle (ORA-22922) — documented + docketed. create-story: 9 ACs authored from source + node-oracledb 7.0.1 reference (epics.md carries only a one-line summary). Scope: public createTemporaryClob/NClob/Blob (CREATE_TEMP + GET_CHUNK_SIZE, session duration), OracleLob.isTemporary (locator TEMP-bit decode; node's ABSTRACT clause deliberately not ported — JS precedence bug), free-on-close via the existing FREE_TEMP piggyback, created-temp handles exempted from the in-flight-slot guard so they can be BOUND (5-site _openLobs audit incl. the now-broken execute-failure-cleanup invariant), OracleLob as a bind value (execute() only; executeMany fails loud), pool-reclaim free, docs. Closes the 12.1 ledger item targeting 12.2 (fetched TO_CLOB temp locators never freed) + 2 evidence gaps (write-then-read on one live handle; multibyte CLOB/NCLOB write on a real server) + 2 stale-doc items in-diff.
   12-3-chunked-streaming-transfer: backlog
   12-4-dual-env-integration-tests: backlog
   epic-12-retrospective: optional
