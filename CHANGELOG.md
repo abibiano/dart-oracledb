@@ -79,14 +79,14 @@ path additionally proven live against a `WE8MSWIN1252` database).
   locator whose flag byte marks it temporary onto the existing free-temp
   piggyback. The values callers receive are byte-for-byte unchanged; only the
   free accounting differs, and locators the server does not mark temporary
-  (table rows, `TO_CLOB(...)`, `FOR UPDATE` locators, plain PL/SQL OUT binds)
-  are unaffected.
-- **A temporary locator can no longer be freed twice.** A PL/SQL `IN OUT` LOB
-  bind whose body does not allocate a new LOB (`p := p`) returns the very
-  locator the driver created for the input value, which was already queued for
-  the free piggyback. Because that piggyback rides an unrelated statement's
-  message, a double free would have surfaced as an error on *that* statement.
-  The queue now skips a locator whose bytes are already pending.
+  (table rows, `TO_CLOB(...)` expressions, `FOR UPDATE` locators, an OUT bind
+  the PL/SQL body fills from a `TO_CLOB` literal) are unaffected. Internal
+  hardening that came with the fix: because the materialize path is a second
+  owner able to queue a temporary locator, the free queue now also dedupes at
+  the locator level — a PL/SQL `IN OUT` LOB bind whose body does not allocate a
+  new LOB (`p := p`) hands back the very locator the driver created for the
+  input value, which was already queued, and queueing it twice would have
+  surfaced as an error on the unrelated statement the piggyback rides.
 
 ## 1.3.0
 

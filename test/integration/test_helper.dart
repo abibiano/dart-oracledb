@@ -231,22 +231,13 @@ bool nationalCharsetSupported(
 /// Note this reads the CURRENT session's SID via `SYS_CONTEXT`, so it cannot be
 /// used to observe another session's count — and it cannot run while a fetched
 /// `OracleLob` handle holds the connection's single in-flight slot (the
-/// concurrency guard rejects it). Use [tempLobCountForSid] from a second
-/// session for that.
+/// concurrency guard rejects it). No test needs a cross-session reading today, so
+/// no SID-parameterized variant is provided (Story 12.4 trap 1: reach for one
+/// only when a test genuinely has to read the count while a slot is held, and
+/// then pass the SID explicitly).
 const String tempLobCountSql =
     'SELECT NVL(SUM(CACHE_LOBS + NOCACHE_LOBS), 0) AS N FROM V\$TEMPORARY_LOBS '
     "WHERE SID = SYS_CONTEXT('USERENV','SID')";
-
-/// The same count as [tempLobCountSql] but for an explicitly named [sid], for
-/// the cross-session reading a test needs while the target session is busy
-/// (e.g. holding a fetched handle's in-flight slot).
-String tempLobCountForSid(int sid) =>
-    'SELECT NVL(SUM(CACHE_LOBS + NOCACHE_LOBS), 0) AS N '
-    'FROM V\$TEMPORARY_LOBS WHERE SID = $sid';
-
-/// SQL returning the current session's SID (for [tempLobCountForSid]).
-const String currentSidSql =
-    "SELECT SYS_CONTEXT('USERENV','SID') AS SID FROM dual";
 
 /// Oracle errors that mean `V$TEMPORARY_LOBS` is simply not usable on this
 /// fixture (missing view / no privilege). Anything else is a real failure and is
@@ -263,9 +254,9 @@ const Set<int> viewUnusableCodes = {
 /// A `null` return has already called [markTestSkipped], so the caller skips
 /// only the view-based assertions and keeps its driver-side
 /// (`debugPendingTempLobCount`) ones running.
-Future<int?> tempLobCount(OracleConnection connection, {String? sql}) async {
+Future<int?> tempLobCount(OracleConnection connection) async {
   try {
-    final r = await connection.execute(sql ?? tempLobCountSql);
+    final r = await connection.execute(tempLobCountSql);
     final n = r.rows.single['N'];
     return n is int ? n : (n as num).toInt();
   } on OracleException catch (e) {

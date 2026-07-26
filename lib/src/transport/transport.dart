@@ -547,14 +547,17 @@ class Transport {
   /// and cannot fail — safe to call from a `close()` that is contractually
   /// exception-free, and from the pool's reclaim path.
   ///
-  /// Callers must queue each locator at most once — a double queue would send
-  /// the same locator twice in one piggyback, and because the piggyback rides an
-  /// unrelated statement's message a double free surfaces as an error on THAT
-  /// statement, not here.
+  /// Callers must still queue each locator at most once — a double queue would
+  /// send the same locator twice in one piggyback, and because the piggyback
+  /// rides an unrelated statement's message a double free surfaces as an error on
+  /// THAT statement, not here.
   ///
-  /// Nothing dedupes at the locator level: this method appends whatever bytes it
-  /// is given. The at-most-once property therefore rests on a structural
-  /// invariant the CALLER must preserve — **one temporary locator has exactly one
+  /// Since Story 12.4 that caller obligation is the PRIMARY guarantee, not the
+  /// only one: this method also dedupes at the locator level as a backstop,
+  /// skipping bytes that are already pending (see [_isTempLobAlreadyQueued] and
+  /// the "Locator-level dedupe backstop" section below, which is the authority on
+  /// why the backstop is both necessary and safe). The structural invariant the
+  /// code is still designed around is **one temporary locator has exactly one
   /// owner responsible for queueing it**, and there are exactly two kinds of
   /// owner:
   ///

@@ -155,7 +155,16 @@ void main() {
           final eagerId = nextTestId();
           final tempBindId = nextTestId();
           final forUpdateId = nextTestId();
-          final streamIds = [nextTestId(), nextTestId(), nextTestId()];
+          // FOUR streamed rows, not three: with `fetchSize: 2` the buffer is
+          // refilled only when it is EMPTY at getRow() time, so it takes a
+          // THIRD getRow() to cross the batch boundary and leave row 4 wrapped
+          // but UNDELIVERED for rs.close() to reap (step 4).
+          final streamIds = [
+            nextTestId(),
+            nextTestId(),
+            nextTestId(),
+            nextTestId(),
+          ];
 
           // ---- step 0: seed rows (non-repeating payloads) ------------------
           final eagerText = risingText(120);
@@ -177,6 +186,24 @@ void main() {
           expectQuiescent('the seed inserts');
           expect(connection.debugPendingTempLobCount, equals(0),
               reason: 'the seed String binds are short enough to travel inline');
+
+          // Statement-cache accounting for the whole sequence, from a baseline
+          // taken here (setUp's DDL runs before it, so its entry is irrelevant).
+          // Every step below declares how many NEW distinct statement texts it
+          // executes and the delta is asserted EXACTLY with a running
+          // accumulator — never a loose bound, never a guess (Story 11.5's
+          // review lesson). A repeated text must NOT add a slot, and the LOB
+          // SELECTs must reuse their slot even though their cursor is re-parsed
+          // every time (the documented LOB exception, proven in the next test).
+          final cacheBase = connection.debugCacheSize;
+          var expectedNewSlots = 0;
+          void expectCacheSlots(int newDistinctStatements, String step) {
+            expectedNewSlots += newDistinctStatements;
+            expect(connection.debugCacheSize - cacheBase,
+                equals(expectedNewSlots),
+                reason: '$step cached exactly $newDistinctStatements new '
+                    'distinct statement(s) — no extra slot, no eviction');
+          }
 
           // ---- step 1: eager fetchLobs SELECT, read, close -----------------
           var readOps = connection.debugLobReadOps;
@@ -200,6 +227,8 @@ void main() {
           expect(connection.debugPendingTempLobCount, equals(0),
               reason: 'a FETCHED table locator is measured non-temporary, so '
                   'close() queues no free (Story 12.2)');
+          // One new text: the eager LOB SELECT.
+          expectCacheSlots(1, 'step 1 (the eager fetchLobs SELECT)');
 
           // ---- step 2: createTemporaryClob + writeStream + bind -----------
           final tempText = risingText(300);
@@ -240,6 +269,9 @@ void main() {
           expect(afterFree.rows.single['V'], equals(1));
           expect(connection.debugPendingTempLobCount, equals(0),
               reason: 'the free-temp queue drained on the next execute');
+          // Three new texts: the temp-LOB INSERT, its read-back SELECT and the
+          // `SELECT 1 AS V FROM dual` the FREE_TEMP piggyback rode on.
+          expectCacheSlots(3, 'step 2 (the temporary LOB)');
 
           // ---- step 3: FOR UPDATE locator write + rollback / commit -------
           //
@@ -311,6 +343,13 @@ void main() {
           await survivor.close();
           await connection.execute('SELECT 1 FROM dual'); // drain the free
           expect(connection.debugPendingTempLobCount, equals(0));
+          // TWO new texts, not three: the plain read-back SELECT (executed
+          // twice — the repeat adds no slot) and `SELECT 1 FROM dual`. The
+          // `SELECT ... FOR UPDATE` is deliberately NOT cache-eligible at all
+          // (`isCacheEligibleSql` excludes a locking select so a reused cursor
+          // can never interact with row-lock semantics), so neither of its two
+          // executions takes a slot — measured here, not assumed.
+          expectCacheSlots(2, 'step 3 (the FOR UPDATE writes and boundaries)');
 
           // ---- step 4: streaming resultSet + fetchLobs --------------------
           readOps = connection.debugLobReadOps;
@@ -321,8 +360,11 @@ void main() {
             const OracleExecuteOptions(
               resultSet: true,
               fetchLobs: true,
-              // Fetch 2 of 3 rows per batch, so a batch keeps an UNDELIVERED
-              // handle when the result set is closed below.
+              // 4 rows, 2 per batch. ResultSetCursor.nextRowData() fetches only
+              // when the buffer is EMPTY at call time, so the three getRow()
+              // calls below deliver rows 1-3 and batch 2 leaves row 4 wrapped
+              // but UNDELIVERED — which is what gives rs.close() a real handle
+              // to reap.
               fetchSize: 2,
             ),
           );
@@ -335,16 +377,47 @@ void main() {
           // disturbed by the interleaved LOB round trip.
           expect(await firstLob.read(), startsWith('row0-'));
           expect(connection.debugLobReadOps - readOps, equals(1));
-          final secondRow = await rs.getRow();
+          final secondRow = await rs.getRow(); // still batch 1, no FETCH
           expect(secondRow, isNotNull);
           final secondLob = secondRow!['DOC']! as OracleLob;
           expect(await secondLob.read(), startsWith('row1-'));
-          // Close while row 3's prefetched batch still holds an UNDELIVERED
-          // handle: rs.close() reaps exactly those.
+          final thirdRow = await rs.getRow(); // empties the buffer -> FETCH #2
+          expect(thirdRow, isNotNull);
+          final thirdLob = thirdRow!['DOC']! as OracleLob;
+          expect(await thirdLob.read(), startsWith('row2-'));
+          expect(connection.debugLobReadOps - readOps, equals(3),
+              reason: 'one READ per handle read, and the batch FETCH itself '
+                  'issues none');
+
+          // Batch 2 wrapped rows 3 AND 4; only row 3 was delivered, so exactly
+          // ONE undelivered handle is sitting in the prefetch buffer right now.
+          final buffered = rs.bufferedLobHandles().toList();
+          final deliveredLobs = [firstLob, secondLob, thirdLob];
+          final undelivered = buffered
+              .where((h) => !deliveredLobs.any((d) => identical(d, h)))
+              .toList();
+          expect(undelivered, hasLength(1),
+              reason: 'row 4 was prefetched and wrapped but never delivered');
+          final reaped = undelivered.single;
+          expect(reaped.isClosed, isFalse, reason: 'still open before close()');
+
+          // Close while that prefetched batch still holds it: rs.close() reaps
+          // exactly `buffered − delivered`.
           await rs.close();
+          expect(reaped.isClosed, isTrue,
+              reason: 'rs.close() reaped the UNDELIVERED handle — without this '
+                  'the connection would keep a registered handle forever');
+          for (final d in deliveredLobs) {
+            expect(d.isClosed, isFalse,
+                reason: 'a DELIVERED handle belongs to the caller and is never '
+                    'reaped by close()');
+          }
           await firstLob.close();
           await secondLob.close();
+          await thirdLob.close();
           expectQuiescent('the streaming result set closed');
+          // One new text: the streaming LOB SELECT.
+          expectCacheSlots(1, 'step 4 (the streaming resultSet + fetchLobs)');
 
           // ---- step 5/6: ordinary query + boundaries ----------------------
           final plain = await connection.execute(
@@ -354,6 +427,8 @@ void main() {
           await connection.commit();
           await connection.rollback();
           expectQuiescent('the ordinary query and the boundaries');
+          // One new text: the COUNT(*). commit()/rollback() cache nothing.
+          expectCacheSlots(1, 'step 5/6 (the ordinary query and boundaries)');
 
           // ---- step 7: the anti-wedge finale ------------------------------
           // Both a plain statement AND a fresh fetchLobs read must work, proving
@@ -375,6 +450,13 @@ void main() {
           expect(await finaleLob.read(), equals(eagerText));
           await finaleLob.close();
           expectQuiescent('the finale');
+          // Two new texts: `SELECT 42 AS V FROM dual` and the finale's
+          // single-column LOB SELECT (step 1 selected `doc, bin`, so this is a
+          // genuinely different statement, not a repeat). The slot-reuse side of
+          // the LOB exception is already pinned above: step 3's read-back LOB
+          // SELECT ran twice for ONE slot even though its cursor is re-parsed
+          // every time — the exception is a cursor rule, not a cache-size rule.
+          expectCacheSlots(2, 'step 7 (the anti-wedge finale)');
           expect(connection.debugPendingTempLobCount, equals(0));
           expect(connection.debugPendingCloseCount, equals(0),
               reason: 'every cursor queued for close was flushed by a later '
@@ -845,7 +927,7 @@ void main() {
 
       test(
         'the shapes measured NON-temporary still queue nothing (a table row '
-        'locator, TO_CLOB, a plain PL/SQL OUT bind)',
+        'locator, a TO_CLOB expression, a TO_CLOB-literal PL/SQL OUT bind)',
         () async {
           // The fix is content-driven off LobLocator.isTemporary, so a locator
           // the server did NOT flag temporary must be completely unaffected.
@@ -877,8 +959,16 @@ void main() {
               {'p': OracleBind.out(type: OracleDbType.clob, maxSize: 4000)},
             );
             expect(outOnly.outBinds['p'], equals('plain out'));
+            // NARROW, because it is shape-dependent: an OUT locator the body
+            // fills from a TO_CLOB LITERAL is not TEMP-flagged. An OUT locator
+            // the body assigns from a TEMPORARY input LOB (`p_out := p_in` where
+            // p_in arrived as the driver's temp CLOB — see the copyProc cases in
+            // clob_integration_test.dart / blob_integration_test.dart) IS
+            // TEMP-flagged and does queue a free. "A plain OUT bind" is not one
+            // answer; how the OUT value was produced decides.
             expect(connection.debugPendingTempLobCount, equals(0),
-                reason: 'a plain PL/SQL CLOB OUT bind is not temporary');
+                reason: 'a TO_CLOB-literal PL/SQL OUT locator is not '
+                    'TEMP-flagged, so nothing is queued for it');
 
             final blob = await connection.execute(
               'BEGIN $blobProc(:p); END;',
@@ -1389,9 +1479,22 @@ void main() {
 
           final lob = await lobFor('doc', id);
           try {
-            // Remedy 1 — an explicit amount. A deliberate overshoot reads to the
-            // end rather than throwing (node-oracledb getData parity), and it
-            // really goes to the server.
+            // Remedy 1 — an explicit amount. LIVE SCOPE, stated plainly: an
+            // explicit `amount` is capped at the units remaining from the CACHED
+            // length, so the direction it actually guards is the SHRUNK one —
+            // and measurement row 3 of the Dev Agent Record records that the
+            // shrunk direction is UNREACHABLE live (a LOB locator is
+            // read-consistent: a stale handle keeps returning the OLD value in
+            // full on both fixtures, so no live shrink ever reaches read()'s
+            // truncation guard). What this case can prove live is therefore the
+            // clamping BEHAVIOUR the remedy relies on — a deliberate overshoot
+            // reads to the end rather than throwing (node-oracledb getData
+            // parity) and really goes to the server. The remedy working against
+            // an actually-shrunk value underneath a stale cached length is
+            // pinned deterministically instead, by the fake-transport unit test
+            // "the AC6 SHRUNK-direction remedy" in test/src/oracle_lob_test.dart
+            // (a server that holds fewer units than the cached length: read()
+            // fails loud, read(amount: <units that exist>) succeeds).
             final before = connection.debugLobReadOps;
             expect(await lob.read(offset: 1, amount: text.length * 10),
                 equals(text));
@@ -1572,7 +1675,6 @@ void main() {
           // — so this test accepts EITHER and asserts neither, which is what
           // keeps it version-agnostic instead of version-branched.
           final expendable = await connectForTest();
-          var closedAlready = false;
           try {
             OracleException? failure;
             try {
@@ -1611,14 +1713,19 @@ void main() {
                       'clearly rather than returning wrong data');
             }
           } finally {
+            // A poisoned transport may legitimately refuse a clean close — but
+            // it must fail the way this driver always fails. Anything that is
+            // not an OracleException escapes here and fails the test (a raw
+            // SocketException or a StateError leaking out of close() would be a
+            // real defect, not a version difference).
             try {
               await expendable.close();
-              closedAlready = true;
-            } catch (_) {
-              // A poisoned transport may refuse a clean close; not a failure.
+            } on OracleException catch (e) {
+              expect(e.message, isNotEmpty,
+                  reason: 'close() on a poisoned session may throw, but only an '
+                      'OracleException carrying a real diagnostic');
             }
           }
-          expect(closedAlready, anyOf(isTrue, isFalse));
 
           // The load-bearing containment assertion: NO server-side damage — a
           // FRESH connection executes normally, including the same tables.

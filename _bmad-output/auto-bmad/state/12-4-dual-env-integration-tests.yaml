@@ -5,10 +5,10 @@ epic_num: 12
 story_num: 4
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T17:42:34Z"
+updated_at: "2026-07-26T18:14:31Z"
 started_at: "2026-07-26T16:42:07Z"
 completed_at: null
-active_seconds: 3606
+active_seconds: 5514
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: true
@@ -20,14 +20,14 @@ tea_selected: []
 tea_rationale: "TEA disabled for this run (tea.enabled=false)"
 epic_story_count: 4
 stories_after_in_epic: 0
-completed_phases: [0, 1, 3, 5]
+completed_phases: [0, 1, 3, 5, 7]
 code_review_iterations: 0
 code_review_loop_done: false
 hitl_halt: null
 external_review_iterations: 0
 convergence_unverified: false
 story_trace: null
-commits: [f224f0f]
+commits: [23b949f]
 phase8_steps:
   trace_gate: null
   nfr: null
@@ -59,3 +59,4 @@ blockers: []
 overrides: {}
 constraints: []
 tier_a_base_sha: c249963f083200a1dafd473089b55c48fbc009aa
+tier_a_review: "iteration 1 — Changes Requested; Critical 0 / High 0 / Med 3 / Low 10; 11 Patch fixed, 1 Defer logged, 1 Decision AUTO-RESOLVED as dismiss (Med — below the draft threshold); 3 noise dismissed; post-fix verified clean"

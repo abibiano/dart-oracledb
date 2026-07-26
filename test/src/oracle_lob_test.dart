@@ -514,6 +514,36 @@ void main() {
       await blob.close();
     });
 
+    test(
+        'the AC6 SHRUNK-direction remedy: an explicit amount covering only units '
+        'that still exist reads correctly where a null amount fails loud',
+        () async {
+      // Story 12.4 AC6 requires the DOCUMENTED remedies to be asserted to work.
+      // The shrunk direction cannot be produced live (measured on 23ai and 21c:
+      // a LOB locator is read-consistent, so a stale handle keeps returning the
+      // OLD value in full and never trips the truncation guard), so it is pinned
+      // here deterministically: a handle whose CACHED length is 40 over a server
+      // value that now holds only 10 units.
+      final (conn, t, lob) = await _fetchLob(_clob(40));
+      t.lobReadData = Uint8List.fromList(utf8.encode('0123456789'));
+      expect(lob.length, equals(40), reason: 'the stale CACHED length');
+
+      // Without an explicit amount the read asks for all 40 cached units and the
+      // server can only deliver 10 — fail loud, never a silently short value.
+      await expectLater(
+        lob.read(),
+        throwsA(isA<OracleException>().having((e) => e.message, 'message',
+            allOf(contains('length mismatch'), contains('expected 40')))),
+      );
+
+      // The remedy: ask only for units you know exist. The cap keeps the request
+      // at 10, the server satisfies it, and the value comes back correct.
+      expect(await lob.read(offset: 1, amount: 10), equals('0123456789'));
+      // ... and it really went to the server both times (no short-circuit).
+      expect(t.lobReadCalls, equals(2));
+      await lob.close();
+    });
+
     test('an EXPLICIT amount past the end reads to the end (not a truncation)',
         () async {
       // offset 7 into an 11-char CLOB with an explicit amount 100: only 5 units

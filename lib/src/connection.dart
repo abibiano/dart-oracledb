@@ -462,11 +462,14 @@ class OracleConnection {
   ///
   /// Instrumentation for the temp-LOB lifecycle integration tests: proves the
   /// queue drains to zero after the execute that follows a temp-LOB release —
-  /// including after a failed execute. Counts BOTH kinds of queued locator: the
-  /// driver's own internal temp LOBs created for a `String` / `Uint8List`
-  /// CLOB/BLOB bind, and a caller-owned temporary [OracleLob]
-  /// ([createTemporaryClob] and friends) whose `close()` released it. Not part
-  /// of the public API.
+  /// including after a failed execute. Counts ALL THREE kinds of queued locator:
+  /// the driver's own internal temp LOBs created for a `String` / `Uint8List`
+  /// CLOB/BLOB bind; a caller-owned temporary [OracleLob]
+  /// ([createTemporaryClob] and friends) whose `close()` released it; and, since
+  /// Story 12.4, a server-allocated temporary locator the `fetchLobs`-off
+  /// materialize path read and discarded (the `IN OUT` LOB-bind OUT locator, and
+  /// an OUT locator the PL/SQL body assigned from a temporary input LOB). Not
+  /// part of the public API.
   @visibleForTesting
   int get debugPendingTempLobCount => _transport.debugPendingTempLobCount;
 

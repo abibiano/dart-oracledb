@@ -5,10 +5,10 @@ epic_num: 12
 story_num: null
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T17:42:34Z"
+updated_at: "2026-07-26T18:14:31Z"
 started_at: "2026-07-26T13:15:23Z"
 completed_at: null
-active_seconds: 15838
+active_seconds: 17746
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: false
@@ -56,7 +56,8 @@ active_story: 12-4-dual-env-integration-tests
 stories_landed:
   - 12-2-temporary-lob-lifecycle
   - 12-3-chunked-streaming-transfer
-auto_decisions: []
+auto_decisions:
+  - "AC4's fix is not confined to _materializeLobValues — it widens the shared queueTempLobToFree contract, and AC4's revert-and-carry alternative was not taken [Med] → dismiss: accept the widened guard as an approved, disclosed AC4 deviation — a single-choke-point backstop is strictly safer than a per-caller guard, the security review independently confirmed it can only suppress adds (never cause an extra free), both dual-env suites plus 12 unit regressions are green, and reverting would reinstate a live-measured leak; residue closed via the docstring patch instead (Tier A, 12-4-dual-env-integration-tests)"
 uat_items:
   - "[12-2-temporary-lob-lifecycle] Setup: 23ai up (docker context use desktop-linux; docker compose up -d); scratch script tool/uat_temp_lob.dart connecting to localhost:1521/FREEPDB1 as system/testpassword, run with dart run"
   - "[12-2-temporary-lob-lifecycle] createTemporaryClob() then print type/length/isTemporary/isClosed/chunkSize -> clob, 0, true, false, real chunk size (8132, never 0)"
