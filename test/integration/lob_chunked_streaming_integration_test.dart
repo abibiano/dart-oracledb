@@ -894,10 +894,13 @@ void main() {
           // The rejected REF cursor id is queued for the close-cursor piggyback
           // alongside the top-level statement cursor. Before Story 12.3 only the
           // statement cursor was reaped (measured: +1 instead of +2), leaking one
-          // server cursor per rejected call.
+          // server cursor per rejected call. Exact (the epic's ratified
+          // counter rule): the delta is the rejected REF cursor plus the
+          // top-level PL/SQL statement cursor, and `before` absorbs whatever the
+          // preceding DDL left pending.
           expect(
             connection.debugPendingCloseCount - before,
-            greaterThanOrEqualTo(2),
+            equals(2),
             reason: 'the rejected embedded cursor must be reaped, not leaked',
           );
           // The connection stays usable and the queue drains.

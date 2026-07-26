@@ -197,9 +197,18 @@ class OracleLob {
   ///
   /// `true` for every handle from `OracleConnection.createTemporaryClob()` /
   /// `createTemporaryNClob()` / `createTemporaryBlob()`, and also for a FETCHED
-  /// locator whose bytes carry the server's temporary flag (Oracle sets it for
-  /// some server-expression and PL/SQL-produced LOBs, e.g.
-  /// `SELECT TO_CLOB('x') FROM dual`).
+  /// locator whose bytes carry the server's temporary flag.
+  ///
+  /// Which fetched shapes carry that flag is measured, not guessable — "a PL/SQL
+  /// LOB OUT bind" is not one answer, because how the OUT value was produced
+  /// decides. On both Oracle 23ai and 21c: a plain table-row locator, a
+  /// `SELECT ... FOR UPDATE` locator, a `SELECT TO_CLOB('x') FROM dual`
+  /// expression and an OUT locator the PL/SQL body fills from a `TO_CLOB`
+  /// **literal** all report `false` (no flag, no session temp-LOB space). An OUT
+  /// locator the body assigns from a **temporary** input LOB (`p_out := p_in`,
+  /// where `p_in` arrived as the driver's temporary LOB for a `String` /
+  /// `Uint8List` bind) and an `IN OUT` bind's returned locator both report
+  /// `true`, and the driver queues their server-side free.
   ///
   /// When `true`, [close] queues the LOB's server-side release; when `false`,
   /// [close] is local bookkeeping only. See [close].
@@ -427,8 +436,14 @@ class OracleLob {
   /// }
   /// ```
   ///
-  /// * **Exactness.** The concatenation of every emitted piece equals
-  ///   `read(offset: offset)` character for character.
+  /// * **Exactness.** For a LOB whose length has not changed since this handle
+  ///   was fetched, the concatenation of every emitted piece equals
+  ///   `read(offset: offset)` character for character. The two DIVERGE for a LOB
+  ///   that grew server-side afterwards, and the stream is the accurate one:
+  ///   [read] caps its request at the cached [length] and so returns a stale
+  ///   prefix, while the stream ends only on the server's empty READ (see the
+  ///   round-trip bullet below) and therefore returns strictly MORE. That is the
+  ///   same stale-length immunity, stated as the trade-off it is.
   /// * **[pieceSize]** defaults to [chunkSize] when the server reported one
   ///   (`> 0`) and otherwise to [defaultLobStreamPieceSize]. A multiple of
   ///   [chunkSize] is recommended for efficiency (node-oracledb `lob.pieceSize`
@@ -498,7 +513,10 @@ class OracleLob {
   /// applies here with bytes as the unit (BLOB offsets, amounts and [length] are
   /// byte counts), minus the character-boundary caveat — raw bytes have none:
   /// the concatenation of the emitted pieces equals `read(offset: offset)` byte
-  /// for byte, [pieceSize] defaults to [chunkSize] (or
+  /// for byte for a LOB whose length has not changed since it was fetched (a LOB
+  /// that grew server-side afterwards streams strictly more than [read]'s
+  /// stale-length prefix — same trade-off as [textStream]), [pieceSize] defaults
+  /// to [chunkSize] (or
   /// [defaultLobStreamPieceSize] when unknown), the stream ends on an empty
   /// server READ, liveness is re-checked per piece, and cancelling leaves the
   /// connection immediately reusable.
@@ -680,6 +698,18 @@ class OracleLob {
   ///   written in place; the handle stays usable, the connection is never
   ///   wedged, and nothing is rolled back for you. Wrap the operation in a
   ///   transaction if partial data is unacceptable.
+  /// * **An abort can leave the written prefix one code unit short
+  ///   (CLOB/NCLOB).** The held-back trailing high surrogate described above is
+  ///   flushed only when the stream *completes*. If the stream instead aborts —
+  ///   a wrong-typed chunk, or the source `Stream` emitting an error — the code
+  ///   unit held back from the LAST successfully written chunk is discarded, so
+  ///   that chunk's data is short by one UTF-16 code unit. Deliberate: the flush
+  ///   would be a further WRITE on a stream the caller is already being told
+  ///   failed (and, for a server error, on a connection that may not accept it).
+  ///   The caller always receives the exception — never a silent short write —
+  ///   and the lost unit is an unpaired surrogate half at a point where the
+  ///   value is already truncated. Re-write the value from the start rather than
+  ///   appending to a partial one.
   ///
   /// Throws [ArgumentError] synchronously, before any round trip and before the
   /// stream is subscribed to, if [offset] `<= 0` — and [OracleException] the same
@@ -737,6 +767,12 @@ class OracleLob {
       await write(offset + written, piece);
       written += units;
     }
+    // Reached only when the stream COMPLETED. An abort (a wrong-typed chunk,
+    // whose `write()` throws before the carry is consumed, or a source-stream
+    // error) skips this flush and discards the carry, leaving the last written
+    // chunk one code unit short — documented on [writeStream] rather than
+    // patched, because the fix would be a further WRITE on an operation the
+    // caller is already being told failed.
     final tail = highSurrogateCarry;
     if (tail != null) {
       // End of stream with the pair never completed. write()'s documented
@@ -999,8 +1035,18 @@ class OracleLob {
 /// bytes and silently redirect the application's own later read/write to a
 /// different LOB in the same session — more authority than an opaque handle is
 /// meant to convey, and invisible to the cross-connection [OracleLob.isOwnedBy]
-/// guard. As a library-private top-level function there is no member to reach
-/// through the object and `_locator` stays private.
+/// guard. Moving the seam off the class kills that path specifically: [OracleLob]
+/// has no member returning `_locator`, so dynamic dispatch on a handle reaches
+/// nothing.
+///
+/// This **raises the bar rather than enforcing a boundary.** The function is a
+/// public top-level name in `lib/src/oracle_lob.dart`, so a
+/// `import 'package:oracledb/src/oracle_lob.dart' show lobLocatorOf;` still
+/// reaches it (the driver's own tests do exactly that) — it only trips the
+/// `implementation_imports` lint. So the confused-deputy scenario above remains
+/// reachable one deliberate `src/` import away; what is gone is the accidental,
+/// zero-effort `(lob as dynamic)` route on an exported class. No later story
+/// should rely on this as an enforced invariant.
 ///
 /// The bytes are still live and mutable BY DESIGN for the driver's own use
 /// (`copyBackLocator` updates a temporary locator in place after every LOB

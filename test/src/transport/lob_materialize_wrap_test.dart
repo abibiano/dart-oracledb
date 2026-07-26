@@ -567,8 +567,42 @@ void main() {
       expect(out.rows[0][0], equals(out.rows[2][0]));
     });
 
-    test('a NON-temporary locator queues nothing (row / TO_CLOB / FOR UPDATE / '
-        'plain PL-SQL-OUT shapes stay unaffected)', () async {
+    // Story 12.4 AC4 SITE-AUDIT item 6: `ResultSetCursor`'s per-batch
+    // `materializeLobs` and the eager drain call the same method, so both inherit
+    // the fix — but nothing pinned "no per-batch double-queue". The per-response
+    // `materialized` dedup map does NOT span calls, so a locator appearing in two
+    // batches of one result set is presented twice; only the content dedupe
+    // (`_tempLobKeysToClose`) keeps the queue at 1. Reachable because the queue
+    // cannot drain between batches: draining needs a `sendExecute`, and an open
+    // fetched handle / open result set means none happens.
+    test('the SAME TEMP locator across two batches (two materializeLobs calls, '
+        'no execute between) queues exactly ONCE', () async {
+      final t = blobTransport(2);
+      final loc = _fetchedTempLocator(oracleType: oraTypeBlob, length: 2);
+      // Batch 1.
+      final first = await t.materializeLobs(
+        ExecuteResponse(isSuccess: true, rows: [
+          [loc],
+        ]),
+      );
+      expect(first.rows.single.single, equals([1, 2]));
+      expect(t.debugPendingTempLobCount, equals(1));
+      // Batch 2 — a fresh response (fresh dedup map), same locator instance, as
+      // Oracle's duplicate-column optimization can carry via
+      // `_previousRoundLastRow`.
+      final second = await t.materializeLobs(
+        ExecuteResponse(isSuccess: true, rows: [
+          [loc],
+        ]),
+      );
+      expect(second.rows.single.single, equals([1, 2]));
+      expect(t.debugPendingTempLobCount, equals(1),
+          reason: 'a second queue would send the locator twice in ONE piggyback '
+              'and surface as a double FREE_TEMP on an unrelated statement');
+    });
+
+    test('a NON-temporary locator queues nothing (table row / TO_CLOB / FOR '
+        'UPDATE / TO_CLOB-literal PL-SQL-OUT shapes stay unaffected)', () async {
       final t = blobTransport(3);
       final loc = _fetchedPlainLocator(oracleType: oraTypeBlob, length: 3);
       final out = await t.materializeLobs(

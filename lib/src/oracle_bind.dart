@@ -295,12 +295,22 @@ class OracleBind {
                 'DateTime, or null',
           );
         }
+      // The RAW and LOB branches report only the offending runtime TYPE, never
+      // the value. `ArgumentError.value` renders its value through
+      // `Error.safeToString`, which for a String emits the whole thing — and
+      // these are exactly the branches a caller trips by passing raw payload
+      // material of the wrong shape (`OracleBind(type: blob, value: apiToken)`
+      // instead of `utf8.encode(apiToken)`; BLOB/RAW columns commonly hold
+      // tokens, key material and encrypted blobs). `ArgumentError` is a plain
+      // API-misuse error that frameworks log verbatim and forward to error
+      // trackers, so the payload would persist outside the database trust
+      // boundary. Same policy as `OracleLob.write()` and
+      // `OracleConnection._validateDefValue`: name the type, never the value.
       case OracleDbType.raw:
         if (value is! Uint8List) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: raw) requires Uint8List or null',
+          throw ArgumentError(
+            'OracleBind(type: raw) requires Uint8List or null, got '
+            '${value.runtimeType}',
           );
         }
       // A LOB-typed bind also accepts an OracleLob handle (Story 12.2): the
@@ -312,26 +322,23 @@ class OracleBind {
       // the declared shape.
       case OracleDbType.clob:
         if (value is! String && value is! OracleLob) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: clob) requires String, OracleLob, or null',
+          throw ArgumentError(
+            'OracleBind(type: clob) requires String, OracleLob, or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.nClob:
         if (value is! String && value is! OracleLob) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: nClob) requires String, OracleLob, or null',
+          throw ArgumentError(
+            'OracleBind(type: nClob) requires String, OracleLob, or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.blob:
         if (value is! Uint8List && value is! OracleLob) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: blob) requires Uint8List, OracleLob, or null',
+          throw ArgumentError(
+            'OracleBind(type: blob) requires Uint8List, OracleLob, or null, '
+            'got ${value.runtimeType}',
           );
         }
       case OracleDbType.json:

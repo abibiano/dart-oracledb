@@ -382,11 +382,12 @@ class OracleConnection {
   /// cursor and no fetch state, and binding it into a statement is its whole
   /// purpose. Its round trips are still serialized by [_runLobOp].
   ///
-  /// The eight dispositions, all load-bearing (a site that treats both kinds
+  /// The nine dispositions, all load-bearing (a site that treats both kinds
   /// alike silently does the wrong thing for one of them). A story auditing LOB
   /// handle lifetime must walk ALL of them — 1-5 are the connection-level
   /// dispositions, 6-8 the streamed-handle reap sites Story 12.3 added, which
-  /// hold the MOST handles at once (up to `prefetchRows` per buffered batch):
+  /// hold the MOST handles at once (up to `prefetchRows` per buffered batch), and
+  /// 9 is the caller-invoked bulk close:
   /// 1. [_rejectConcurrentOperation] — ignores created-temp, still trips on
   ///    fetched;
   /// 2. the execute-failure cleanup — reaps fetched only
@@ -406,10 +407,17 @@ class OracleConnection {
   ///    rows never reach the caller, so nothing else can close them;
   /// 8. [_openResultSetGuarded]'s catch (`_reapUndeliveredLobs`) — the FIRST
   ///    batch is wrapped before the cursor exists, so a failure between the two
-  ///    leaves handles with no result set to ever reap them.
+  ///    leaves handles with no result set to ever reap them;
+  /// 9. `OracleResult.closeLobs()` (`result.dart`, walking rows / OUT binds /
+  ///    implicit results / a streaming `resultSet` via `bufferedLobHandles()`) —
+  ///    the BLUNTEST disposition and the only one that deliberately closes
+  ///    handles the caller ALREADY RECEIVED: it has no delivered-handle filter by
+  ///    design ("close everything this result reached"), so an aliased delivered
+  ///    handle goes too. Any story reasoning about who may close a delivered
+  ///    handle must account for it.
   ///
-  /// 6-8 all concern FETCHED handles only; a created-temporary handle is never
-  /// produced by a batch wrap.
+  /// 6-9 all concern FETCHED handles only; a created-temporary handle is never
+  /// produced by a batch wrap or reachable from an `OracleResult`.
   ///
   /// Each handle's `close()` removes itself via [releaseLob]. Insertion order is
   /// preserved so a force-close reaps deterministically.
@@ -878,8 +886,23 @@ class OracleConnection {
   ///
   /// [fetchLobs] is `required` deliberately: every caller must state its answer.
   /// An omitted argument silently defaulted to `false` here once (streaming
-  /// `resultSet: true` + `fetchLobs: true`), which skipped the reject and drove
-  /// the undecodable fetch that costs a 21c session.
+  /// `resultSet: true` + `fetchLobs: true`), which left this one entry point
+  /// without the reject every other one enforces.
+  ///
+  /// Reachability, stated precisely so no caller mistakes this reject for a
+  /// remedy: it runs on ALREADY-DECODED rows, i.e. strictly after `sendExecute`
+  /// returned. For a nested `CURSOR(...)` column a real server's EXECUTE response
+  /// does not decode at all (measured — see [_rejectCursorEmbeddedLob]), so on
+  /// 23ai and 21c the decode failure happens FIRST and no `fetchLobs` value can
+  /// pre-empt it; the 21c session is lost either way, and projecting the LOB
+  /// outside the cursor is the only remedy. This reject is therefore pinned by
+  /// fake-transport tests (which can hand over such a decoded row) and exists to
+  /// keep the flag-threading contract total: `fetchLobs` never silently
+  /// materializes a cursor-embedded LOB at any entry point or nesting depth. The
+  /// reject that IS live-reachable is the REF CURSOR OUT-bind one in
+  /// [_wrapRefCursorOutBinds] — that cursor's describe decodes fine, so the
+  /// reject lands after the execute round trip but before the row FETCH that
+  /// would poison the session.
   Future<void> _materializeNestedCursorsInBatch(
     List<List<Object?>> rows,
     List<int> cursorColumnIndices, {
@@ -906,7 +929,24 @@ class OracleConnection {
         }
         var nestedRows = drained[value.cursorId];
         if (nestedRows == null) {
-          nestedRows = await _drainNestedCursor(value, fetchLobs: fetchLobs);
+          try {
+            nestedRows = await _drainNestedCursor(value, fetchLobs: fetchLobs);
+          } catch (_) {
+            // The reject can also arrive from BELOW: [_drainNestedCursor]
+            // recurses into this method for a deeper `CURSOR()` column, and a
+            // throw down there propagates straight through this `await` with no
+            // requeue of THIS level's ids. The inner batch requeues its own ids
+            // and the drained cursor is reaped by [_drainNestedCursor]'s
+            // `finally`, but an OUTER sibling `CURSOR(...)` column that has not
+            // been drained yet reaches neither — so collect this level's ids on
+            // every failure path, not only at the reject site above. Applies to
+            // any drain failure, not just the LOB reject; the close queue
+            // dedupes, so already-reaped ids cost nothing.
+            _cache.requeueCursorsToClose(
+              _nestedCursorIdsIn(rows, cursorColumnIndices),
+            );
+            rethrow;
+          }
           drained[value.cursorId] = nestedRows;
         }
         row[i] = nestedRows;
@@ -918,11 +958,14 @@ class OracleConnection {
   /// positions [cursorColumnIndices] — including descriptors this batch has not
   /// drained yet.
   ///
-  /// Used by the cursor-embedded-LOB reject, which throws MID-loop: the sibling
-  /// `CURSOR(...)` columns after the offending one never reach
-  /// [_drainNestedCursor]'s reaping `finally`, so their ids must be collected
-  /// here or their server cursors leak. Already-materialized positions hold a
-  /// `List<OracleRow>` rather than a [DecodedCursorResult] and are skipped.
+  /// Used by both mid-loop failure paths in [_materializeNestedCursorsInBatch]:
+  /// the cursor-embedded-LOB reject (which throws before any deeper drain) and a
+  /// throw propagating UP from [_drainNestedCursor] (including a reject raised at
+  /// nesting depth >= 2). In both cases the sibling `CURSOR(...)` columns after
+  /// the offending one never reach [_drainNestedCursor]'s reaping `finally`, so
+  /// their ids must be collected here or their server cursors leak.
+  /// Already-materialized positions hold a `List<OracleRow>` rather than a
+  /// [DecodedCursorResult] and are skipped.
   static Iterable<int> _nestedCursorIdsIn(
     List<List<Object?>> rows,
     List<int> cursorColumnIndices,
@@ -3988,6 +4031,15 @@ class OracleConnection {
   /// open Epic 12 follow-up (a future decision, not pending work in this epic) —
   /// so the fetched branch below stays a validation path no test can exercise
   /// live, kept because the unwrap is category-agnostic and the rule may lift.
+  ///
+  /// **Whoever lifts it inherits a second, non-obvious dependency.** The
+  /// free-temp queue's double-free backstop relies on this slot rule to keep two
+  /// queue attempts for one locator inside a single pending window (the
+  /// `fetchLobs: true` `p := p` shape). Relaxing the rule lets an execute drain
+  /// the queue between them, re-opening a real double FREE_TEMP and leaving the
+  /// handle pointing at an already-freed LOB (ORA-22922 on the next `read()`).
+  /// See `Transport.queueTempLobToFree`'s invariant section for the full
+  /// statement of the coupling.
   void _validateLobBindValue(
     OracleLob lob, {
     required String slotLabel,
@@ -4242,10 +4294,14 @@ class OracleConnection {
       if (cursorColumnIndices.isNotEmpty) {
         // fetchLobs MUST be threaded: `resultSet: true + fetchLobs: true` over a
         // SELECT projecting a nested `CURSOR(...)` column is a reachable shape
-        // (both halves are supported), and it is the reject in
-        // `_materializeNestedCursorsInBatch` — not any wrap decision here — that
-        // keeps such a row from entering the undecodable fetch that costs a 21c
-        // session. Defaulting it to false here silently disabled that reject.
+        // (both halves are supported), and the reject in
+        // `_materializeNestedCursorsInBatch` — not any wrap decision here — is
+        // what keeps this entry point's answer identical to every other one.
+        // Defaulting it to false here silently disabled that reject. Note the
+        // reject is NOT a remedy for the 21c session loss: it runs on decoded
+        // rows, and a real server's EXECUTE response for a LOB-carrying nested
+        // CURSOR() does not decode at all (see `_materializeNestedCursorsInBatch`
+        // for the reachability note).
         await _materializeNestedCursorsInBatch(
           firstResponse.rows,
           cursorColumnIndices,

@@ -543,14 +543,24 @@ class Transport {
   /// the 40-odd bytes — no allocation-heavy hex formatting).
   ///
   /// Snapshot semantics, deliberately: the key is derived when the locator is
-  /// QUEUED. That matches the live-scan behaviour it replaces on every measured
-  /// path, because nothing copies back INTO a buffer that is already pending —
-  /// `copyBackLocator` writes into the freshly decoded echo instance, which is a
-  /// different `Uint8List` than the one the create helper queued. Hardening the
+  /// QUEUED, and it exactly reproduces the live byte-for-byte scan it replaces on
+  /// every measured path.
+  ///
+  /// Do NOT read that as "a pending buffer cannot mutate" — it can.
+  /// [copyBackLocator] does `source.setRange(0, source.length, updated)`, i.e. it
+  /// writes INTO the live locator buffer, which is precisely the instance
+  /// [_createTempClob] queues and the instance an `OracleLob` later hands to
+  /// [queueTempLobToFree]. So this key is a snapshot of a buffer the driver keeps
+  /// updating, and the dedupe's real basis is **byte-equality between two echoes
+  /// of ONE locator taken at different points in its life** (the create helper's
+  /// post-WRITE echo vs the handle's or the materialize path's post-READ echo) —
+  /// an empirical invariant, proven on both the 23ai and 21c fixtures, not a
+  /// structural one. Node-oracledb likewise frees its copy-back-updated locator,
+  /// which is why snapshotting is not obviously the wrong call. Hardening the
   /// comparison to a locator identity SUBRANGE (so in-place mutation could not
-  /// matter at all) is a tracked follow-up; if a pending buffer ever did mutate,
-  /// the stale key degrades to the same double-queue this backstop already
-  /// documents as its residual risk, not to something new.
+  /// matter at all) is the robust form and a tracked follow-up; if the two echoes
+  /// ever diverge, the stale key degrades to the same double-queue this backstop
+  /// already documents as its residual risk, not to something new.
   static String _tempLobKey(Uint8List locator) =>
       String.fromCharCodes(locator);
 
@@ -625,6 +635,21 @@ class Transport {
   /// LOB's unique server-side identity), and a locator can only be re-created
   /// after its free was actually SENT — i.e. after it left this list — so the
   /// dedupe can never swallow a free that was genuinely needed.
+  ///
+  /// **The backstop's guarantee is COUPLED to the fetched-handle slot rule, and
+  /// that rule is scheduled for review.** For the `fetchLobs: true` version of
+  /// `p := p`, `_createTempClob` queues locator L and the wrapping handle queues
+  /// the same bytes again when it closes. Both attempts land in ONE pending
+  /// window — which is the only reason the dedupe sees the second one at all —
+  /// and that window is guaranteed solely because an open fetched handle trips
+  /// `OracleConnection._rejectConcurrentOperation`, so no [sendExecute] can drain
+  /// the queue while the handle lives. `_validateLobBindValue`'s dartdoc names
+  /// relaxing that slot rule as an open Epic 12 follow-up. Relaxing it re-opens a
+  /// genuine DOUBLE FREE for this shape (the intervening execute drains L, then
+  /// the handle's close queues L again) AND leaves the handle dangling (its LOB
+  /// already freed → ORA-22922 on the next `read()`). Whoever relaxes it owns
+  /// both. Note the existing regression test for this shape closes the handle
+  /// BEFORE any further execute, so it cannot catch that regression.
   ///
   /// The check is **O(1)**, via the [_tempLobKeysToClose] content index. It has
   /// to be: the queue is NOT "at most a handful of entries" on every shape —
@@ -1799,10 +1824,17 @@ class Transport {
   /// * **Bounded and fail-loud.** A piece the server reports as **zero units**
   ///   while units are still outstanding cannot make progress, so it throws
   ///   [OracleException] naming the offset/amount rather than spinning. The one
-  ///   exception is a first piece that delivers nothing at all: that returns an
-  ///   empty result so the caller's own "read returned no data" guard produces
-  ///   its established message. A piece reporting MORE units than were
-  ///   outstanding is likewise a protocol fault.
+  ///   exception is a first piece that delivers nothing at all — no reported
+  ///   units AND no payload bytes: that returns an empty result so the caller's
+  ///   own "read returned no data" guard produces its established message. A
+  ///   piece reporting MORE units than that piece REQUESTED is likewise a
+  ///   protocol fault.
+  /// * **The two halves of a reply are cross-checked.** The unit count comes from
+  ///   `RETURN_PARAMETER` and the payload from separate `LOB_DATA` messages, so
+  ///   an internally inconsistent reply is possible in principle: a piece that
+  ///   ships bytes while reporting 0 units fails loud naming the inconsistency,
+  ///   rather than being mistaken for "the LOB delivered nothing" and silently
+  ///   discarding the prefix.
   /// * **Missing SB8 amount.** If a READ reply omits the amount (never observed
   ///   for a `sendAmount: true` READ on either tested server version), the piece
   ///   is treated as having satisfied the whole outstanding request — i.e. the
@@ -1852,26 +1884,42 @@ class Transport {
       // reduces this loop to the pre-12.3 single READ.
       final delivered = response.amount ?? outstanding;
       if (delivered <= 0) {
-        if (unitsRead == 0) {
+        if (unitsRead == 0 && totalBytes == 0) {
           // Nothing at all was delivered: hand back the empty result so the
           // caller's own "read returned no data" guard reports it.
           break;
         }
+        // `amount` (RETURN_PARAMETER) and `data` (separate LOB_DATA messages)
+        // are decoded from UNRELATED wire messages, so a reply can ship bytes
+        // while reporting zero units. Without this cross-check the first such
+        // piece took the break above and handed back an EMPTY result, silently
+        // discarding the prefix and mis-diagnosing the fault as "read returned
+        // no data".
         throw OracleException(
           errorCode: oraProtocolError,
-          message:
-              'LOB read made no progress: the server delivered 0 units at '
-              'offset ${offset + unitsRead} with ${amount - unitsRead} of '
-              '$amount units still outstanding (read started at offset $offset)',
+          message: totalBytes > 0 && unitsRead == 0
+              ? 'LOB read reply is internally inconsistent: the server '
+                  'delivered $totalBytes payload bytes at offset $offset but '
+                  'reported 0 units read (requested $request of $amount)'
+              : 'LOB read made no progress: the server delivered 0 units at '
+                  'offset ${offset + unitsRead} with ${amount - unitsRead} of '
+                  '$amount units still outstanding (read started at offset '
+                  '$offset)',
         );
       }
-      if (delivered > outstanding) {
+      // Compared against what THIS piece actually requested, not against the
+      // whole outstanding tail: with a piece cap in play (`pieceUnits`, or the
+      // test-only `debugLobReadPieceUnits`) `request < outstanding`, and the
+      // looser comparison accepted an over-reporting server — which then
+      // corrupts the next piece's `sourceOffset`. Identical in production, where
+      // `pieceUnits` is null on every caller and `request == outstanding`.
+      if (delivered > request) {
         throw OracleException(
           errorCode: oraProtocolError,
           message:
               'LOB read overshot: the server reported $delivered units at '
-              'offset ${offset + unitsRead} but only $outstanding of $amount '
-              'were outstanding',
+              'offset ${offset + unitsRead} but only $request were requested '
+              '($outstanding of $amount outstanding)',
         );
       }
       unitsRead += delivered;
@@ -1900,10 +1948,15 @@ class Transport {
   /// binds with its materialized value — `String` for CLOB, `Uint8List` for
   /// BLOB.
   ///
-  /// Runs inside [sendExecute] — and therefore inside the connection's
-  /// single-execute guard — after the fetch drain, so all LOB reads complete
-  /// before the response escapes the transport. A failed LOB read
-  /// fails the whole execute rather than returning a half-populated result.
+  /// Always runs AFTER the round trip that produced [response] has completed —
+  /// never inside [sendExecute]. Every call site is in the connection layer or
+  /// `ResultSetCursor` (the eager execute pass, the eager implicit-results pass,
+  /// `_openResultSetGuarded`'s first batch, and a streaming cursor's per-batch
+  /// FETCH), reached through the public [materializeLobs] seam. So all LOB reads
+  /// still complete before the response escapes to the caller, and a failed LOB
+  /// read still fails the whole operation rather than returning a half-populated
+  /// result — but the bracket that holds the connection is the caller's, and on
+  /// the streaming path the enclosing round trip is a FETCH, not an execute.
   Future<ExecuteResponse> _materializeLobValues(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
@@ -1957,10 +2010,13 @@ class Transport {
         // The decision is CONTENT-driven, never shape- or version-driven: the
         // locator's own TEMP flag bit (LobLocator.isTemporary, flag byte 4 bit
         // 0x01) is the only input. Every shape measured non-temporary — a plain
-        // table row locator, `SELECT TO_CLOB(...)`, a `FOR UPDATE` locator, a
-        // plain PL/SQL CLOB OUT bind — therefore keeps queueing nothing and is
-        // byte-for-byte unaffected. Only the free-temp queue ACCOUNTING changes;
-        // the materialized value the caller receives is untouched.
+        // table row locator, `SELECT TO_CLOB(...)`, a `FOR UPDATE` locator, and a
+        // PL/SQL CLOB OUT bind the body fills from a TO_CLOB LITERAL — therefore
+        // keeps queueing nothing and is byte-for-byte unaffected. ("A PL/SQL LOB
+        // OUT bind" is NOT one answer: an OUT locator the body assigns from a
+        // TEMPORARY input LOB, `p_out := p_in`, IS flagged and IS queued.) Only
+        // the free-temp queue ACCOUNTING changes; the materialized value the
+        // caller receives is untouched.
         //
         // At most once per locator per response: this closure runs behind the
         // `materialized` dedup map above, so an aliased locator (Oracle's
@@ -1968,10 +2024,23 @@ class Transport {
         // exactly once, preserving queueTempLobToFree's at-most-once contract.
         // There is no `OracleLob` on this path, so no handle can queue it too.
         //
-        // The queued free rides the NEXT sendExecute's FREE_TEMP piggyback: this
-        // method runs inside sendExecute AFTER that call already drained the
-        // queue, so a locator can never be freed by the very execute that
-        // produced it.
+        // The queued free rides the NEXT sendExecute's FREE_TEMP piggyback, and a
+        // locator can never be freed by the very round trip that produced it.
+        // The invariant is ORDERING, not call nesting: this method always runs
+        // AFTER the round trip that produced the response has completed (it is
+        // called from the connection layer / ResultSetCursor, NOT from inside
+        // sendExecute), and that round trip's piggyback was built and sent before
+        // the response came back. So whatever is queued here can only ride a
+        // LATER message.
+        //
+        // FETCH-path deferral, worth knowing: on a streaming result set the
+        // enclosing round trip is a per-batch FETCH, not an execute — and the
+        // queue drains only on sendExecute. An open fetched handle blocks
+        // execute() anyway, so a free queued while materializing a continuation
+        // batch waits for the first UNRELATED execute after the result set
+        // closes. Correct (the server-side temp LOB simply lives a little
+        // longer), but it means debugPendingTempLobCount can stay non-zero for
+        // the whole life of a streaming result set.
         //
         // EXCEPTION-SAFE by `try/finally`, not by ordering: the read below can
         // throw (the strict truncation guard, a malformed UTF-8/UTF-16

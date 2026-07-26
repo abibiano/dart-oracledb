@@ -670,6 +670,90 @@ void main() {
       );
     });
 
+    // Epic 12 integration review iteration 2 — SECURITY (LOW). The RAW and LOB
+    // branches accept two value shapes, so a caller trips them by passing raw
+    // payload material of the wrong shape (`type: blob, value: apiToken` instead
+    // of `utf8.encode(apiToken)`). `ArgumentError.value` renders through
+    // `Error.safeToString`, which emits a whole String — and BLOB/RAW columns
+    // commonly hold tokens, key material and encrypted payloads. Same policy as
+    // `OracleLob.write()`: name the runtime type, never the value.
+    group('wrong-typed RAW/LOB bind values report the TYPE only, never the '
+        'payload (security)', () {
+      const secret = 'AKIA-SECRET-ACCESS-KEY-0001';
+      final secretBytes = Uint8List.fromList(<int>[171, 205, 239]);
+
+      void expectTypeOnly(
+        void Function() construct, {
+        required String requires,
+        required String gotType,
+        required String mustNotContain,
+      }) {
+        try {
+          construct();
+          fail('expected ArgumentError');
+        } on ArgumentError catch (e) {
+          final text = e.toString();
+          expect(text, contains(requires));
+          expect(text, contains(gotType),
+              reason: 'the runtime type IS useful diagnostics');
+          expect(text, isNot(contains(mustNotContain)),
+              reason: 'the payload must never reach the message');
+        }
+      }
+
+      test('blob rejecting a String does not echo the secret', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(
+            value: secret,
+            type: OracleDbType.blob,
+            maxSize: 4000,
+          ),
+          requires: 'requires Uint8List, OracleLob, or null',
+          gotType: 'String',
+          mustNotContain: 'AKIA-SECRET',
+        );
+      });
+
+      test('raw rejecting a String does not echo the secret', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(
+            value: secret,
+            type: OracleDbType.raw,
+            maxSize: 64,
+          ),
+          requires: 'requires Uint8List or null',
+          gotType: 'String',
+          mustNotContain: 'AKIA-SECRET',
+        );
+      });
+
+      test('clob rejecting a Uint8List does not echo the payload bytes', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(
+            value: secretBytes,
+            type: OracleDbType.clob,
+            maxSize: 4000,
+          ),
+          requires: 'requires String, OracleLob, or null',
+          gotType: 'Uint8List',
+          mustNotContain: '171, 205, 239',
+        );
+      });
+
+      test('nClob rejecting a Uint8List does not echo the payload bytes', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(
+            value: secretBytes,
+            type: OracleDbType.nClob,
+            maxSize: 4000,
+          ),
+          requires: 'requires String, OracleLob, or null',
+          gotType: 'Uint8List',
+          mustNotContain: '171, 205, 239',
+        );
+      });
+    });
+
     test('raw bind rejects non-positive maxSize', () {
       expect(
         () => OracleBind.out(type: OracleDbType.raw, maxSize: 0),

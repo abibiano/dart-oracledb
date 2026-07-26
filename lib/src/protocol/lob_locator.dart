@@ -21,17 +21,21 @@
 /// constructed with `isTemporary: true` and escapes the transport as a
 /// caller-OWNED handle: the caller decides when it dies, and the handle's
 /// `close()` queues the locator bytes for the transport's existing
-/// `FREE_TEMP | ARRAY` piggyback. The bytes are still never exposed publicly —
-/// the only public reference is the opaque `OracleLob`.
+/// `FREE_TEMP | ARRAY` piggyback. The bytes are still not part of the public
+/// API — the only exported reference is the opaque `OracleLob`.
 ///
-/// "Never exposed publicly" is enforced by the shape of the seam, not by
-/// convention: the driver reaches a handle's locator through
-/// `lobLocatorOf(OracleLob)`, a top-level `@internal` function that
-/// `lib/oracledb.dart`'s `show` clause omits. It is deliberately NOT a getter on
-/// `OracleLob` — `@internal` is a lint annotation only, so a member on an
-/// exported class stays reachable by dynamic dispatch from any code holding a
-/// handle, which would hand out this live, mutable buffer (see `lobLocatorOf`'s
-/// own doc for the confused-deputy scenario that motivates the shape).
+/// The seam's SHAPE raises the bar but does not enforce that: the driver reaches
+/// a handle's locator through `lobLocatorOf(OracleLob)`, a top-level `@internal`
+/// function that `lib/oracledb.dart`'s `show` clause omits. It is deliberately
+/// NOT a getter on `OracleLob` — `@internal` is a lint annotation only, so a
+/// member on an exported class stays reachable by dynamic dispatch from any code
+/// holding a handle, which would hand out this live, mutable buffer. Off the
+/// class there is no such member; but the function itself is still reachable via
+/// a deliberate `import 'package:oracledb/src/oracle_lob.dart'` (an
+/// `implementation_imports` lint, not a compile error), so treat "not exposed
+/// publicly" as a convention backed by a raised bar, not an invariant. See
+/// `lobLocatorOf`'s own doc for the confused-deputy scenario that motivates the
+/// shape.
 ///
 /// Story 12.3 adds the fourth escape route, and the only LAZY one: a locator
 /// wrapped **per FETCHED BATCH** by a streaming result set

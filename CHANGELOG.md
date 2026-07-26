@@ -68,8 +68,13 @@ path additionally proven live against a `WE8MSWIN1252` database).
   rejected under `fetchLobs` (and every nested server cursor in that batch is
   requeued for close rather than leaked) — note this query shape is not usable
   at all, `fetchLobs` or not: it fails with a protocol error on 23ai and 21c,
-  and on 21c the session is lost, so `fetchLobs: true` is the only way to meet
-  the boundary with the connection intact (see README "Known Limitations"); `resultSet: true` + `fetchLobs: true` on a PL/SQL block
+  and on 21c the session is lost. Because every LOB pre-check runs on
+  already-decoded rows, `fetchLobs: true` reaches the rejection only for the
+  REF CURSOR OUT-bind half (after the execute round trip, but before the
+  poisoning row FETCH); for a nested `CURSOR(...)` column the EXECUTE response
+  fails to decode first, so `fetchLobs` changes nothing and projecting the LOB
+  outside the cursor is the only remedy (see README "Known Limitations");
+  `resultSet: true` + `fetchLobs: true` on a PL/SQL block
   with lazily-drained implicit results is rejected pre-wire; `executeMany()`
   with an `OracleLob` bind value is rejected; writing through a read-only
   plain-`SELECT` locator surfaces the real Oracle error (ORA-22920) and leaves

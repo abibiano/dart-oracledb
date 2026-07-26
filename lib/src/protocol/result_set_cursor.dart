@@ -21,12 +21,15 @@ library;
 
 import 'dart:collection';
 
+import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
 
 import '../errors.dart';
 import '../transport/transport.dart';
 import 'lob_locator.dart';
 import 'messages/execute_message.dart';
+
+final _log = Logger('ResultSetCursor');
 
 /// Drives incremental row delivery over one open server cursor.
 ///
@@ -91,8 +94,13 @@ class ResultSetCursor {
   /// FETCH, so every earlier row was already delivered, which keeps the retained
   /// set bounded by one batch.
   ///
-  /// All three must be supplied together or not at all; they are unused on the
-  /// eager drain path ([drainRemaining]), which never wraps.
+  /// All three must be supplied together or not at all — enforced by a
+  /// constructor `assert`, because a partial set leaks SILENTLY: with only
+  /// `wrapLob`, handles are registered on the connection while `_recordDelivered`
+  /// and [bufferedLobHandles] no-op (`isLobHandle` is null) and [close] returns
+  /// early (`closeLobHandles` is null), wedging the connection with no public API
+  /// to find them. They are unused on the eager drain path ([drainRemaining]),
+  /// which never wraps.
   ResultSetCursor({
     required Transport transport,
     required int cursorId,
@@ -123,7 +131,14 @@ class ResultSetCursor {
         _fetchTimeout = fetchTimeout,
         _buffer = Queue<List<Object?>>.of(firstBatch),
         _previousRoundLastRow =
-            firstBatch.isNotEmpty ? firstBatch.last : null;
+            firstBatch.isNotEmpty ? firstBatch.last : null,
+        assert(
+          (wrapLob == null) == (isLobHandle == null) &&
+              (wrapLob == null) == (closeLobHandles == null),
+          'wrapLob, isLobHandle and closeLobHandles must be supplied together '
+          'or not at all: a partial set registers handles nothing can ever '
+          'reap, wedging the connection with no way to find them.',
+        );
 
   final Transport _transport;
   final int _cursorId;
@@ -555,8 +570,14 @@ class ResultSetCursor {
     if (found.isEmpty) return;
     try {
       await closeHandles(found);
-    } catch (_) {
-      // Swallow: the batch failure below is the error the caller must see.
+    } catch (e) {
+      // Swallowed so the batch failure below stays the error the caller sees —
+      // but LOGGED, matching `OracleConnection._reapUndeliveredLobs`, which does
+      // the same for the identical "defensive only" situation. Without this a
+      // failed reap leaves a permanently wedged connection with zero evidence of
+      // why; preserving the original exception never required discarding the
+      // secondary one.
+      _log.warning('Failed to reap a failed batch\'s OracleLob handle: $e');
     }
   }
 

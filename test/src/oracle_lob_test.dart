@@ -1895,6 +1895,58 @@ void main() {
       await lob.close();
     });
 
+    // Epic 12 integration review iteration 2 (Low): `amount` (RETURN_PARAMETER)
+    // and `data` (separate LOB_DATA messages) are decoded from UNRELATED wire
+    // messages, so an internally inconsistent reply is possible in principle and
+    // was uncross-checked. A FIRST piece shipping bytes while reporting 0 units
+    // used to take the "nothing at all was delivered" break, returning an EMPTY
+    // result — the prefix silently discarded and the fault mis-diagnosed as
+    // "read returned no data".
+    test('a FIRST piece that ships bytes but reports ZERO units fails loud, '
+        'never silently discarding the prefix', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(9));
+      t.lobReadReplies
+          .add((data: Uint8List.fromList(utf8.encode('abcd')), amount: 0));
+      await expectLater(
+        lob.read(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+            .having((e) => e.message, 'message',
+                allOf(
+                  contains('internally inconsistent'),
+                  contains('4 payload bytes'),
+                  contains('reported 0 units'),
+                ))),
+      );
+      expect(t.lobReadCalls, equals(1));
+      await lob.close();
+    });
+
+    test('the overshoot guard is measured against what the PIECE requested, not '
+        'the whole outstanding tail', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(6));
+      // A piece cap of 2 makes request(2) < outstanding(6); a server reporting 4
+      // units for a 2-unit request is a fault even though 4 <= 6, because the
+      // next piece's sourceOffset would then be wrong. The looser comparison
+      // accepted it.
+      conn.debugLobReadPieceUnits = 2;
+      try {
+        t.lobReadReplies
+            .add((data: Uint8List.fromList(utf8.encode('abcd')), amount: 4));
+        await expectLater(
+          lob.read(),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message',
+                  allOf(contains('overshot'), contains('only 2 were '
+                      'requested')))),
+        );
+      } finally {
+        conn.debugLobReadPieceUnits = null;
+      }
+      await lob.close();
+    });
+
     test('the single-READ fast path is preserved: one tnsLobOpRead for a value '
         'that fits, with no extra probe', () async {
       final (conn, t, lob) = await _fetchLob(_clob(11));
@@ -2457,6 +2509,56 @@ void main() {
       await lob.close();
       final ok = await conn.execute('SELECT 1 FROM dual');
       expect(ok.rows, isEmpty); // the fake returns a bare successful response
+    });
+
+    // Epic 12 integration review iteration 2 (Low): the carry-then-ABORT
+    // interaction. The wrong-typed-chunk test above uses chunks that never create
+    // a carry, so the documented off-by-one-code-unit at the abort boundary was
+    // both unhandled and untested. Pins the DOCUMENTED behaviour (see
+    // writeStream's "one code unit short" bullet): the held-back high surrogate
+    // from the last written chunk is discarded, never flushed onto a failing
+    // stream, and the caller always gets the exception.
+    test('an aborted CLOB stream DISCARDS the surrogate carry held back from '
+        'the last written chunk (documented, one code unit short)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      const high = '\u{D83D}';
+      await expectLater(
+        // Chunk 1 ends with an unpaired high surrogate (held back, so only 'A'
+        // is written); chunk 2 is wrong-typed, so write() throws before the carry
+        // can be prepended, consumed, or flushed.
+        lob.writeStream(Stream<Object>.fromIterable(<Object>['A$high', 42])),
+        throwsArgumentError,
+      );
+      // Exactly one WRITE, carrying 'A' only — the carry never reached the wire
+      // and no extra flush WRITE was attempted on the failing stream.
+      expect(t.lobWriteCalls, equals(1));
+      expect(t.lastWriteData, equals(utf8.encode('A')));
+      expect(lob.length, equals(1),
+          reason: 'the written prefix is one UTF-16 code unit short of the '
+              'chunk the caller emitted — the documented abort boundary');
+      expect(conn.isExecuting, isFalse);
+      await lob.close();
+    });
+
+    test('a source-stream ERROR also discards the surrogate carry', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      const high = '\u{D83D}';
+      // A lazy source: nothing runs until writeStream subscribes, so the error
+      // arrives strictly after chunk 1's WRITE — the abort boundary under test.
+      Stream<Object> failing() async* {
+        yield 'A$high';
+        throw StateError('source failed');
+      }
+
+      await expectLater(
+        lob.writeStream(failing()),
+        throwsA(isA<StateError>()),
+      );
+      expect(t.lobWriteCalls, equals(1));
+      expect(t.lastWriteData, equals(utf8.encode('A')));
+      expect(lob.length, equals(1));
+      expect(conn.isExecuting, isFalse);
+      await lob.close();
     });
 
     test('a BLOB chunk with an out-of-range element throws from write()',
