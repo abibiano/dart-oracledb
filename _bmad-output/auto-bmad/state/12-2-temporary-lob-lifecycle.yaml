@@ -5,10 +5,10 @@ epic_num: 12
 story_num: 2
 branch: epic/12-lob-streaming-temporary-lobs
 status: in-progress
-updated_at: "2026-07-26T14:15:24Z"
+updated_at: "2026-07-26T14:39:02Z"
 started_at: "2026-07-26T13:15:49Z"
 completed_at: null
-active_seconds: 3501
+active_seconds: 4900
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: false
@@ -27,7 +27,7 @@ hitl_halt: null
 external_review_iterations: 0
 convergence_unverified: false
 story_trace: null
-commits: [9d3202f]
+commits: [4980faf]
 phase8_steps:
   trace_gate: null
   nfr: null
@@ -58,3 +58,4 @@ blockers: []
 overrides: {}
 constraints: []
 tier_a_base_sha: 27ac2f13973c82f243cda0cbe15ed5ce622d5d00
+tier_a_review: "iteration 1 — Approve; Critical 0 / High 0 / Med 0 / Low 4; 3 Patch fixed, 1 Defer logged, 0 Decisions (no auto-resolution needed); 2 noise dismissed; post-fix verified clean"

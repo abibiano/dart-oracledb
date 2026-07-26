@@ -342,5 +342,57 @@ Claude Opus 5 (`claude-opus-5[1m]`) via the BMAD `dev-story` workflow, 2026-07-2
 | 2026-07-26 | Story 12.2 implemented: public temporary-LOB creation (`createTemporaryClob`/`createTemporaryNClob`/`createTemporaryBlob`), `OracleLob.isTemporary`, free-on-`close()` via the existing FREE_TEMP piggyback, created-temp handles exempted from the in-flight-slot guard (5-site `_openLobs` audit), `OracleLob` as an `execute()` bind value with three pre-wire rejections and fail-loud `executeMany` guidance, pool-reclaim free, dartdoc + README. Status → review. |
 | 2026-07-26 | Live dual-env measurement recorded (AC2/AC3/AC9): no fetched LOB shape sets the locator TEMP bit or allocates session temp-LOB space on 23ai or 21c; an `IN OUT` bind consumes the caller's handle (ORA-22922) and its returned locator IS temporary. Closed 3 deferred-work entries, fixed 2 stale-doc entries in-diff, added 3 new entries. |
 | 2026-07-26 | Zero regressions: unit 1597/12-skip; integration 23ai 511/28-skip and 21c 512/27-skip (+25 each over the 12.1 baseline). `dart analyze` clean; no new `dart doc` warnings. |
+| 2026-07-26 | Code-review iteration 1 fixes (all 3 `[Patch][Low]`, doc/test-only): AC9 non-ASCII fixtures + assertions converted to explicit Dart escapes (new `accentedFirst4` constant); `OracleLob.isTemporary` dartdoc completed against AC8's five-statement checklist; `Transport.queueTempLobToFree` dartdoc corrected to state the real per-handle (not per-locator) no-double-free invariant plus the Story 12.3 instruction. Counts unchanged on both fixtures. |
 
 ### Review Findings
+
+#### Iteration 1
+
+Thin (Tier-A) review: Acceptance Auditor (reviewer `primary`) + dedicated security review only.
+Blind Hunter / Edge Case Hunter deliberately deferred to the whole-epic diff. Security review
+returned HIGH 0 / MEDIUM 0 / LOW 0 (no vulnerabilities); Acceptance Auditor found all nine ACs
+implemented with no Critical/High/Med violations. Triaged: 4 surviving Low findings, 2 dismissed.
+
+- [x] [Review][Patch][Low] AC9 non-ASCII fixtures are raw literals while the file's own docstring claims explicit Dart escapes [test/integration/lob_temporary_integration_test.dart:1] — AC9's final clause requires "non-ASCII fixtures use explicit Dart escapes", and the new file's header asserts `/// Non-ASCII literals use explicit Dart escapes so expectations never depend on this file's own encoding.` Yet `const accented = 'café crème';` and `const cjk = '中文日本語';` are raw (only `emoji = '\u{1F600}\u{1F389}'` is escaped), and three assertions embed raw literals (`expect(await lob.read(offset: 1, amount: 4), equals('café'))`). Inherited from the 12.1 convention source (`test/integration/lob_stream_integration_test.dart:46-47` has the identical raw literals) and green on both 23ai and 21c today, so the failure mode is latent: any re-encoding of the file silently changes the expectations. Fix: replace the raw non-ASCII fixture and assertion literals with `\u{...}` escapes so the file matches AC9 and its own docstring (source: Acceptance Auditor / primary).
+- [x] [Review][Patch][Low] AC8's five-statement dartdoc checklist is not satisfied on `OracleLob.isTemporary` [lib/src/oracle_lob.dart] — AC8 requires the three `createTemporary*` methods, `OracleLob.isTemporary` and the `close()`-frees-a-temp-LOB behavior to *all* carry dartdoc stating 1-based offsets/native units, session duration, the caller's `close()` obligation, that the free is sent on the next execute, and that a created temp handle does not block other statements. `isTemporary`'s dartdoc states only the flag's meaning, `V$TEMPORARY_LOBS` visibility and "When `true`, [close] queues the LOB's server-side release … See [close]." — no session duration, no units/offsets, no "next execute", no non-blocking note; `close()` carries the deferred-free/session-teardown/`commit()`-does-not-flush items but not units/offsets or the concurrency exemption (those live one hop away in the class dartdoc and `createTemporaryClob`). `createTemporaryNClob`/`createTemporaryBlob` satisfy the list by explicit reference and are compliant. Fix: add one sentence to `isTemporary` — session-duration resource, the free rides the next `execute()`, a created temp handle does not block other statements, see `[close]` (source: Acceptance Auditor / primary).
+- [x] [Review][Patch][Low] `queueTempLobToFree` dartdoc overstates the no-double-free guarantee: it holds per *handle*, not per *locator* [lib/src/transport/transport.dart:538] — AC6 claims "no double-free is possible on any path" and AC3 grounds it in `close()`'s idempotency "by construction". `releaseLob` keys the queue on the handle (`if (!lob.isTemporary) return; … _transport.queueTempLobToFree(lob.internalLocator.locator);`, `lib/src/connection.dart:4362`) and `queueTempLobToFree`'s dartdoc pushes the duty outward — "Callers must queue each locator at most once (a double queue would send the same locator twice in one piggyback); `OracleLob.close()`'s idempotency guarantees that." That guarantee is per-`OracleLob`; nothing dedupes at the locator level, and the piggyback rides an unrelated statement (AC3 trap 5). Not reachable today — every created handle owns a freshly `CREATE_TEMP`'d locator and the live dual-env sweep found no fetched shape carrying the TEMP bit except an `IN OUT` bind's returned OUT locator (one handle per bind) — but Story 12.3's fetched-LOB work could hand two handles the same locator bytes (e.g. duplicate-column carry under `fetchLobs`). Fix: correct the dartdoc to state the real invariant ("one temp locator ↔ exactly one `OracleLob`; the idempotency guarantee is per handle and depends on that") so a future story cannot silently break it (source: Acceptance Auditor / primary).
+- [x] [Review][Defer][Low] AC5's "temporary **or fetched**" premise is only half-reachable — an open fetched handle can never actually be bound [lib/src/connection.dart:3751] — deferred, already logged for Story 12.3. AC5 says a bind accepts an open `OracleLob` ("temporary or fetched") while AC4 keeps 12.1's rule that an open fetched handle makes the connection busy; the implementation resolves the contradiction in AC4's favor, as `_validateLobBindValue`'s dartdoc states ("only a created-temporary handle can reach an `execute()` while open, because an open FETCHED handle still makes the connection busy … and so trips `_rejectConcurrentOperation` before this validation runs") and as the pinning unit test asserts (`oraProtocolError`/"still in progress" while open, `oraBindTypeError`/"closed" after `close()`). Accepted: the unwrap is category-agnostic, so no bind-code change is needed when 12.3 relaxes the fetched-handle slot rule, and the consequence is already recorded in code, in the Completion Notes and in `deferred-work.md` with `target: Story 12.3`. Recorded here so the epic-boundary reviewer does not read AC5 as literally satisfied (source: Acceptance Auditor / primary).
+
+##### Iteration 1 — resolution (2026-07-26)
+
+All three `[Review][Patch][Low]` findings applied; the one `[Review][Defer][Low]` item stays deferred
+to Story 12.3 (unchanged, no direction was requested).
+
+1. **AC9 escapes** — `test/integration/lob_temporary_integration_test.dart` fixtures are now explicit
+   Dart escapes: `accented = 'caf\u{00E9} cr\u{00E8}me'`,
+   `cjk = '\u{4E2D}\u{6587}\u{65E5}\u{672C}\u{8A9E}'`. The two raw `equals('café')` assertions now use
+   a new escaped `accentedFirst4 = 'caf\u{00E9}'` constant instead of repeating the escape inline, so
+   the assertion and the fixture cannot drift. The fixture-adjacent comments were rewritten ASCII-only
+   (naming the code points) rather than restating the raw glyphs, so **no test expectation in the file
+   depends on its encoding any more** — the only remaining non-ASCII bytes are em-dashes in prose
+   comments, the file docstring, and one `markTestSkipped` message. The file's own docstring claim is
+   now true. The identical raw literals in the 12.1 convention source
+   (`test/integration/lob_stream_integration_test.dart:46-47`) were left alone — out of this story's
+   diff; not re-docketed, since that file's docstring makes no escape claim.
+2. **`OracleLob.isTemporary` dartdoc** — now carries all five AC8 statements in one bullet list on the
+   getter itself: session duration (survives `commit()`/`rollback()`), the caller's `close()`
+   obligation, that the free rides the **next `execute()`** as a piggyback, 1-based offsets in UCS-2
+   code units for CLOB/NCLOB and bytes for BLOB, and that a *created* temporary handle does not block
+   other statements while a fetched one does (with round trips still serialized either way).
+3. **`Transport.queueTempLobToFree` dartdoc** — no longer claims an unconditional no-double-free. It
+   now states the real invariant: nothing dedupes at the locator level, so at-most-once rests on
+   **one temporary locator ↔ exactly one `OracleLob`**, which is what makes `close()`'s per-handle
+   idempotency sufficient; why that invariant holds today (every created handle owns a freshly
+   `CREATE_TEMP`'d locator; the only fetched shape measured to carry the TEMP bit is an `IN OUT`
+   bind's returned OUT locator, wrapped once); that a double free surfaces on the *unrelated*
+   statement the piggyback rides; and the explicit instruction for Story 12.3 — if two handles can
+   ever share one temporary locator's bytes (duplicate-column carry under `fetchLobs`), add
+   locator-level dedupe here or transfer ownership at the wrap site.
+
+Doc-and-test-only: no production control flow changed.
+
+**Re-validation** — `dart analyze` clean (lib + test, zero issues). `dart doc` still reports only the
+3 pre-existing warnings (connection.dart:54/149). Unit `test/src/`: **1597 pass / 12 skip**.
+Integration: **23ai 511 pass / 28 skip**, **21c 512 pass / 27 skip** — every count identical to the
+pre-review numbers, i.e. zero regressions, and the 25 temp-LOB tests still pass on both versions with
+the escaped fixtures.

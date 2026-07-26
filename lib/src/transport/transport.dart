@@ -545,9 +545,24 @@ class Transport {
   /// and cannot fail — safe to call from a `close()` that is contractually
   /// exception-free, and from the pool's reclaim path.
   ///
-  /// Callers must queue each locator at most once (a double queue would send the
-  /// same locator twice in one piggyback); `OracleLob.close()`'s idempotency
-  /// guarantees that.
+  /// Callers must queue each locator at most once — a double queue would send
+  /// the same locator twice in one piggyback, and because the piggyback rides an
+  /// unrelated statement's message a double free surfaces as an error on THAT
+  /// statement, not here.
+  ///
+  /// Nothing dedupes at the locator level: this method appends whatever bytes it
+  /// is given. The at-most-once property therefore rests on a structural
+  /// invariant the CALLER must preserve — **one temporary locator is owned by
+  /// exactly one `OracleLob`**. Given that, `OracleLob.close()`'s idempotency
+  /// (it queues only on the first call, via
+  /// `OracleConnection.releaseLob`) makes a double free impossible. Today the
+  /// invariant holds by construction: every created-temporary handle owns a
+  /// locator freshly returned by [createTemporaryLob], and the only FETCHED
+  /// shape measured to carry the TEMP flag is an `IN OUT` bind's returned OUT
+  /// locator, which is wrapped once. A future change that lets two handles share
+  /// one temporary locator's bytes (e.g. duplicate-column carry under
+  /// `fetchLobs`, Story 12.3) breaks the guarantee and must add locator-level
+  /// dedupe here or ownership transfer at the wrap site.
   @internal
   void queueTempLobToFree(Uint8List locator) {
     _tempLobsToClose.add(locator);

@@ -177,6 +177,24 @@ class OracleLob {
   ///
   /// When `true`, [close] queues the LOB's server-side release; when `false`,
   /// [close] is local bookkeeping only. See [close].
+  ///
+  /// For a `true` handle:
+  ///
+  /// * the LOB has **session duration** — it survives `commit()` / `rollback()`
+  ///   and lives until [close] or session end;
+  /// * you **must** [close] it, or Oracle holds session temp-LOB resources for
+  ///   the rest of the session;
+  /// * the actual free is **not** a round trip of its own: [close] queues the
+  ///   locator and it rides the **next `execute()`** on this connection as a
+  ///   piggyback;
+  /// * offsets and lengths use the same convention as every other handle —
+  ///   1-based offsets in **characters (UCS-2 code units)** for CLOB/NCLOB and in
+  ///   **bytes** for BLOB;
+  /// * if it came from `OracleConnection.createTemporaryClob()` and friends it
+  ///   does **not** block other statements while open (binding it into an
+  ///   `execute()` is the point), unlike a fetched handle, which makes the
+  ///   connection busy until closed. Individual LOB round trips are serialized
+  ///   either way.
   bool get isTemporary => _locator.isTemporary;
 
   /// Whether this handle can no longer be read or written — because [close] was

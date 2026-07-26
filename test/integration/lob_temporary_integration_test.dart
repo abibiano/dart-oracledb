@@ -72,9 +72,14 @@ void main() {
       final testTable = uniqueTableName('lobtemp');
 
       // Non-ASCII fixtures, escaped so the file encoding is irrelevant.
-      const accented = 'café crème';
-      const cjk = '中文日本語';
+      // Latin-1 accented: "cafe creme" with U+00E9 / U+00E8.
+      const accented = 'caf\u{00E9} cr\u{00E8}me';
+      // CJK: five ideographs, U+4E2D U+6587 U+65E5 U+672C U+8A9E.
+      const cjk = '\u{4E2D}\u{6587}\u{65E5}\u{672C}\u{8A9E}';
       const emoji = '\u{1F600}\u{1F389}'; // supplementary plane (2 units each)
+      // The first four UCS-2 units of [accented], for bounded reads on a clean
+      // character boundary.
+      const accentedFirst4 = 'caf\u{00E9}';
 
       /// Whether the fixture's national character set supports NCLOB.
       bool nationalCharsetSupported() {
@@ -185,7 +190,7 @@ void main() {
           expect(lob.length, equals(text.length));
           expect(await lob.read(), equals(text));
           // A bounded read on a clean character boundary.
-          expect(await lob.read(offset: 1, amount: 4), equals('café'));
+          expect(await lob.read(offset: 1, amount: 4), equals(accentedFirst4));
         } finally {
           await lob.close();
         }
@@ -212,7 +217,7 @@ void main() {
           );
           expect(await lob.read(), equals(text));
           // Bounded reads on clean boundaries.
-          expect(await lob.read(offset: 1, amount: 4), equals('café'));
+          expect(await lob.read(offset: 1, amount: 4), equals(accentedFirst4));
           expect(await lob.read(offset: 12, amount: 5), equals(cjk));
         } finally {
           await lob.close();
