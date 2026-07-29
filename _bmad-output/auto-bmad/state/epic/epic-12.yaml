@@ -4,8 +4,8 @@ story_key: epic-12
 epic_num: 12
 story_num: null
 branch: epic/12-lob-streaming-temporary-lobs
-status: in-progress
-updated_at: "2026-07-29T06:56:47Z"
+status: done
+updated_at: "2026-07-29T06:58:11Z"
 started_at: "2026-07-26T13:15:23Z"
 completed_at: "2026-07-26T21:44:34Z"
 active_seconds: 33512
