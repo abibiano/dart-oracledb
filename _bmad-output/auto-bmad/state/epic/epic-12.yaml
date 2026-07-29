@@ -5,7 +5,7 @@ epic_num: 12
 story_num: null
 branch: epic/12-lob-streaming-temporary-lobs
 status: done
-updated_at: "2026-07-29T08:44:18Z"
+updated_at: "2026-07-29T08:45:36Z"
 started_at: "2026-07-26T13:15:23Z"
 completed_at: "2026-07-26T21:44:34Z"
 active_seconds: 33512
@@ -42,9 +42,9 @@ deferred_work_archived: 42
 pr_url: "https://github.com/abibiano/dart-oracledb/pull/2"
 ci_run_url: "https://github.com/abibiano/dart-oracledb/actions/runs/30429972524"
 ci_status: passed
-pr_merged: false
-merge_method: null
-merge_commit: null
+pr_merged: true
+merge_method: merge
+merge_commit: d5ea5f7
 branch_deleted: false
 open_questions: []
 deferred_work: []
