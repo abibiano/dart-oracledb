@@ -951,8 +951,9 @@ try {
   direction is to **re-select** the value: an explicit `amount` is still capped
   at the cached length (it can only make a read shorter), so it guards the
   opposite direction — a LOB that shrank, where a read for the full cached length
-  **can** fail loud with a length mismatch and asking only for units you know
-  exist avoids it. `textStream()` / `byteStream()` are immune by construction:
+  **can** fail loud (a length mismatch, or `"LOB read made no progress"`,
+  depending on whether the server reports the units it actually delivered) and
+  asking only for units you know exist avoids it. `textStream()` / `byteStream()` are immune by construction:
   they never consult `length` and stop on the server's empty READ. Measured on
   Oracle 23ai and 21c: because a LOB locator is read-consistent, a handle fetched
   before another session's committed update keeps seeing the *old* value in full

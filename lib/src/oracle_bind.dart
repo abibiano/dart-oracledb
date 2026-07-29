@@ -235,18 +235,34 @@ class OracleBind {
     // encoding, which is far from the call site. OUT-only binds always pass
     // `value: null` and are unaffected.
     if (value == null) return;
+    // POLICY for every type-mismatch throw below: report only the offending
+    // runtime TYPE, never the value. `ArgumentError.value` renders its value
+    // through `Error.safeToString`, which for a String emits the whole thing —
+    // and a String is precisely what trips most of these branches, because the
+    // natural mistake is forwarding text straight out of JSON or a form into a
+    // typed bind (`OracleBind(type: number, value: body['card_number'])`,
+    // `OracleBind(type: blob, value: apiToken)` instead of
+    // `utf8.encode(apiToken)`). Numeric, temporal, RAW and LOB columns commonly
+    // hold PANs, account ids, tokens, key material and encrypted payloads, and
+    // `ArgumentError` is a plain API-misuse error that frameworks log verbatim
+    // and forward to error trackers — so the value would persist outside the
+    // database trust boundary. Same policy as `OracleLob.write()` and
+    // `OracleConnection._validateDefValue`. Applies uniformly: a partially
+    // applied redaction reads as deliberate and was twice mistaken for it.
     switch (type) {
       case OracleDbType.number:
         if (value is! num) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: number) requires int, double, num, or null',
+          throw ArgumentError(
+            'OracleBind(type: number) requires int, double, num, or null, got '
+            '${value.runtimeType}',
           );
         }
         // Oracle NUMBER cannot represent NaN/±Infinity. Reject at
         // construction so the failure surfaces at the call site, not deep
-        // inside `encodeNumber` during wire encoding.
+        // inside `encodeNumber` during wire encoding. `ArgumentError.value` is
+        // deliberate and NOT a policy exception: `value` is provably one of
+        // NaN / Infinity / -Infinity here (the `is! num` branch above already
+        // ran), so there is no caller payload left to leak.
         if (value is double && !value.isFinite) {
           throw ArgumentError.value(
             value,
@@ -256,56 +272,39 @@ class OracleBind {
         }
       case OracleDbType.varchar:
         if (value is! String) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: varchar) requires String or null',
+          throw ArgumentError(
+            'OracleBind(type: varchar) requires String or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.nVarchar:
         if (value is! String) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: nVarchar) requires String or null',
+          throw ArgumentError(
+            'OracleBind(type: nVarchar) requires String or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.date:
         if (value is! DateTime) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: date) requires DateTime or null',
+          throw ArgumentError(
+            'OracleBind(type: date) requires DateTime or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.timestamp:
         if (value is! DateTime) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: timestamp) requires DateTime or null',
+          throw ArgumentError(
+            'OracleBind(type: timestamp) requires DateTime or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.timestampTz:
         if (value is! OracleTimestampTz && value is! DateTime) {
-          throw ArgumentError.value(
-            value,
-            'value',
+          throw ArgumentError(
             'OracleBind(type: timestampTz) requires OracleTimestampTz, '
-                'DateTime, or null',
+            'DateTime, or null, got ${value.runtimeType}',
           );
         }
-      // The RAW and LOB branches report only the offending runtime TYPE, never
-      // the value. `ArgumentError.value` renders its value through
-      // `Error.safeToString`, which for a String emits the whole thing — and
-      // these are exactly the branches a caller trips by passing raw payload
-      // material of the wrong shape (`OracleBind(type: blob, value: apiToken)`
-      // instead of `utf8.encode(apiToken)`; BLOB/RAW columns commonly hold
-      // tokens, key material and encrypted blobs). `ArgumentError` is a plain
-      // API-misuse error that frameworks log verbatim and forward to error
-      // trackers, so the payload would persist outside the database trust
-      // boundary. Same policy as `OracleLob.write()` and
-      // `OracleConnection._validateDefValue`: name the type, never the value.
       case OracleDbType.raw:
         if (value is! Uint8List) {
           throw ArgumentError(

@@ -94,8 +94,10 @@ class ResultSetCursor {
   /// FETCH, so every earlier row was already delivered, which keeps the retained
   /// set bounded by one batch.
   ///
-  /// All three must be supplied together or not at all — enforced by a
-  /// constructor `assert`, because a partial set leaks SILENTLY: with only
+  /// All three must be supplied together or not at all — guarded in dev/test
+  /// builds by a constructor `assert` (Dart strips asserts in release, so this
+  /// catches a driver-development mistake, which is the only place these
+  /// callbacks are ever wired). A partial set leaks SILENTLY: with only
   /// `wrapLob`, handles are registered on the connection while `_recordDelivered`
   /// and [bufferedLobHandles] no-op (`isLobHandle` is null) and [close] returns
   /// early (`closeLobHandles` is null), wedging the connection with no public API

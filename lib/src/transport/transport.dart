@@ -1837,9 +1837,14 @@ class Transport {
   ///   discarding the prefix.
   /// * **Missing SB8 amount.** If a READ reply omits the amount (never observed
   ///   for a `sendAmount: true` READ on either tested server version), the piece
-  ///   is treated as having satisfied the whole outstanding request — i.e. the
-  ///   read degrades to exactly the pre-12.3 single-round-trip behavior, and the
-  ///   caller's strict truncation guard still catches a short payload.
+  ///   is treated as having satisfied what THAT PIECE requested. With no piece
+  ///   cap set — every production caller — a piece requests the whole
+  ///   outstanding tail, so the read degrades to exactly the pre-12.3
+  ///   single-round-trip behavior; with a cap in play the degrade is per piece
+  ///   and the loop simply continues. Either way the caller's strict truncation
+  ///   guard still catches a short payload. (Falling back to the whole
+  ///   outstanding tail under a cap would itself exceed the piece's request and
+  ///   trip the overshoot check below.)
   ///
   /// The server's echoed post-op locator is copied back after every piece
   /// ([copyBackLocator]), exactly as a single READ did.
@@ -1880,9 +1885,13 @@ class Transport {
         totalBytes += data.length;
       }
       // Progress in UNITS comes from the server's SB8 reply. A reply without one
-      // is treated as having satisfied the request (see the dartdoc), which
-      // reduces this loop to the pre-12.3 single READ.
-      final delivered = response.amount ?? outstanding;
+      // is treated as having satisfied THIS PIECE's request (see the dartdoc),
+      // which with no cap in play (`request == outstanding`, every production
+      // caller) reduces this loop to the pre-12.3 single READ. Falling back to
+      // `outstanding` instead would exceed `request` whenever a cap IS in play
+      // and so trip the overshoot guard below — turning the documented degrade
+      // into a hard error on exactly the seam that makes this loop testable.
+      final delivered = response.amount ?? request;
       if (delivered <= 0) {
         if (unitsRead == 0 && totalBytes == 0) {
           // Nothing at all was delivered: hand back the empty result so the
@@ -2022,7 +2031,22 @@ class Transport {
         // `materialized` dedup map above, so an aliased locator (Oracle's
         // duplicate-column optimization) is materialized — and hence queued —
         // exactly once, preserving queueTempLobToFree's at-most-once contract.
-        // There is no `OracleLob` on this path, so no handle can queue it too.
+        //
+        // No `OracleLob` is PRODUCED on this path (wrapLob is null), but one can
+        // still be BOUND across the same statement: README documents
+        // `OracleBind.inOut(value: lob, type: clob)` for a `createTemporary*`
+        // handle, and created-temporary handles are exempt from the in-flight
+        // slot rule, so such a handle can be open and can queue its own locator
+        // on close(). What holds the at-most-once contract there is not the
+        // absence of a handle but a MEASURED locator distinctness: Oracle
+        // REPLACES the LOB behind an `IN OUT` bind, so the materialized OUT
+        // locator is a DIFFERENT temporary LOB from the one the caller's handle
+        // owns, and `p_out := p_in` deep-copies. Pinned live on 23ai and 21c by
+        // `test/integration/lob_temporary_integration_test.dart` (the IN OUT
+        // temp-handle case asserting pending 1 -> 2 as two DISTINCT entries,
+        // then proving the carrier statement and the session survive both
+        // frees). Empirical, not structural — a story that changes IN OUT
+        // handling must re-measure it rather than trust this paragraph.
         //
         // The queued free rides the NEXT sendExecute's FREE_TEMP piggyback, and a
         // locator can never be freed by the very round trip that produced it.

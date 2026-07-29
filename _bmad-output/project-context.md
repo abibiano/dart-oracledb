@@ -133,7 +133,7 @@ final v = buffer.readUint16();     // WRONG — which endian?
 - Liveness is **consulted, not mirrored**: a handle whose connection closed/reset/broke reports `isClosed == true` immediately. Do not "fix" liveness by marking handles closed at each invalidation site — that was tried and reverted.
 - Pool reclaim force-closes open handles (`forceCloseOpenLobs(reclaimedByPool: true)`), and a later `read`/`write` surfaces a pool-reclaim-specific error.
 
-**Temporary-LOB free queue ownership is IMPLICIT and hazardous.** Two owner classes queue locators for `FREE_TEMP`: `createTemporary*` and the materialize path (TEMP-flagged fetched locators). They are meant to be mutually exclusive, backstopped by content-level dedupe in `_isTempLobAlreadyQueued`. If you add a third owner, **add the dedupe in the same pass** — a double queue sends the same locator twice in one piggyback, and because the piggyback rides an unrelated statement's message the failure surfaces on *that* statement.
+**Temporary-LOB free queue ownership is IMPLICIT and hazardous.** Two owner classes queue locators for `FREE_TEMP`: `createTemporary*` and the materialize path (TEMP-flagged fetched locators). They are meant to be mutually exclusive, backstopped by an O(1) content-level dedupe **inside `Transport.queueTempLobToFree` itself** — the `_tempLobKeysToClose` index keyed by `_tempLobKey(locator)`, kept in lockstep with `_tempLobsToClose` at queue / drain / restore. (The earlier linear `_isTempLobAlreadyQueued` scan is gone; do not grep for it.) If you add a third owner, **verify the dedupe covers it in the same pass** — a double queue sends the same locator twice in one piggyback, and because the piggyback rides an unrelated statement's message the failure surfaces on *that* statement. The dedupe key is a snapshot of the whole mutable locator buffer, so its correctness is fixture-proven rather than structural; the identity-subrange hardening is a carried ledger item.
 
 **A wrap/materialize decision must carry its full close / force-close / bulk-close lifecycle in the same change.** A partial decision reads as a leak and will be reverted.
 
@@ -195,14 +195,14 @@ final Logger _log = Logger('OracleConnection');   // or 'oracledb.<area>'
 
 **Two tiers, both mandatory.**
 
-**1. Unit tests (1716 pass / 6 skip currently) — `dart test --exclude-tags=integration`.**
+**1. Unit tests (1741 pass / 6 skip currently) — `dart test --exclude-tags=integration`.**
 
 - Test tree mirrors `lib/src/` exactly; files end `_test.dart`.
 - The core unit pattern is a **fake transport**: `class _FakeXTransport extends Transport` with canned wire bytes (see `test/src/oracle_lob_test.dart`, `connection_test.dart`, `nested_cursor_test.dart`, `transport/lob_materialize_wrap_test.dart`, `connection_execute_many_test.dart`). Prefer this over mocking a socket.
 - A fake transport must honour the parameters the real one does. Precedent gap: `_NestedCursorTransport.sendExecute` ignored `cursorId`, silently making every nested-cursor test depth-1-only. When you extend a fake, check it can actually drive the path you claim to cover.
 - **Proven-to-fail is the standard.** A regression test must be verified to FAIL against the unfixed code (temporarily revert the fix), and say so in the story record. Add negative controls so nothing can pass vacuously.
 - Assert **exact** counters, not bounds, when you can — exact `debugCacheSize` / `debugPendingTempLobCount` / `debugLobReadOps` deltas have repeatedly corrected wrong mental models.
-- Coverage gate: **line coverage floor 80%** in `.github/workflows/ci.yml` (measured 81.95% on 2026-07-26). Convention: **a floor bump rides the story diff that raises coverage.** This floor has silently drifted ~9 points below reality twice; if you touch coverage, re-measure and bump.
+- Coverage gate: **line coverage floor 80%** in `.github/workflows/ci.yml` (measured 82.33% on 2026-07-29). Convention: **a floor bump rides the story diff that raises coverage.** This floor has silently drifted ~9 points below reality twice; if you touch coverage, re-measure and bump.
 
 **2. Integration tests — real Oracle, both versions, EVERY story. Non-negotiable.**
 
@@ -232,7 +232,7 @@ RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
   dart test test/integration/charset_non_al32utf8_integration_test.dart
 ```
 
-Current baselines: **561 pass / 32 skip on 23ai**, **562 pass / 31 skip on 21c** (+4 more when the non-AL32UTF8 fixture is up).
+Current baselines: **563 pass / 32 skip on 23ai**, **564 pass / 31 skip on 21c** (+4 more when the non-AL32UTF8 fixture is up). The focused Epic 12 LOB suite (6 files) is **155 / 0** on both. Re-read these from a real run before quoting them anywhere user-facing — a stale count shipped in the 1.4.0 CHANGELOG twice.
 
 **Integration test rules:**
 

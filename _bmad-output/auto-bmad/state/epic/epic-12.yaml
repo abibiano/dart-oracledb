@@ -4,11 +4,11 @@ story_key: epic-12
 epic_num: 12
 story_num: null
 branch: epic/12-lob-streaming-temporary-lobs
-status: done
-updated_at: "2026-07-26T21:44:34Z"
+status: in-progress
+updated_at: "2026-07-29T06:56:47Z"
 started_at: "2026-07-26T13:15:23Z"
 completed_at: "2026-07-26T21:44:34Z"
-active_seconds: 30072
+active_seconds: 33512
 timing_anchor: null
 is_first_in_epic: false
 is_last_in_epic: false
@@ -21,13 +21,13 @@ tea_rationale: "TEA disabled (tea.enabled=false — no bmad-testarch-* skills in
 epic_story_count: 4
 stories_after_in_epic: null
 completed_phases: [0, 1, 2, 5, 7, 9, 81, 82]
-code_review_iterations: 2
+code_review_iterations: 3
 code_review_loop_done: true
-hitl_halt: "auto-continued (epic — no halt)"
+hitl_halt: "auto-continued (epic — no halt); loop extended once by the user to iteration 3, still unconverged"
 external_review_iterations: 0
 convergence_unverified: true
 story_trace: null
-commits: [8d028b8]
+commits: [38ab4a1]
 phase8_steps:
   trace_gate: done
   nfr: done
@@ -40,8 +40,8 @@ gate_decision: null
 gate_iterations: 0
 deferred_work_archived: 42
 pr_url: "https://github.com/abibiano/dart-oracledb/pull/2"
-ci_run_url: "https://github.com/abibiano/dart-oracledb/actions/runs/30221687154"
-ci_status: unknown
+ci_run_url: "https://github.com/abibiano/dart-oracledb/actions/runs/30221705377"
+ci_status: passed
 pr_merged: false
 merge_method: null
 merge_commit: null

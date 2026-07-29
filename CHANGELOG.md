@@ -7,9 +7,9 @@ values can now be worked with as server-backed handles instead of being
 materialized whole: read bounded ranges, write in place, stream a value in or
 out piece by piece, create session-duration temporary LOBs, and consume a
 streaming result set that hands back a handle per row. All additive — no
-breaking changes — and validated against Oracle 23ai and Oracle 21c (153/153
-focused LOB integration tests green on both, plus the full suites: 561 pass /
-32 skip on 23ai and 562 pass / 31 skip on 21c, and the UTF-8-form CLOB read
+breaking changes — and validated against Oracle 23ai and Oracle 21c (155/155
+focused LOB integration tests green on both, plus the full suites: 563 pass /
+32 skip on 23ai and 564 pass / 31 skip on 21c, and the UTF-8-form CLOB read
 path additionally proven live against a `WE8MSWIN1252` database).
 
 ### Features

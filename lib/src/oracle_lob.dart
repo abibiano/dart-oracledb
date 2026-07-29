@@ -584,10 +584,14 @@ class OracleLob {
         offset: next,
         amount: pieceUnits,
       );
-      if (piece.bytes.isEmpty) return; // empty READ == end of LOB
+      if (piece.bytes.isEmpty) {
+        _requirePayloadForUnits(piece.units, next, pieceUnits);
+        return; // empty READ == end of LOB
+      }
       // Advance by the server's own unit count; for a BLOB units ARE bytes, so
       // the payload length is an exact fallback when a reply omits the SB8.
-      next += _requireProgress(piece.units ?? piece.bytes.length, next);
+      final reported = _requireWithinRequest(piece.units, pieceUnits, next);
+      next += _requireProgress(reported ?? piece.bytes.length, next);
       yield piece.bytes;
     }
   }
@@ -609,6 +613,49 @@ class OracleLob {
     );
   }
 
+  /// Cross-checks the two halves of a READ reply in the direction the stream
+  /// generators treat as end-of-LOB: reported units but NO payload bytes.
+  ///
+  /// The unit count comes from `RETURN_PARAMETER` and the payload from separate
+  /// `LOB_DATA` messages, so an internally inconsistent reply is possible in
+  /// principle. Without this check `piece.bytes.isEmpty` alone ends the stream,
+  /// so a reply claiming to have delivered units while shipping none would
+  /// TRUNCATE the caller's value and report success — the driver's cardinal sin.
+  /// [Transport.readLobRange] makes the mirror inconsistency (bytes but zero
+  /// units) fail loud for the same reason.
+  ///
+  /// Cannot fire on 23ai or 21c: the MEASURED end-of-LOB reply is `amount: 0`
+  /// with no payload (see [OracleConnection.runLobReadPiece]), which this
+  /// accepts as termination.
+  static void _requirePayloadForUnits(int? units, int offset, int requested) {
+    if ((units ?? 0) <= 0) return;
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message: 'LOB read reply is internally inconsistent: the server reported '
+          '$units units delivered at offset $offset (requested $requested) but '
+          'shipped no payload bytes',
+    );
+  }
+
+  /// Rejects a piece that reports MORE units than that piece requested.
+  ///
+  /// An over-reporting reply would advance [next] past the units actually
+  /// delivered, leaving a silent HOLE in the middle of the streamed value. The
+  /// comparison is against what THIS piece asked for, mirroring
+  /// [Transport.readLobRange]'s `delivered > request` guard.
+  ///
+  /// Returns [units] unchanged so the caller can keep its `?? fallback` for a
+  /// reply that omits the SB8 amount entirely; the fallback is derived from the
+  /// delivered payload, so it can never exceed the request on its own.
+  static int? _requireWithinRequest(int? units, int requested, int offset) {
+    if (units == null || units <= requested) return units;
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message: 'LOB read overshot: the server reported $units units at offset '
+          '$offset but only $requested were requested',
+    );
+  }
+
   /// The [textStream] generator: one raw READ per piece, decoded through a
   /// carrying decoder so a piece boundary can never corrupt a split encoding
   /// sequence or surrogate pair.
@@ -622,12 +669,16 @@ class OracleLob {
         offset: next,
         amount: pieceUnits,
       );
-      if (piece.bytes.isEmpty) break; // empty READ == end of LOB
+      if (piece.bytes.isEmpty) {
+        _requirePayloadForUnits(piece.units, next, pieceUnits);
+        break; // empty READ == end of LOB
+      }
       final decoded = decoder.add(piece.bytes);
       // The offset MUST advance by the units the SERVER reported, never by what
       // was decoded or emitted: bytes held back for the next piece were still
       // delivered by this READ, so re-reading them would duplicate data.
-      next += _requireProgress(piece.units ?? decoded.units, next);
+      final reported = _requireWithinRequest(piece.units, pieceUnits, next);
+      next += _requireProgress(reported ?? decoded.units, next);
       if (decoded.text.isNotEmpty) yield decoded.text;
     }
     // Flush anything deliberately held back (a trailing unpaired high surrogate

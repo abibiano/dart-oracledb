@@ -545,6 +545,34 @@ void main() {
       await lob.close();
     });
 
+    // Epic 12 integration review iteration 3 (Low): the `length mismatch`
+    // diagnosis above is reachable only from the fake's shape — a server that
+    // reports `amount == request` while shipping fewer units. A server that
+    // instead reports the units it ACTUALLY delivered makes `readLobRange` take a
+    // second piece, get 0 units with progress already made, and throw
+    // "LOB read made no progress" — the diagnosis the README named as the only
+    // one. Both are pinned now so neither text can drift.
+    test('a SHORT-READING server produces the "made no progress" diagnosis for '
+        'the same shrunk LOB, not a length mismatch', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(40)); // stale cached length
+      // Reports honestly: 10 units delivered, then nothing left. `lobReadData`
+      // (the sibling test's shape) reports no amount at all, which is what makes
+      // that one degrade into the truncation guard instead.
+      t.lobReadReplies.addAll([
+        (data: Uint8List.fromList(utf8.encode('0123456789')), amount: 10),
+        (data: null, amount: 0),
+      ]);
+      await expectLater(
+        lob.read(),
+        throwsA(isA<OracleException>()
+            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+            .having((e) => e.message, 'message',
+                allOf(contains('made no progress'), contains('offset 11')))),
+      );
+      expect(t.lobReadCalls, equals(2));
+      await lob.close();
+    });
+
     test('an EXPLICIT amount past the end reads to the end (not a truncation)',
         () async {
       // offset 7 into an 11-char CLOB with an explicit amount 100: only 5 units
@@ -1973,6 +2001,61 @@ void main() {
       await lob.close();
     });
 
+    // Epic 12 integration review iteration 3 (Low): iteration 2's
+    // `delivered > request` tightening was paired with a fallback of
+    // `response.amount ?? outstanding`, so under a piece cap the documented
+    // missing-SB8 DEGRADE tripped the brand-new overshoot throw — a documented
+    // behaviour turned into a hard error on precisely the seam 12.4 AC5 added to
+    // make this loop testable. The fallback is now `?? request`.
+    test('a reply that OMITS the SB8 amount degrades PER PIECE under a piece '
+        'cap, instead of tripping the overshoot guard', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(6));
+      conn.debugLobReadPieceUnits = 2; // request(2) < outstanding(6)
+      try {
+        // Both replies omit the amount. With `?? outstanding` the first piece
+        // "delivered" 6 units against a 2-unit request and threw "overshot";
+        // with `?? request` it credits 2 and the loop simply continues.
+        t.lobReadReplies.addAll([
+          (data: Uint8List.fromList(utf8.encode('ab')), amount: null),
+          (data: Uint8List.fromList(utf8.encode('cd')), amount: null),
+          (data: Uint8List.fromList(utf8.encode('ef')), amount: null),
+        ]);
+        expect(await lob.read(), equals('abcdef'));
+        expect(
+          t.readRequests,
+          equals([
+            (offset: 1, amount: 2),
+            (offset: 3, amount: 2),
+            (offset: 5, amount: 2),
+          ]),
+          reason: 'the offset advances by what each piece requested',
+        );
+      } finally {
+        conn.debugLobReadPieceUnits = null;
+      }
+      await lob.close();
+    });
+
+    test('the overshoot guard still fires under a cap when the server REPORTS '
+        'too many units (negative control for the `?? request` fallback)',
+        () async {
+      final (conn, t, lob) = await _fetchLob(_clob(6));
+      conn.debugLobReadPieceUnits = 2;
+      try {
+        // A reported (non-null) amount is unaffected by the fallback change.
+        t.lobReadReplies
+            .add((data: Uint8List.fromList(utf8.encode('abc')), amount: 3));
+        await expectLater(
+          lob.read(),
+          throwsA(isA<OracleException>()
+              .having((e) => e.message, 'message', contains('overshot'))),
+        );
+      } finally {
+        conn.debugLobReadPieceUnits = null;
+      }
+      await lob.close();
+    });
+
     test('a deliberate read past the end still reads to the end without '
         'tripping the no-progress guard', () async {
       final (conn, t, lob) = await _fetchLob(_clob(11));
@@ -2346,6 +2429,128 @@ void main() {
               (e) => e.message, 'message', contains('stream made no progress'))),
         );
         expect(t2.lobReadCalls, equals(1));
+        await blob.close();
+      });
+
+      // Epic 12 integration review iteration 3. Iteration 2 made both halves of
+      // an internally inconsistent READ reply fail loud in `readLobRange` (the
+      // LOOPING seam), but the per-piece stream seam shares the identical wire
+      // hazard — `amount` comes from RETURN_PARAMETER and the payload from
+      // separate LOB_DATA messages — and had neither check, so both failure
+      // shapes were still silent there. Safe to guard on both fixtures: the
+      // MEASURED end-of-LOB reply is `amount: 0` with no payload, which stays
+      // termination.
+      test('a piece reporting UNITS with an EMPTY payload fails loud instead of '
+          'silently TRUNCATING the stream', () async {
+        // The mirror image of the sibling above: without the guard
+        // `piece.bytes.isEmpty` alone ends the stream, so the caller gets a
+        // short value and a successful completion — silently wrong data.
+        final (conn, t, lob) = await _fetchLob(_clob(9));
+        t.lobReadReplies.addAll([
+          (data: Uint8List.fromList(utf8.encode('abc')), amount: 3),
+          (data: null, amount: 3), // units claimed, nothing shipped
+        ]);
+        final seen = <String>[];
+        await expectLater(
+          () async {
+            await for (final piece in lob.textStream(pieceSize: 3)) {
+              seen.add(piece);
+            }
+          }(),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having(
+                  (e) => e.message,
+                  'message',
+                  allOf(contains('internally inconsistent'),
+                      contains('no payload bytes')))),
+        );
+        expect(seen, equals(['abc']),
+            reason: 'the prefix already delivered is not retracted');
+        expect(t.lobReadCalls, equals(2), reason: 'bounded: no third READ');
+        await lob.close();
+
+        final (conn2, t2, blob) = await _fetchLob(_blob(9));
+        t2.lobReadReplies.addAll([
+          (data: Uint8List.fromList([1, 2, 3]), amount: 3),
+          (data: Uint8List(0), amount: 2), // empty payload, units claimed
+        ]);
+        await expectLater(
+          blob.byteStream(pieceSize: 3).toList(),
+          throwsA(isA<OracleException>().having((e) => e.message, 'message',
+              contains('internally inconsistent'))),
+        );
+        expect(t2.lobReadCalls, equals(2));
+        await blob.close();
+      });
+
+      test('a piece reporting MORE units than it requested fails loud instead '
+          'of leaving a silent HOLE in the value', () async {
+        // An over-reported amount advances the next piece's offset past units
+        // that were never delivered, so the stream would skip data and still
+        // report success. Mirrors `readLobRange`'s `delivered > request` guard.
+        final (conn, t, lob) = await _fetchLob(_clob(12));
+        t.lobReadReplies.addAll([
+          (data: Uint8List.fromList(utf8.encode('abc')), amount: 3),
+          (data: Uint8List.fromList(utf8.encode('def')), amount: 5), // > 3
+        ]);
+        await expectLater(
+          lob.textStream(pieceSize: 3).toList(),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having(
+                  (e) => e.message,
+                  'message',
+                  allOf(contains('overshot'), contains('only 3 were '
+                      'requested')))),
+        );
+        expect(t.lobReadCalls, equals(2));
+        await lob.close();
+
+        final (conn2, t2, blob) = await _fetchLob(_blob(12));
+        t2.lobReadReplies
+            .add((data: Uint8List.fromList([1, 2]), amount: 4)); // > 2
+        await expectLater(
+          blob.byteStream(pieceSize: 2).toList(),
+          throwsA(isA<OracleException>()
+              .having((e) => e.message, 'message', contains('overshot'))),
+        );
+        expect(t2.lobReadCalls, equals(1), reason: 'fails on the FIRST piece');
+        await blob.close();
+      });
+
+      test('a piece reporting EXACTLY what it requested is accepted (negative '
+          'control for the overshoot guard)', () async {
+        final (conn, t, lob) = await _fetchLob(_clob(6));
+        t.lobReadReplies.addAll([
+          (data: Uint8List.fromList(utf8.encode('abc')), amount: 3),
+          (data: Uint8List.fromList(utf8.encode('def')), amount: 3),
+        ]);
+        expect(await lob.textStream(pieceSize: 3).toList(),
+            equals(['abc', 'def']));
+        await lob.close();
+      });
+
+      test('a reply that OMITS the SB8 amount still streams (the guards only '
+          'act on a reported count)', () async {
+        // `amount: null` is the missing-SB8 shape; the byte-derived fallback
+        // takes over and neither new guard can fire on it.
+        final (conn, t, blob) = await _fetchLob(_blob(4));
+        t.lobReadReplies.addAll([
+          (data: Uint8List.fromList([1, 2]), amount: null),
+          (data: Uint8List.fromList([3, 4]), amount: null),
+        ]);
+        expect(
+          (await blob.byteStream(pieceSize: 2).toList())
+              .map((p) => p.toList())
+              .toList(),
+          equals([
+            [1, 2],
+            [3, 4]
+          ]),
+        );
+        expect(t.readRequests.map((r) => r.offset).toList(),
+            equals([1, 3, 5]), reason: 'advanced by the delivered byte count');
         await blob.close();
       });
 

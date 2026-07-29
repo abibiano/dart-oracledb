@@ -62,13 +62,17 @@ jobs:
       # (measured 68.89% then). Fresh measured unit-test baseline: 80.85%
       # on 2026-07-12 (Story 12.1); the 73 floor keeps headroom.
       #
-      # Raised 73 -> 80 by Story 12.4 (the Epic 12 closeout), whose 19 new
+      # Raised 73 -> 80 by Story 12.4 (the Epic 12 closeout), whose new
       # fake-transport unit tests measured 81.95% on 2026-07-26 with the same
       # command this gate runs. Per the ratified convention a floor bump rides
       # the story diff that raises coverage, and 73 had again drifted ~9 points
       # below reality. 80 (not 81) is deliberate: local and CI figures can differ
       # slightly by platform-specific lines, so ~2 points of headroom keeps the
       # gate strict without turning a platform difference into a red build.
+      #
+      # Re-measured 82.33% on 2026-07-29 (epic-12 review iteration 3, which added
+      # 25 more unit tests). The floor stays at 80: the ~2.3 points of headroom is
+      # exactly the margin the paragraph above calls for.
       # Integration-tagged tests are excluded from coverage, so the protocol
       # paths they exercise don't count here. Ratchet the floor upward as
       # unit coverage grows.

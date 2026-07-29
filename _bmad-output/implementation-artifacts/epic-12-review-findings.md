@@ -73,6 +73,30 @@ items: every surviving finding has one unambiguous fix direction.
 - [x] [Review][Defer][Low] The inline-VARCHAR sibling of the fixed leak is asserted away rather than measured [test/integration/clob_integration_test.dart] — deferred, needs a live `V$TEMPORARY_LOBS` measurement to settle. In the `copyProc(p_in IN CLOB, p_out OUT CLOB)` cases the 32,767-byte (inline VARCHAR) shape asserts `debugPendingTempLobCount == 0` while the 32,768-byte shape asserts `2`, i.e. a PL/SQL `OUT CLOB` assigned from an IMPLICITLY converted VARCHAR yields an OUT locator with no TEMP flag. Since the whole 12.4 fix is flag-driven, that shape leaks exactly as before IF the server did allocate session temp space for it — and no test measures `V$TEMPORARY_LOBS` across repeated calls of that shape. The claim that non-flagged locators "allocate no session temp-LOB space" is measured for the `TO_CLOB`-literal / table-row / `FOR UPDATE` shapes and merely assumed for the one adjacent to the bug the epic set out to fix. Fix when next measured: add a baseline/after `tempLobCount` assertion around a repeat loop of the inline-VARCHAR OUT shape on both fixtures. (source: blind@primary)
 - [x] [Review][Defer][Low] `_openLobs` grows unbounded across a long `fetchLobs` result-set iteration when the caller never closes each delivered handle [lib/src/connection.dart:4681] — deferred, a documented caller obligation with no correctness impact. Under `resultSet: true + fetchLobs: true` every delivered row contributes one registered handle, and `close()` reaps only the UNdelivered ones — by design, so the "collect the rows, close the result set, then read the LOBs" pattern works. A caller that iterates a million rows and closes nothing therefore accumulates a million registered handles plus the O(n) `_openLobs` sweeps every guard performs, with no warning threshold and no diagnostic. Bounded in blast radius (an open fetched handle already blocks `execute()`, so the growth is confined to the iteration) and entirely caller-driven. Fix when next touched: a one-shot `_log.warning` once `_openLobs` passes a threshold, naming the close obligation. (source: edge@primary)
 
+#### Iteration 3
+
+THIRD and FINAL epic-boundary pass over the SAME assembled diff, now including iterations 1 and 2
+(36 patch fixes). All six lens layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor ×
+reviewers `primary` and `secondary`) plus the dedicated security review returned content; **no
+failed/empty layer**. Iterations 1 + 2's 36 `[Patch]` items and 12 `[Defer]` items are closed and
+were NOT re-opened, nor was anything already recorded in a story's own `### Review Findings` or
+carried in `deferred-work.md` (which absorbed a large share of this round's raw claims — 28 of 39
+deduped claims were dismissed, most as already-carried deferrals). What survives is (a) residue of
+iteration 2's own fixes and (b) the one user-facing text iteration 2's four-place false-remedy
+correction missed. No `[Review][Decision]` items: every survivor has one unambiguous fix direction.
+
+- [x] [Review][Patch][Med] The user-facing cursor-embedded-LOB EXCEPTION still ends with the false remedy iteration 2 removed from all four DOCS, and contradicts itself in the same sentence [lib/src/connection.dart:730] — the message (`:734-741`) says the rows "fail with a protocol error even without fetchLobs" and then offers "…**or run this statement without fetchLobs**" as a remedy. Iteration 2's Med fix corrected exactly this claim in `README.md` (Known Limitations + the `fetchLobs` section), `CHANGELOG.md` and the `_materializeNestedCursorsInBatch` / `_drainNestedCursor` dartdocs — but not the ONE text a user actually sees at the failure. Consequence at a real call site: this reject is live-reachable only for the REF CURSOR OUT-bind shape (iteration 2's own conclusion), and for that shape running the same statement WITHOUT `fetchLobs` fails at the first row FETCH and, on 21c, poisons the transport — so the message actively directs the caller to the one action that costs them their session, while the real remedy the README now documents (project the LOB column OUTSIDE the cursor) appears nowhere in it. No test asserts the offending fragment (`grep 'without fetchLobs' test/` finds only an unrelated test name), so the text is free to change. Fix: replace the trailing clause with the real remedy — project the CLOB/NCLOB/BLOB column outside the cursor (or return it as a separate top-level OUT bind) — and state that dropping `fetchLobs` does NOT help, since the same shape fails at decode/FETCH and on 21c leaves the session unusable; keep the "top-level column / scalar OUT bind, including `resultSet: true`" half. (source: blind@primary)
+- [x] [Review][Patch][Low] Iteration 2's two `readLobRange` cross-checks were applied to the LOOPING seam only — the per-piece stream seam that shares the identical wire hazard got neither, so both failure shapes are still SILENT there [lib/src/oracle_lob.dart:587] — `_bytePieces` (`:575-593`) and `_textPieces` (`:615-637`) each issue one `runLobReadPiece` per piece and (a) terminate the stream on `if (piece.bytes.isEmpty)` (`:587`, `:625`) WITHOUT consulting `piece.units`, so the mirror image of the inconsistency iteration 2 made fail loud — units reported, payload absent — silently TRUNCATES the caller's stream and reports success; and (b) advance `next += _requireProgress(piece.units ?? …, next)` (`:590`, `:630`) with no analogue of the new `delivered > request` guard, so an over-reporting reply corrupts the next piece's offset and leaves a silent HOLE in the delivered value instead of failing loud. Both are the driver's cardinal sin (silently wrong data) on the same never-observed-but-structurally-possible reply that justified the sibling fix: `amount` comes from `RETURN_PARAMETER` and the payload from separate `LOB_DATA` messages. Safe to guard on both fixtures: `runLobReadPiece`'s own dartdoc records the MEASURED end-of-LOB reply as `amount: 0` with no payload (connection.dart:4855-4859), so a "units > 0 with empty payload" throw cannot fire on 23ai or 21c. Fix: in both generators throw an `OracleException` naming the inconsistency when `piece.bytes.isEmpty && (piece.units ?? 0) > 0` (before the existing terminate), and throw when the reported units exceed the units THIS piece requested (`pieceUnits`), mirroring `readLobRange`'s `delivered > request`; add two fake-transport cases. (source: blind@primary ×2)
+- [x] [Review][Patch][Low] Iteration 2's `delivered > request` tightening made `readLobRange`'s own documented missing-SB8 degrade throw a spurious "LOB read overshot" whenever a piece cap is active [lib/src/transport/transport.dart:1885] — `final delivered = response.amount ?? outstanding;` falls back to the WHOLE outstanding tail, while the new guard at `:1916` compares against `request` (`min(pieceUnits, outstanding)`). With a cap in play (`pieceUnits`, or the test-only `debugLobReadPieceUnits`) `outstanding > request`, so the fallback ITSELF trips the overshoot throw — making the dartdoc's stated behaviour (`:1838-1842` "the piece is treated as having satisfied the whole outstanding request — i.e. the read degrades to exactly the pre-12.3 single-round-trip behavior") unreachable under a cap and turning a documented degrade into a hard error. Production-identical either way (`pieceUnits` is null on every production caller and `_debugLobReadPieceUnits` is null, so `request == outstanding`), which is why it is Low — but the capped path is exactly the seam 12.4 AC5 added to make this loop testable. Fix: `response.amount ?? request` (fall back to what THIS piece requested), and adjust the "Missing SB8 amount" dartdoc bullet to say the degrade is per-piece when a cap is set. (source: edge@primary + edge@secondary)
+- [x] [Review][Patch][Low] SECURITY (LOW): iteration 2's payload-redaction fix stopped four branches short — four sibling branches of the SAME `switch` still render the caller's value verbatim, so one method now applies two opposite policies [lib/src/oracle_bind.dart:241] — `number` (`:241`), `date` (`:274`), `timestamp` (`:281`) and `timestampTz` (`:289`) still use `ArgumentError.value(value, 'value', …)`, which renders through `Error.safeToString` and emits a `String` IN FULL (verified by local Dart repro in the security lane: `Invalid argument (value): OracleBind(type: number) requires int, double, num, or null: "4111-1111-1111-1111"`). These four branches reject non-`num` / non-`DateTime` values — i.e. a `String` is precisely what trips them — so the natural mistake of forwarding text from JSON/a form into a numeric or temporal bind (`OracleBind(type: OracleDbType.number, value: body['card_number'])`) persists a PAN / SSN / account id in an `ArgumentError` that frameworks log verbatim and forward to error trackers: the identical mechanism, trigger and blast radius as the `blob`/`raw` case iteration 2 fixed one line away, and the new policy comment at `:296-300` names only "The RAW and LOB branches", reading as deliberate when it is incomplete. Precision so the fix stays minimal: `varchar` / `nVarchar` reject only NON-`String`s (Dart renders those as `_Uint8List` / `_Map len:2`), so they are NOT leaks — convert them only for uniformity. Fix: `throw ArgumentError('OracleBind(type: number) requires int, double, num, or null, got ${value.runtimeType}');` for the four leaking branches, and extend `test/src/oracle_bind_test.dart`'s existing "does not echo the secret" group with a `number` case using the same `mustNotContain` helper. (source: security + blind@primary + edge@primary)
+- [x] [Review][Patch][Low] The shipped `## 1.4.0` CHANGELOG advertises dual-env validation counts that the review's OWN added tests invalidated — 153 focused / 561 / 562 against a real final 155 / 563 / 564 [CHANGELOG.md:10] — violates 12.4 AC10 ("a short prose lead naming the feature and the dual-env validation **with this story's real counts**") and the epic's ratified never-a-stale-number discipline. The text is 12.4's PRE-epic-review figure; iteration 1 added two dual-env cases to `lob_coexistence_integration_test.dart` (one of AC1's six focused-suite files) and both iterations' Validation sections record **563 pass / 32 skip (23ai)** and **564 pass / 31 skip (21c)**, focused suite 155. This is the only user-facing statement of the epic's validation evidence, on the release cut itself, with no later gate to catch it. Fix: set the three numbers from the ITERATION-3 dev pass's own dual-env run (i.e. re-read them from that run rather than hardcoding 563/564 — this iteration's fixes add unit and fake-transport tests, and any integration case added for the stream-seam guard moves the integration figures again), and optionally correct the two adjacent internal records (`.github/workflows/ci.yml`'s "19 new fake-transport unit tests" attribution and 12.4's Completion Notes' 561/562). (source: auditor@primary + auditor@secondary)
+- [x] [Review][Patch][Low] `_isTempLobAlreadyQueued` — deleted by iteration 1 — survives as the NAMED AUTHORITY in `project-context.md`'s LOB rules, the one file every future story reads as binding instruction [_bmad-output/project-context.md:136] — the rule reads "…backstopped by content-level dedupe **in `_isTempLobAlreadyQueued`**. If you add a third owner, **add the dedupe in the same pass**", pointing the next story at a symbol `grep -rn '_isTempLobAlreadyQueued' lib/` no longer finds (iteration 1 replaced it with the O(1) `_tempLobKeysToClose` / `_tempLobKey` index inside `queueTempLobToFree`). This is the exact defect iteration 2 patched for 12.2's File List, in a file that was REGENERATED after iteration 2 (commit `9a623c0`), so it is current intent rather than history. Two further stale references: `12-4-dual-env-integration-tests.md:594` File List, and `deferred-work.md:21`'s trailing file bracket (its sibling at `:238` does record the rename, so the ledger contradicts itself). Verified NOT stale and to be left alone: the same file's "three sites" `required bool fetchLobs` claim — there are exactly three (`connection.dart:909`, `:1010`, `:4243`). Docs only, no code change. Fix: point `project-context.md:136` at `queueTempLobToFree` / `_tempLobKeysToClose` / `_tempLobKey`, correct 12.4's File List entry, and reconcile `deferred-work.md:21`'s bracket with `:238`. (source: auditor@primary)
+- [x] [Review][Patch][Low] README names the ONE shrunk-LOB diagnosis a real short-reading server cannot produce, while `read()`'s own dartdoc already hedges it correctly [README.md:954] — README says a read for the full cached length "**can** fail loud with a length mismatch"; against a server that reports the units it actually delivered, `readLobRange` takes a second piece (`while (unitsRead < amount)`), gets 0 units with `unitsRead != 0`, and throws **"LOB read made no progress…"** instead. The `length mismatch` guard (`oracle_lob.dart:371`, `:399`) is reachable only from the fake's shape (reported `amount` == request while shipping fewer units), i.e. precisely the internally-inconsistent reply iteration 2 made fail loud in the mirror direction — and that fake is the sole pin for the AC6 shrunk-direction remedy (`test/src/oracle_lob_test.dart:518`). AC6's real invariant (correct data or fail-loud) holds either way, so this is text accuracy, not correctness. Note `lib/src/oracle_lob.dart:276` ALREADY says "(a length mismatch, or \"made no progress\")" — the code-side text is correct and must not be "fixed" twice. Fix: hedge README.md:954 the same way the dartdoc does; optionally add a short-reading variant to the fake so both diagnoses are pinned. (source: auditor@primary + blind@primary)
+- [x] [Review][Patch][Low] The AC4 comment block's "There is no `OracleLob` on this path, so no handle can queue it too" is over-broad — a caller's created-temporary handle bound `IN OUT` IS on this path, and what actually holds the at-most-once contract is a MEASURED locator distinctness, not the absence of a handle [lib/src/transport/transport.dart:2025] — the sentence justifies the queue's at-most-once contract for the `fetchLobs: false` materialize path, but README (`:930`, `:939`) documents `OracleBind.inOut(value: lob, type: clob)` for a `createTemporary*` handle, and created-temporary handles are exempt from the in-flight-slot rule, so such a handle can be open (and can queue its own locator on `close()`) across the same statement. Triaged DOWN from the security lane's routed correctness hypothesis (premature/double `FREE_TEMP` on an unrelated statement) because the epic's own dual-env measurements refute the premise that both sides queue the SAME locator: Oracle REPLACES the LOB behind an `IN OUT` bind (so the materialized OUT locator is a different temp LOB, pinned live at `test/integration/lob_temporary_integration_test.dart:442-504`, which asserts pending 1 → 2 as two DISTINCT entries and then proves the carrier statement and the session survive both frees on 23ai and 21c), and `p_out := p_in` deep-copies (the `copyProc` 1→2 counts). It is also NOT a duplicate of the carried deferral (whole-buffer key snapshot) or of iteration 2's slot-rule coupling note, which cover the fetched-handle shape. So: no behaviour change, and the dev pass must NOT "fix" the free accounting. Fix: replace the sentence with the real basis — a bound created-temporary handle CAN coexist on this path, and the OUT locator is measured to be a distinct LOB (IN OUT replacement / deep copy), cross-referencing the pinning test — so a future story that changes IN OUT handling knows the claim is empirical. (source: security open questions — routed non-security correctness item)
+- [x] [Review][Patch][Low] Iteration 2's all-or-nothing callback `assert` is pinned by NOTHING, and is documented as "enforced" though asserts are stripped in release builds [lib/src/protocol/result_set_cursor.dart:135] — the doc (`:98`) says the three lazy-handle callbacks "must be supplied together or not at all — enforced by a constructor `assert`, because a partial set leaks SILENTLY". Nothing in the diff would fail if the condition were inverted or deleted, while the project has an established convention for pinning asserts (`throwsA(isA<AssertionError>())`, ~10 uses in `test/src/protocol/messages/execute_message_test.dart`), and Epic 11 retro action item 2 requires each fix site to be pinned. The guard is genuinely effective for the only realistic case (driver development, where asserts are on), so the word "enforced" is the overstatement, not the design. Fix: add one `throwsA(isA<AssertionError>())` case per omitted callback and soften "enforced by" to "guarded in dev/test builds by (Dart strips asserts in release)". (source: blind@primary)
+- [x] [Review][Defer][Low] `writeStream`'s unit accounting may diverge from the server's CHARACTER billing for supplemental characters on a UTF-8-form (single-byte-charset) CLOB [lib/src/oracle_lob.dart:762] — deferred, needs a live `WE8MSWIN1252` measurement to settle and the proposed fix would itself change the measured mainstream accounting. `written += units` counts UTF-16 code units (an astral pair = 2), which is right for an AL16UTF16-stored CLOB; if a UTF-8-form CLOB is billed in characters (an astral pair = 1) then every supplemental character shifts each later chunk one unit on, leaving a server-filled gap — silent corruption rather than a loud error. Unmeasured in BOTH directions (the epic's non-AL32UTF8 fixture proved the READ path only), and the data itself is unrepresentable in a single-byte charset, so the shape is doubly exotic. Fix when next measured: write a supplemental-character `writeStream` against the `WE8MSWIN1252` fixture, compare `DBMS_LOB.GETLENGTH` against the driver's advance, and correct whichever side is wrong. (source: edge@primary)
+- [x] [Review][Defer][Low] The POOL's disposition of an open caller-owned temporary LOB is absent from the public docs that create one [README.md:908] — deferred, genuine but minor doc gap on a path that already fails loud and safely. `hasOpenLob` deliberately includes created-temporary handles, so `release()`ing a pooled connection with an open `createTemporaryClob()` handle logs a warning, force-closes the handle, marks it reclaimed-by-pool and queues its server-side free — defensible, and a later `read`/`write` gets a clear pool-reclaim error. But `createTemporaryClob`'s bullet list and README's "Temporary LOBs you create, fill, and bind" section say only "you must `close()` it"; the behaviour is documented only on the internal `forceCloseOpenLobs` seam, which no user reads. Fix when next touched: one clause in the temp-LOB README section (and the `createTemporary*` dartdocs) stating that an open handle at pool `release()` is force-closed and its LOB freed. (source: blind@primary)
+
 ### Resolution (dev pass — iteration 1)
 
 All 18 `[Review][Patch]` findings are resolved; the 6 `[Review][Defer]` items are untouched and
@@ -260,3 +284,125 @@ existed in this iteration.
 XEPDB1, `colima`) **564 pass / 31 skip**, zero failures on either — the tightened exact-counter
 integration assertion (`equals(2)`) holds on both. The depth-2 sibling-requeue test was verified RED
 against the pre-fix code before being accepted.
+
+### Resolution (dev pass — iteration 3)
+
+All 9 iteration-3 `[Review][Patch]` findings are resolved (1 Med + 8 Low); the 2 iteration-3
+`[Review][Defer]` items are untouched and remain carried follow-ups. No `[Review][Decision]` items
+existed in this iteration. Iterations 1 and 2 were treated as closed and were not re-opened.
+
+**Med**
+
+1. **The user-facing exception still offered the false remedy** (`lib/src/connection.dart`,
+   `_rejectCursorEmbeddedLob`) — iteration 2 corrected the claim in all four DOCS but not in the one
+   text a user sees at the failure. The trailing "…or run this statement without fetchLobs" clause is
+   replaced by the measured remedy — project the CLOB/NCLOB/BLOB **outside** the cursor, as a
+   top-level column or a separate scalar OUT bind — plus an explicit statement that re-running
+   WITHOUT `fetchLobs` does **not** help (the same shape still fails while decoding the execute
+   response or the first row FETCH, and on 21c and older the malformed stream leaves the session
+   unusable). The supported half ("top-level column / scalar OUT bind, including `resultSet: true`")
+   is kept. A new fake-transport case in `test/src/nested_cursor_test.dart` pins the message
+   positively (both remedy fragments, the "does NOT help" sentence, the session warning) and
+   negatively (`isNot(contains('or run this statement without fetchLobs'))`) — nothing pinned this
+   text before, which is exactly how the stale clause survived two iterations.
+
+**Low**
+
+- **The per-piece stream seam got iteration 2's two cross-checks** (`lib/src/oracle_lob.dart`) —
+  `_bytePieces` and `_textPieces` share `readLobRange`'s wire hazard (`amount` from
+  `RETURN_PARAMETER`, payload from separate `LOB_DATA` messages) and had neither guard. Two new
+  private helpers, both fail-loud `OracleException`s in the existing `_requireProgress` style:
+  `_requirePayloadForUnits` throws when a reply reports units but ships no payload (previously
+  `piece.bytes.isEmpty` alone ended the stream, so the caller got a silently TRUNCATED value and a
+  successful completion), and `_requireWithinRequest` throws when the reported units exceed what
+  THAT piece requested (previously the offset advanced past undelivered units, leaving a silent HOLE).
+  Both are unreachable on 23ai/21c — the measured end-of-LOB reply is `amount: 0` with no payload,
+  which stays termination. Four new cases (the two faults on both a CLOB and a BLOB stream, an
+  exact-request negative control, and a missing-SB8 case proving neither guard fires on a reply that
+  omits the amount); both faults **verified RED** against the unguarded code.
+- **`readLobRange`'s missing-SB8 fallback is now `?? request`** (`lib/src/transport/transport.dart`)
+  — iteration 2's `delivered > request` tightening made the documented degrade throw a spurious
+  "LOB read overshot" whenever a piece cap was active, because the fallback still credited the whole
+  `outstanding` tail. Production-identical (`pieceUnits` is null on every production caller, so
+  `request == outstanding`), but it broke exactly the seam 12.4 AC5 added to make this loop testable.
+  The "Missing SB8 amount" dartdoc bullet now states that the degrade is per piece under a cap. Two
+  new cases: a three-piece capped read with every reply omitting the amount (**verified RED** — it
+  threw "overshot" before), plus a negative control proving a REPORTED over-count still throws.
+  Sibling seams were swept in the same pass, which is what surfaced the stream-seam finding above.
+- **SECURITY: `OracleBind._validate`'s four remaining leaking branches**
+  (`lib/src/oracle_bind.dart`) — `number`, `date`, `timestamp` and `timestampTz` still used
+  `ArgumentError.value`, which renders through `Error.safeToString` and emits a `String` in full;
+  a `String` is precisely what trips them (text forwarded from JSON or a form into a numeric or
+  temporal bind), so a PAN / SSN / account id persisted into a routinely-logged `ArgumentError`. All
+  four now report `got ${value.runtimeType}` only. `varchar` / `nVarchar` were converted for
+  uniformity (they reject only non-`String`s, so they were never leaks). The policy comment moved
+  above the `switch` and now covers every branch, since naming only "the RAW and LOB branches" is
+  what made a partial redaction read as deliberate. The NaN/Infinity guard deliberately keeps
+  `ArgumentError.value` — by then the value is provably a non-finite double — and says so, with a
+  negative-control test so it is not "fixed" later. Seven new cases in the existing
+  `test/src/oracle_bind_test.dart` security group; the `number` case **verified RED** (the reverted
+  branch emits `Invalid argument (value): … : "4111-1111-1111-1111"`).
+- **The stale `## 1.4.0` CHANGELOG validation counts** (`CHANGELOG.md`) — set from THIS pass's own
+  dual-env run rather than from the findings file, so they cannot ship stale a third time:
+  **155/155** focused LOB integration tests on both fixtures (was 153), **563 pass / 32 skip** on
+  23ai (was 561) and **564 pass / 31 skip** on 21c (was 562). `_bmad-output/project-context.md`'s
+  "Current baselines" line and its unit count (1716 → 1741) were refreshed from the same run — that
+  line is presented as current fact and had gone stale the same way — with a note to re-read the
+  numbers from a real run before quoting them user-facing. `.github/workflows/ci.yml`'s coverage
+  comment records the fresh **82.33%** measurement (floor stays 80: the ~2.3 points of headroom is
+  exactly the margin that paragraph asks for) and drops the now-wrong "19 new" test attribution.
+  12.4's own per-iteration Completion Notes are left as dated history.
+- **`_isTempLobAlreadyQueued` no longer named as the authority**
+  (`_bmad-output/project-context.md`) — the binding LOB rule pointed the next story at a symbol
+  iteration 1 deleted. It now names `Transport.queueTempLobToFree`'s inline O(1) index
+  (`_tempLobKeysToClose` keyed by `_tempLobKey`, kept in lockstep at queue / drain / restore), says
+  explicitly not to grep for the old helper, and records that the whole-buffer key makes the dedupe
+  fixture-proven rather than structural (cross-referencing the carried identity-subrange item). The
+  two sibling stale references are fixed: `12-4-dual-env-integration-tests.md`'s File List entry and
+  `deferred-work.md:21`'s trailing file bracket, which now agrees with its sibling at `:238`.
+  Verified NOT stale and left alone: the same file's "three sites" `required bool fetchLobs` claim.
+  Docs only.
+- **README's shrunk-LOB diagnosis hedged** (`README.md`) — "**can** fail loud with a length
+  mismatch" named the one diagnosis a real short-reading server cannot produce; it now matches
+  `read()`'s own dartdoc ("a length mismatch, or `LOB read made no progress`, depending on whether
+  the server reports the units it actually delivered"). The code-side text at `oracle_lob.dart:276`
+  was already correct and was deliberately NOT touched. The optional half was taken too: a
+  short-reading variant added to the fake pins the "made no progress" diagnosis for the same shrunk
+  LOB, so both texts are now held by a test.
+- **The AC4 "no `OracleLob` on this path" sentence** (`lib/src/transport/transport.dart`) — replaced
+  with the real basis, **comment only, no change to the free accounting or the dedupe** (the triage
+  refuted the underlying hypothesis). It now states that a caller's `createTemporary*` handle bound
+  `IN OUT` CAN coexist on this path (README documents that shape, and created-temporary handles are
+  exempt from the slot rule), and that what actually holds the at-most-once contract is a MEASURED
+  locator distinctness: Oracle REPLACES the LOB behind an `IN OUT` bind, so the materialized OUT
+  locator is a distinct temp LOB, and `p_out := p_in` deep-copies. Cross-references the pinning test
+  (`test/integration/lob_temporary_integration_test.dart`, the IN OUT temp-handle case asserting
+  pending 1 → 2 as two DISTINCT entries and then proving the carrier statement and the session
+  survive both frees on 23ai and 21c) and flags the claim as empirical, so a future story changing
+  IN OUT handling re-measures rather than trusting the paragraph.
+- **Iteration 2's all-or-nothing callback `assert` is now pinned**
+  (`lib/src/protocol/result_set_cursor.dart`, new
+  `test/src/protocol/result_set_cursor_lob_callbacks_test.dart`) — 10 cases: two positive controls
+  (all three supplied, none supplied), one per omitted callback and one per callback supplied ALONE
+  (so neither half of the `&&` can be deleted without a failure), a message assertion, and a fixture
+  self-check that the three stand-in callbacks really match the constructor signatures. The dartdoc's
+  "enforced by a constructor `assert`" is softened to "guarded in dev/test builds by … (Dart strips
+  asserts in release)", with why that is adequate here — these callbacks are wired only inside the
+  driver.
+
+**Validation** — `dart analyze --fatal-infos --fatal-warnings`: clean (zero issues).
+`dart doc`: 3 warnings, 0 errors — the same 3 pre-existing unresolved references, no new ones.
+`scripts/sync_readme_version.sh --check`: consistent at 1.4.0. Unit suite **1741 pass / 6 skip**,
+zero failures (+25 new cases). Line coverage **82.33%**, above the 80 floor. Integration on BOTH
+fixtures per the standing dual-env rule: Oracle 23ai (`localhost:1521` / FREEPDB1,
+`desktop-linux`) **563 pass / 32 skip**, Oracle 21c (`localhost:1522` / XEPDB1, `colima`)
+**564 pass / 31 skip**, zero failures on either. Focused Epic 12 LOB suite (the 6 files AC1 names)
+**155 pass / 0 skip** on both. Three of this iteration's fixes were verified RED against the
+unfixed code before being accepted (the `number` payload leak, both stream-seam cross-checks, and
+the `?? request` fallback).
+
+Note on formatting: `dart format` was deliberately NOT run. The repo carries pre-existing
+formatter-version drift (the current stable SDK reformats 105 files, including many this pass never
+touched), and CI's "Verify formatting / analyzer" step runs `dart analyze` only — so reformatting
+would have produced a large unrelated diff without satisfying any gate. New code follows the
+surrounding style.

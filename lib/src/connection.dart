@@ -727,6 +727,13 @@ class OracleConnection {
   /// "LOB column → handle" contract on this one shape. The reject path itself
   /// requeues the embedded cursor id for the close-cursor piggyback (both call
   /// sites), so a rejected call no longer leaks a server cursor.
+  ///
+  /// The message names the ONE remedy that is measured to work — project the LOB
+  /// column outside the cursor — and explicitly says that dropping `fetchLobs`
+  /// does not help. Re-running the same statement without the flag is the one
+  /// action that costs the caller their session on 21c, so offering it as a
+  /// remedy (as this message once did) actively harms; the four user-facing docs
+  /// were corrected for the same claim.
   Never _rejectCursorEmbeddedLob() {
     throw const OracleException(
       errorCode: oraProtocolError,
@@ -735,10 +742,13 @@ class OracleConnection {
           'CLOB/NCLOB/BLOB carried by a nested CURSOR(...) result column or a '
           'REF CURSOR OUT bind: such cursor-embedded LOB rows cannot be decoded '
           'by this driver yet (they fail with a protocol error even without '
-          'fetchLobs), so they are never wrapped as OracleLob handles. Fetch a '
-          'top-level LOB column or scalar OUT bind with fetchLobs — including '
-          'with resultSet: true, which is supported — or run this statement '
-          'without fetchLobs.',
+          'fetchLobs), so they are never wrapped as OracleLob handles. Project '
+          'the CLOB/NCLOB/BLOB OUTSIDE the cursor — as a top-level column or as '
+          'a separate scalar OUT bind — which fetchLobs fully supports, '
+          'including with resultSet: true. Re-running this statement WITHOUT '
+          'fetchLobs does NOT help: the same shape still fails while decoding '
+          'the execute response or the first row FETCH, and on Oracle 21c and '
+          'older the malformed stream leaves the session unusable.',
     );
   }
 

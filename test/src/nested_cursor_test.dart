@@ -716,6 +716,46 @@ void main() {
       },
     );
 
+    // Epic 12 integration review iteration 3 (Med). Iteration 2 removed the
+    // false "just drop fetchLobs" remedy from all four DOCS but not from the ONE
+    // text a user actually sees. For this shape the same statement WITHOUT
+    // fetchLobs fails while decoding anyway, and on 21c the malformed stream
+    // costs the caller their session — so the message must not offer it. Nothing
+    // pinned the message text before, which is how the stale clause survived.
+    test(
+      'the reject message offers the MEASURED remedy (project the LOB outside '
+      'the cursor) and never suggests dropping fetchLobs',
+      () async {
+        final t = buildTransport(_clobLocator());
+        final conn = OracleConnection.forTesting(transport: t);
+        OracleException? caught;
+        try {
+          await conn.execute(
+            'SELECT id, nc FROM t',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+        } on OracleException catch (e) {
+          caught = e;
+        }
+        expect(caught, isNotNull);
+        final message = caught!.message;
+        // The remedy the README documents and the epic measured.
+        expect(message, contains('OUTSIDE the cursor'));
+        expect(message, contains('separate scalar OUT bind'));
+        // The supported shapes stay named (the half that was always correct).
+        expect(message, contains('resultSet: true'));
+        // The false remedy is gone, and the reason is stated.
+        expect(message, contains('WITHOUT fetchLobs does NOT help'));
+        expect(message, contains('session unusable'));
+        expect(
+          message,
+          isNot(contains('or run this statement without fetchLobs')),
+          reason: 'the one action that costs a 21c caller their session',
+        );
+      },
+    );
+
     // Story 12.3 AC6: the REJECT path must not leak the server cursor it
     // rejects. `_materializeNestedCursorsInBatch` throws BEFORE
     // `_drainNestedCursor`'s reaping `finally` ever runs, so without an explicit
