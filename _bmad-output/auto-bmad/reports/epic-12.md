@@ -235,3 +235,55 @@ Reconcile marked 13 ledger entries genuinely resolved against the current code (
 7. Optional cleanup: the oracle-non-al32 charset container was left running on the desktop-linux context (story 12-4 used it for the UTF-8 decode branch).
 
 **Next:** story_plan.py would re-pick 12-2-temporary-lob-lifecycle (the first story still at `review`) — because a caveated epic deliberately leaves every landed story there. Resolve the caveat above first; a bare /auto-bmad will hard-stop and redirect to `/auto-bmad epic --epic 12` while this epic anchor is in flight.
+
+## Report — 2026-07-29T06:57:57Z (final — caveated)
+
+**Epic:** `12` — 4 stories.
+**Branch:** `epic/12-lob-streaming-temporary-lobs` (HEAD `3d345a9`).
+**Pipeline status:** ⚠️ Still caveated after a user-granted 3rd review iteration. The extension ran the full roster again and found 1 Med + 10 Low (9 Patch, all fixed); the loop gate still returns exit-unconverged because 9 non-deferred findings exceeds the ≤3 threshold and the pass was not Low-only. convergence_unverified therefore stays true: the PR remains a DRAFT and all three stories stay at `review`. CI is GREEN on this branch.
+**Continues:** 2026-07-26T21:43:13Z (final — caveated)
+
+**Summary:** Session delta only — this section covers the user-granted extension of the epic integration review (iteration 3) after the epic had already finalized. No story work, no new stories: the epic anchor was reopened, the full 6-lens + security roster re-ran over the 13.3k-line epic diff, 9 Patch findings were fixed, and the epic re-finalized. Epic scope, deliverables and release (1.4.0) are unchanged from the prior section.
+
+**Timing:** started 2026-07-26T13:15:23Z; completed 2026-07-26T21:44:34Z — elapsed 8h 29m (≈9h 18m AI-run, ≈0m human/idle wait); resumed 3×.
+
+**Stories:**
+1. No story was re-entered. All three landed stories (12-2, 12-3, 12-4) remain at `review` — the batch BMAD-status flip is still withheld because the draft predicate is unchanged.
+2. Post-iteration-3 verification: unit 1741 pass / 6 skip (+25 over iteration 2); integration 563 on 23ai and 564 on 21c; focused epic-12 LOB suite 155 green on BOTH fixtures; coverage 82.33% against the 80% floor; dart analyze --fatal-infos --fatal-warnings clean; 3 of the fixes verified RED against unfixed code first.
+
+**Skipped (already done):** 12-1-public-lob-object — already `done` and in base (unchanged from the prior section).
+
+**Integration review:** Iteration 3 (user-granted extension, judged as a final iteration with --max-iterations 3). Same roster: 6 lenses across 2 reviewer models + the single-instance security pass; 0 failed lenses. Verdict Changes Requested — Critical 0 / High 0 / Med 1 / Low 10; 11 persisted (9 Patch, 2 Defer), 0 open Decisions, 28 dismissed (mostly already-carried deferrals). All 9 Patch fixed and post-fix verified clean. Gate: exit-unconverged (9 non-deferred > 3, not Low-only). ACROSS ALL THREE ITERATIONS the non-deferred count trended 18 -> 18 -> 9 with ZERO Critical/High in any pass. For the third consecutive iteration the highest-value findings were residue of the PREVIOUS iteration's own fixes: iteration 2's two readLobRange hardening guards had been applied to the looping seam only, leaving the sibling single-READ stream seam still able to truncate silently on an empty payload and to advance the offset from an unchecked unit count; and its tightened delivered-vs-request comparison collided with an untouched fallback, making the documented missing-SB8 degrade throw 'LOB read overshot' whenever a piece cap is active. The one Med: the cursor-embedded-LOB reject MESSAGE still carried the claim iteration 2 had corrected everywhere else (README, CHANGELOG, dartdocs) — the one text a user actually reads. One finding routed from the security lane as a suspected premature/double FREE_TEMP was triaged DOWN to a comment fix after the triage refuted its premise with the epic's own dual-env measurements (Oracle replaces the LOB behind an IN OUT bind, so the materialized OUT locator is a distinct temp LOB); the free accounting and dedupe were deliberately left untouched.
+
+**Epic gate:** Unchanged — not run (tea.enabled false; BMAD 6.10.0 ships no bmad-testarch-* skills). gate_decision stays null.
+
+**TEA:** disabled (unchanged).
+
+**UAT:**
+1. Unchanged from the prior section — the consolidated 40-item single-session checklist there still applies; iteration 3 changed no user-facing behaviour beyond one improved error message.
+2. One item to re-verify given iteration 3: the cursor-embedded-LOB reject on a SYS_REFCURSOR OUT bind with fetchLobs: true -> the thrown message now names the measured remedy (project the LOB outside the cursor), states that dropping fetchLobs does NOT help, and warns that the 21c session may be lost.
+
+**Overrides:** none. The user granted one loop extension at the re-opened review decision — recorded on the anchor as hitl_halt: "auto-continued (epic — no halt); loop extended once by the user to iteration 3, still unconverged".
+
+**Open questions:**
+1. Whether to grant a 4th iteration or stop machine-iterating. RECOMMENDATION: stop. Three passes produced zero Critical/High findings, the non-deferred count fell 18 -> 18 -> 9, and iteration 3's residue was one error-message text plus doc/guard polish. A human read of the PR is now worth more than another pass.
+2. Whether the epic-scope convergence rule is structurally reachable on a 13k-line diff: ≤3 non-deferred findings OR Low-only is a story-scope threshold, and three honest passes never met it despite finding nothing severe. Worth deciding whether epic scope needs its own threshold or should always end in a human judgement.
+3. dart format was deliberately not run: the current stable SDK reformats 105 files (pre-existing formatter-version drift) and CI only runs dart analyze. Worth pinning a formatter/SDK version.
+
+**Deferred work:**
+1. 2 new Defer items from iteration 3: writeStream supplemental-character billing on a single-byte-charset CLOB (needs a WE8MSWIN1252 measurement), and the pool disposition of an open caller-owned temporary LOB in the public docs.
+2. All prior deferred items from the earlier section stand unchanged (the cursor-embedded-LOB decode defect, the super-linear full-length read, the node-parity LOB gap, and the rest) — 14 items now logged under the epic-review headings.
+No archive pass ran this session (the epic-end closing steps already completed in the prior section). The ledger gained 2 iteration-3 deferrals.
+
+**Auto-decided (epic mode):**
+1. None this session — iteration 3 produced 0 open [Review][Decision] items, so nothing was resolved without a human. The single auto-decision from the earlier section (AC4 guard placement, Med, dismissed) still stands and is still reversible.
+
+**Planning drift:** Unchanged from the prior section: architecture.md's 'one lifecycle model for all lazy, server-backed handles' invariant is structurally stale (missing the created-temp-LOB slot-guard exemption), and epics.md remains one-line stubs (recurring, detail-level). No PRD drift. Neither was acted on this session.
+
+**⚠️ Needs human:**
+1. DECIDE: accept the caveat and merge PR #2 manually (mark it ready first), or grant a 4th review iteration. My recommendation is to stop iterating — see Open questions.
+2. The three stories stay at `review` until you act. Marking the PR ready does NOT flip them; that flip is gated on the draft predicate, which only clears if a review pass converges.
+3. Still open from the prior section: file the cursor-embedded-LOB decode defect as its own protocol/decode story; amend architecture.md's lifecycle invariant; decide on enabling TEA before Epic 13.
+4. Decide whether to pin a formatter/SDK version — dart format currently reformats 105 files and no CI job enforces it.
+
+**Next:** Unchanged: story_plan.py would re-pick 12-2-temporary-lob-lifecycle, because a caveated epic leaves every landed story at `review`. A bare /auto-bmad still hard-stops and redirects while this epic anchor exists.
