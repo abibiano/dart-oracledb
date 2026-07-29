@@ -13,5 +13,10 @@ docker-compose.yml
 docker-compose.override.yml
 coverage/
 
+# Generated dartdoc output. Gitignored, but a root .pubignore shadows the root
+# .gitignore, so it must be repeated here or a local `dart doc` run leaks 200+
+# HTML files into the published archive (pub.dev renders API docs itself).
+doc/api/
+
 # TLS test certificates (gitignored *.pem)
 docker/tls/

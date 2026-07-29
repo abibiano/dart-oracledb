@@ -679,6 +679,8 @@ try {
   print(lob.length);                       // native units (see below)
   final head = await lob.read(offset: 1, amount: 100) as String;
   final all = await lob.read() as String;  // whole value (default args)
+  // getData([offset, amount]) is a positional alias of read(), for
+  // node-oracledb parity: lob.getData(1, 100).
 } finally {
   await lob.close();                        // always close
 }

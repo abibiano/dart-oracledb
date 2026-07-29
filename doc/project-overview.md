@@ -16,7 +16,7 @@ the port maintainable and to allow upstream behaviour to be cross-checked
 file-by-file (see `reference/` and the architecture doc).
 
 - **Package name:** `oracledb` (repo `dart-oracledb`)
-- **Version:** `0.9.2` (pre-1.0; see [Project Status](#project-status))
+- **Version:** `1.4.0` (see [Project Status](#project-status))
 - **License:** see `LICENSE`
 - **Repository:** https://github.com/abibiano/dart-oracledb
 
@@ -34,7 +34,12 @@ file-by-file (see `reference/` and the architecture doc).
 | Statement caching (cursor reuse, parse skipping) | ✅ |
 | Data types — NUMBER, VARCHAR2/CHAR, DATE, TIMESTAMP, TIMESTAMP WITH TIME ZONE, RAW, CLOB, BLOB, native JSON (OSON) | ✅ |
 | Connection health check (`ping`) | ✅ |
-| Connection pooling | ⏳ Planned |
+| Connection pooling (`OraclePool`, tagging, `acquireTimeout`, `idleTimeout`, drain) | ✅ |
+| Result sets & streaming (`OracleResultSet`, `queryStream()` / `executeStream()`) | ✅ |
+| Server cursors — `REF CURSOR` OUT binds, implicit results, nested `CURSOR()` columns | ✅ |
+| Non-`AL32UTF8` database character sets; national types on `AL16UTF16` | ✅ |
+| Bulk DML — `executeMany()` (array DML, `RETURNING`, bulk PL/SQL, batch errors) | ✅ |
+| LOB handles — `fetchLobs`, bounded `read()`/`write()`, piece streams, temporary LOBs | ✅ |
 
 ## Technology Stack
 
@@ -107,9 +112,11 @@ See [source-tree-analysis.md](./source-tree-analysis.md) for the annotated tree.
 
 ## Project Status
 
-Pre-1.0 (`0.9.2`). Core connectivity, query/DML/transaction, PL/SQL, and the full
-scalar + LOB + JSON data-type surface are implemented and validated against both
-Oracle 23ai and 21c. The main remaining pre-1.0 work is **connection pooling**.
+Stable (`1.4.0`), semantically versioned. Core connectivity, query/DML/transaction,
+PL/SQL, the full scalar + LOB + JSON data-type surface, connection pooling, result-set
+streaming, server cursors, non-`AL32UTF8` character sets, bulk DML, and `OracleLob`
+handles are implemented and validated against both Oracle 23ai and 21c. Remaining
+roadmap items are listed under "Planned After 1.0" in the README.
 
 **Known limitations** (see README for the authoritative list): single in-flight
 `execute()` per connection (overlapping calls are rejected, not serialized — use
