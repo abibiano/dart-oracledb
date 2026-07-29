@@ -42,19 +42,14 @@ void main() {
       late OracleConnection connection;
       final testTable = uniqueTableName('lobstream');
 
-      // Non-ASCII fixtures, escaped so the file encoding is irrelevant.
-      const accented = 'café crème'; // café crème
-      const cjk = '中文日本語'; // 中文日本語
+      // Non-ASCII fixtures, escaped so the file encoding is irrelevant
+      // (Story 12.4 AC9 — this file's own docstring already claimed escapes;
+      // the raw literals contradicted it).
+      // Latin-1 accented: "cafe creme" with U+00E9 / U+00E8.
+      const accented = 'caf\u{00E9} cr\u{00E8}me'; // café crème
+      // CJK: five ideographs, U+4E2D U+6587 U+65E5 U+672C U+8A9E.
+      const cjk = '\u{4E2D}\u{6587}\u{65E5}\u{672C}\u{8A9E}'; // 中文日本語
       const emoji = '\u{1F600}\u{1F389}'; // 😀🎉 (supplementary plane)
-
-      bool nationalCharsetSupported() {
-        if (connection.charsetInfo.supportsNationalCharacterSet) return true;
-        markTestSkipped(
-          'national charset is ${connection.charsetInfo.nationalCharset}, '
-          'not AL16UTF16 — NCLOB unsupported on this fixture',
-        );
-        return false;
-      }
 
       setUp(() async {
         connectionHandle = await connectForTest();
@@ -117,7 +112,7 @@ void main() {
 
       test('an NCLOB with multibyte + supplemental text reads correctly',
           () async {
-        if (!nationalCharsetSupported()) return;
+        if (!nationalCharsetSupported(connection)) return;
         final id = nextTestId();
         // 'café crème 中文日本語 😀🎉' — accented + CJK + a surrogate-pair emoji.
         const text = '$accented $cjk $emoji';
@@ -140,13 +135,13 @@ void main() {
 
         // Bounded read on a clean character boundary: the leading 'café'
         // (4 code units) at offset 1.
-        expect(await lob.read(offset: 1, amount: 4), equals('café'));
+        expect(await lob.read(offset: 1, amount: 4), equals('caf\u{00E9}'));
 
         // Non-1-offset bounded read (AC9 mandates this for NCLOB too, not just
         // CLOB/BLOB): 'crème' is 5 UCS-2 code units at 1-based offset 6
         // ('café ' = 5 units, so 'crème' starts at 6). Clean boundary — no
         // surrogate split.
-        expect(await lob.read(offset: 6, amount: 5), equals('crème'));
+        expect(await lob.read(offset: 6, amount: 5), equals('cr\u{00E8}me'));
 
         // A non-1-offset bounded read over the multibyte CJK run:
         // '中文日本語' is 5 code units at offset 12 ('café crème ' = 11 units).

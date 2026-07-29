@@ -97,12 +97,31 @@ const int tnsDurationSession = 10;
 /// (length + chunk size sent inline with the locator).
 const int tnsLobPrefetchFlag = 0x2000000;
 
+/// Locator byte offset of flag byte 1 (TNS_LOB_LOC_OFFSET_FLAG_1 —
+/// `reference/node-oracledb/lib/thin/protocol/constants.js`, value 4). Carries
+/// the storage-kind bits ([tnsLobLocFlagsBlob], [tnsLobLocFlagsValueBased],
+/// [tnsLobLocFlagsAbstract]).
+const int tnsLobLocOffsetFlag1 = 4;
+
 /// Locator byte offset of flag byte 3 (TNS_LOB_LOC_OFFSET_FLAG_3).
 const int tnsLobLocOffsetFlag3 = 6;
+
+/// Locator byte offset of flag byte 4 (TNS_LOB_LOC_OFFSET_FLAG_4 —
+/// `reference/node-oracledb/lib/thin/protocol/constants.js`, value 7). Carries
+/// the temporary-LOB bit ([tnsLobLocFlagsTemp]).
+const int tnsLobLocOffsetFlag4 = 7;
 
 /// Flag-3 bit: the locator uses a variable-length (NCHAR) character set
 /// (TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET).
 const int tnsLobLocFlagsVarLengthCharset = 0x80;
+
+/// Flag-4 bit: the locator references a **temporary** LOB
+/// (TNS_LOB_LOC_FLAGS_TEMP — `constants.js`, value 0x01), i.e. one the server
+/// allocated in the session's temp-LOB space rather than a persistent
+/// table-backed value. node-oracledb `thin/lob.js init()` tests this bit at
+/// [tnsLobLocOffsetFlag4] to decide whether `close()` must free the LOB; this
+/// driver does the same through `LobLocator.isTemporary`.
+const int tnsLobLocFlagsTemp = 0x01;
 
 /// Size in bytes of a fresh (all-zero) temporary LOB locator buffer.
 const int tnsLobLocatorBufferSize = 40;

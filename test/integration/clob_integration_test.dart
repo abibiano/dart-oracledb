@@ -539,9 +539,15 @@ void main() {
             'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
           },
         );
-        expect(connection.debugPendingTempLobCount, equals(1),
+        // TWO frees are pending, not one (Story 12.4 AC4): the driver's own
+        // INPUT temp LOB for the converted bind, PLUS the server's TEMP-flagged
+        // OUT locator, which the materialize path now queues instead of
+        // discarding. The ROUTING signal this test cares about — that the value
+        // converted rather than travelling inline — is `> 0` vs `0`; the inline
+        // sibling above still asserts exactly `0`.
+        expect(connection.debugPendingTempLobCount, equals(2),
             reason: 'one byte over the limit must convert to exactly one '
-                'temp CLOB');
+                'temp CLOB (plus the OUT locator freed since Story 12.4)');
         expect(result.outBinds['ret'], equals(text));
       });
 
@@ -581,9 +587,15 @@ void main() {
             'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
           },
         );
-        expect(connection.debugPendingTempLobCount, equals(1),
+        // TWO frees are pending, not one (Story 12.4 AC4): the driver's own
+        // INPUT temp LOB for the converted bind, PLUS the server's TEMP-flagged
+        // OUT locator, which the materialize path now queues instead of
+        // discarding. The ROUTING signal this test cares about — that the value
+        // converted rather than travelling inline — is `> 0` vs `0`; the inline
+        // sibling above still asserts exactly `0`.
+        expect(connection.debugPendingTempLobCount, equals(2),
             reason: 'the threshold must be measured in UTF-8 bytes, '
-                'not characters');
+                'not characters (input temp CLOB + the Story 12.4 OUT free)');
         expect(result.outBinds['ret'], equals(text));
       });
 

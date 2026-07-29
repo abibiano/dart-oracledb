@@ -20,6 +20,11 @@ library;
 import 'dart:typed_data';
 
 import 'errors.dart';
+// A LOB-typed bind may carry an OracleLob handle as its value (Story 12.2), so
+// the construction-time type check needs the type. `oracle_lob.dart` imports
+// this library back for OracleDbType — the same benign library cycle
+// `connection.dart` <-> `oracle_lob.dart` already forms.
+import 'oracle_lob.dart';
 import 'oracle_timestamp_tz.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/messages/execute_message.dart' show BindDir;
@@ -230,18 +235,34 @@ class OracleBind {
     // encoding, which is far from the call site. OUT-only binds always pass
     // `value: null` and are unaffected.
     if (value == null) return;
+    // POLICY for every type-mismatch throw below: report only the offending
+    // runtime TYPE, never the value. `ArgumentError.value` renders its value
+    // through `Error.safeToString`, which for a String emits the whole thing —
+    // and a String is precisely what trips most of these branches, because the
+    // natural mistake is forwarding text straight out of JSON or a form into a
+    // typed bind (`OracleBind(type: number, value: body['card_number'])`,
+    // `OracleBind(type: blob, value: apiToken)` instead of
+    // `utf8.encode(apiToken)`). Numeric, temporal, RAW and LOB columns commonly
+    // hold PANs, account ids, tokens, key material and encrypted payloads, and
+    // `ArgumentError` is a plain API-misuse error that frameworks log verbatim
+    // and forward to error trackers — so the value would persist outside the
+    // database trust boundary. Same policy as `OracleLob.write()` and
+    // `OracleConnection._validateDefValue`. Applies uniformly: a partially
+    // applied redaction reads as deliberate and was twice mistaken for it.
     switch (type) {
       case OracleDbType.number:
         if (value is! num) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: number) requires int, double, num, or null',
+          throw ArgumentError(
+            'OracleBind(type: number) requires int, double, num, or null, got '
+            '${value.runtimeType}',
           );
         }
         // Oracle NUMBER cannot represent NaN/±Infinity. Reject at
         // construction so the failure surfaces at the call site, not deep
-        // inside `encodeNumber` during wire encoding.
+        // inside `encodeNumber` during wire encoding. `ArgumentError.value` is
+        // deliberate and NOT a policy exception: `value` is provably one of
+        // NaN / Infinity / -Infinity here (the `is! num` branch above already
+        // ran), so there is no caller payload left to leak.
         if (value is double && !value.isFinite) {
           throw ArgumentError.value(
             value,
@@ -251,75 +272,72 @@ class OracleBind {
         }
       case OracleDbType.varchar:
         if (value is! String) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: varchar) requires String or null',
+          throw ArgumentError(
+            'OracleBind(type: varchar) requires String or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.nVarchar:
         if (value is! String) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: nVarchar) requires String or null',
+          throw ArgumentError(
+            'OracleBind(type: nVarchar) requires String or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.date:
         if (value is! DateTime) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: date) requires DateTime or null',
+          throw ArgumentError(
+            'OracleBind(type: date) requires DateTime or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.timestamp:
         if (value is! DateTime) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: timestamp) requires DateTime or null',
+          throw ArgumentError(
+            'OracleBind(type: timestamp) requires DateTime or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.timestampTz:
         if (value is! OracleTimestampTz && value is! DateTime) {
-          throw ArgumentError.value(
-            value,
-            'value',
+          throw ArgumentError(
             'OracleBind(type: timestampTz) requires OracleTimestampTz, '
-                'DateTime, or null',
+            'DateTime, or null, got ${value.runtimeType}',
           );
         }
       case OracleDbType.raw:
         if (value is! Uint8List) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: raw) requires Uint8List or null',
+          throw ArgumentError(
+            'OracleBind(type: raw) requires Uint8List or null, got '
+            '${value.runtimeType}',
           );
         }
+      // A LOB-typed bind also accepts an OracleLob handle (Story 12.2): the
+      // handle binds as its server-side LOB locator instead of a materialized
+      // value. Whether the HANDLE's own LOB kind matches [type], whether it is
+      // still open, and whether it belongs to the connection running the
+      // statement are all checked pre-wire by the connection's bind unwrap —
+      // that layer owns the handle's identity and lifetime, this one only knows
+      // the declared shape.
       case OracleDbType.clob:
-        if (value is! String) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: clob) requires String or null',
+        if (value is! String && value is! OracleLob) {
+          throw ArgumentError(
+            'OracleBind(type: clob) requires String, OracleLob, or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.nClob:
-        if (value is! String) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: nClob) requires String or null',
+        if (value is! String && value is! OracleLob) {
+          throw ArgumentError(
+            'OracleBind(type: nClob) requires String, OracleLob, or null, got '
+            '${value.runtimeType}',
           );
         }
       case OracleDbType.blob:
-        if (value is! Uint8List) {
-          throw ArgumentError.value(
-            value,
-            'value',
-            'OracleBind(type: blob) requires Uint8List or null',
+        if (value is! Uint8List && value is! OracleLob) {
+          throw ArgumentError(
+            'OracleBind(type: blob) requires Uint8List, OracleLob, or null, '
+            'got ${value.runtimeType}',
           );
         }
       case OracleDbType.json:

@@ -43,6 +43,9 @@ library;
 import 'dart:convert';
 
 import 'package:oracledb/oracledb.dart';
+// `lobLocatorOf` is a package-internal seam (not exported from oracledb.dart):
+// the locator buffer is deliberately unreachable from a public OracleLob.
+import 'package:oracledb/src/oracle_lob.dart' show lobLocatorOf;
 import 'package:test/test.dart';
 
 import 'test_helper.dart';
@@ -416,6 +419,168 @@ void main() {
               'the CLOB must be drained via exactly one full-length '
               'LOB READ, not an inline shortcut',
         );
+      });
+
+      // ---------------------------------------------------------------
+      // Story 12.4 AC7 - the UTF-8-FORM CLOB read path, live at last.
+      //
+      // On an AL32UTF8 database EVERY CLOB locator carries the
+      // variable-length-charset flag, so `OracleLob._isUtf16` is always true and
+      // `_LobTextDecoder`'s UTF-8 branch (its UTF-8 unit scan and its
+      // incomplete-sequence carry) is exercised only by unit tests on both
+      // standard fixtures - the Epic 12 ledger item this closes. THIS fixture is
+      // the only one that can produce the other form, so these cases first prove
+      // the branch is genuinely taken here and then exercise it end to end.
+      //
+      // The cases live in this suite (not in the LOB suites) because they are
+      // meaningless on an AL32UTF8 database, and they inherit this file's
+      // DOUBLE gate, so the standard 23ai/21c runs are unaffected.
+      // ---------------------------------------------------------------
+
+      /// Accented text representable in WE8MSWIN1252 and MULTIBYTE in UTF-8:
+      /// each of U+00E9 / U+00E8 is 2 bytes in UTF-8 but 1 byte in the database
+      /// charset, so a naive units-vs-bytes confusion cannot survive it.
+      /// Explicit escapes, so this file's own encoding is irrelevant.
+      const utf8FormText =
+          'caf\u{00E9} cr\u{00E8}me br\u{00FB}l\u{00E9}e'; // café crème brûlée
+
+      Future<OracleLob> fetchDocHandle(int id) async {
+        final r = await connection.execute(
+          'SELECT doc FROM $testTable WHERE id = $id',
+          null,
+          const OracleExecuteOptions(fetchLobs: true),
+        );
+        return r.rows.single['DOC']! as OracleLob;
+      }
+
+      test('a fetched CLOB locator on this fixture reports the '
+          'NON-variable-length charset form, so the UTF-8 decode branch is '
+          'really taken (12.4 AC7)', () async {
+        final id = nextTestId();
+        await connection.execute(
+          'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+          [id, utf8FormText],
+        );
+        final lob = await fetchDocHandle(id);
+        try {
+          final locator = lobLocatorOf(lob);
+          // The load-bearing guard: without this, every assertion below could
+          // pass on the UTF-16 path and prove nothing about the UTF-8 branch.
+          expect(locator.isNChar, isFalse,
+              reason: 'a plain CLOB is not national-charset');
+          expect(locator.usesVarLengthCharset, isFalse,
+              reason: 'MEASURED: on WE8MSWIN1252 a fetched CLOB locator does '
+                  'NOT carry the variable-length-charset flag, so _isUtf16 is '
+                  'false and the UTF-8 branch is taken - the one thing no '
+                  'AL32UTF8 fixture can show');
+          expect(lob.type, equals(OracleDbType.clob));
+          expect(lob.length, equals(utf8FormText.length),
+              reason: 'length is in characters, not UTF-8 bytes');
+        } finally {
+          await lob.close();
+        }
+      });
+
+      test('read() and textStream() over a UTF-8-form CLOB return the exact '
+          'accented text, and the stream equals read() (12.4 AC7)', () async {
+        final id = nextTestId();
+        await connection.execute(
+          'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+          [id, utf8FormText],
+        );
+        final lob = await fetchDocHandle(id);
+        try {
+          expect(lobLocatorOf(lob).usesVarLengthCharset, isFalse);
+          final whole = await lob.read() as String;
+          expect(whole, equals(utf8FormText));
+
+          // Every piece size, including sizes that land ON a multibyte
+          // character: the concatenation must always equal read().
+          for (final pieceSize in [1, 2, 3, 4, 7, 100]) {
+            final pieces = await lob.textStream(pieceSize: pieceSize).toList();
+            expect(pieces.join(), equals(whole),
+                reason: 'pieceSize $pieceSize must reassemble exactly');
+            expect(pieces.join(), equals(utf8FormText));
+          }
+          // And a bounded read landing exactly on an accented character.
+          final acuteIndex = utf8FormText.indexOf('\u{00E9}');
+          expect(await lob.read(offset: acuteIndex + 1, amount: 1),
+              equals('\u{00E9}'));
+        } finally {
+          await lob.close();
+        }
+      });
+
+      test('MEASUREMENT (12.4 AC7): the server bills amount in CHARACTERS and '
+          'delivers WHOLE characters, so a piece boundary cannot split a UTF-8 '
+          'sequence on this fixture', () async {
+        // The question AC7 refuses to assume. MEASURED here and recorded in the
+        // Dev Agent Record: with `pieceSize: N` over text whose characters are
+        // 2 UTF-8 bytes each, every emitted piece is EXACTLY N characters (the
+        // last one being the remainder) - never N-1 with a byte carried over.
+        // So `_LobTextDecoder`'s incomplete-sequence carry is UNREACHABLE live
+        // even on the only fixture that takes the UTF-8 branch; it stays
+        // unit-proven. That is a measurement, not a contortion of the code.
+        final id = nextTestId();
+        // All-accented text, so EVERY character is 2 UTF-8 bytes and any
+        // boundary would split a sequence if the server billed bytes.
+        // Eight accented characters, each 2 bytes in UTF-8 and 1 byte in
+        // WE8MSWIN1252: é è ü ñ ç à ö â.
+        const allMultibyte = '\u{00E9}\u{00E8}\u{00FC}\u{00F1}'
+            '\u{00E7}\u{00E0}\u{00F6}\u{00E2}';
+        await connection.execute(
+          'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+          [id, allMultibyte],
+        );
+        final lob = await fetchDocHandle(id);
+        try {
+          expect(lobLocatorOf(lob).usesVarLengthCharset, isFalse);
+          expect(lob.length, equals(8), reason: '8 characters');
+          for (final pieceSize in [1, 3]) {
+            final pieces = await lob.textStream(pieceSize: pieceSize).toList();
+            expect(pieces.join(), equals(allMultibyte));
+            final expected = <int>[
+              for (var left = 8; left > 0; left -= pieceSize)
+                left < pieceSize ? left : pieceSize,
+            ];
+            expect(pieces.map((p) => p.length).toList(), equals(expected),
+                reason: 'pieceSize $pieceSize: whole characters per piece - the '
+                    'server never hands back a partial UTF-8 sequence');
+          }
+        } finally {
+          await lob.close();
+        }
+      });
+
+      test('the Story 12.4 piece cap also drives a genuine MULTI-PIECE READ on '
+          'the UTF-8-form path, byte-exact (12.4 AC5 + AC7)', () async {
+        final id = nextTestId();
+        await connection.execute(
+          'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+          [id, utf8FormText],
+        );
+        final lob = await fetchDocHandle(id);
+        try {
+          expect(lobLocatorOf(lob).usesVarLengthCharset, isFalse);
+          final reference = await lob.read();
+          expect(reference, equals(utf8FormText));
+          for (final cap in [1, 4, 7]) {
+            connection.debugLobReadPieceUnits = cap;
+            final before = connection.debugLobReadOps;
+            final capped = await lob.read();
+            final ops = connection.debugLobReadOps - before;
+            connection.debugLobReadPieceUnits = null;
+            expect(ops, equals((utf8FormText.length + cap - 1) ~/ cap),
+                reason: 'cap $cap: ceil(chars/cap) READs on the UTF-8 form too');
+            expect(ops, greaterThan(1));
+            expect(capped, equals(reference),
+                reason: 'cap $cap: assembling BYTES and decoding once keeps a '
+                    'multibyte character whole across a piece boundary');
+          }
+        } finally {
+          connection.debugLobReadPieceUnits = null;
+          await lob.close();
+        }
       });
 
       test(

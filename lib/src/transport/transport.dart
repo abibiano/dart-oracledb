@@ -522,10 +522,233 @@ class Transport {
   final List<Uint8List> _tempLobsToClose = [];
   int _tempLobsTotalSize = 0;
 
+  /// Content keys of every locator currently on [_tempLobsToClose], so
+  /// [queueTempLobToFree]'s dedupe backstop is O(1) instead of a linear scan.
+  ///
+  /// MUST be kept in lockstep with [_tempLobsToClose] at all three mutation
+  /// sites (queue, drain, and the drain's restore-on-bind-failure) — a stale key
+  /// would silently swallow a free that was genuinely needed, and a missing one
+  /// would let a double free through.
+  ///
+  /// Why a parallel index rather than a `Set` replacing the list: the piggyback
+  /// sends the locator BYTES in queue order and needs the original `Uint8List`
+  /// instances (which `copyBackLocator` may have updated in place — node-oracledb
+  /// likewise frees its copy-back-updated locator), so the list stays
+  /// authoritative for what is sent and this set answers only "is it already in
+  /// there?".
+  final Set<String> _tempLobKeysToClose = <String>{};
+
+  /// Content key for a locator buffer: its bytes as a `String` (every byte is a
+  /// valid UTF-16 code unit, so this is a lossless, cheap, hashable snapshot of
+  /// the 40-odd bytes — no allocation-heavy hex formatting).
+  ///
+  /// Snapshot semantics, deliberately: the key is derived when the locator is
+  /// QUEUED, and it exactly reproduces the live byte-for-byte scan it replaces on
+  /// every measured path.
+  ///
+  /// Do NOT read that as "a pending buffer cannot mutate" — it can.
+  /// [copyBackLocator] does `source.setRange(0, source.length, updated)`, i.e. it
+  /// writes INTO the live locator buffer, which is precisely the instance
+  /// [_createTempClob] queues and the instance an `OracleLob` later hands to
+  /// [queueTempLobToFree]. So this key is a snapshot of a buffer the driver keeps
+  /// updating, and the dedupe's real basis is **byte-equality between two echoes
+  /// of ONE locator taken at different points in its life** (the create helper's
+  /// post-WRITE echo vs the handle's or the materialize path's post-READ echo) —
+  /// an empirical invariant, proven on both the 23ai and 21c fixtures, not a
+  /// structural one. Node-oracledb likewise frees its copy-back-updated locator,
+  /// which is why snapshotting is not obviously the wrong call. Hardening the
+  /// comparison to a locator identity SUBRANGE (so in-place mutation could not
+  /// matter at all) is the robust form and a tracked follow-up; if the two echoes
+  /// ever diverge, the stale key degrades to the same double-queue this backstop
+  /// already documents as its residual risk, not to something new.
+  static String _tempLobKey(Uint8List locator) =>
+      String.fromCharCodes(locator);
+
   /// Number of temp-LOB locators queued for the free piggyback. Exposed for
   /// integration tests (temp-LOB lifecycle) via
   /// `OracleConnection.debugPendingTempLobCount`; not a public API.
+  ///
+  /// Three kinds of locator land on the queue: the driver's own bind-conversion
+  /// temp LOBs ([_createTempClob] / [_createTempBlob], queued right after the
+  /// execute that bound them); since Story 12.2, a **caller-owned** temporary
+  /// LOB whose public `OracleLob.close()` released it (queued via
+  /// [queueTempLobToFree]); and since Story 12.4, a **server-allocated**
+  /// temporary locator the `fetchLobs`-off materialize path read and discarded
+  /// ([_materializeLobValues], the `IN OUT` LOB-bind OUT locator). Either way the
+  /// count drains to zero on the next [sendExecute].
   int get debugPendingTempLobCount => _tempLobsToClose.length;
+
+  /// Queues [locator]'s raw bytes for the free-temporary-LOB piggyback that
+  /// rides the NEXT [sendExecute], keeping [_tempLobsTotalSize] in step (that
+  /// total is a single UB4 in the piggyback header covering the concatenated
+  /// locator bytes, so the two must never diverge).
+  ///
+  /// Package-internal seam for `OracleConnection.releaseLob`, so a caller-owned
+  /// temporary `OracleLob` frees its server-side resource on `close()` without
+  /// `oracle_lob.dart` ever reaching into the transport. Issues no wire traffic
+  /// and cannot fail — safe to call from a `close()` that is contractually
+  /// exception-free, and from the pool's reclaim path.
+  ///
+  /// Callers must still queue each locator at most once — a double queue would
+  /// send the same locator twice in one piggyback, and because the piggyback
+  /// rides an unrelated statement's message a double free surfaces as an error on
+  /// THAT statement, not here.
+  ///
+  /// Since Story 12.4 that caller obligation is the PRIMARY guarantee, not the
+  /// only one: this method also dedupes at the locator level as a backstop,
+  /// skipping bytes that are already pending (see [_tempLobKeysToClose] and
+  /// the "Locator-level dedupe backstop" section below, which is the authority on
+  /// why the backstop is both necessary and safe). The structural invariant the
+  /// code is still designed around is **one temporary locator has exactly one
+  /// owner responsible for queueing it**, and there are exactly two kinds of
+  /// owner:
+  ///
+  /// 1. **An `OracleLob` handle** (`wrapLob != null`, i.e. `fetchLobs: true`, and
+  ///    every `createTemporary*` handle). `OracleLob.close()` is idempotent — it
+  ///    queues only on the first call, via `OracleConnection.releaseLob` — so a
+  ///    double free is impossible. Every created-temporary handle owns a locator
+  ///    freshly returned by [createTemporaryLob], and the only FETCHED shape
+  ///    measured to carry the TEMP flag is an `IN OUT` bind's returned OUT
+  ///    locator, which is wrapped exactly once.
+  /// 2. **The materialize path** (`wrapLob == null`, i.e. `fetchLobs: false`),
+  ///    since Story 12.4: there is no handle at all, so `_materializeLobValues`
+  ///    queues the locator itself right after reading it. It runs behind that
+  ///    method's per-response `materialized` dedup map, so an aliased locator
+  ///    (Oracle's duplicate-column optimization) is queued at most once per
+  ///    response.
+  ///
+  /// The two are **mutually exclusive by construction** — one `materializeLobs`
+  /// call either wraps a locator or materializes it, never both — which is what
+  /// keeps a locator from being queued twice, once by each owner class.
+  ///
+  /// **Locator-level dedupe backstop (Story 12.4).** Because owner class 2 is a
+  /// path with no handle, one case CAN present the same LOB to both: a PL/SQL
+  /// `IN OUT` LOB bind whose body does not allocate a new LOB (`p := p`) returns
+  /// the very locator the driver created for the INPUT value — which
+  /// [_createTempClob] / [_createTempBlob] already queued. Queueing it again
+  /// would put the same locator twice in ONE piggyback, and because that
+  /// piggyback rides an unrelated statement's message the resulting double free
+  /// would surface as an error on THAT statement. So this method now skips a
+  /// locator whose bytes are already pending — exactly the "locator-level
+  /// dedupe here" this docstring has always prescribed for that situation.
+  /// Distinct temporary LOBs never share locator bytes (a locator encodes the
+  /// LOB's unique server-side identity), and a locator can only be re-created
+  /// after its free was actually SENT — i.e. after it left this list — so the
+  /// dedupe can never swallow a free that was genuinely needed.
+  ///
+  /// **The backstop's guarantee is COUPLED to the fetched-handle slot rule, and
+  /// that rule is scheduled for review.** For the `fetchLobs: true` version of
+  /// `p := p`, `_createTempClob` queues locator L and the wrapping handle queues
+  /// the same bytes again when it closes. Both attempts land in ONE pending
+  /// window — which is the only reason the dedupe sees the second one at all —
+  /// and that window is guaranteed solely because an open fetched handle trips
+  /// `OracleConnection._rejectConcurrentOperation`, so no [sendExecute] can drain
+  /// the queue while the handle lives. `_validateLobBindValue`'s dartdoc names
+  /// relaxing that slot rule as an open Epic 12 follow-up. Relaxing it re-opens a
+  /// genuine DOUBLE FREE for this shape (the intervening execute drains L, then
+  /// the handle's close queues L again) AND leaves the handle dangling (its LOB
+  /// already freed → ORA-22922 on the next `read()`). Whoever relaxes it owns
+  /// both. Note the existing regression test for this shape closes the handle
+  /// BEFORE any further execute, so it cannot catch that regression.
+  ///
+  /// The check is **O(1)**, via the [_tempLobKeysToClose] content index. It has
+  /// to be: the queue is NOT "at most a handful of entries" on every shape —
+  /// `_prepareBulkRowLobs` queues one locator per row BEFORE the single array
+  /// execute, so an N-row `executeMany()` with a CLOB/BLOB column would perform
+  /// ~N²/2 whole-locator byte comparisons under a linear scan (a real
+  /// bulk-load regression), and an application may likewise open many
+  /// `createTemporary*` handles between two executes.
+  @internal
+  void queueTempLobToFree(Uint8List locator) {
+    if (!_tempLobKeysToClose.add(_tempLobKey(locator))) return;
+    _tempLobsToClose.add(locator);
+    _tempLobsTotalSize += locator.length;
+  }
+
+  /// Creates an EMPTY session-duration temporary LOB on the server and returns
+  /// its locator, seeded with the server's real chunk size.
+  ///
+  /// Mirrors node-oracledb `thin/lob.js create()` exactly: one CREATE_TEMP over
+  /// a zeroed 40-byte source locator with the charset form in the source offset
+  /// ([csfrm] — [ttcCsfrmImplicit] for CLOB, [ttcCsfrmNChar] for NCLOB, `0` for
+  /// BLOB), the Oracle type in the dest offset ([oraType]) and
+  /// [tnsDurationSession] in the dest length, followed by one GET_CHUNK_SIZE
+  /// (`sendAmount: true`, whose SB8 reply carries the chunk size —
+  /// `_getChunkSizeAsync()`). The returned locator is marked
+  /// `isTemporary: true` and reports `length: 0`: a temp LOB is created empty
+  /// and filled by later WRITEs.
+  ///
+  /// This is the sibling of [_createTempClob] / [_createTempBlob] (the IMPLICIT
+  /// bind conversion, which creates AND fills AND self-queues for the free
+  /// piggyback). Here the caller owns the lifetime: nothing is queued on the
+  /// success path — `OracleConnection.releaseLob` queues it when the public
+  /// `OracleLob` closes. If any step AFTER a successful CREATE_TEMP throws, the
+  /// just-created locator IS queued before the exception propagates, so a
+  /// partially-created temp LOB can never leak (same discipline as the create
+  /// helpers' `finally`).
+  ///
+  /// Throws [OracleException] when the server rejects the operation or returns
+  /// no locator.
+  @internal
+  Future<LobLocator> createTemporaryLob({
+    required int oraType,
+    required int csfrm,
+    Duration? timeout = const Duration(minutes: 2),
+  }) async {
+    final created = await sendLobOp(
+      operation: tnsLobOpCreateTemp,
+      sourceLocator: Uint8List(tnsLobLocatorBufferSize),
+      sourceOffset: csfrm,
+      destOffset: oraType,
+      destLength: tnsDurationSession,
+      timeout: timeout,
+    );
+    final locator = created.updatedLocator;
+    if (locator == null) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message: 'Temporary '
+            '${oraType == oraTypeBlob ? 'BLOB' : 'CLOB'} creation returned no '
+            'locator',
+      );
+    }
+    try {
+      // node-oracledb `create()` follows CREATE_TEMP with _getChunkSizeAsync()
+      // so the handle reports the server's real chunk size instead of 0. No
+      // wire-format change is needed: `sendAmount` alone drives both the
+      // trailing UB8 on the request and the SB8 amount in the reply.
+      final chunk = await sendLobOp(
+        operation: tnsLobOpGetChunkSize,
+        sourceLocator: locator,
+        sendAmount: true,
+        timeout: timeout,
+      );
+      // Keep the live locator buffer tracking the server's latest echo, exactly
+      // like every other LOB op (lobOp.js processReturnParameter).
+      copyBackLocator(locator, chunk.updatedLocator);
+      final amount = chunk.amount;
+      if (amount == null) {
+        throw const OracleException(
+          errorCode: oraProtocolError,
+          message: 'Temporary LOB creation: GET_CHUNK_SIZE returned no amount',
+        );
+      }
+      return LobLocator(
+        locator: locator,
+        oracleType: oraType,
+        length: 0, // a temporary LOB is created empty
+        chunkSize: amount,
+        isNChar: csfrm == ttcCsfrmNChar,
+        isTemporary: true,
+      );
+    } catch (_) {
+      // The temp LOB already exists on the server. Queue it for the free
+      // piggyback BEFORE propagating, so a half-created handle the caller never
+      // receives cannot leak session temp-LOB space.
+      queueTempLobToFree(locator);
+      rethrow;
+    }
+  }
 
   /// Count of TTC LOB READ operations sent (one per [sendLobOp] call with
   /// `tnsLobOpRead`). See [debugLobReadOps].
@@ -538,6 +761,52 @@ class Transport {
   /// Oracle views. Surfaced to tests via `OracleConnection.debugLobReadOps`;
   /// not a public API.
   int get debugLobReadOps => _lobReadOps;
+
+  /// TEST-ONLY per-piece cap for [readLobRange], `null` (off) in production.
+  ///
+  /// **Never a public knob**, and deliberately not a caller-facing `pieceSize`
+  /// for `OracleLob.read()` — see [debugLobReadPieceUnits] for why it exists.
+  int? _debugLobReadPieceUnits;
+
+  /// TEST-ONLY: forces [readLobRange] to request at most this many units per
+  /// `tnsLobOpRead`, making its continuation loop reachable against a real
+  /// server. `null` (the default) leaves the production single-READ fast path
+  /// **byte-for-byte unchanged**.
+  ///
+  /// Why it exists (Story 12.4 AC5): no live server was ever measured to
+  /// short-read a LOB READ — the server's SB8 `amount` always equalled the
+  /// request, up to 33.5 M units on 23ai and 8.4 M on 21c — so [readLobRange]'s
+  /// continuation loop, its no-progress throw and its overshoot throw were
+  /// provable only by fake transports. `readLobRange(pieceUnits:)` already
+  /// existed but was reachable from no caller. This seam makes it reachable from
+  /// a test without adding a wire message, a queue or a shape-specific branch.
+  ///
+  /// **Reach is deliberate.** It applies to [readLobRange] and therefore to both
+  /// callers that need it — `OracleLob.read()` (via
+  /// `OracleConnection.runLobRead`) and the `fetchLobs`-off materialize path
+  /// ([_readClobAsString] / [_readBlobAsBytes]). It does **not** reach
+  /// `OracleConnection.runLobReadPiece`, which issues its own single READ
+  /// directly: `textStream()` / `byteStream()` already choose their own piece
+  /// size, so double-capping them would prove nothing.
+  ///
+  /// An explicit `pieceUnits` argument always wins over this cap (the argument
+  /// is the caller's own choice; the cap is only a default for callers that pass
+  /// none). Surfaced to tests via `OracleConnection.debugLobReadPieceUnits`.
+  @internal
+  int? get debugLobReadPieceUnits => _debugLobReadPieceUnits;
+
+  @internal
+  set debugLobReadPieceUnits(int? units) {
+    if (units != null && units <= 0) {
+      throw ArgumentError.value(
+        units,
+        'units',
+        'the test-only LOB read piece cap must be a positive number of units; '
+            'pass null to turn it off',
+      );
+    }
+    _debugLobReadPieceUnits = units;
+  }
 
   Future<ExecuteResponse> sendExecute(
     String sql, {
@@ -601,6 +870,10 @@ class Transport {
     final lobsToFreeSize = _tempLobsTotalSize;
     _tempLobsToClose.clear();
     _tempLobsTotalSize = 0;
+    // Lockstep with the list (see _tempLobKeysToClose): once these locators are
+    // no longer pending, a re-created locator with the same bytes must be
+    // queueable again.
+    _tempLobKeysToClose.clear();
 
     // CLOB-typed String binds, BLOB-typed Uint8List binds
     // (and PL/SQL strings beyond the 32767-byte VARCHAR limit) travel as
@@ -633,8 +906,13 @@ class Transport {
         // drained locators back so the next execute frees them. (Temp LOBs
         // already created by THIS call queued themselves in the create
         // helpers' finally blocks, so they ride the same restored list.)
+        // Restore the drained locators AND their content keys together. Any
+        // locator this failed call already queued in a create helper's `finally`
+        // is on the list (and in the key set) too; `addAll` is idempotent, so a
+        // restored locator that is somehow already keyed stays single-entry.
         _tempLobsToClose.insertAll(0, lobsToFree);
         _tempLobsTotalSize += lobsToFreeSize;
+        _tempLobKeysToClose.addAll(lobsToFree.map(_tempLobKey));
         rethrow;
       }
     }
@@ -1368,8 +1646,9 @@ class Transport {
         locator.setRange(0, locator.length, updated);
       }
     } finally {
-      _tempLobsToClose.add(locator);
-      _tempLobsTotalSize += locator.length;
+      // Same two-line accounting as queueTempLobToFree (single writer of the
+      // free list + its UB4 total size).
+      queueTempLobToFree(locator);
     }
     return LobLocator(
       locator: locator,
@@ -1425,8 +1704,9 @@ class Transport {
         }
       }
     } finally {
-      _tempLobsToClose.add(locator);
-      _tempLobsTotalSize += locator.length;
+      // Same two-line accounting as queueTempLobToFree (single writer of the
+      // free list + its UB4 total size).
+      queueTempLobToFree(locator);
     }
     return LobLocator(
       locator: locator,
@@ -1476,12 +1756,17 @@ class Transport {
     return bindMetadata[bindIdx].maxSize;
   }
 
-  /// Fail-loud guard for single-round-trip BLOB reads: the locator's
-  /// prefetch metadata reports the exact byte length, so a mismatch means
-  /// the value cannot be returned whole — never truncate or pad. A short
-  /// read most likely means the value exceeds what one READ round trip can
-  /// deliver (multi-round-trip streaming is a post-1.0 roadmap item), not
-  /// that the wire stream is corrupt.
+  /// Fail-loud guard for a completed BLOB range read: the locator's prefetch
+  /// metadata reports the exact byte length, so a mismatch means the value
+  /// cannot be returned whole — never truncate or pad.
+  ///
+  /// Since Story 12.3 the read behind this guard is a **chunked continuation
+  /// loop** ([readLobRange]), so size alone no longer explains a short result:
+  /// a value larger than one round trip is read across as many READs as it
+  /// takes. A mismatch here therefore means the LOB really delivered fewer
+  /// bytes than its locator advertised — most often a locator whose cached
+  /// prefetch length went stale (the LOB shrank in another session between the
+  /// fetch and the read), or a corrupt stream.
   @visibleForTesting
   static void verifyBlobReadLength(int received, int locatorLength) {
     if (received == locatorLength) return;
@@ -1489,20 +1774,198 @@ class Transport {
       errorCode: oraProtocolError,
       message:
           'BLOB read returned $received bytes but the locator reports '
-          '$locatorLength${received < locatorLength ? ' — the value may '
-                    'exceed the single round-trip read limit; values this large '
-                    'are not yet supported' : ''}',
+          '$locatorLength${received < locatorLength ? ' — the LOB delivered '
+                    'fewer bytes than its locator advertises (the value may '
+                    'have shrunk since it was fetched)' : ''}',
     );
+  }
+
+  /// Copies the server's echoed (post-op) locator bytes back into [source] in
+  /// place, guarded on an equal length.
+  ///
+  /// node-oracledb's `lobOp.processReturnParameter` copies the returned locator
+  /// into `sourceLobImpl._locator` after EVERY LOB op, so a follow-on op
+  /// references post-op state rather than stale bytes. Single implementation
+  /// shared by [readLobRange], `createTemporaryLob` and the connection's
+  /// read/write seams. A differently-sized echo is ignored (never truncates or
+  /// grows the live locator).
+  @internal
+  static void copyBackLocator(Uint8List source, Uint8List? updated) {
+    if (updated != null && updated.length == source.length) {
+      source.setRange(0, source.length, updated);
+    }
+  }
+
+  /// Reads [amount] units starting at 1-based [offset] from the LOB [locator]
+  /// references, issuing **as many** `tnsLobOpRead` round trips as it takes,
+  /// and returns the concatenated payload bytes plus the total units the server
+  /// reported delivering.
+  ///
+  /// This is the driver's single LOB read-continuation loop (Story 12.3 AC1):
+  /// `_readClobAsString`, `_readBlobAsBytes` and the connection's `runLobRead`
+  /// seam (behind `OracleLob.read()`) all route through it, so the "keep reading
+  /// at the advanced offset" logic exists in exactly one place.
+  ///
+  /// * **Units, not bytes.** [offset] and [amount] are in the LOB's native
+  ///   units — characters (UCS-2 code units) for CLOB/NCLOB, bytes for BLOB —
+  ///   while the returned buffer is always BYTES. Per-piece progress is taken
+  ///   from the server's own SB8 reply (`LobOpResponse.amount`, decoded for
+  ///   every `sendAmount: true` READ), never inferred from byte counts: a
+  ///   CLOB has no fixed bytes-per-unit ratio.
+  /// * **Single-READ fast path.** With [pieceUnits] null the first READ requests
+  ///   the whole [amount], so a value that fits one round trip (measured: every
+  ///   size up to 32 MB on 23ai and 8 MB on 21c) costs exactly **one**
+  ///   `tnsLobOpRead` — byte-for-byte the pre-12.3 behavior. The loop only
+  ///   engages if a server actually short-reads.
+  /// * **Assemble bytes, decode once.** Pieces are concatenated as bytes and
+  ///   handed back undecoded, because a piece boundary can split a UTF-8
+  ///   sequence or a UTF-16 surrogate pair — which a per-piece decode cannot
+  ///   reassemble but a single decode over the assembled buffer always can.
+  /// * **Bounded and fail-loud.** A piece the server reports as **zero units**
+  ///   while units are still outstanding cannot make progress, so it throws
+  ///   [OracleException] naming the offset/amount rather than spinning. The one
+  ///   exception is a first piece that delivers nothing at all — no reported
+  ///   units AND no payload bytes: that returns an empty result so the caller's
+  ///   own "read returned no data" guard produces its established message. A
+  ///   piece reporting MORE units than that piece REQUESTED is likewise a
+  ///   protocol fault.
+  /// * **The two halves of a reply are cross-checked.** The unit count comes from
+  ///   `RETURN_PARAMETER` and the payload from separate `LOB_DATA` messages, so
+  ///   an internally inconsistent reply is possible in principle: a piece that
+  ///   ships bytes while reporting 0 units fails loud naming the inconsistency,
+  ///   rather than being mistaken for "the LOB delivered nothing" and silently
+  ///   discarding the prefix.
+  /// * **Missing SB8 amount.** If a READ reply omits the amount (never observed
+  ///   for a `sendAmount: true` READ on either tested server version), the piece
+  ///   is treated as having satisfied what THAT PIECE requested. With no piece
+  ///   cap set — every production caller — a piece requests the whole
+  ///   outstanding tail, so the read degrades to exactly the pre-12.3
+  ///   single-round-trip behavior; with a cap in play the degrade is per piece
+  ///   and the loop simply continues. Either way the caller's strict truncation
+  ///   guard still catches a short payload. (Falling back to the whole
+  ///   outstanding tail under a cap would itself exceed the piece's request and
+  ///   trip the overshoot check below.)
+  ///
+  /// The server's echoed post-op locator is copied back after every piece
+  /// ([copyBackLocator]), exactly as a single READ did.
+  @internal
+  Future<LobRangeRead> readLobRange({
+    required Uint8List locator,
+    required int offset,
+    required int amount,
+    int? pieceUnits,
+    Duration? timeout = const Duration(minutes: 2),
+  }) async {
+    if (amount <= 0) return LobRangeRead(bytes: Uint8List(0), unitsRead: 0);
+    // An explicit argument wins; otherwise the test-only cap applies (null in
+    // production, which keeps the single-READ fast path byte-for-byte
+    // unchanged). See [debugLobReadPieceUnits].
+    final effectivePieceUnits = pieceUnits ?? _debugLobReadPieceUnits;
+    final pieces = <Uint8List>[];
+    var unitsRead = 0;
+    var totalBytes = 0;
+    while (unitsRead < amount) {
+      final outstanding = amount - unitsRead;
+      final request =
+          effectivePieceUnits != null && effectivePieceUnits < outstanding
+              ? effectivePieceUnits
+              : outstanding;
+      final response = await sendLobOp(
+        operation: tnsLobOpRead,
+        sourceLocator: locator,
+        sourceOffset: offset + unitsRead,
+        sendAmount: true,
+        amount: request,
+        timeout: timeout,
+      );
+      copyBackLocator(locator, response.updatedLocator);
+      final data = response.data;
+      if (data != null && data.isNotEmpty) {
+        pieces.add(data);
+        totalBytes += data.length;
+      }
+      // Progress in UNITS comes from the server's SB8 reply. A reply without one
+      // is treated as having satisfied THIS PIECE's request (see the dartdoc),
+      // which with no cap in play (`request == outstanding`, every production
+      // caller) reduces this loop to the pre-12.3 single READ. Falling back to
+      // `outstanding` instead would exceed `request` whenever a cap IS in play
+      // and so trip the overshoot guard below — turning the documented degrade
+      // into a hard error on exactly the seam that makes this loop testable.
+      final delivered = response.amount ?? request;
+      if (delivered <= 0) {
+        if (unitsRead == 0 && totalBytes == 0) {
+          // Nothing at all was delivered: hand back the empty result so the
+          // caller's own "read returned no data" guard reports it.
+          break;
+        }
+        // `amount` (RETURN_PARAMETER) and `data` (separate LOB_DATA messages)
+        // are decoded from UNRELATED wire messages, so a reply can ship bytes
+        // while reporting zero units. Without this cross-check the first such
+        // piece took the break above and handed back an EMPTY result, silently
+        // discarding the prefix and mis-diagnosing the fault as "read returned
+        // no data".
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message: totalBytes > 0 && unitsRead == 0
+              ? 'LOB read reply is internally inconsistent: the server '
+                  'delivered $totalBytes payload bytes at offset $offset but '
+                  'reported 0 units read (requested $request of $amount)'
+              : 'LOB read made no progress: the server delivered 0 units at '
+                  'offset ${offset + unitsRead} with ${amount - unitsRead} of '
+                  '$amount units still outstanding (read started at offset '
+                  '$offset)',
+        );
+      }
+      // Compared against what THIS piece actually requested, not against the
+      // whole outstanding tail: with a piece cap in play (`pieceUnits`, or the
+      // test-only `debugLobReadPieceUnits`) `request < outstanding`, and the
+      // looser comparison accepted an over-reporting server — which then
+      // corrupts the next piece's `sourceOffset`. Identical in production, where
+      // `pieceUnits` is null on every caller and `request == outstanding`.
+      if (delivered > request) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'LOB read overshot: the server reported $delivered units at '
+              'offset ${offset + unitsRead} but only $request were requested '
+              '($outstanding of $amount outstanding)',
+        );
+      }
+      unitsRead += delivered;
+    }
+    return LobRangeRead(
+      bytes: _concatPieces(pieces, totalBytes),
+      unitsRead: unitsRead,
+    );
+  }
+
+  /// Concatenates [pieces] into one buffer, avoiding a copy in the (dominant)
+  /// single-piece case.
+  static Uint8List _concatPieces(List<Uint8List> pieces, int totalBytes) {
+    if (pieces.isEmpty) return Uint8List(0);
+    if (pieces.length == 1) return pieces.single;
+    final out = Uint8List(totalBytes);
+    var at = 0;
+    for (final piece in pieces) {
+      out.setRange(at, at + piece.length, piece);
+      at += piece.length;
+    }
+    return out;
   }
 
   /// Replaces every [LobLocator] in a successful response's rows and OUT
   /// binds with its materialized value — `String` for CLOB, `Uint8List` for
   /// BLOB.
   ///
-  /// Runs inside [sendExecute] — and therefore inside the connection's
-  /// single-execute guard — after the fetch drain, so all LOB reads complete
-  /// before the response escapes the transport. A failed LOB read
-  /// fails the whole execute rather than returning a half-populated result.
+  /// Always runs AFTER the round trip that produced [response] has completed —
+  /// never inside [sendExecute]. Every call site is in the connection layer or
+  /// `ResultSetCursor` (the eager execute pass, the eager implicit-results pass,
+  /// `_openResultSetGuarded`'s first batch, and a streaming cursor's per-batch
+  /// FETCH), reached through the public [materializeLobs] seam. So all LOB reads
+  /// still complete before the response escapes to the caller, and a failed LOB
+  /// read still fails the whole operation rather than returning a half-populated
+  /// result — but the bracket that holds the connection is the caller's, and on
+  /// the streaming path the enclosing round trip is a FETCH, not an execute.
   Future<ExecuteResponse> _materializeLobValues(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
@@ -1536,11 +1999,107 @@ class Transport {
     Future<Object> readLocator(LobLocator locator) async {
       final existing = materialized[locator];
       if (existing != null) return existing;
-      final Object value = wrapLob != null
-          ? wrapLob(locator)
-          : locator.oracleType == oraTypeBlob
+      final Object value;
+      if (wrapLob != null) {
+        // fetchLobs: true — the handle owns the locator and frees it itself on
+        // close() via OracleConnection.releaseLob. Queueing here too would
+        // double-free (see queueTempLobToFree's ownership invariant).
+        value = wrapLob(locator);
+      } else {
+        // Story 12.4 AC4 — the MATERIALIZE path's temporary-locator free.
+        //
+        // Materializing reads the locator's content into a String/Uint8List and
+        // then DISCARDS the locator, so nothing else can ever free it. For a
+        // locator the server allocated as a session-duration TEMPORARY LOB that
+        // is a real resource leak: measured live on Oracle 23ai and 21c, three
+        // consecutive `OracleBind.inOut(value: <String>, type: clob)` PL/SQL
+        // calls under `fetchLobs: false` grew this session's V$TEMPORARY_LOBS
+        // count 0 -> 1 -> 2 -> 3, exactly one per call, until session end.
+        //
+        // The decision is CONTENT-driven, never shape- or version-driven: the
+        // locator's own TEMP flag bit (LobLocator.isTemporary, flag byte 4 bit
+        // 0x01) is the only input. Every shape measured non-temporary — a plain
+        // table row locator, `SELECT TO_CLOB(...)`, a `FOR UPDATE` locator, and a
+        // PL/SQL CLOB OUT bind the body fills from a TO_CLOB LITERAL — therefore
+        // keeps queueing nothing and is byte-for-byte unaffected. ("A PL/SQL LOB
+        // OUT bind" is NOT one answer: an OUT locator the body assigns from a
+        // TEMPORARY input LOB, `p_out := p_in`, IS flagged and IS queued.) Only
+        // the free-temp queue ACCOUNTING changes; the materialized value the
+        // caller receives is untouched.
+        //
+        // At most once per locator per response: this closure runs behind the
+        // `materialized` dedup map above, so an aliased locator (Oracle's
+        // duplicate-column optimization) is materialized — and hence queued —
+        // exactly once, preserving queueTempLobToFree's at-most-once contract.
+        //
+        // No `OracleLob` is PRODUCED on this path (wrapLob is null), but one can
+        // still be BOUND across the same statement: README documents
+        // `OracleBind.inOut(value: lob, type: clob)` for a `createTemporary*`
+        // handle, and created-temporary handles are exempt from the in-flight
+        // slot rule, so such a handle can be open and can queue its own locator
+        // on close(). What holds the at-most-once contract there is not the
+        // absence of a handle but a MEASURED locator distinctness: Oracle
+        // REPLACES the LOB behind an `IN OUT` bind, so the materialized OUT
+        // locator is a DIFFERENT temporary LOB from the one the caller's handle
+        // owns, and `p_out := p_in` deep-copies. Pinned live on 23ai and 21c by
+        // `test/integration/lob_temporary_integration_test.dart` (the IN OUT
+        // temp-handle case asserting pending 1 -> 2 as two DISTINCT entries,
+        // then proving the carrier statement and the session survive both
+        // frees). Empirical, not structural — a story that changes IN OUT
+        // handling must re-measure it rather than trust this paragraph.
+        //
+        // The queued free rides the NEXT sendExecute's FREE_TEMP piggyback, and a
+        // locator can never be freed by the very round trip that produced it.
+        // The invariant is ORDERING, not call nesting: this method always runs
+        // AFTER the round trip that produced the response has completed (it is
+        // called from the connection layer / ResultSetCursor, NOT from inside
+        // sendExecute), and that round trip's piggyback was built and sent before
+        // the response came back. So whatever is queued here can only ride a
+        // LATER message.
+        //
+        // FETCH-path deferral, worth knowing: on a streaming result set the
+        // enclosing round trip is a per-batch FETCH, not an execute — and the
+        // queue drains only on sendExecute. An open fetched handle blocks
+        // execute() anyway, so a free queued while materializing a continuation
+        // batch waits for the first UNRELATED execute after the result set
+        // closes. Correct (the server-side temp LOB simply lives a little
+        // longer), but it means debugPendingTempLobCount can stay non-zero for
+        // the whole life of a streaming result set.
+        //
+        // EXCEPTION-SAFE by `try/finally`, not by ordering: the read below can
+        // throw (the strict truncation guard, a malformed UTF-8/UTF-16
+        // FormatException, a no-progress/overshoot fault in `readLobRange`'s
+        // piece loop). Queueing only after a SUCCESSFUL read would gate the free
+        // on "the read worked" and re-open exactly the leak this AC closed —
+        // every read-failure path would leak the temp LOB until session end. The
+        // `finally` gates it on "the read was attempted" instead, matching
+        // `_createTempClob`/`_createTempBlob` (`finally`) and
+        // `createTemporaryLob` (`catch`/rethrow). Queueing is not freeing: it
+        // only records the locator for the next execute's piggyback, so doing it
+        // for a locator whose read failed is correct — the server-side temp LOB
+        // exists either way.
+        //
+        // ORDERING (Story 12.3 interaction, recorded here because nothing else
+        // records it): `_readClobAsString`/`_readBlobAsBytes` now go through
+        // `readLobRange`, which calls `copyBackLocator(locator,
+        // response.updatedLocator)` after every piece. So both the
+        // `locator.isTemporary` DECISION and the BYTES queued are the server's
+        // post-READ echo of the locator, not the bytes the row delivered — the
+        // `finally` does not change that (a partial read may already have copied
+        // back). That is deliberate and matches node-oracledb, which frees its
+        // own copy-back-updated `_locator`; the echo of a temporary LOB stays
+        // temporary and keeps the same identity, and the dangerous direction
+        // would be a persistent locator whose echo flipped flag-4 bit 0 on,
+        // which is unobserved on both fixtures. See `queueTempLobToFree`'s
+        // dedupe-backstop note for the companion in-place-mutation caveat.
+        try {
+          value = locator.oracleType == oraTypeBlob
               ? await _readBlobAsBytes(locator, timeout)
               : await _readClobAsString(locator, timeout);
+        } finally {
+          if (locator.isTemporary) queueTempLobToFree(locator.locator);
+        }
+      }
       materialized[locator] = value;
       return value;
     }
@@ -1677,23 +2236,26 @@ class Transport {
     );
   }
 
-  /// Reads a CLOB locator's full value as a Dart String via a single TTC LOB
-  /// READ operation.
+  /// Reads a CLOB locator's full value as a Dart String.
   ///
-  /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`: one
-  /// READ requesting the entire LOB length at 1-based offset 1. The server
-  /// streams the content back as one or more `LOB_DATA` messages inside the
-  /// single response, which [decodeLobOpResponse] concatenates into one byte
-  /// buffer.
+  /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`: the
+  /// entire LOB length requested at 1-based offset 1. The server streams the
+  /// content back as one or more `LOB_DATA` messages inside a single response,
+  /// which [decodeLobOpResponse] concatenates into one byte buffer — and since
+  /// Story 12.3 the request itself continues across further READs at the
+  /// advanced offset ([readLobRange]) if one round trip cannot deliver the whole
+  /// range, so there is no size at which this path gives up. Every measured
+  /// value (up to 32 MB on 23ai, 8 MB on 21c) still arrives in exactly one READ.
   ///
-  /// Reading the whole length at once — rather than looping with a per-chunk
-  /// character offset — keeps multibyte and supplementary-plane (surrogate
-  /// pair) text correct: a chunk boundary can split a UTF-8 sequence or a
-  /// surrogate pair, which a per-piece decode cannot reassemble but a single
-  /// decode over the fully assembled bytes always can. It also avoids
-  /// reconstructing a character offset from a decoded String's length, which
-  /// counts UTF-16 code units and desynced from Oracle's character offsets on
-  /// astral text.
+  /// Requesting the whole length — rather than looping with a per-chunk
+  /// character offset and decoding each chunk — keeps multibyte and
+  /// supplementary-plane (surrogate pair) text correct: a chunk boundary can
+  /// split a UTF-8 sequence or a surrogate pair, which a per-piece decode cannot
+  /// reassemble but a single decode over the fully assembled bytes always can.
+  /// [readLobRange] therefore concatenates pieces as BYTES and this method
+  /// decodes exactly once. It also avoids reconstructing a character offset from
+  /// a decoded String's length, which counts UTF-16 code units and desynced from
+  /// Oracle's character offsets on astral text.
   Future<String> _readClobAsString(
     LobLocator locator,
     Duration? timeout,
@@ -1707,16 +2269,14 @@ class Transport {
     // whose data is stored as UCS-2). Server-created NCLOB locators do NOT
     // always set the flag bit, so the declared NCHAR form must be honored too.
     final isUtf16 = locator.isNChar || locator.usesVarLengthCharset;
-    final response = await sendLobOp(
-      operation: tnsLobOpRead,
-      sourceLocator: locator.locator,
-      sourceOffset: 1, // 1-based: read from the start of the LOB
-      sendAmount: true,
-      amount: locator.length, // entire LOB length in one round trip
+    final read = await readLobRange(
+      locator: locator.locator,
+      offset: 1, // 1-based: read from the start of the LOB
+      amount: locator.length, // the entire LOB length
       timeout: timeout,
     );
-    final bytes = response.data;
-    if (bytes == null || bytes.isEmpty) {
+    final bytes = read.bytes;
+    if (bytes.isEmpty) {
       throw OracleException(
         errorCode: oraProtocolError,
         message:
@@ -1754,16 +2314,19 @@ class Transport {
     return text;
   }
 
-  /// Reads a BLOB locator's full value as a Dart `Uint8List` via a single
-  /// TTC LOB READ operation.
+  /// Reads a BLOB locator's full value as a Dart `Uint8List`.
   ///
-  /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`:
-  /// one READ requesting the entire LOB byte length at 1-based offset 1. The
-  /// server streams the content back as one or more `LOB_DATA` messages
-  /// inside the single response, which [decodeLobOpResponse] concatenates
-  /// into one byte buffer. BLOB `LOB_DATA` bytes pass through unchanged — no
-  /// character set conversion of any kind (node-oracledb lobOp.js
-  /// processMessage keeps BLOB data as a raw Buffer).
+  /// Mirrors node-oracledb `lob.js` `getData()` → `read(1, this._length)`: the
+  /// entire LOB byte length requested at 1-based offset 1. The server streams
+  /// the content back as one or more `LOB_DATA` messages inside a single
+  /// response, which [decodeLobOpResponse] concatenates into one byte buffer —
+  /// and since Story 12.3 the request continues across further READs at the
+  /// advanced offset ([readLobRange]) if one round trip cannot deliver the whole
+  /// range, so there is no size at which this path gives up. Every measured
+  /// value (up to 32 MB on 23ai, 8 MB on 21c) still arrives in exactly one READ.
+  /// BLOB `LOB_DATA` bytes pass through unchanged — no character set conversion
+  /// of any kind (node-oracledb lobOp.js processMessage keeps BLOB data as a raw
+  /// Buffer).
   Future<Uint8List> _readBlobAsBytes(
     LobLocator locator,
     Duration? timeout,
@@ -1771,16 +2334,14 @@ class Transport {
     if (locator.length == 0) {
       return Uint8List(0); // EMPTY_BLOB() — no LOB_DATA round trip needed
     }
-    final response = await sendLobOp(
-      operation: tnsLobOpRead,
-      sourceLocator: locator.locator,
-      sourceOffset: 1, // 1-based: read from the start of the LOB (bytes)
-      sendAmount: true,
-      amount: locator.length, // entire LOB byte length in one round trip
+    final read = await readLobRange(
+      locator: locator.locator,
+      offset: 1, // 1-based: read from the start of the LOB (bytes)
+      amount: locator.length, // the entire LOB byte length
       timeout: timeout,
     );
-    final bytes = response.data;
-    if (bytes == null || bytes.isEmpty) {
+    final bytes = read.bytes;
+    if (bytes.isEmpty) {
       throw OracleException(
         errorCode: oraProtocolError,
         message:
@@ -3500,4 +4061,26 @@ class Transport {
     }
     return response.payload.sublist(2);
   }
+}
+
+/// Result of one [Transport.readLobRange] range read: the assembled payload
+/// **bytes** plus the total **units** the server reported delivering.
+///
+/// The two counts are deliberately distinct (Story 12.3): a BLOB's units are
+/// bytes, an NCLOB / variable-length-charset CLOB's units are half its byte
+/// count (UTF-16BE), and a UTF-8-form CLOB has no fixed ratio at all — so a
+/// caller that needs to reason about progress or truncation must use
+/// [unitsRead], never `bytes.length`.
+@internal
+class LobRangeRead {
+  /// Creates a range-read result.
+  const LobRangeRead({required this.bytes, required this.unitsRead});
+
+  /// The concatenated LOB_DATA payload bytes, undecoded (CLOB/NCLOB text is
+  /// decoded ONCE by the caller over this whole buffer).
+  final Uint8List bytes;
+
+  /// Total units the server reported delivering across every piece — characters
+  /// (UCS-2 code units) for CLOB/NCLOB, bytes for BLOB.
+  final int unitsRead;
 }

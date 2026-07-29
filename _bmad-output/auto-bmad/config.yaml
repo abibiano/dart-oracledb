@@ -1,16 +1,16 @@
 version: 1
-profiles_source_version: "0.25.2"  # abm version whose assets/agents/profiles.yaml seeded the
-                                   # profiles + phase_profiles blocks below; re-stamped by the
-                                   # Phase 0 heal (ADDITIVE-only) or `/auto-bmad reprovision`.
+profiles_source_version: "0.26.0" # abm version whose assets/agents/profiles.yaml seeded the
+  # profiles + phase_profiles blocks below; re-stamped by the
+  # Phase 0 heal (ADDITIVE-only) or `/auto-bmad reprovision`.
 delegation:
-  host: auto               # auto (detect each run) | claude-code | codex | opencode | other
-  mode: auto               # auto (derive from host) | custom-subagents | general-subagents | inline
+  host: auto # auto (detect each run) | claude-code | codex | opencode | other
+  mode: auto # auto (derive from host) | custom-subagents | general-subagents | inline
   target_tools:
     - claude-code
     - codex
-  cli_phases: {}           # OPT-IN per-phase external-CLI routing; empty => every phase uses its tier
+  cli_phases: {} # OPT-IN per-phase external-CLI routing; empty => every phase uses its tier
 tea:
-  enabled: false           # no bmad-testarch-* skills installed at setup; enable via /auto-bmad setup after installing them
+  enabled: false # no bmad-testarch-* skills installed at setup; enable via /auto-bmad setup after installing them
   framework_ci: skip
   gate_max_iterations: 2
   story_trace_advisory:
@@ -18,15 +18,16 @@ tea:
     min_epic_stories: 6
     skip_last_stories: 3
 git:
-  mode: auto               # auto -> detect; or force "remote" / "local"
+  mode: auto # auto -> detect; or force "remote" / "local"
   branch_prefix: "story/"
   epic_branch_prefix: "epic/"
-  base_branch: main        # auto-detected at first run
+  base_branch: main # auto-detected at first run
   offer_merge: true
   ci_wait_minutes: 30
 code_review:
   max_iterations: 2
   security_review: true
+  verification_gap: false # bmad-review-verification-gap not in BMAD 6.10.0 (only on @next)
   epic_review: true
   tier_a_lenses: [auditor, security]
   epic_diff_chunk_threshold_lines: 6000
@@ -106,6 +107,21 @@ profiles:
       model: ""
       variant: ""
 
+  ab-verification:
+    description: "auto-bmad delegate for the verification-gap review: a reviewer that traces whether a regression in the story diff's CHANGED behavior would be caught by a test where that behavior is exercised — hunting verification gaps (regression / missing-adoption / broken-verification), not correctness bugs, and grounding every absence claim in an actual symbol/import search. Invoked by the auto-bmad orchestrator; not meant for direct use."
+    role_blurb: "the verification-gap review: for each behavior the diff changes, trace it to the places that observe it, read the covering tests, and ask only whether a regression there would make a test fail. Report verification gaps — regression gaps, missing-adoption gaps, and broken/weak-verification gaps — with concrete file:line evidence and NO severity (the triage step assigns it). Be rigorous, not speculative: read a test before claiming what it covers, and claim a test is absent only when a repo-wide symbol/import search shows it; drop any finding you cannot ground."
+    status_example: "the output-file path you wrote and the count of verification-gap findings — never the findings text, and never a severity (the triage delegate reads the file and assigns severity)"
+    claude:
+      model: opus
+      effort: high
+    codex:
+      model: gpt-5.5
+      reasoning_effort: high
+    opencode:
+      model: ""        # provider/model, e.g. anthropic/claude-opus-4-5. BLANK => inherit your opencode
+                       # default model. Agent files are model-only (no portable per-agent effort knob).
+      variant: ""      # OPTIONAL, cli_phases route ONLY: --variant high|max|minimal. BLANK => model default.
+
 # Phase -> profile mapping. Single source of the phase->profile binding.
 phase_profiles:
   create_story: ab-deep
@@ -123,3 +139,4 @@ phase_profiles:
   project_context: ab-standard
   deferred_reconcile: ab-standard
   uat: ab-standard
+  code_review_verification: ab-verification

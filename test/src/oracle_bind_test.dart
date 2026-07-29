@@ -670,6 +670,181 @@ void main() {
       );
     });
 
+    // Epic 12 integration review iterations 2 + 3 — SECURITY (LOW). Iteration 2
+    // covered the RAW and LOB branches: a caller trips them by passing raw
+    // payload material of the wrong shape (`type: blob, value: apiToken` instead
+    // of `utf8.encode(apiToken)`). `ArgumentError.value` renders through
+    // `Error.safeToString`, which emits a whole String — and BLOB/RAW columns
+    // commonly hold tokens, key material and encrypted payloads. Same policy as
+    // `OracleLob.write()`: name the runtime type, never the value.
+    //
+    // Iteration 3 extended the policy to the remaining sibling branches of the
+    // SAME switch — `number`, `date`, `timestamp`, `timestampTz` (which leaked a
+    // String in full, and a String is exactly what trips them: forwarding text
+    // from JSON or a form into a numeric/temporal bind) plus `varchar` /
+    // `nVarchar` for uniformity. One method must not apply two opposite
+    // policies; a partial redaction reads as deliberate.
+    group('wrong-typed bind values report the TYPE only, never the '
+        'payload (security)', () {
+      const secret = 'AKIA-SECRET-ACCESS-KEY-0001';
+      final secretBytes = Uint8List.fromList(<int>[171, 205, 239]);
+
+      void expectTypeOnly(
+        void Function() construct, {
+        required String requires,
+        required String gotType,
+        required String mustNotContain,
+      }) {
+        try {
+          construct();
+          fail('expected ArgumentError');
+        } on ArgumentError catch (e) {
+          final text = e.toString();
+          expect(text, contains(requires));
+          expect(text, contains(gotType),
+              reason: 'the runtime type IS useful diagnostics');
+          expect(text, isNot(contains(mustNotContain)),
+              reason: 'the payload must never reach the message');
+        }
+      }
+
+      test('blob rejecting a String does not echo the secret', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(
+            value: secret,
+            type: OracleDbType.blob,
+            maxSize: 4000,
+          ),
+          requires: 'requires Uint8List, OracleLob, or null',
+          gotType: 'String',
+          mustNotContain: 'AKIA-SECRET',
+        );
+      });
+
+      test('raw rejecting a String does not echo the secret', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(
+            value: secret,
+            type: OracleDbType.raw,
+            maxSize: 64,
+          ),
+          requires: 'requires Uint8List or null',
+          gotType: 'String',
+          mustNotContain: 'AKIA-SECRET',
+        );
+      });
+
+      test('clob rejecting a Uint8List does not echo the payload bytes', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(
+            value: secretBytes,
+            type: OracleDbType.clob,
+            maxSize: 4000,
+          ),
+          requires: 'requires String, OracleLob, or null',
+          gotType: 'Uint8List',
+          mustNotContain: '171, 205, 239',
+        );
+      });
+
+      test('nClob rejecting a Uint8List does not echo the payload bytes', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(
+            value: secretBytes,
+            type: OracleDbType.nClob,
+            maxSize: 4000,
+          ),
+          requires: 'requires String, OracleLob, or null',
+          gotType: 'Uint8List',
+          mustNotContain: '171, 205, 239',
+        );
+      });
+
+      // The four iteration-3 branches. A PAN is the realistic payload: a
+      // numeric or temporal bind fed a String straight out of a request body.
+      const pan = '4111-1111-1111-1111';
+
+      test('number rejecting a String does not echo the account number', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(value: pan, type: OracleDbType.number),
+          requires: 'requires int, double, num, or null',
+          gotType: 'String',
+          mustNotContain: '4111',
+        );
+      });
+
+      test('date rejecting a String does not echo the value', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(value: pan, type: OracleDbType.date),
+          requires: 'requires DateTime or null',
+          gotType: 'String',
+          mustNotContain: '4111',
+        );
+      });
+
+      test('timestamp rejecting a String does not echo the value', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(value: pan, type: OracleDbType.timestamp),
+          requires: 'requires DateTime or null',
+          gotType: 'String',
+          mustNotContain: '4111',
+        );
+      });
+
+      test('timestampTz rejecting a String does not echo the value', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(value: pan, type: OracleDbType.timestampTz),
+          requires: 'requires OracleTimestampTz, DateTime, or null',
+          gotType: 'String',
+          mustNotContain: '4111',
+        );
+      });
+
+      // varchar / nVarchar reject only NON-Strings, so they were never leaks;
+      // converted for uniformity, pinned so the shape cannot drift back.
+      test('varchar rejecting a non-String reports the type only', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(
+            value: secretBytes,
+            type: OracleDbType.varchar,
+            maxSize: 64,
+          ),
+          requires: 'requires String or null',
+          gotType: 'Uint8List',
+          mustNotContain: '171, 205, 239',
+        );
+      });
+
+      test('nVarchar rejecting a non-String reports the type only', () {
+        expectTypeOnly(
+          () => OracleBind.inOut(
+            value: secretBytes,
+            type: OracleDbType.nVarchar,
+            maxSize: 64,
+          ),
+          requires: 'requires String or null',
+          gotType: 'Uint8List',
+          mustNotContain: '171, 205, 239',
+        );
+      });
+
+      // Negative control: the NaN/Infinity guard deliberately keeps
+      // `ArgumentError.value`, because by then the value is provably a
+      // non-finite double and there is no caller payload to leak.
+      test('the NaN guard still names the offending double', () {
+        expect(
+          () => OracleBind.inOut(value: double.nan, type: OracleDbType.number),
+          throwsA(
+            isA<ArgumentError>().having(
+              (e) => e.toString(),
+              'message',
+              allOf(contains('cannot bind NaN or Infinity'), contains('NaN')),
+            ),
+          ),
+        );
+      });
+    });
+
     test('raw bind rejects non-positive maxSize', () {
       expect(
         () => OracleBind.out(type: OracleDbType.raw, maxSize: 0),

@@ -13,6 +13,39 @@
 /// `OracleLob` handle (the `wrapLob` callback threaded into `materializeLobs`);
 /// the handle owns the locator and drives its own bounded LOB READ/WRITE round
 /// trips. The locator bytes themselves are still never handed to callers.
+///
+/// Story 12.2 adds a third origin: a locator the DRIVER creates on the server
+/// (`Transport.createTemporaryLob`, a session-duration temporary LOB) and hands
+/// to the caller wrapped in an `OracleLob` from
+/// `OracleConnection.createTemporaryClob/NClob/Blob()`. Such a locator is
+/// constructed with `isTemporary: true` and escapes the transport as a
+/// caller-OWNED handle: the caller decides when it dies, and the handle's
+/// `close()` queues the locator bytes for the transport's existing
+/// `FREE_TEMP | ARRAY` piggyback. The bytes are still not part of the public
+/// API — the only exported reference is the opaque `OracleLob`.
+///
+/// The seam's SHAPE raises the bar but does not enforce that: the driver reaches
+/// a handle's locator through `lobLocatorOf(OracleLob)`, a top-level `@internal`
+/// function that `lib/oracledb.dart`'s `show` clause omits. It is deliberately
+/// NOT a getter on `OracleLob` — `@internal` is a lint annotation only, so a
+/// member on an exported class stays reachable by dynamic dispatch from any code
+/// holding a handle, which would hand out this live, mutable buffer. Off the
+/// class there is no such member; but the function itself is still reachable via
+/// a deliberate `import 'package:oracledb/src/oracle_lob.dart'` (an
+/// `implementation_imports` lint, not a compile error), so treat "not exposed
+/// publicly" as a convention backed by a raised bar, not an invariant. See
+/// `lobLocatorOf`'s own doc for the confused-deputy scenario that motivates the
+/// shape.
+///
+/// Story 12.3 adds the fourth escape route, and the only LAZY one: a locator
+/// wrapped **per FETCHED BATCH** by a streaming result set
+/// (`OracleExecuteOptions(resultSet: true, fetchLobs: true)`). `ResultSetCursor`
+/// threads the same `wrapLob` callback into `Transport.materializeLobs` on every
+/// continuation FETCH, so each batch's locators become `OracleLob` handles as the
+/// batch is prefetched — i.e. BEFORE the caller has retrieved those rows. The
+/// cursor therefore also tracks which handles it has delivered and closes the
+/// rest when the result set closes; see `ResultSetCursor`'s constructor doc for
+/// the aliasing rule that keeps a delivered handle from being reaped.
 library;
 
 import 'dart:typed_data';
@@ -22,13 +55,20 @@ import 'constants.dart';
 /// A decoded LOB locator plus the prefetch metadata needed to read its value.
 class LobLocator {
   /// Creates a locator value.
+  ///
+  /// [isTemporary] forces [isTemporary] to `true` regardless of the locator's
+  /// flag bytes: the driver sets it for a locator it just created itself via
+  /// CREATE_TEMP (`Transport.createTemporaryLob`), where the temporary nature is
+  /// known from the request, not inferred from the server's echo. Leave it at
+  /// its default for a FETCHED locator so the TEMP flag bit decides.
   LobLocator({
     required this.locator,
     required this.oracleType,
     required this.length,
     required this.chunkSize,
     this.isNChar = false,
-  });
+    bool isTemporary = false,
+  }) : _createdTemporary = isTemporary;
 
   /// Raw locator bytes as sent by the server (typically 40 bytes). For
   /// temporary LOBs the server updates this buffer's contents on every LOB
@@ -75,10 +115,48 @@ class LobLocator {
       locator.length > tnsLobLocOffsetFlag3 &&
       (locator[tnsLobLocOffsetFlag3] & tnsLobLocFlagsVarLengthCharset) != 0;
 
+  /// Set when the driver created this locator itself through CREATE_TEMP, so
+  /// [isTemporary] is authoritative without inspecting the server's echoed
+  /// flag bytes. Never set for a fetched locator.
+  final bool _createdTemporary;
+
+  /// Whether this locator references a **temporary** LOB — one occupying
+  /// session temp-LOB space that must be explicitly freed (via the transport's
+  /// `FREE_TEMP | ARRAY` piggyback) rather than a persistent, table-backed
+  /// value the server reclaims on its own.
+  ///
+  /// True either because the driver created the LOB itself (the constructor's
+  /// `isTemporary` flag — `Transport.createTemporaryLob`) or because a FETCHED
+  /// locator's flag byte 4 carries [tnsLobLocFlagsTemp]. The flag read is
+  /// bounds-guarded exactly like [usesVarLengthCharset]: a locator shorter than
+  /// the flag offset simply reports `false`.
+  ///
+  /// **Deliberate node-oracledb divergence.** `thin/lob.js init()` marks a
+  /// fetched locator temporary when EITHER
+  /// `locator[FLAG_4] & TNS_LOB_LOC_FLAGS_TEMP === TNS_LOB_LOC_FLAGS_TEMP` OR
+  /// `locator[FLAG_1] & TNS_LOB_LOC_FLAGS_ABSTRACT === TNS_LOB_LOC_FLAGS_ABSTRACT`.
+  /// Only the FIRST clause is ported here. JavaScript's `===` binds tighter
+  /// than `&`, so each clause actually evaluates as `byte & (X === X)` →
+  /// `byte & 1`; the second clause therefore does not test ABSTRACT (0x40) at
+  /// all — it tests bit 0x01 of flag byte 1, which is
+  /// [tnsLobLocFlagsBlob], marking EVERY fetched BLOB "temporary". Porting
+  /// node's effective behavior would queue every fetched BLOB locator for
+  /// FREE_TEMP, and since that free rides an unrelated statement's piggyback it
+  /// would corrupt innocent executes. Porting node's *intended* behavior
+  /// (`& 0x40`) would capture value-based abstract JSON/VECTOR locators, which
+  /// never reach `OracleLob` in this driver (native JSON has its own OSON decode
+  /// path and never becomes a LOB handle). So only the TEMP bit — where node's
+  /// effective behavior and the intended semantics agree — is honored.
+  bool get isTemporary =>
+      _createdTemporary ||
+      (locator.length > tnsLobLocOffsetFlag4 &&
+          (locator[tnsLobLocOffsetFlag4] & tnsLobLocFlagsTemp) != 0);
+
   @override
   String toString() => 'LobLocator(type: $oracleType, length: $length '
       '${oracleType == oraTypeBlob ? 'bytes' : 'chars'}, '
-      'chunkSize: $chunkSize, locator: ${locator.length} bytes)';
+      'chunkSize: $chunkSize, temporary: $isTemporary, '
+      'locator: ${locator.length} bytes)';
 }
 
 /// Encodes [value] as UTF-16BE bytes (2 bytes per UTF-16 code unit) for LOB

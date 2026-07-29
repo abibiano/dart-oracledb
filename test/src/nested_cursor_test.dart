@@ -97,6 +97,14 @@ class _NestedCursorTransport extends Transport {
     bool dmlReturning = false,
   }) async {
     sentCursorsToClose.add(cursorsToClose);
+    // node-oracledb `requiresFullExecute`: a describe-created cursor whose rows
+    // carry DEEPER `CURSOR()` columns issues its FIRST fetch as a full EXECUTE on
+    // the already-open cursor (empty SQL + non-zero cursorId). Route those to the
+    // same per-cursor batch queue `fetchRows` serves, so a nested cursor that is
+    // itself a parent (nesting depth >= 2) can be driven by this fake.
+    if (sql.isEmpty && cursorId != 0 && nestedFetches.containsKey(cursorId)) {
+      return _nextBatchFor(cursorId);
+    }
     return firstBatch;
   }
 
@@ -108,7 +116,10 @@ class _NestedCursorTransport extends Transport {
     Duration? timeout = const Duration(minutes: 2),
     bool preserveTimestampTimeZone = false,
     List<Object?>? previousRoundLastRow,
-  }) async {
+  }) async => _nextBatchFor(cursorId);
+
+  /// The next canned batch for [cursorId], consuming its queue in order.
+  ExecuteResponse _nextBatchFor(int cursorId) {
     fetchedCursorIds.add(cursorId);
     final n = _fetchCounts[cursorId] ?? 0;
     _fetchCounts[cursorId] = n + 1;
@@ -629,15 +640,18 @@ void main() {
     );
   });
 
-  // Story 12.1 review finding (Decision, High — iter 3): a LOB nested inside a
-  // CURSOR() result column arrives through a LAZY per-batch result-set drain
-  // whose OracleLob handle lifecycle is not yet complete (force-close on
-  // result-set close / pool-reclaim / decode-throw; closeLobs() reaching a
-  // result-set OUT bind). Wrapping it would orphan handles that permanently
-  // wedge the connection, so Story 12.1 REJECTS such cursor-embedded LOB columns
-  // pre-wire (fail loud) rather than silently materializing (which would break
-  // AC2) — the wrap is deferred to Story 12.3. This reverses the iter-1 wrap
-  // decision. fetchLobs OFF still materializes unchanged.
+  // Story 12.1 review finding (Decision, High — iter 3), CARRIED by Story 12.3:
+  // a LOB nested inside a CURSOR() result column stays fail-loud under
+  // fetchLobs. 12.3 lifted the equivalent rejection for a TOP-LEVEL
+  // `resultSet: true` cursor (which now wraps per batch, with the reap
+  // lifecycle), but kept this one because the shape is not live-reachable at
+  // all: measured on 23ai and 21c, a cursor row carrying a LOB fails inside
+  // decodeExecuteResponse ("buffer underrun in execute response" / "Integer too
+  // large: size=114 exceeds maxSize=8") WITHOUT fetchLobs, so a wrap could only
+  // ever be proven by fake transports. What 12.3 DOES fix here is the reject
+  // path's cursor leak: the embedded cursor id is now queued for the
+  // close-cursor piggyback before the throw. fetchLobs OFF still materializes
+  // unchanged.
   group('nested-CURSOR() LOB columns fail loud under fetchLobs (review '
       'Decision fix, iter 3)', () {
     const nestedLobColumns = [
@@ -677,8 +691,7 @@ void main() {
         );
 
     test(
-      'a CLOB inside a CURSOR() column fails loud under fetchLobs: true '
-      '(deferred to Story 12.3)',
+      'a CLOB inside a CURSOR() column fails loud under fetchLobs: true',
       () async {
         final clob = _clobLocator();
         final t = buildTransport(clob);
@@ -691,13 +704,87 @@ void main() {
           ),
           throwsA(isA<OracleException>()
               .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('Story 12.3'))
-              .having((e) => e.message, 'message', contains('CURSOR'))),
+              .having((e) => e.message, 'message', contains('CURSOR'))
+              .having((e) => e.message, 'message',
+                  contains('cannot be decoded by this driver yet'))),
         );
         // No handle was registered for the cursor-embedded LOB: the reject
         // fires before it could be wrapped, so nothing wedges the connection.
         // (The parent row carries no top-level LOB, so the eager top-level
         // materialize registers nothing either.)
+        expect(conn.hasOpenLob, isFalse);
+      },
+    );
+
+    // Epic 12 integration review iteration 3 (Med). Iteration 2 removed the
+    // false "just drop fetchLobs" remedy from all four DOCS but not from the ONE
+    // text a user actually sees. For this shape the same statement WITHOUT
+    // fetchLobs fails while decoding anyway, and on 21c the malformed stream
+    // costs the caller their session — so the message must not offer it. Nothing
+    // pinned the message text before, which is how the stale clause survived.
+    test(
+      'the reject message offers the MEASURED remedy (project the LOB outside '
+      'the cursor) and never suggests dropping fetchLobs',
+      () async {
+        final t = buildTransport(_clobLocator());
+        final conn = OracleConnection.forTesting(transport: t);
+        OracleException? caught;
+        try {
+          await conn.execute(
+            'SELECT id, nc FROM t',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+        } on OracleException catch (e) {
+          caught = e;
+        }
+        expect(caught, isNotNull);
+        final message = caught!.message;
+        // The remedy the README documents and the epic measured.
+        expect(message, contains('OUTSIDE the cursor'));
+        expect(message, contains('separate scalar OUT bind'));
+        // The supported shapes stay named (the half that was always correct).
+        expect(message, contains('resultSet: true'));
+        // The false remedy is gone, and the reason is stated.
+        expect(message, contains('WITHOUT fetchLobs does NOT help'));
+        expect(message, contains('session unusable'));
+        expect(
+          message,
+          isNot(contains('or run this statement without fetchLobs')),
+          reason: 'the one action that costs a 21c caller their session',
+        );
+      },
+    );
+
+    // Story 12.3 AC6: the REJECT path must not leak the server cursor it
+    // rejects. `_materializeNestedCursorsInBatch` throws BEFORE
+    // `_drainNestedCursor`'s reaping `finally` ever runs, so without an explicit
+    // requeue the nested cursor id is abandoned — one leaked server cursor per
+    // rejected call, an ORA-01000 hazard on a pooled connection (measured live on
+    // 23ai and 21c as a MISSING pendingClose increment).
+    test(
+      'the rejected nested cursor id IS queued for the close-cursor piggyback',
+      () async {
+        final clob = _clobLocator();
+        final t = buildTransport(clob);
+        final conn = OracleConnection.forTesting(transport: t);
+        expect(conn.debugPendingCloseCount, equals(0));
+        await expectLater(
+          conn.execute(
+            'SELECT id, nc FROM t',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          ),
+          throwsA(isA<OracleException>()),
+        );
+        // Both the rejected nested cursor (id 100) and the top-level statement
+        // cursor (id 7, reaped by the execute path's catch) are queued.
+        expect(
+          conn.debugPendingCloseCount,
+          equals(2),
+          reason: 'the rejected embedded cursor must be reaped, not leaked',
+        );
+        expect(conn.hasOpenResultSet, isFalse);
         expect(conn.hasOpenLob, isFalse);
       },
     );
@@ -717,6 +804,288 @@ void main() {
         expect(conn.hasOpenLob, isFalse);
         expect(t.materializeWrapLobFlags, everyElement(isFalse),
             reason: 'no fetchLobs -> no wrapLob on any materialize call');
+      },
+    );
+
+    // ---------------------------------------------------------------------
+    // Epic 12 integration review (High): the STREAMING shape.
+    //
+    // `_openResultSetGuarded` materialized nested cursors WITHOUT threading
+    // `fetchLobs`, so `resultSet: true` + `fetchLobs: true` over a SELECT
+    // projecting a `CURSOR(...)` column silently took the `fetchLobs = false`
+    // default, leaving this one entry point without the reject every other one
+    // enforces. Both halves of that shape are supported, so the combination is
+    // reachable. NOT a remedy for the 21c session loss: the reject runs on
+    // already-decoded rows, and a real server's EXECUTE response for a
+    // LOB-carrying nested `CURSOR()` does not decode at all (12.3 AC8 row 6/6b) —
+    // which is why only a fake transport can hand such a row over. What these
+    // tests pin is that the flag-threading contract is total.
+    // These two tests fail (they return rows instead of throwing) if either
+    // call site inside `_openResultSetGuarded` drops the argument again; the
+    // parameter is `required` so the compiler catches it first.
+    // ---------------------------------------------------------------------
+    test(
+      'streaming resultSet: true + fetchLobs: true rejects a CURSOR() LOB in '
+      'the FIRST batch',
+      () async {
+        final t = buildTransport(_clobLocator());
+        final conn = OracleConnection.forTesting(transport: t);
+        expect(conn.debugPendingCloseCount, equals(0));
+        await expectLater(
+          conn.execute(
+            'SELECT id, nc FROM t',
+            null,
+            const OracleExecuteOptions(resultSet: true, fetchLobs: true),
+          ),
+          throwsA(isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message',
+                  contains('cannot be decoded by this driver yet'))),
+        );
+        // The reject must leave the connection clean: no handle, no result set,
+        // and the nested cursor requeued rather than leaked. Exactly two ids are
+        // owed on a freshly constructed connection (nothing else pollutes the
+        // count): the rejected nested cursor (100) and the top-level statement
+        // cursor (7, reaped by `_openResultSetGuarded`'s catch via
+        // `unhandledCursorId`). A loose `greaterThanOrEqualTo(1)` could not tell
+        // "queued both" from "queued one when two were owed".
+        expect(conn.hasOpenLob, isFalse);
+        expect(conn.hasOpenResultSet, isFalse);
+        expect(conn.debugPendingCloseCount, equals(2));
+      },
+    );
+
+    test(
+      'streaming resultSet: true + fetchLobs: true rejects a CURSOR() LOB '
+      'arriving on a CONTINUATION batch (onBatchDecoded)',
+      () async {
+        // First batch: a scalar row only, more rows pending — so the cursor
+        // column arrives on the continuation FETCH, exercising the second
+        // (closure) call site rather than the eager first-batch one.
+        final t = _NestedCursorTransport(
+          firstBatch: _resp(
+            [
+              [5, null],
+            ],
+            more: true,
+            columns: _parentColumns,
+          ),
+          parentFetches: [
+            _resp(
+              [
+                [6, nestedCursor],
+              ],
+              more: false,
+              columns: _parentColumns,
+            ),
+          ],
+          nestedFetches: {
+            100: [
+              ExecuteResponse(
+                isSuccess: true,
+                cursorId: 100,
+                columnMetadata: nestedLobColumns,
+                rows: [
+                  [1, _clobLocator()],
+                ],
+                moreRowsToFetch: false,
+              ),
+            ],
+          },
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+        final result = await conn.execute(
+          'SELECT id, nc FROM t',
+          null,
+          const OracleExecuteOptions(resultSet: true, fetchLobs: true),
+        );
+        final rs = result.resultSet!;
+        // The first row is fine (NULL cursor column).
+        expect((await rs.getRow())!['ID'], equals(5));
+        // Nothing queued yet: the statement cursor is still owned by the OPEN
+        // result set, and no nested cursor has been seen.
+        expect(conn.debugPendingCloseCount, equals(0));
+        // Reading on triggers the continuation FETCH, whose batch carries the
+        // offending cursor column.
+        await expectLater(
+          rs.getRow(),
+          throwsA(isA<OracleException>().having((e) => e.message, 'message',
+              contains('cannot be decoded by this driver yet'))),
+        );
+        // Exactly one id is owed by the reject itself: the nested cursor (100)
+        // the continuation batch carried. Asserted BEFORE `close()` so the
+        // requeue is attributed to the reject and not to the result set's own
+        // cursor disposition — without this, nothing in the test would fail if
+        // the CONTINUATION call site's requeue were silently dropped.
+        expect(conn.debugPendingCloseCount, equals(1));
+        await rs.close();
+        expect(conn.hasOpenLob, isFalse);
+      },
+    );
+
+    // ---------------------------------------------------------------------
+    // Epic 12 integration review (Med): SIBLING nested cursors.
+    //
+    // The reject throws MID-loop, so a second `CURSOR(...)` column in the same
+    // row that has not been drained yet never reaches `_drainNestedCursor`'s
+    // reaping `finally`. Requeueing only the offending id leaked the sibling's
+    // server cursor — the same ORA-01000 hazard the requeue was added to close.
+    // ---------------------------------------------------------------------
+    test(
+      'EVERY nested cursor id in the rejected batch is requeued, not just the '
+      'offending one',
+      () async {
+        const plainCursor = DecodedCursorResult(
+          columns: _nestedColumns,
+          cursorId: 200,
+        );
+        // Column order matters: the LOB-carrying cursor (100) comes FIRST, so
+        // the throw fires before the sibling (200) is ever drained.
+        final t = _NestedCursorTransport(
+          firstBatch: _resp(
+            [
+              [5, nestedCursor, plainCursor],
+            ],
+            more: false,
+            columns: const [
+              ColumnMetadata(name: 'ID', oracleType: oraTypeNumber,
+                  maxLength: 0),
+              ColumnMetadata(name: 'NC', oracleType: oraTypeCursor,
+                  maxLength: 0),
+              ColumnMetadata(name: 'NC2', oracleType: oraTypeCursor,
+                  maxLength: 0),
+            ],
+          ),
+          nestedFetches: {
+            100: [
+              ExecuteResponse(
+                isSuccess: true,
+                cursorId: 100,
+                columnMetadata: nestedLobColumns,
+                rows: [
+                  [1, _clobLocator()],
+                ],
+                moreRowsToFetch: false,
+              ),
+            ],
+          },
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+        expect(conn.debugPendingCloseCount, equals(0));
+        await expectLater(
+          conn.execute(
+            'SELECT id, nc, nc2 FROM t',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          ),
+          throwsA(isA<OracleException>()),
+        );
+        // 100 (rejected), 200 (un-drained sibling) and 7 (the top-level
+        // statement cursor, reaped by the execute path's catch).
+        expect(
+          conn.debugPendingCloseCount,
+          equals(3),
+          reason: 'a sibling CURSOR() column that never got drained must still '
+              'have its server cursor reaped',
+        );
+        expect(t.fetchedCursorIds, isNot(contains(200)),
+            reason: 'the sibling was never drained — that is the whole point',);
+      },
+    );
+
+    // ---------------------------------------------------------------------
+    // Epic 12 integration review iteration 2 (Med): the reject arriving from
+    // BELOW, at nesting depth >= 2.
+    //
+    // The sibling requeue above only covers a reject raised at THIS level.
+    // `_drainNestedCursor` recurses into `_materializeNestedCursorsInBatch` for a
+    // deeper `CURSOR()` column, and a throw down there propagates straight
+    // through the `await _drainNestedCursor(...)` call — the inner batch requeues
+    // its own ids and the drained cursor is reaped by `_drainNestedCursor`'s
+    // `finally`, but the OUTER level's un-drained sibling reaches neither and
+    // leaked its server cursor (the same ORA-01000 hazard, one per rejected call).
+    // ---------------------------------------------------------------------
+    test(
+      'a reject at nesting depth 2 still requeues the OUTER batch sibling ids',
+      () async {
+        // Depth 2: the outer row's FIRST cursor column (100) itself projects a
+        // deeper CURSOR() (300) whose describe carries the CLOB — so the reject
+        // fires inside the recursive pass, one level down. The outer row's SECOND
+        // cursor column (200) is never drained.
+        const midColumns = [
+          ColumnMetadata(name: 'X', oracleType: oraTypeNumber, maxLength: 0),
+          ColumnMetadata(name: 'DEEP', oracleType: oraTypeCursor, maxLength: 0),
+        ];
+        const deepCursor = DecodedCursorResult(
+          columns: nestedLobColumns,
+          cursorId: 300,
+        );
+        const midCursor = DecodedCursorResult(
+          columns: midColumns,
+          cursorId: 100,
+        );
+        const plainCursor = DecodedCursorResult(
+          columns: _nestedColumns,
+          cursorId: 200,
+        );
+        final t = _NestedCursorTransport(
+          firstBatch: _resp(
+            [
+              [5, midCursor, plainCursor],
+            ],
+            more: false,
+            columns: const [
+              ColumnMetadata(name: 'ID', oracleType: oraTypeNumber,
+                  maxLength: 0),
+              ColumnMetadata(name: 'NC', oracleType: oraTypeCursor,
+                  maxLength: 0),
+              ColumnMetadata(name: 'NC2', oracleType: oraTypeCursor,
+                  maxLength: 0),
+            ],
+          ),
+          nestedFetches: {
+            // Cursor 100 carries a deeper cursor column, so its first fetch is a
+            // full EXECUTE on the open cursor — the fake routes that here too.
+            100: [
+              ExecuteResponse(
+                isSuccess: true,
+                cursorId: 100,
+                columnMetadata: midColumns,
+                rows: [
+                  [1, deepCursor],
+                ],
+                moreRowsToFetch: false,
+              ),
+            ],
+          },
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+        expect(conn.debugPendingCloseCount, equals(0));
+        await expectLater(
+          conn.execute(
+            'SELECT id, nc, nc2 FROM t',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          ),
+          throwsA(isA<OracleException>().having((e) => e.message, 'message',
+              contains('cannot be decoded by this driver yet'))),
+        );
+        // Exactly four ids are owed: 300 (rejected, by the inner batch's own
+        // requeue), 100 (the drained mid-level cursor, by `_drainNestedCursor`'s
+        // `finally`), 200 (the OUTER un-drained sibling — the id this fix adds)
+        // and 7 (the top-level statement cursor, by the execute path's catch).
+        // Without the depth->outer requeue this is 3, missing 200.
+        expect(
+          conn.debugPendingCloseCount,
+          equals(4),
+          reason: 'a reject raised one level down must still reap the outer '
+              'batch\'s un-drained sibling cursors',
+        );
+        // The deeper cursor was rejected off its describe, never fetched; the
+        // outer sibling was never drained.
+        expect(t.fetchedCursorIds, isNot(contains(300)));
+        expect(t.fetchedCursorIds, isNot(contains(200)));
+        expect(conn.hasOpenLob, isFalse);
       },
     );
   });

@@ -2,11 +2,11 @@
 
 A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire protocol. No Oracle Client libraries required.
 
-[![Pub Version](https://img.shields.io/badge/pub-v1.3.0-orange)](https://pub.dev/packages/oracledb)
+[![Pub Version](https://img.shields.io/badge/pub-v1.4.0-orange)](https://pub.dev/packages/oracledb)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
-> **Stable API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is complete: `OraclePool.create()` builds a pool of prewarmed authenticated sessions, `acquire()`/`release()` borrow and recycle them (with automatic rollback of uncommitted work on release), `withConnection()` wraps the pair leak-safely, queued acquires can be bounded with `acquireTimeout`, surplus idle sessions shrink back to `minConnections` with `idleTimeout`, `close(drainTimeout: ...)` waits for borrowed sessions on shutdown, and session tagging (`acquire(tag: ...)` with an optional `sessionCallback`) reuses session state such as NLS settings across borrowers. As of 1.1, query results can also be consumed incrementally — `OracleResultSet` and `queryStream()` / `executeStream()` stream rows without materializing them, PL/SQL `REF CURSOR` OUT binds and `DBMS_SQL.RETURN_RESULT` implicit result sets are consumable, and nested `CURSOR()` columns materialize inline. As of 1.2, non-`AL32UTF8` database character sets are supported: the client always negotiates UTF-8 and the server converts, so `VARCHAR2`/`CHAR`/`CLOB` text round-trips correctly on single-byte databases too (validated against `WE8MSWIN1252`), with national types (`NCHAR`/`NVARCHAR2`/`NCLOB`) supported on `AL16UTF16`. As of 1.3, bulk DML is available: `executeMany()` runs one statement across many bind sets in a single round trip — array INSERT/UPDATE/DELETE/MERGE (including `RETURNING ... INTO`), repeated PL/SQL with per-iteration binds, optional row-level batch errors, and per-row affected-row counts. Depend on `oracledb: ^1.3.0`; the public API now follows semantic versioning (breaking changes bump the major version).
+> **Stable API.** Connections, authentication, queries, DML, transactions, statement caching, PL/SQL (stored procedures, functions, OUT/IN OUT binds), CLOB-as-String, BLOB-as-Uint8List, RAW-as-Uint8List, and native JSON-as-Map/List are implemented and validated against Oracle 23ai and 21c. Connection pooling is complete: `OraclePool.create()` builds a pool of prewarmed authenticated sessions, `acquire()`/`release()` borrow and recycle them (with automatic rollback of uncommitted work on release), `withConnection()` wraps the pair leak-safely, queued acquires can be bounded with `acquireTimeout`, surplus idle sessions shrink back to `minConnections` with `idleTimeout`, `close(drainTimeout: ...)` waits for borrowed sessions on shutdown, and session tagging (`acquire(tag: ...)` with an optional `sessionCallback`) reuses session state such as NLS settings across borrowers. As of 1.1, query results can also be consumed incrementally — `OracleResultSet` and `queryStream()` / `executeStream()` stream rows without materializing them, PL/SQL `REF CURSOR` OUT binds and `DBMS_SQL.RETURN_RESULT` implicit result sets are consumable, and nested `CURSOR()` columns materialize inline (except when a cursor row carries a CLOB/NCLOB/BLOB column — see [Known Limitations](#known-limitations)). As of 1.2, non-`AL32UTF8` database character sets are supported: the client always negotiates UTF-8 and the server converts, so `VARCHAR2`/`CHAR`/`CLOB` text round-trips correctly on single-byte databases too (validated against `WE8MSWIN1252`), with national types (`NCHAR`/`NVARCHAR2`/`NCLOB`) supported on `AL16UTF16`. As of 1.3, bulk DML is available: `executeMany()` runs one statement across many bind sets in a single round trip — array INSERT/UPDATE/DELETE/MERGE (including `RETURNING ... INTO`), repeated PL/SQL with per-iteration binds, optional row-level batch errors, and per-row affected-row counts. As of 1.4, LOBs can be handled as server-backed `OracleLob` handles instead of whole values: `OracleExecuteOptions(fetchLobs: true)` returns a handle with bounded `read()`/`write()`, `textStream()`/`byteStream()`/`writeStream()` transfer a value piece by piece, `createTemporaryClob()`/`createTemporaryNClob()`/`createTemporaryBlob()` create session-duration temporary LOBs freed on `close()`, a created-temporary `OracleLob` can be bound as a value, and `resultSet: true` + `fetchLobs: true` streams a SELECT one handle per row. Depend on `oracledb: ^1.4.0`; the public API now follows semantic versioning (breaking changes bump the major version).
 
 > **This is NOT an official Oracle product.** It is an independent Dart port of the thin-client wire protocol as documented and implemented in Oracle's official [node-oracledb](https://github.com/oracle/node-oracledb) driver. Oracle Corporation is not affiliated with this project.
 
@@ -21,7 +21,8 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 - **Bulk DML** — `executeMany()` runs one statement across many bind sets in a single round trip, with array `RETURNING`, per-iteration PL/SQL binds, batch errors, and per-row counts
 - **PL/SQL** — stored procedures and functions with OUT / IN OUT bind parameters
 - **Result sets & streaming** — consume large queries incrementally via `OracleResultSet` or `queryStream()` / `executeStream()` instead of materializing every row
-- **REF CURSOR & implicit results** — PL/SQL `SYS_REFCURSOR` OUT binds, `DBMS_SQL.RETURN_RESULT` implicit result sets, and nested `CURSOR()` columns
+- **REF CURSOR & implicit results** — PL/SQL `SYS_REFCURSOR` OUT binds, `DBMS_SQL.RETURN_RESULT` implicit result sets, and nested `CURSOR()` columns (cursor rows must not carry a CLOB/NCLOB/BLOB column — see [Known Limitations](#known-limitations))
+- **LOB streaming & temporary LOBs** — `OracleExecuteOptions(fetchLobs: true)` returns a server-backed `OracleLob` with bounded `read()`/`write()`, `textStream()`/`byteStream()`/`writeStream()` for piece-by-piece transfer, and `createTemporaryClob()`/`createTemporaryNClob()`/`createTemporaryBlob()` for session-duration temporary LOBs
 - **Transactions** — commit, rollback, and transaction helper
 - **TIMESTAMP WITH TIME ZONE** — decoded as UTC `DateTime`, or as `OracleTimestampTz` preserving the original offset (opt-in)
 - **Statement caching** — transparent prepared-statement cache
@@ -56,7 +57,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  oracledb: ^1.3.0
+  oracledb: ^1.4.0
 ```
 
 Then run:
@@ -555,7 +556,7 @@ final isAlive = await connection.ping();
 | CLOB                      | `String` (see [CLOB support](#clob-support), [Character Set Support](#character-set-support)) |
 | BLOB                      | `Uint8List` (see [BLOB support](#blob-support))                                  |
 | JSON (21c+)               | `Map<String, Object?>` / `List<Object?>` (see [JSON support](#json-support))     |
-| CURSOR / REF CURSOR       | `OracleResultSet` (OUT bind) / `List<OracleRow>` (nested `CURSOR()` column) (see [Result Sets & Streaming](#result-sets--streaming)) |
+| CURSOR / REF CURSOR       | `OracleResultSet` (OUT bind) / `List<OracleRow>` (nested `CURSOR()` column) — cursor rows carrying a CLOB/NCLOB/BLOB column are not decodable (see [Result Sets & Streaming](#result-sets--streaming), [Known Limitations](#known-limitations)) |
 | NULL                      | `null`                                                                           |
 
 ### RAW support
@@ -650,9 +651,12 @@ both Oracle 23ai and 21c: a 1,000,000-byte BLOB and 500,000-character CLOBs
 (ASCII and mixed multibyte/emoji — ~1 MB as the on-wire UTF-16BE payload) as
 IN binds and IN OUT round trips, plus IN binds straddling the 64 KiB
 wire-chunk boundary exactly (BLOB at 65,535/65,536/65,537 payload bytes; CLOB
-at the nearest even UTF-16BE sizes 65,534/65,536/65,538). Unbounded/multi-gigabyte LOBs are
-still not claimed: values are materialized in memory as a single `String` /
-`Uint8List`. NCLOB columns are supported as Dart `String` (the national
+at the nearest even UTF-16BE sizes 65,534/65,536/65,538). On this **default**
+path values are still materialized in memory as a single `String` / `Uint8List`,
+so unbounded/multi-gigabyte LOBs are not claimed for it — use
+[`fetchLobs`](#incremental-lob-access-with-fetchlobs) and
+`OracleLob.textStream()` / `byteStream()` / `writeStream()` to move a value in
+bounded pieces instead. NCLOB columns are supported as Dart `String` (the national
 `AL16UTF16` charset — see [Character Set Support](#character-set-support)); BFILE
 columns are not supported and fail with a clear `OracleException`.
 
@@ -689,10 +693,20 @@ try {
   variable-length-charset CLOB** (decoded UTF-16BE) returns a lone surrogate as a
   partial character, while a **plain CLOB** (decoded UTF-8) fails loud with an
   `OracleException` because the split leaves an incomplete UTF-8 sequence.
+- **No size ceiling on `read()`** — the requested range is fetched in one LOB
+  READ round trip and, if one cannot carry it all, the read **continues** at the
+  advanced offset until the range arrives. The bytes are assembled first and
+  decoded exactly once, so a round-trip boundary can never corrupt multibyte or
+  supplemental-plane text. (Measured: every value up to 32 MB on 23ai and 8 MB on
+  21c still arrives in a single READ.) Use the streams below when the point is to
+  avoid holding the whole value in memory.
 - **Writing** — `write(offset, data)` (a `String` for CLOB/NCLOB, `Uint8List` /
   `List<int>` for BLOB) requires a **writable** locator: a LOB OUT/IN OUT bind or
   a `SELECT ... FOR UPDATE` locator. Writing through a read-only plain-`SELECT`
-  locator surfaces the Oracle server error (it is not blocked client-side).
+  locator surfaces the Oracle server error (it is not blocked client-side —
+  measured: `ORA-22920`, with the handle and connection left usable). Writing
+  past `length + 1` extends the LOB and the server fills the gap; the local
+  `length` advance matches the server's own `DBMS_LOB.GETLENGTH`.
 - **Lifecycle** — each open handle holds the connection's single in-flight slot:
   the connection rejects other operations (and the pool force-closes any
   still-open handle on release) until every handle is `close()`d. `close()` is
@@ -724,15 +738,240 @@ try {
   }
   ```
 
-`fetchLobs` wraps only the **eager** shapes: top-level `execute()` SELECT rows
-and scalar OUT / IN OUT binds. A CLOB/NCLOB/BLOB carried by a **lazily-streamed**
-handle is not wrapped in this release and is deferred to Story 12.3: combining
-`resultSet: true` with `fetchLobs: true` throws before any wire round trip, and a
-CLOB/BLOB nested in a `CURSOR(...)` column or carried by a REF CURSOR OUT bind
-**fails loud** under `fetchLobs` (rather than silently materializing) — run those
-statements without `fetchLobs` and the LOB materializes to a `String` /
-`Uint8List` as before. Also not yet available: a `Stream` surface,
-`createTemporary*` LOB creation, BFILE, and `trim()`.
+`fetchLobs` wraps top-level `execute()` SELECT rows, scalar OUT / IN OUT binds,
+eager PL/SQL implicit-result rows, and a **streaming** `resultSet: true` cursor
+(see below). It does **not** reach a CLOB/NCLOB/BLOB carried by a nested
+`CURSOR(...)` column or a REF CURSOR OUT bind: those **fail loud** under
+`fetchLobs` (rather than silently materializing), because a cursor row carrying a
+LOB cannot be decoded by this driver at all yet — such statements fail with a
+protocol error even *without* `fetchLobs`, and on Oracle **21c** that failure
+also leaves the connection unusable. Note that `fetchLobs: true` only reaches
+this rejection for the **REF CURSOR OUT bind** half, and only *after* the
+statement has executed and its describe decoded (what it saves you is the row
+FETCH that poisons the session). For a **nested `CURSOR(...)` column** the
+EXECUTE response itself fails to decode, so the check never runs and
+`fetchLobs` makes no difference — the only remedy is to project the LOB outside
+the cursor. See
+[Known Limitations](#known-limitations) for the shape and the workaround.
+`resultSet: true` + `fetchLobs: true`
+on a **PL/SQL block** (whose implicit results come back as a group of lazy result
+sets) also throws before any wire round trip; use the eager `execute()` path
+there. Still not available: BFILE and `trim()`.
+
+#### Streaming a LOB in and out
+
+`textStream()` / `byteStream()` deliver a LOB in bounded pieces — **one LOB READ
+round trip per piece** (see the supplemental-character note below for the single
+exception) — and `writeStream()` feeds one in from a `Stream`, so a
+multi-megabyte value never has to exist whole in memory:
+
+```dart
+// Read: one round trip per piece, nothing materialized whole.
+final sink = File('article.txt').openWrite();
+try {
+  await for (final piece in lob.textStream(pieceSize: 64 * 1024)) {
+    sink.write(piece);              // Stream<Uint8List> for a BLOB (byteStream)
+  }
+} finally {
+  await sink.close();
+  await lob.close();
+}
+```
+
+```dart
+// Write: node-oracledb's canonical streamed insert. This driver accepts
+// OracleBind specs only inside PL/SQL, so the DML RETURNING is wrapped in a block.
+final result = await connection.execute(
+  'BEGIN INSERT INTO articles (id, doc) VALUES (:id, EMPTY_CLOB()) '
+  'RETURNING doc INTO :out; END;',
+  {'id': 1, 'out': OracleBind.out(type: OracleDbType.clob, maxSize: 1)},
+  OracleExecuteOptions(fetchLobs: true),
+);
+final lob = result.outBinds['out'] as OracleLob;
+try {
+  final written = await lob.writeStream(pieces); // Stream<String>; returns units
+  await connection.commit();
+} finally {
+  await lob.close();
+}
+```
+
+- **Units** are the type's native ones: characters (UCS-2 code units) for
+  CLOB/NCLOB, bytes for BLOB — same as `read` / `write` / `length`.
+- **`pieceSize`** defaults to `chunkSize` when the server reported one and
+  otherwise to `defaultLobStreamPieceSize`; a multiple of `chunkSize` is
+  recommended. The concatenation of the emitted pieces equals
+  `read(offset: offset)` exactly — for a LOB whose length has not changed since
+  the handle was fetched (see the next bullet for the one case where they
+  deliberately differ).
+- **A read stream ends when a READ returns no data**, not when the cached
+  `length` is reached — so it is immune to a `length` that went stale after the
+  fetch, and it never loops past the end. That terminating empty READ costs one
+  extra round trip, and an **empty** LOB yields no pieces at all. This is also
+  the one case where a stream and `read()` disagree, and the stream is the
+  accurate one: for a LOB that **grew** server-side after the fetch, `read()`
+  caps its request at the cached `length` and returns a stale prefix, while the
+  stream keeps going to the real end and so returns strictly more.
+- **Emitted CLOB pieces are not guaranteed whole-character-aligned** (the driver
+  picks the boundaries), but they are never corrupt: a split encoding sequence or
+  a trailing unpaired high surrogate is held back and joined to the next piece, so
+  the **concatenation is always exact**. That carry-over is why a supplemental
+  (astral) character straddling a boundary relaxes both piece-level guarantees: a
+  piece may be **one UCS-2 code unit longer than `pieceSize`**, and a piece may be
+  assembled from **more than one READ** (a READ whose payload is entirely held
+  back emits nothing). A LOB that itself ends with an unpaired high surrogate
+  emits it as the final piece, again to keep the concatenation exact. `byteStream`
+  has no carry-over and so no exceptions.
+- **`writeStream` issues one write per caller chunk** at the running offset —
+  your chunk size is the wire piece size. An empty chunk costs no round trip, and
+  a surrogate pair split across two chunks is stitched back together (that
+  boundary is the driver's, unlike the caller-chosen boundaries `write()` stays
+  lenient about); a chunk stream ending on a still-unpaired high surrogate costs
+  one extra write to flush it. It is **not atomic**: a bad chunk or a server error
+  aborts the rest and leaves what was already written in place.
+- **Cancelling a read stream mid-flight** leaves the connection immediately
+  reusable; the handle stays open, so `close()` it as usual. Liveness is
+  re-checked before every piece, so closing the handle (or losing the connection)
+  mid-stream fails the stream loud rather than truncating it silently.
+- **`executeStream()` / `queryStream()` are unrelated** — they stream *rows* and
+  always materialize LOB columns; they take no `fetchLobs` argument.
+
+#### Streaming result sets that yield LOB handles
+
+Combine `resultSet: true` with `fetchLobs: true` and each batch's LOB columns are
+wrapped as handles **as the batch is prefetched**, so a huge result set never
+holds a handle per row up front:
+
+```dart
+final result = await connection.execute(
+  'SELECT id, doc FROM articles',
+  null,
+  OracleExecuteOptions(resultSet: true, fetchLobs: true, fetchSize: 100),
+);
+final rs = result.resultSet!;
+try {
+  for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
+    final lob = row['DOC'] as OracleLob?;
+    if (lob == null) continue;               // SQL NULL LOB
+    try {
+      await for (final piece in lob.textStream()) { process(piece); }
+    } finally {
+      await lob.close();                     // close every handle you receive
+    }
+  }
+} finally {
+  await rs.close();      // reaps any handle prefetched but never delivered
+}
+```
+
+- **Close every handle you receive** — each holds the connection's in-flight
+  slot, and only one can be read at a time. Reading a LOB *between* two
+  `getRow()` calls is fine and does not disturb the cursor (verified on Oracle
+  23ai and 21c).
+- **`rs.close()` is the safety net** — it force-closes every handle the cursor
+  wrapped for a prefetched row you never retrieved, so abandoning iteration early
+  cannot wedge the connection. A handle you already **received** survives
+  `rs.close()` and stays readable, which makes the "collect the rows, close the
+  result set, then read the LOBs" pattern work.
+- **`result.closeLobs()`** also reaches a streaming result set's buffered
+  handles, and the pool force-closes everything on release.
+
+#### Temporary LOBs you create, fill, and bind
+
+`createTemporaryClob()`, `createTemporaryNClob()` and `createTemporaryBlob()`
+create a new, **empty** session-duration temporary LOB on the server and return
+it as a caller-owned `OracleLob`. Fill it with `write()`, bind it into an
+`INSERT` or a PL/SQL block, then `close()` it — this is how you build a value
+above the 32 KB inline bind limit without materializing one giant
+`String`/`Uint8List`:
+
+```dart
+final lob = await connection.createTemporaryClob();
+try {
+  await lob.write(1, firstChunk);             // 1-based offsets
+  await lob.write(lob.length + 1, nextChunk); // append after what you wrote
+  print(lob.length);        // characters (UCS-2 code units); bytes for BLOB
+  print(lob.isTemporary);   // true
+  print(lob.chunkSize);     // real server chunk size
+
+  await connection.execute(
+    'INSERT INTO articles (id, doc) VALUES (:id, :doc)',
+    {'id': 1, 'doc': lob},  // binds as the server-side LOB locator
+  );
+  await connection.commit(); // the temp LOB survives commit()
+} finally {
+  await lob.close();         // ALWAYS close
+}
+```
+
+- **Units and offsets** — identical to a fetched handle: 1-based offsets, counted
+  in **characters (UCS-2 code units)** for CLOB/NCLOB and in **bytes** for BLOB.
+  `createTemporaryNClob()` stores/transfers its data as UTF-16BE and requires the
+  `AL16UTF16` national character set (it throws before any wire round trip
+  otherwise).
+- **You must `close()` it** — Oracle holds session resources for every unclosed
+  temporary LOB (visible in `V$TEMPORARY_LOBS`). `close()` is idempotent and
+  never throws. The actual server-side free travels as a **piggyback on the next
+  `execute()`** on that session, matching node-oracledb: a `close()` followed
+  only by `connection.close()` relies on session teardown, and a pooled
+  connection's pending frees are flushed by the next borrower's first
+  `execute()`. `commit()` / `rollback()` / `ping()` do not flush them.
+- **It does not block other statements** — unlike a fetched handle, an open
+  created-temporary handle leaves the connection free to run statements (binding
+  it is the whole point). Individual LOB round trips are still serialized, so
+  `await` each `read()` / `write()`.
+- **Session duration, not transaction duration** — the LOB survives `commit()`
+  and `rollback()`.
+- **An empty temporary LOB is not SQL `NULL`** — binding a created-but-unwritten
+  handle stores an **empty LOB**, deliberately unlike binding an empty `String`
+  (which Oracle's `'' IS NULL` semantics store as `NULL`).
+- **Binding** — pass the handle positionally (`[lob]`), by name
+  (`{'doc': lob}`), or as
+  `OracleBind.inOut(value: lob, type: OracleDbType.clob, maxSize: ...)` in a
+  PL/SQL block. Binding never frees the handle: its lifetime is yours. Binding a
+  **closed** handle, or one belonging to a **different** connection, throws
+  before any wire round trip. **Only created-temporary handles can be bound.** A
+  handle obtained from `fetchLobs: true` holds the connection's single in-flight
+  slot while it is open, so the statement that would bind it is rejected as a
+  concurrent operation (with an error saying exactly that) — read the fetched
+  value, `close()` the handle, then bind the value or a created-temporary LOB. `executeMany()` does not accept `OracleLob` values
+  (it fails loud naming `execute()`); pass plain `String` / `Uint8List` values
+  there and the driver creates a temporary LOB per iteration.
+- **An `IN OUT` bind consumes the handle** — validated on Oracle 23ai and 21c:
+  the server replaces the LOB behind an `IN OUT` bind, so the returned value in
+  `result.outBinds` is correct but a later `read()` on the **bound** handle
+  raises `ORA-22922`. Read the returned value (a `String` / `Uint8List`, or a
+  fresh `OracleLob` under `fetchLobs: true`) and treat the bound handle as spent;
+  you still `close()` it. A plain **IN** bind leaves the handle fully usable.
+- **Cached `length`** — `length` is seeded from the locator's prefetch metadata
+  and advanced locally by `write()`; it is never re-read from the server
+  (node-oracledb parity). So if the LOB grew server-side after the handle was
+  fetched, `read()` stops at the cached length, and `read(offset: length + 1)`
+  returns the empty value **without any round trip**. The remedy for that
+  direction is to **re-select** the value: an explicit `amount` is still capped
+  at the cached length (it can only make a read shorter), so it guards the
+  opposite direction — a LOB that shrank, where a read for the full cached length
+  **can** fail loud (a length mismatch, or `"LOB read made no progress"`,
+  depending on whether the server reports the units it actually delivered) and
+  asking only for units you know exist avoids it. `textStream()` / `byteStream()` are immune by construction:
+  they never consult `length` and stop on the server's empty READ. Measured on
+  Oracle 23ai and 21c: because a LOB locator is read-consistent, a handle fetched
+  before another session's committed update keeps seeing the *old* value in full
+  — correct data, never silently truncated — in **both** directions, so the
+  shrunk-direction mismatch was not reproducible live on either fixture.
+
+`OracleLob.isTemporary` reports whether a handle references a temporary LOB —
+always `true` for a created one, and `true` for a fetched locator that carries
+the server's temporary flag. Measured on 23ai and 21c: a plain table LOB, a
+`SELECT ... FOR UPDATE` locator, a `SELECT TO_CLOB(...)` expression and a PL/SQL
+CLOB OUT bind the body fills from a `TO_CLOB` **literal** all report `false`
+(their locators carry no temporary flag and allocate no session temp-LOB space).
+"A PL/SQL LOB OUT bind" is not one answer, though — **how the OUT value was
+produced decides**: an OUT locator the body assigns from a *temporary* input LOB
+(`p_out := p_in`, where `p_in` arrived as the driver's temporary LOB for a
+`String` / `Uint8List` bind) **is** TEMP-flagged, and the driver queues its free.
+An `IN OUT` bind's returned locator likewise reports `true` and frees itself on
+`close()`.
 
 ### JSON support
 
@@ -855,6 +1094,7 @@ This package implements a subset of the full Oracle driver feature set. Below is
 | Result sets, streaming, REF CURSOR & implicit results | ✅ Done  |
 | Character set support (`AL32UTF8` + non-`AL32UTF8` databases, national types) | ✅ Done |
 | Bulk DML (`executeMany()` — array DML, RETURNING, bulk PL/SQL, batch errors) | ✅ Done |
+| LOB streaming & temporary LOBs (`OracleLob`, chunked read/write, `textStream`/`byteStream`/`writeStream`, `createTemporary*`) | ✅ Done |
 
 ### Planned After 1.0
 
@@ -862,10 +1102,9 @@ After the 1.0 release, the project roadmap includes larger API and compatibility
 
 | Priority | Planned enhancement                                                                       |
 | -------- | ----------------------------------------------------------------------------------------- |
-| 1        | Public LOB streaming and temporary LOBs                                                   |
-| 2        | Extended JSON / OSON parity (Oracle-specific JSON scalars, OSON-in-BLOB helpers)          |
-| 3        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
-| 4        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
+| 1        | Extended JSON / OSON parity (Oracle-specific JSON scalars, OSON-in-BLOB helpers)          |
+| 2        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
+| 3        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
 
 ## Tests
 
@@ -911,7 +1150,8 @@ RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
 - **Statement cache and external DDL** — top-level DDL executed on the same connection clears the statement cache, but DDL issued from another session (or inside a PL/SQL block) can leave stale cached SELECT metadata. This matches node-oracledb thin-mode behavior.
 - **CLOB/BLOB cursor re-parse** — result cursors for queries selecting CLOB or BLOB columns are always re-parsed, never blind-reused from the statement cache (fresh defines are required to keep the LOB-prefetch metadata); RAW queries keep normal cursor reuse.
 - **NUMBER beyond 2⁵³** — integer-valued NUMBERs larger than 2⁵³ decode to `double` and lose precision (Dart `double` limit; matches node-oracledb).
-- **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work.
+- **Nested `CURSOR()` / REF CURSOR rows carrying a LOB** — a row returned by a nested `CURSOR(...)` column or a `SYS_REFCURSOR` OUT bind that projects a `CLOB`/`NCLOB`/`BLOB` column **cannot be decoded by this driver**, with or without `fetchLobs`. Measured on both Oracle 23ai and 21c, such a statement fails with a protocol error (ORA-12547 / buffer underrun) as the cursor's rows are decoded; **on Oracle 21c the malformed stream also leaves the connection unusable**, so the session is lost and must be replaced (via `OraclePool` this happens on reclaim). This is the one fail-loud boundary in this driver that does not leave the connection usable. `fetchLobs: true` does **not** rescue the two shapes equally, because every LOB pre-check runs on already-decoded rows: for a **nested `CURSOR(...)` column** the decode fails first (inside the EXECUTE response), so `fetchLobs` changes nothing and the 21c session is lost either way; for a **`SYS_REFCURSOR` OUT bind** the describe decodes fine, so with `fetchLobs: true` you get the driver's clear rejection — after the execute round trip, but before the row FETCH that would poison the connection — and the session stays healthy. **Workaround (the only remedy for the nested-`CURSOR()` shape):** project the LOB column outside the cursor (join it into the outer SELECT, or return its key from the cursor and read the LOB in a second statement).
+- **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work. As of 1.4 an **open fetched `OracleLob`** (from `fetchLobs: true`) also holds that slot — for the handle's whole lifetime, not just during a round trip, and including handles a streaming result set prefetched but you never asked for — so an unclosed LOB handle is the most likely cause of a concurrent-operation error; a **created-temporary** handle (`createTemporaryClob()` and friends) is deliberately exempt and can be read, written, and bound while open. See [Incremental LOB access with `fetchLobs`](#incremental-lob-access-with-fetchlobs).
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
 - **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) are rejected on decode; offset-based zones (e.g. `+02:00`) are supported. Region-name compatibility is planned as a post-1.0 temporal enhancement.
 - **Very large result sets** — a single `execute()` is bounded by a safety cap of 1,000 fetch round-trips (about 50,000 rows at the default fetch size); if the cap is hit, a warning is logged, the rows fetched so far are returned, and `result.moreRowsAvailable` is `true` so the truncation is detectable. The same flag is also set (with a logged warning) in the rarer case where the server reports more rows pending but the driver has no usable cursor id to continue fetching — in either case `true` means the rows are an incomplete prefix of the full result set. Streaming (`queryStream()` / `executeStream()`) and result-set (`OracleExecuteOptions(resultSet: true)`) consumption have **no such cap** — prefer them for very large result sets.

@@ -10,6 +10,7 @@ import 'dart:math';
 
 import 'package:logging/logging.dart';
 import 'package:oracledb/oracledb.dart';
+import 'package:test/test.dart' show markTestSkipped;
 
 /// Oracle host. Override with ORACLE_HOST env var.
 String get testHost => Platform.environment['ORACLE_HOST'] ?? 'localhost';
@@ -179,6 +180,112 @@ List<Object?> returned(OracleResult r, int row, Object bind) {
 /// never hardcode the literal in a WHERE clause.
 int _nextId = _random.nextInt(1 << 20) * 1000;
 int nextTestId() => ++_nextId;
+
+// ---------------------------------------------------------------------------
+// Shared content-driven skip probes (hoisted in Story 12.4)
+//
+// These two helpers were copy-pasted across four/two integration files before
+// Story 12.4 (`lob_stream`, `lob_temporary`, `lob_chunked_streaming`,
+// `nchar_integration_test` for the national-charset probe; `lob_temporary` for
+// the V$TEMPORARY_LOBS probe). They live here as SINGLE implementations, per
+// the Story 11.5 `returned()` / `uniqueObjectName()` precedent. Behavior is
+// unchanged: same `markTestSkipped` (skip-not-fail) semantics, same messages,
+// same tolerated Oracle error codes.
+//
+// Both are CONTENT-driven (they probe what the fixture can actually do), never
+// version- or auth-path-driven — the standing project rule that no test may
+// branch on a server version string.
+// ---------------------------------------------------------------------------
+
+/// Whether [connection]'s fixture has a national character set that supports
+/// the national types (NCHAR/NVARCHAR2/NCLOB).
+///
+/// Returns `true` when the fixture reports `AL16UTF16`. Otherwise marks the
+/// current test skipped with the fixture's actual national charset and returns
+/// `false`, so the caller can `return` immediately:
+///
+/// ```dart
+/// if (!nationalCharsetSupported(connection)) return;
+/// ```
+///
+/// [subject] names what is unsupported in the skip message — `'NCLOB'` for the
+/// LOB suites (the default) and `'national types'` for the NCHAR suite, exactly
+/// as those files worded it before the hoist.
+bool nationalCharsetSupported(
+  OracleConnection connection, {
+  String subject = 'NCLOB',
+}) {
+  if (connection.charsetInfo.supportsNationalCharacterSet) return true;
+  markTestSkipped(
+    'national charset is ${connection.charsetInfo.nationalCharset}, '
+    'not AL16UTF16 — $subject unsupported on this fixture',
+  );
+  return false;
+}
+
+/// Session-scoped temporary-LOB count from `V$TEMPORARY_LOBS`.
+///
+/// The fixtures connect as `system`, so the view is readable. `ABSTRACT_LOBS`
+/// is deliberately NOT summed (it does not exist on every supported line).
+///
+/// Note this reads the CURRENT session's SID via `SYS_CONTEXT`, so it cannot be
+/// used to observe another session's count — and it cannot run while a fetched
+/// `OracleLob` handle holds the connection's single in-flight slot (the
+/// concurrency guard rejects it). No test needs a cross-session reading today, so
+/// no SID-parameterized variant is provided (Story 12.4 trap 1: reach for one
+/// only when a test genuinely has to read the count while a slot is held, and
+/// then pass the SID explicitly).
+const String tempLobCountSql =
+    'SELECT NVL(SUM(CACHE_LOBS + NOCACHE_LOBS), 0) AS N FROM V\$TEMPORARY_LOBS '
+    "WHERE SID = SYS_CONTEXT('USERENV','SID')";
+
+/// Oracle errors that mean `V$TEMPORARY_LOBS` is simply not usable on this
+/// fixture (missing view / no privilege). Anything else is a real failure and is
+/// rethrown — mirroring the probe convention in
+/// `json_data_type_integration_test.dart`.
+const Set<int> viewUnusableCodes = {
+  942, // ORA-00942: table or view does not exist
+  1031, // ORA-01031: insufficient privileges
+};
+
+/// [connection]'s own session temporary-LOB count, or `null` when
+/// `V$TEMPORARY_LOBS` is not usable on this fixture.
+///
+/// A `null` return has already called [markTestSkipped], so the caller skips
+/// only the view-based assertions and keeps its driver-side
+/// (`debugPendingTempLobCount`) ones running.
+///
+/// **This probe is NOT inert: it MUTATES the state it reports.** It runs
+/// `connection.execute()`, and an execute is precisely what flushes the driver's
+/// pending FREE_TEMP piggyback — so by the time this returns, every temp LOB that
+/// was merely QUEUED has been freed server-side and
+/// `debugPendingTempLobCount` has drained to 0. Consequences for test authors:
+///
+/// * The count you get is the count AFTER the probe's own statement did its
+///   piggyback work, never the count at the moment you called.
+/// * A `debugPendingTempLobCount == 0` assertion written immediately after this
+///   probe is satisfied BY THE PROBE, not by the code under test. Sample the
+///   driver-side counter BEFORE calling this if you mean to assert on it.
+/// * Sampling the count before and after a `close()` is therefore meaningless —
+///   the "before" probe already drained whatever the `close()` had queued. To
+///   observe a close's effect, assert `debugPendingTempLobCount` around the
+///   close and use this probe only once, afterwards, as the unrelated statement
+///   the piggyback rides on.
+Future<int?> tempLobCount(OracleConnection connection) async {
+  try {
+    final r = await connection.execute(tempLobCountSql);
+    final n = r.rows.single['N'];
+    return n is int ? n : (n as num).toInt();
+  } on OracleException catch (e) {
+    if (!viewUnusableCodes.contains(e.errorCode)) rethrow;
+    markTestSkipped(
+      'V\$TEMPORARY_LOBS is unusable on this fixture '
+      '(ORA-${e.errorCode}); the server-side free assertions are skipped '
+      'while the debugPendingTempLobCount assertions still run',
+    );
+    return null;
+  }
+}
 
 /// Null-safe tearDown cleanup.
 ///

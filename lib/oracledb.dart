@@ -43,7 +43,10 @@ export 'src/pool.dart' show OraclePool, PoolSessionCallback;
 // Query Results
 export 'src/result.dart' show OracleResult, OracleRow;
 export 'src/result_set.dart' show OracleResultSet;
-export 'src/oracle_lob.dart' show OracleLob;
+// `defaultLobStreamPieceSize` rides along because OracleLob.textStream() /
+// byteStream() document it as their fallback piece size (Story 12.3) — a caller
+// reasoning about round-trip counts needs to be able to name it.
+export 'src/oracle_lob.dart' show OracleLob, defaultLobStreamPieceSize;
 export 'src/protocol/messages/execute_message.dart' show ColumnMetadata;
 
 // Output bind API

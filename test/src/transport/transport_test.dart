@@ -946,19 +946,27 @@ void main() {
       });
     });
 
-    group('verifyBlobReadLength (single-round-trip BLOB read guard)', () {
+    group('verifyBlobReadLength (completed BLOB range-read guard)', () {
       test('exact length passes silently', () {
         Transport.verifyBlobReadLength(100, 100);
       });
 
-      test('short read names the single round-trip limit, not corruption',
-          () {
+      // Story 12.3: the read behind this guard now continues across as many
+      // round trips as the range needs, so a short result can no longer be
+      // explained by size. The message must NOT tell callers that large values
+      // are unsupported; it must point at the LOB delivering fewer bytes than
+      // its (possibly stale) locator length advertises.
+      test('short read blames the LOB, not a round-trip size limit', () {
         expect(
           () => Transport.verifyBlobReadLength(80, 100),
           throwsA(isA<OracleException>()
               .having((e) => e.errorCode, 'errorCode', oraProtocolError)
               .having((e) => e.message, 'message',
-                  contains('single round-trip read limit'))),
+                  contains('fewer bytes than its locator advertises'))
+              .having((e) => e.message, 'message',
+                  isNot(contains('not yet supported')))
+              .having((e) => e.message, 'message',
+                  isNot(contains('single round-trip')))),
         );
       });
 

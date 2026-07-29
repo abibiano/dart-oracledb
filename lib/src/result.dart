@@ -225,11 +225,30 @@ class OracleResult {
   /// runs concurrent LOB ops. Idempotent and exception-free per handle
   /// ([OracleLob.close] is), so calling it after some handles were already
   /// closed is safe (already-closed handles are counted as closed).
+  ///
+  /// **Streaming result sets are included.** With
+  /// `OracleExecuteOptions(resultSet: true, fetchLobs: true)` the [resultSet]'s
+  /// cursor wraps a handle for every LOB in each prefetched batch, so this walk
+  /// reaches those buffered handles too (Story 12.3 AC5) — otherwise the
+  /// documented bulk-close remedy would do nothing for the shape that holds the
+  /// most handles. Note the consequences, which make this a blunter instrument
+  /// than `resultSet.close()` (that one reaps exactly the *undelivered* handles):
+  ///
+  /// * a handle still buffered for a row the caller has NOT read yet is closed as
+  ///   well, so call this only when done iterating; and
+  /// * a handle the caller already **received** is closed too when Oracle's
+  ///   duplicate-column optimization aliased that one handle into a row still
+  ///   sitting in the prefetch buffer (`SELECT doc, doc FROM …` shapes — see
+  ///   [OracleResultSet.bufferedLobHandles]). This walk has no delivered-handle
+  ///   filter by design: it is the "close everything this result reached" remedy.
+  ///   If you need a still-live delivered handle to survive, close the result set
+  ///   instead of calling this.
   Future<int> closeLobs() async {
     final lobs = <OracleLob>{};
     _collectLobs(_rows, lobs);
     _collectLobs(outBinds.toList(), lobs);
     _collectLobs(implicitResults, lobs);
+    _collectLobs(resultSet, lobs);
     for (final lob in lobs) {
       await lob.close();
     }
@@ -242,11 +261,18 @@ class OracleResult {
   /// `List`/`Map` per iteration), and DML-RETURNING OUT-bind cells (a `List`
   /// per return bind). Deduped via the [Set] so an aliased locator's shared
   /// handle is closed once.
+  ///
+  /// An [OracleResultSet] — in [resultSet], in [implicitResults] (lazy mode), or
+  /// in a REF CURSOR OUT bind — contributes the handles its cursor wrapped for
+  /// prefetched-but-undelivered rows; without this branch the walker cannot see
+  /// them at all.
   static void _collectLobs(Object? value, Set<OracleLob> acc) {
     if (value is OracleLob) {
       acc.add(value);
     } else if (value is OracleRow) {
       _collectLobs(value._data, acc);
+    } else if (value is OracleResultSet) {
+      acc.addAll(value.bufferedLobHandles());
     } else if (value is Map) {
       for (final v in value.values) {
         _collectLobs(v, acc);
