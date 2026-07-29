@@ -1,6 +1,6 @@
 # Story 12.3: Chunked streaming transfer — LOB read/write streams and streamed LOB handles
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- THIRD story of Epic 12. baseline_commit is injected by the auto-bmad orchestrator (it owns git); do not fabricate it here. -->

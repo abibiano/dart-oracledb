@@ -1,6 +1,6 @@
 # Story 12.2: Temporary LOB lifecycle — public creation, binding, and free-on-close
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- SECOND story of Epic 12. baseline_commit is injected by the auto-bmad orchestrator (it owns git); do not fabricate it here. -->

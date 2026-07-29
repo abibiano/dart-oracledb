@@ -1,6 +1,6 @@
 # Story 12.4: Dual-env integration tests — Epic 12 LOB closeout
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- FOURTH and FINAL story of Epic 12. baseline_commit is injected by the auto-bmad orchestrator (it owns git); do not fabricate it here. -->
