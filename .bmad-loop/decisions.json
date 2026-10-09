@@ -7,5 +7,14 @@
     "key": "3",
     "label": "Keep open",
     "resolution": ""
+  },
+  "DW-28": {
+    "answered_at": "2026-10-09",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Remove the no-round-trip short-circuit in OracleLob.read so a past-end read asks the server like the streams do; update tests and docs.",
+    "key": "1",
+    "label": "Drop the short-circuit",
+    "resolution": ""
   }
 }
