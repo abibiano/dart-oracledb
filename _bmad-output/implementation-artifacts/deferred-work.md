@@ -890,6 +890,7 @@ location: lib/oracledb.dart
 reason: **`defaultLobStreamPieceSize` is exported into the public namespace as a bare, un-prefixed top-level constant.** It is the only such name among `lib/oracledb.dart`'s exports, which are otherwise uniformly `Oracle*`-prefixed types — a plausible collision in downstream code, and a second naming convention introduced for a need ("a caller reasoning about round-trip counts needs to be able to name it") that a static getter on `OracleLob` would satisfy without touching the global namespace. Note the window to change this without a breaking change closes when 1.4.0 ships. Fix: expose it as `OracleLob.defaultStreamPieceSize` (static getter) and drop the top-level export. target: Epic 12 follow-up (public API surface, ideally before 1.4.0 release). [lib/oracledb.dart; lib/src/oracle_lob.dart]
 status: open
 decision: 2026-10-09 Move to OracleLob static getter — Expose OracleLob.defaultStreamPieceSize, keep the top-level export as @Deprecated alias, update docs and tests.
+decision: 2026-10-09 Move to OracleLob static getter — Expose OracleLob.defaultStreamPieceSize, keep the top-level export as @Deprecated alias, update docs and tests.
 
 ### DW-116: `writeStream()`'s unit accounting may diverge from the server's CHARACTER billing for supplemental characters on a UTF-8-form (single-byte-charset)…
 
