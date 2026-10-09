@@ -105,23 +105,24 @@ void main() {
       // Binary fidelity: every byte value 0x00..0xFF must survive the wire
       // unmodified — in particular 0x00 (which would terminate a C string)
       // and 0xFF (the driver's NULL length marker in other contexts).
-      test('RAW preserves the full 0x00..0xFF byte range without corruption',
-          () async {
-        final id = nextTestId();
-        final payload =
-            Uint8List.fromList(List<int>.generate(256, (i) => i));
-        await connection.execute(
-          'INSERT INTO $testTable (id, r2000) VALUES ($id, :1)',
-          [payload],
-        );
-        final result = await connection.execute(
-          'SELECT r2000 FROM $testTable WHERE id = $id',
-        );
-        final value = result.rows.single['R2000'];
-        expect(value, isA<Uint8List>());
-        expect(value, equals(payload));
-        expect((value! as Uint8List).length, equals(256));
-      });
+      test(
+        'RAW preserves the full 0x00..0xFF byte range without corruption',
+        () async {
+          final id = nextTestId();
+          final payload = Uint8List.fromList(List<int>.generate(256, (i) => i));
+          await connection.execute(
+            'INSERT INTO $testTable (id, r2000) VALUES ($id, :1)',
+            [payload],
+          );
+          final result = await connection.execute(
+            'SELECT r2000 FROM $testTable WHERE id = $id',
+          );
+          final value = result.rows.single['R2000'];
+          expect(value, isA<Uint8List>());
+          expect(value, equals(payload));
+          expect((value! as Uint8List).length, equals(256));
+        },
+      );
 
       test('NULL RAW bind round-trips as null', () async {
         final id = nextTestId();
@@ -139,18 +140,20 @@ void main() {
       // empty VARCHAR2 ''). An empty Uint8List bind is encoded as a
       // zero-length field and must round-trip back as null, not as an empty
       // Uint8List.
-      test('empty Uint8List bind is stored as NULL (zero-length RAW)',
-          () async {
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, r16) VALUES ($id, :1)',
-          [Uint8List(0)],
-        );
-        final result = await connection.execute(
-          'SELECT r16 FROM $testTable WHERE id = $id',
-        );
-        expect(result.rows.single['R16'], isNull);
-      });
+      test(
+        'empty Uint8List bind is stored as NULL (zero-length RAW)',
+        () async {
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, r16) VALUES ($id, :1)',
+            [Uint8List(0)],
+          );
+          final result = await connection.execute(
+            'SELECT r16 FROM $testTable WHERE id = $id',
+          );
+          expect(result.rows.single['R16'], isNull);
+        },
+      );
 
       test('RAW(16) over-length payload (17 bytes) raises ORA-12899', () async {
         final id = nextTestId();
@@ -160,27 +163,39 @@ void main() {
             'INSERT INTO $testTable (id, r16) VALUES ($id, :1)',
             [tooBig],
           ),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', 12899)),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              12899,
+            ),
+          ),
         );
       });
 
       // The same over-length contract at the RAW(2000) standard-size ceiling:
       // 2001 bytes is one past the declared column width and must surface the
       // server's ORA-12899, never a silent truncation to 2000 bytes.
-      test('RAW(2000) over-length payload (2001 bytes) raises ORA-12899',
-          () async {
-        final id = nextTestId();
-        final tooBig = patternBytes(2001, seed: 47);
-        await expectLater(
-          connection.execute(
-            'INSERT INTO $testTable (id, r2000) VALUES ($id, :1)',
-            [tooBig],
-          ),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', 12899)),
-        );
-      });
+      test(
+        'RAW(2000) over-length payload (2001 bytes) raises ORA-12899',
+        () async {
+          final id = nextTestId();
+          final tooBig = patternBytes(2001, seed: 47);
+          await expectLater(
+            connection.execute(
+              'INSERT INTO $testTable (id, r2000) VALUES ($id, :1)',
+              [tooBig],
+            ),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'errorCode',
+                12899,
+              ),
+            ),
+          );
+        },
+      );
 
       // A full-width RAW(2000) payload is the standard-size ceiling
       // (MAX_STRING_SIZE=STANDARD); both test databases support it without
@@ -201,52 +216,63 @@ void main() {
         expect((value! as Uint8List).length, equals(2000));
       });
 
-      test('UPDATE with a RAW bind reports rowsAffected and round-trips',
-          () async {
-        final id = nextTestId();
-        final original = Uint8List.fromList([0x11, 0x22]);
-        final replacement = Uint8List.fromList([0x33, 0x44, 0x55]);
-        final insert = await connection.execute(
-          'INSERT INTO $testTable (id, r16) VALUES ($id, :1)',
-          [original],
-        );
-        expect(insert.rowsAffected, equals(1));
-        final update = await connection.execute(
-          'UPDATE $testTable SET r16 = :data WHERE id = $id',
-          {'data': replacement},
-        );
-        expect(update.rowsAffected, equals(1));
-        final result = await connection.execute(
-          'SELECT r16 FROM $testTable WHERE id = $id',
-        );
-        expect(result.rows.single['R16'], equals(replacement));
-      });
+      test(
+        'UPDATE with a RAW bind reports rowsAffected and round-trips',
+        () async {
+          final id = nextTestId();
+          final original = Uint8List.fromList([0x11, 0x22]);
+          final replacement = Uint8List.fromList([0x33, 0x44, 0x55]);
+          final insert = await connection.execute(
+            'INSERT INTO $testTable (id, r16) VALUES ($id, :1)',
+            [original],
+          );
+          expect(insert.rowsAffected, equals(1));
+          final update = await connection.execute(
+            'UPDATE $testTable SET r16 = :data WHERE id = $id',
+            {'data': replacement},
+          );
+          expect(update.rowsAffected, equals(1));
+          final result = await connection.execute(
+            'SELECT r16 FROM $testTable WHERE id = $id',
+          );
+          expect(result.rows.single['R16'], equals(replacement));
+        },
+      );
 
       // RAW is a normal scalar cursor: unlike CLOB/BLOB (whose cached
       // cursors are deliberately re-parsed because blind re-execute drops
       // the LOB-prefetch metadata), a repeated RAW SELECT must take the
       // statement cache's plain cursor-reuse path.
-      test('repeated RAW SELECT reuses the cached cursor (no LOB re-parse)',
-          () async {
-        final id = nextTestId();
-        final bytes = patternBytes(64, seed: 7);
-        await connection.execute(
-          'INSERT INTO $testTable (id, r2000) VALUES (:1, :2)',
-          [id, bytes],
-        );
-        final query = 'SELECT r2000 FROM $testTable WHERE id = :1';
-        final first = await connection.execute(query, [id]);
-        expect(first.rows.single['R2000'], equals(bytes));
-        final parseBefore = connection.debugFullParseExecutes;
-        final reuseBefore = connection.debugReuseExecutes;
-        final second = await connection.execute(query, [id]);
-        expect(second.rows.single['R2000'], equals(bytes));
-        expect(connection.debugReuseExecutes, equals(reuseBefore + 1),
-            reason: 'RAW cursors must take the normal cursor-reuse path — '
-                'exactly one reuse EXECUTE for the repeated SELECT');
-        expect(connection.debugFullParseExecutes, equals(parseBefore),
-            reason: 'RAW must not inherit the CLOB/BLOB re-parse safeguard');
-      });
+      test(
+        'repeated RAW SELECT reuses the cached cursor (no LOB re-parse)',
+        () async {
+          final id = nextTestId();
+          final bytes = patternBytes(64, seed: 7);
+          await connection.execute(
+            'INSERT INTO $testTable (id, r2000) VALUES (:1, :2)',
+            [id, bytes],
+          );
+          final query = 'SELECT r2000 FROM $testTable WHERE id = :1';
+          final first = await connection.execute(query, [id]);
+          expect(first.rows.single['R2000'], equals(bytes));
+          final parseBefore = connection.debugFullParseExecutes;
+          final reuseBefore = connection.debugReuseExecutes;
+          final second = await connection.execute(query, [id]);
+          expect(second.rows.single['R2000'], equals(bytes));
+          expect(
+            connection.debugReuseExecutes,
+            equals(reuseBefore + 1),
+            reason:
+                'RAW cursors must take the normal cursor-reuse path — '
+                'exactly one reuse EXECUTE for the repeated SELECT',
+          );
+          expect(
+            connection.debugFullParseExecutes,
+            equals(parseBefore),
+            reason: 'RAW must not inherit the CLOB/BLOB re-parse safeguard',
+          );
+        },
+      );
 
       // 60 rows > the 50-row prefetch window forces at least one FETCH
       // continuation round; RAW bytes must stay aligned across the batch
@@ -255,48 +281,60 @@ void main() {
       // null/bytes transition straddles the batch boundary and a misaligned
       // null indicator would corrupt the rows that follow it.
       bool isNullRow(int i) => i % 7 == 0;
-      test('RAW SELECT spanning multiple fetch batches preserves every row',
-          () async {
-        final baseId = nextTestId();
-        for (var i = 0; i < 60; i++) {
-          await connection.execute(
-            'INSERT INTO $testTable (id, r2000) VALUES (:1, :2)',
-            [baseId + i, isNullRow(i) ? null : patternBytes(32, seed: i)],
-          );
-        }
-        final result = await connection.execute(
-          'SELECT id, r2000 FROM $testTable '
-          'WHERE id BETWEEN $baseId AND ${baseId + 59} ORDER BY id',
-        );
-        expect(result.rows, hasLength(60));
-        for (var i = 0; i < 60; i++) {
-          expect(result.rows[i]['ID'], equals(baseId + i));
-          if (isNullRow(i)) {
-            expect(result.rows[i]['R2000'], isNull,
-                reason: 'null row $i corrupted across fetch continuation');
-          } else {
-            expect(result.rows[i]['R2000'], equals(patternBytes(32, seed: i)),
-                reason: 'row $i bytes corrupted across fetch continuation');
+      test(
+        'RAW SELECT spanning multiple fetch batches preserves every row',
+        () async {
+          final baseId = nextTestId();
+          for (var i = 0; i < 60; i++) {
+            await connection.execute(
+              'INSERT INTO $testTable (id, r2000) VALUES (:1, :2)',
+              [baseId + i, isNullRow(i) ? null : patternBytes(32, seed: i)],
+            );
           }
-        }
-      });
+          final result = await connection.execute(
+            'SELECT id, r2000 FROM $testTable '
+            'WHERE id BETWEEN $baseId AND ${baseId + 59} ORDER BY id',
+          );
+          expect(result.rows, hasLength(60));
+          for (var i = 0; i < 60; i++) {
+            expect(result.rows[i]['ID'], equals(baseId + i));
+            if (isNullRow(i)) {
+              expect(
+                result.rows[i]['R2000'],
+                isNull,
+                reason: 'null row $i corrupted across fetch continuation',
+              );
+            } else {
+              expect(
+                result.rows[i]['R2000'],
+                equals(patternBytes(32, seed: i)),
+                reason: 'row $i bytes corrupted across fetch continuation',
+              );
+            }
+          }
+        },
+      );
 
       // ColumnMetadata for a RAW column reports the declared byte size in
       // `maxLength` (unlike NUMBER/DATE/TIMESTAMP, whose maxLength is 0).
-      test('RAW column metadata reports declared byte size in maxLength',
-          () async {
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, r16) VALUES ($id, :1)',
-          [Uint8List.fromList([0x00, 0xFF])],
-        );
-        final result = await connection.execute(
-          'SELECT r16 FROM $testTable WHERE id = $id',
-        );
-        final column = result.columns.single;
-        expect(column.name, equals('R16'));
-        expect(column.maxLength, equals(16));
-      });
+      test(
+        'RAW column metadata reports declared byte size in maxLength',
+        () async {
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, r16) VALUES ($id, :1)',
+            [
+              Uint8List.fromList([0x00, 0xFF]),
+            ],
+          );
+          final result = await connection.execute(
+            'SELECT r16 FROM $testTable WHERE id = $id',
+          );
+          final column = result.columns.single;
+          expect(column.name, equals('R16'));
+          expect(column.maxLength, equals(16));
+        },
+      );
     },
   );
 
@@ -343,38 +381,36 @@ void main() {
       });
 
       test('RAW OUT bind returning NULL decodes as null', () async {
-        final result = await connection.execute(
-          'BEGIN :ret := NULL; END;',
-          {'ret': OracleBind.out(type: OracleDbType.raw, maxSize: 16)},
-        );
+        final result = await connection.execute('BEGIN :ret := NULL; END;', {
+          'ret': OracleBind.out(type: OracleDbType.raw, maxSize: 16),
+        });
         expect(result.outBinds['ret'], isNull);
       });
 
       // Oracle has no empty-but-not-NULL RAW: HEXTORAW('') yields NULL, the
       // same zero-length convention as the empty Uint8List DML bind. The OUT
       // bind must report null, never Uint8List(0).
-      test('RAW OUT bind returning a zero-length RAW decodes as null',
-          () async {
-        final result = await connection.execute(
-          "BEGIN :ret := HEXTORAW(''); END;",
-          {'ret': OracleBind.out(type: OracleDbType.raw, maxSize: 16)},
-        );
-        expect(result.outBinds['ret'], isNull);
-      });
+      test(
+        'RAW OUT bind returning a zero-length RAW decodes as null',
+        () async {
+          final result = await connection.execute(
+            "BEGIN :ret := HEXTORAW(''); END;",
+            {'ret': OracleBind.out(type: OracleDbType.raw, maxSize: 16)},
+          );
+          expect(result.outBinds['ret'], isNull);
+        },
+      );
 
       // A null IN value travels as a zero-length field; the procedure
       // receives NULL and UTL_RAW.CONCAT(NULL, 'FF') returns just 'FF'.
       test('RAW IN OUT bind accepts a null input value', () async {
-        final result = await connection.execute(
-          'BEGIN $appendProc(:v); END;',
-          {
-            'v': OracleBind.inOut(
-              value: null,
-              type: OracleDbType.raw,
-              maxSize: 16,
-            ),
-          },
-        );
+        final result = await connection.execute('BEGIN $appendProc(:v); END;', {
+          'v': OracleBind.inOut(
+            value: null,
+            type: OracleDbType.raw,
+            maxSize: 16,
+          ),
+        });
         expect(result.outBinds['v'], equals(Uint8List.fromList([0xFF])));
       });
 
@@ -383,16 +419,13 @@ void main() {
       // maxSize contract for a return value longer than the input).
       test('RAW IN OUT bind sends and returns modified bytes', () async {
         final input = Uint8List.fromList([0x01, 0x02]);
-        final result = await connection.execute(
-          'BEGIN $appendProc(:v); END;',
-          {
-            'v': OracleBind.inOut(
-              value: input,
-              type: OracleDbType.raw,
-              maxSize: 16,
-            ),
-          },
-        );
+        final result = await connection.execute('BEGIN $appendProc(:v); END;', {
+          'v': OracleBind.inOut(
+            value: input,
+            type: OracleDbType.raw,
+            maxSize: 16,
+          ),
+        });
         expect(
           result.outBinds['v'],
           equals(Uint8List.fromList([0x01, 0x02, 0xFF])),
@@ -404,17 +437,23 @@ void main() {
       // the server's ORA-06502 (PL/SQL numeric or value error), never silently
       // truncate. Here HEXTORAW('DEADBEEF') is 4 bytes returned into a 2-byte
       // OUT buffer.
-      test('RAW OUT bind smaller than the returned value fails with ORA-06502',
-          () async {
-        await expectLater(
-          connection.execute(
-            "BEGIN :ret := HEXTORAW('DEADBEEF'); END;",
-            {'ret': OracleBind.out(type: OracleDbType.raw, maxSize: 2)},
-          ),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', 6502)),
-        );
-      });
+      test(
+        'RAW OUT bind smaller than the returned value fails with ORA-06502',
+        () async {
+          await expectLater(
+            connection.execute("BEGIN :ret := HEXTORAW('DEADBEEF'); END;", {
+              'ret': OracleBind.out(type: OracleDbType.raw, maxSize: 2),
+            }),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'errorCode',
+                6502,
+              ),
+            ),
+          );
+        },
+      );
     },
   );
 }

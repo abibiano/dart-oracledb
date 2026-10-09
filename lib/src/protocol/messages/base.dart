@@ -57,10 +57,7 @@ class MessageException implements Exception {
 /// ```
 abstract class Message {
   /// Creates a message with the given type and optional sequence number.
-  Message({
-    required this.messageType,
-    this.sequence = 0,
-  });
+  Message({required this.messageType, this.sequence = 0});
 
   /// The TTC message type code (e.g., EXECUTE, FETCH, PING).
   final int messageType;
@@ -86,8 +83,10 @@ abstract class Message {
     final buffer = WriteBuffer();
     encode(buffer);
     final bytes = buffer.toBytes();
-    _log.fine('Encoded message: type=$messageType, seq=$sequence, '
-        'size=${bytes.length} bytes');
+    _log.fine(
+      'Encoded message: type=$messageType, seq=$sequence, '
+      'size=${bytes.length} bytes',
+    );
     return bytes;
   }
 }

@@ -15,10 +15,7 @@ void main() {
       expect(bytes[0], equals(ttcMsgTypeProtocol));
       expect(bytes[1], equals(ttcProtocolVersion));
       expect(bytes[2], equals(0), reason: 'pre-driver terminator');
-      expect(
-        bytes.sublist(3, 3 + driverBytes.length),
-        equals(driverBytes),
-      );
+      expect(bytes.sublist(3, 3 + driverBytes.length), equals(driverBytes));
       expect(bytes.last, equals(0), reason: 'driver string null terminator');
       expect(bytes.length, equals(3 + driverBytes.length + 1));
     });

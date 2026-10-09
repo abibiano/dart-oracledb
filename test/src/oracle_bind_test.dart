@@ -701,10 +701,16 @@ void main() {
         } on ArgumentError catch (e) {
           final text = e.toString();
           expect(text, contains(requires));
-          expect(text, contains(gotType),
-              reason: 'the runtime type IS useful diagnostics');
-          expect(text, isNot(contains(mustNotContain)),
-              reason: 'the payload must never reach the message');
+          expect(
+            text,
+            contains(gotType),
+            reason: 'the runtime type IS useful diagnostics',
+          );
+          expect(
+            text,
+            isNot(contains(mustNotContain)),
+            reason: 'the payload must never reach the message',
+          );
         }
       }
 

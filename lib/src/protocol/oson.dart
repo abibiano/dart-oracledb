@@ -97,10 +97,11 @@ void assertValidJsonBindValue(Object? value, String name) {
   if (value == null) return;
   if (value is! Map && value is! List || value is Uint8List) {
     throw ArgumentError.value(
-        value,
-        name,
-        'JSON bind values must be Map<String, Object?>, List<Object?>, or '
-        'null (got ${value.runtimeType})');
+      value,
+      name,
+      'JSON bind values must be Map<String, Object?>, List<Object?>, or '
+      'null (got ${value.runtimeType})',
+    );
   }
   _assertValidJsonMember(value, name, name);
 }
@@ -110,17 +111,21 @@ void _assertValidJsonMember(Object? value, String name, String path) {
   if (value is num) {
     if (value is double && !value.isFinite) {
       throw ArgumentError.value(
-          value, name, 'JSON numbers cannot be NaN or Infinity (at $path)');
+        value,
+        name,
+        'JSON numbers cannot be NaN or Infinity (at $path)',
+      );
     }
     return;
   }
   // Uint8List is a List<int>; check it before the generic List branch.
   if (value is Uint8List) {
     throw ArgumentError.value(
-        value,
-        name,
-        'Uint8List is not a supported JSON member — bytes stay RAW/BLOB '
-        '(at $path)');
+      value,
+      name,
+      'Uint8List is not a supported JSON member — bytes stay RAW/BLOB '
+      '(at $path)',
+    );
   }
   if (value is List) {
     for (var i = 0; i < value.length; i++) {
@@ -133,21 +138,23 @@ void _assertValidJsonMember(Object? value, String name, String path) {
       final key = entry.key;
       if (key is! String) {
         throw ArgumentError.value(
-            value,
-            name,
-            'JSON object keys must be String '
-            '(got ${key.runtimeType} at $path)');
+          value,
+          name,
+          'JSON object keys must be String '
+          '(got ${key.runtimeType} at $path)',
+        );
       }
       _assertValidJsonMember(entry.value, name, "$path['$key']");
     }
     return;
   }
   throw ArgumentError.value(
-      value,
-      name,
-      'Unsupported JSON member type ${value.runtimeType} (at $path). '
-      'Supported: Map<String, Object?>, List<Object?>, String, finite num, '
-      'bool, null');
+    value,
+    name,
+    'Unsupported JSON member type ${value.runtimeType} (at $path). '
+    'Supported: Map<String, Object?>, List<Object?>, String, finite num, '
+    'bool, null',
+  );
 }
 
 // ============================================================================
@@ -233,17 +240,19 @@ class _OsonWriteBuffer {
     _buf[at + 3] = value & 0xff;
   }
 
-  Uint8List toBytes() => Uint8List.fromList(Uint8List.sublistView(_buf, 0, pos));
+  Uint8List toBytes() =>
+      Uint8List.fromList(Uint8List.sublistView(_buf, 0, pos));
 }
 
 class _OsonFieldName {
   _OsonFieldName(this.name)
-      : nameBytes = Uint8List.fromList(utf8.encode(name)),
-        hashId = 0 {
+    : nameBytes = Uint8List.fromList(utf8.encode(name)),
+      hashId = 0 {
     if (nameBytes.length > _maxFieldNameBytes) {
       throw OracleException(
         errorCode: oraUnsupportedType,
-        message: 'JSON field names longer than $_maxFieldNameBytes UTF-8 '
+        message:
+            'JSON field names longer than $_maxFieldNameBytes UTF-8 '
             'bytes are not supported (got ${nameBytes.length} bytes)',
       );
     }
@@ -282,8 +291,7 @@ class _OsonEncoder {
   int _fieldIdSize = 1;
 
   Uint8List encode(Object? value) {
-    final isContainer =
-        (value is Map || value is List) && value is! Uint8List;
+    final isContainer = (value is Map || value is List) && value is! Uint8List;
 
     var flags = _flagInlineLeaf;
     if (isContainer) {
@@ -391,7 +399,8 @@ class _OsonEncoder {
         if (key is! String) {
           throw OracleException(
             errorCode: oraUnsupportedType,
-            message: 'JSON object keys must be String '
+            message:
+                'JSON object keys must be String '
                 '(got ${key.runtimeType})',
           );
         }
@@ -498,11 +507,12 @@ class _OsonEncoder {
   }
 
   static OracleException _unsupportedValue(Object value) => OracleException(
-        errorCode: oraUnsupportedType,
-        message: 'Unsupported JSON member type ${value.runtimeType}. '
-            'Supported: Map<String, Object?>, List<Object?>, String, '
-            'finite num, bool, null',
-      );
+    errorCode: oraUnsupportedType,
+    message:
+        'Unsupported JSON member type ${value.runtimeType}. '
+        'Supported: Map<String, Object?>, List<Object?>, String, '
+        'finite num, bool, null',
+  );
 }
 
 // ============================================================================
@@ -546,7 +556,8 @@ class _OsonDecoder {
     if (m1 != _magic1 || m2 != _magic2 || m3 != _magic3) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'OSON magic bytes mismatch: '
+        message:
+            'OSON magic bytes mismatch: '
             '${m1.toRadixString(16)} ${m2.toRadixString(16)} '
             '${m3.toRadixString(16)}',
       );
@@ -610,15 +621,27 @@ class _OsonDecoder {
     _buf.skip((primaryFlags & _flagTreeSegUint32) != 0 ? 4 : 2);
     _buf.skip(2);
 
-    _fieldNames =
-        List<String>.filled(numShortFieldNames + numLongFieldNames, '');
+    _fieldNames = List<String>.filled(
+      numShortFieldNames + numLongFieldNames,
+      '',
+    );
     if (numShortFieldNames > 0) {
-      _readFieldNames(0, numShortFieldNames, shortFieldNameOffsetsSize,
-          shortFieldNamesSegSize, 1);
+      _readFieldNames(
+        0,
+        numShortFieldNames,
+        shortFieldNameOffsetsSize,
+        shortFieldNamesSegSize,
+        1,
+      );
     }
     if (numLongFieldNames > 0) {
-      _readFieldNames(numShortFieldNames, numLongFieldNames,
-          longFieldNameOffsetsSize, longFieldNamesSegSize, 2);
+      _readFieldNames(
+        numShortFieldNames,
+        numLongFieldNames,
+        longFieldNameOffsetsSize,
+        longFieldNamesSegSize,
+        2,
+      );
     }
 
     _treeSegPos = _buf.position;
@@ -629,8 +652,13 @@ class _OsonDecoder {
   /// array, and the packed length-prefixed names. [fieldNamesSize] is 1 for
   /// short names (uint8 hash + uint8 length) and 2 for long names (uint16
   /// hash + uint16 length).
-  void _readFieldNames(int arrStartPos, int numFields, int offsetsSize,
-      int fieldNamesSegSize, int fieldNamesSize) {
+  void _readFieldNames(
+    int arrStartPos,
+    int numFields,
+    int offsetsSize,
+    int fieldNamesSegSize,
+    int fieldNamesSize,
+  ) {
     _buf.skip(numFields * fieldNamesSize); // hash id array
     final offsetsPos = _buf.position;
     _buf.skip(numFields * offsetsSize);
@@ -639,8 +667,9 @@ class _OsonDecoder {
 
     _buf.seek(offsetsPos);
     for (var i = arrStartPos; i < arrStartPos + numFields; i++) {
-      final offset =
-          offsetsSize == 2 ? _buf.readUint16BE() : _buf.readUint32BE();
+      final offset = offsetsSize == 2
+          ? _buf.readUint16BE()
+          : _buf.readUint32BE();
       if (offset + fieldNamesSize > seg.length) {
         throw const BufferException('OSON field name offset out of range');
       }
@@ -651,8 +680,9 @@ class _OsonDecoder {
       if (start + nameLen > seg.length) {
         throw const BufferException('OSON field name length out of range');
       }
-      _fieldNames[i] =
-          utf8.decode(Uint8List.sublistView(seg, start, start + nameLen));
+      _fieldNames[i] = utf8.decode(
+        Uint8List.sublistView(seg, start, start + nameLen),
+      );
     }
     _buf.seek(finalPos);
   }
@@ -757,7 +787,8 @@ class _OsonDecoder {
       numChildren = _readNumChildren(sharedNodeType);
       if (numChildren == null) {
         throw const BufferException(
-            'OSON shared container points at another shared container');
+          'OSON shared container points at another shared container',
+        );
       }
       fieldIdsPos = _buf.position;
     } else if (isObject) {
@@ -786,8 +817,10 @@ class _OsonDecoder {
         }
         fieldIdsPos = _buf.position;
         if (fieldId < 1 || fieldId > _fieldNames.length) {
-          throw BufferException('OSON field id $fieldId out of range '
-              '(have ${_fieldNames.length} names)');
+          throw BufferException(
+            'OSON field id $fieldId out of range '
+            '(have ${_fieldNames.length} names)',
+          );
         }
         name = _fieldNames[fieldId - 1];
       }
@@ -830,7 +863,8 @@ class _OsonDecoder {
   static OracleException _unsupportedNode(int nodeType, String kind) =>
       OracleException(
         errorCode: oraUnsupportedType,
-        message: 'Unsupported OSON node type '
+        message:
+            'Unsupported OSON node type '
             '0x${nodeType.toRadixString(16)} ($kind). This driver supports '
             'standard JSON values only: objects, arrays, strings, numbers, '
             'booleans, and null.',

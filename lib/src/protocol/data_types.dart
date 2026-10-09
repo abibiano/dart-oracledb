@@ -64,7 +64,8 @@ Uint8List encodeNumber(num value) {
     if (magnitude < 1e-130 || magnitude >= 1e126) {
       throw OracleException(
         errorCode: oraDataTypeNotSupported,
-        message: 'Oracle NUMBER cannot represent $value '
+        message:
+            'Oracle NUMBER cannot represent $value '
             '(magnitude outside [1E-130, 1E126))',
       );
     }
@@ -195,11 +196,7 @@ Uint8List encodeNumber(num value) {
 /// for fixed-scale `NUMBER(p,s)` columns (declared scale > 0), matching
 /// node-oracledb's always-Number contract; bare `NUMBER` keeps the heuristic
 /// for backward compatibility.
-num decodeNumber(
-  ReadBuffer buffer, {
-  int? length,
-  bool forceDouble = false,
-}) {
+num decodeNumber(ReadBuffer buffer, {int? length, bool forceDouble = false}) {
   // An explicit zero-length wire field is not a valid NUMBER: the NULL case
   // is signaled by the column indicator before this function is called, so a
   // length=0 NUMBER reaching us means the stream is misaligned. Bail out
@@ -284,7 +281,8 @@ num decodeNumber(
   if (!result.isFinite) {
     throw OracleException(
       errorCode: oraProtocolError,
-      message: 'Decoded Oracle NUMBER overflowed Dart double range '
+      message:
+          'Decoded Oracle NUMBER overflowed Dart double range '
           '(exponent=$exponent)',
     );
   }
@@ -396,7 +394,8 @@ DateTime decodeDate(ReadBuffer buffer) {
   if (centuryByte < 100) {
     throw OracleException(
       errorCode: oraUnsupportedType,
-      message: 'BCE DATE values are not supported '
+      message:
+          'BCE DATE values are not supported '
           '(century byte $centuryByte < 100)',
     );
   }
@@ -571,7 +570,8 @@ OracleTimestampTz decodeTimestampTz(ReadBuffer buffer) {
   if (tzHour == null || tzMinute == null) {
     throw const OracleException(
       errorCode: oraProtocolError,
-      message: 'TIMESTAMP WITH TIME ZONE payload is missing its time-zone '
+      message:
+          'TIMESTAMP WITH TIME ZONE payload is missing its time-zone '
           'bytes (got a 7/11-byte payload; TSTZ zone bytes are never '
           'truncated because they encode +20/+60, never zero)',
     );
@@ -612,7 +612,15 @@ class _TimestampWire {
   /// TSTZ payload this IS the absolute instant (the server normalizes the
   /// fields to UTC before sending).
   DateTime get fieldsAsUtc => DateTime.utc(
-      year, month, day, hour, minute, second, millisecond, microsecond);
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    millisecond,
+    microsecond,
+  );
 }
 
 _TimestampWire _readTimestampWire(ReadBuffer buffer) {
@@ -620,7 +628,8 @@ _TimestampWire _readTimestampWire(ReadBuffer buffer) {
   if (centuryByte < 100) {
     throw OracleException(
       errorCode: oraUnsupportedType,
-      message: 'BCE TIMESTAMP values are not supported '
+      message:
+          'BCE TIMESTAMP values are not supported '
           '(century byte $centuryByte < 100)',
     );
   }
@@ -648,7 +657,8 @@ _TimestampWire _readTimestampWire(ReadBuffer buffer) {
 
   var nanos = 0;
   if (remaining >= 4) {
-    nanos = (buffer.readUint8() << 24) |
+    nanos =
+        (buffer.readUint8() << 24) |
         (buffer.readUint8() << 16) |
         (buffer.readUint8() << 8) |
         buffer.readUint8();
@@ -662,7 +672,8 @@ _TimestampWire _readTimestampWire(ReadBuffer buffer) {
     if ((byte11 & 0x80) != 0) {
       throw OracleException(
         errorCode: oraUnsupportedType,
-        message: 'TIMESTAMP region-id time zones are not supported '
+        message:
+            'TIMESTAMP region-id time zones are not supported '
             '(byte11=0x${byte11.toRadixString(16)})',
       );
     }
@@ -684,7 +695,8 @@ _TimestampWire _readTimestampWire(ReadBuffer buffer) {
         (tzHourOffset < 0 && tzMinuteOffset > 0)) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'TIMESTAMP TZ offset out of range: '
+        message:
+            'TIMESTAMP TZ offset out of range: '
             '$tzHourOffset:$tzMinuteOffset (bytes $byte11/$byte12)',
       );
     }

@@ -165,8 +165,10 @@ void main() {
     });
 
     test('xorBytes mismatch is symmetric (shorter first)', () {
-      expect(() => xorBytes(Uint8List(2), Uint8List(8)),
-          throwsA(isA<ArgumentError>()));
+      expect(
+        () => xorBytes(Uint8List(2), Uint8List(8)),
+        throwsA(isA<ArgumentError>()),
+      );
     });
   });
 }

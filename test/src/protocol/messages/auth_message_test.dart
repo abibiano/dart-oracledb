@@ -83,12 +83,21 @@ void main() {
         );
         final bytes = request.toBytes();
 
-        expect(bytes[0], equals(ttcMsgTypeFunction),
-            reason: 'First byte must be function message type (3)');
-        expect(bytes[1], equals(ttcAuthPhaseOne),
-            reason: 'Second byte must be AUTH_PHASE_ONE function code (0x76)');
-        expect(bytes[2], equals(1),
-            reason: 'Third byte must be sequence number');
+        expect(
+          bytes[0],
+          equals(ttcMsgTypeFunction),
+          reason: 'First byte must be function message type (3)',
+        );
+        expect(
+          bytes[1],
+          equals(ttcAuthPhaseOne),
+          reason: 'Second byte must be AUTH_PHASE_ONE function code (0x76)',
+        );
+        expect(
+          bytes[2],
+          equals(1),
+          reason: 'Third byte must be sequence number',
+        );
       });
 
       test('sequence number is correctly embedded', () {
@@ -211,12 +220,21 @@ void main() {
         );
         final bytes = request.toBytes();
 
-        expect(bytes[0], equals(ttcMsgTypeFunction),
-            reason: 'First byte must be function message type (3)');
-        expect(bytes[1], equals(ttcAuthPhaseTwo),
-            reason: 'Second byte must be AUTH_PHASE_TWO function code (0x73)');
-        expect(bytes[2], equals(2),
-            reason: 'Third byte must be sequence number');
+        expect(
+          bytes[0],
+          equals(ttcMsgTypeFunction),
+          reason: 'First byte must be function message type (3)',
+        );
+        expect(
+          bytes[1],
+          equals(ttcAuthPhaseTwo),
+          reason: 'Second byte must be AUTH_PHASE_TWO function code (0x73)',
+        );
+        expect(
+          bytes[2],
+          equals(2),
+          reason: 'Third byte must be sequence number',
+        );
       });
 
       test('sequence number is correctly embedded', () {
@@ -239,18 +257,23 @@ void main() {
         expect(bytes.length, greaterThan(20));
       });
 
-      test('use23aiFormat=true produces larger output than use23aiFormat=false',
-          () {
-        final request = AuthPhaseTwoRequest(
-          encryptedProof: mockProof,
-          sessionKey: mockSessionKey,
-          sequence: 2,
-        );
-        final with23ai = request.toBytes(use23aiFormat: true);
-        final without23ai = request.toBytes(use23aiFormat: false);
-        expect(with23ai.length, greaterThan(without23ai.length),
-            reason: 'Oracle 23.1+ format includes 8-byte token number field');
-      });
+      test(
+        'use23aiFormat=true produces larger output than use23aiFormat=false',
+        () {
+          final request = AuthPhaseTwoRequest(
+            encryptedProof: mockProof,
+            sessionKey: mockSessionKey,
+            sequence: 2,
+          );
+          final with23ai = request.toBytes(use23aiFormat: true);
+          final without23ai = request.toBytes(use23aiFormat: false);
+          expect(
+            with23ai.length,
+            greaterThan(without23ai.length),
+            reason: 'Oracle 23.1+ format includes 8-byte token number field',
+          );
+        },
+      );
 
       test('12c verifier type includes AUTH_PBKDF2_SPEEDY_KEY', () {
         final request = AuthPhaseTwoRequest(
@@ -277,12 +300,14 @@ void main() {
             break;
           }
         }
-        expect(found, isTrue,
-            reason: 'AUTH_PBKDF2_SPEEDY_KEY must be in 12c request');
+        expect(
+          found,
+          isTrue,
+          reason: 'AUTH_PBKDF2_SPEEDY_KEY must be in 12c request',
+        );
       });
 
-      test('12c verifier type with speedyKey=null omits AUTH_PBKDF2_SPEEDY_KEY',
-          () {
+      test('12c verifier type with speedyKey=null omits AUTH_PBKDF2_SPEEDY_KEY', () {
         // Regression test: numPairs must not be incremented when speedyKey is null.
         // Previously, numPairs was set to 7 unconditionally for is12c=true, but only
         // 6 pairs were written when speedyKey==null — causing a wire format desync.
@@ -310,9 +335,12 @@ void main() {
             break;
           }
         }
-        expect(found, isFalse,
-            reason:
-                'AUTH_PBKDF2_SPEEDY_KEY must not appear when speedyKey is null');
+        expect(
+          found,
+          isFalse,
+          reason:
+              'AUTH_PBKDF2_SPEEDY_KEY must not appear when speedyKey is null',
+        );
       });
 
       test('AUTH_SESSKEY key name is present in output', () {
@@ -338,8 +366,11 @@ void main() {
             break;
           }
         }
-        expect(found, isTrue,
-            reason: 'AUTH_SESSKEY must be in AUTH_PHASE_TWO request');
+        expect(
+          found,
+          isTrue,
+          reason: 'AUTH_SESSKEY must be in AUTH_PHASE_TWO request',
+        );
       });
 
       test('AUTH_PASSWORD key name is present in output', () {
@@ -365,16 +396,21 @@ void main() {
             break;
           }
         }
-        expect(found, isTrue,
-            reason: 'AUTH_PASSWORD must be in AUTH_PHASE_TWO request');
+        expect(
+          found,
+          isTrue,
+          reason: 'AUTH_PASSWORD must be in AUTH_PHASE_TWO request',
+        );
       });
 
-      test('SESSION_CLIENT_CHARSET value is driven by ttcCharsetUtf8 (873)',
-          () {
+      test('SESSION_CLIENT_CHARSET value is driven by ttcCharsetUtf8 (873)', () {
         // AC5: AUTH_PHASE_TWO must encode SESSION_CLIENT_CHARSET=873, sourced
         // from the ttcCharsetUtf8 constant rather than an unexplained literal.
-        expect(ttcCharsetUtf8, equals(873),
-            reason: 'Primary client charset constant must be AL32UTF8 (873)');
+        expect(
+          ttcCharsetUtf8,
+          equals(873),
+          reason: 'Primary client charset constant must be AL32UTF8 (873)',
+        );
 
         final request = AuthPhaseTwoRequest(
           encryptedProof: mockProof,
@@ -399,8 +435,11 @@ void main() {
             break;
           }
         }
-        expect(keyIndex, greaterThan(-1),
-            reason: 'SESSION_CLIENT_CHARSET key must be present');
+        expect(
+          keyIndex,
+          greaterThan(-1),
+          reason: 'SESSION_CLIENT_CHARSET key must be present',
+        );
 
         // The value follows the key as a length-prefixed key-value pair. It
         // must equal ttcCharsetUtf8.toString() ("873").
@@ -421,10 +460,13 @@ void main() {
             break;
           }
         }
-        expect(valueFound, isTrue,
-            reason:
-                'SESSION_CLIENT_CHARSET value must be ttcCharsetUtf8.toString() '
-                '("873") immediately after the key');
+        expect(
+          valueFound,
+          isTrue,
+          reason:
+              'SESSION_CLIENT_CHARSET value must be ttcCharsetUtf8.toString() '
+              '("873") immediately after the key',
+        );
       });
 
       test('username bytes appear in output when non-empty', () {
@@ -452,8 +494,11 @@ void main() {
             break;
           }
         }
-        expect(found, isTrue,
-            reason: 'Username must appear in AUTH_PHASE_TWO request');
+        expect(
+          found,
+          isTrue,
+          reason: 'Username must appear in AUTH_PHASE_TWO request',
+        );
       });
 
       test('different session keys produce different output', () {
@@ -525,15 +570,21 @@ void main() {
       ]);
       final response = AuthPhaseTwoResponse.decode(data);
       expect(response.isSuccess, isFalse);
-      expect(response.errorCode, equals(1017),
-          reason: 'Error code 0 defaults to 1017 (invalid credentials)');
+      expect(
+        response.errorCode,
+        equals(1017),
+        reason: 'Error code 0 defaults to 1017 (invalid credentials)',
+      );
     });
 
     test('decode returns success for empty data (no error messages)', () {
       final data = Uint8List(0);
       final response = AuthPhaseTwoResponse.decode(data);
-      expect(response.isSuccess, isTrue,
-          reason: 'Empty response with no error message type means success');
+      expect(
+        response.isSuccess,
+        isTrue,
+        reason: 'Empty response with no error message type means success',
+      );
     });
   });
 
@@ -570,18 +621,19 @@ void main() {
     });
 
     test(
-        'toVerifierParams extracts mixing iterations from AUTH_PBKDF2_SDER_COUNT',
-        () {
-      const response = AuthPhaseOneResponse(
-        sessionData: {
-          'AUTH_VFR_DATA': '00000000000000000000000000000000',
-          'AUTH_PBKDF2_SDER_COUNT': '3',
-        },
-        verifierType: 0x4815,
-      );
-      final params = response.toVerifierParams();
-      expect(params.mixingIterations, equals(3));
-    });
+      'toVerifierParams extracts mixing iterations from AUTH_PBKDF2_SDER_COUNT',
+      () {
+        const response = AuthPhaseOneResponse(
+          sessionData: {
+            'AUTH_VFR_DATA': '00000000000000000000000000000000',
+            'AUTH_PBKDF2_SDER_COUNT': '3',
+          },
+          verifierType: 0x4815,
+        );
+        final params = response.toVerifierParams();
+        expect(params.mixingIterations, equals(3));
+      },
+    );
 
     test('toVerifierParams handles missing mixing salt gracefully', () {
       const response = AuthPhaseOneResponse(
@@ -608,29 +660,36 @@ void main() {
       );
       final bytes = request.toBytes();
       expect(_containsKey(bytes, 'AUTH_PBKDF2_SPEEDY_KEY'), isTrue);
-      expect(_decodeNumPairs(bytes), equals(7),
-          reason: 'base 6 pairs + the speedy key pair');
+      expect(
+        _decodeNumPairs(bytes),
+        equals(7),
+        reason: 'base 6 pairs + the speedy key pair',
+      );
     });
 
     test(
-        '0xB92 omits the speedy key and counts 6 pairs even if one is supplied',
-        () {
-      // 0xB92 (verifierTypePbkdf2) is an internal key-derivation routing flag,
-      // NOT a wire verifier type. node-oracledb only emits the
-      // speedy key for the 12c verifier (0x4815), so 0xB92 must omit it. A
-      // speedyKey is deliberately supplied here to prove it is ignored.
-      final request = AuthPhaseTwoRequest(
-        encryptedProof: mockProof,
-        sessionKey: mockSessionKey,
-        speedyKey: mockSpeedyKey,
-        sequence: 2,
-        verifierType: verifierTypePbkdf2, // 0xB92
-      );
-      final bytes = request.toBytes();
-      expect(_containsKey(bytes, 'AUTH_PBKDF2_SPEEDY_KEY'), isFalse);
-      expect(_decodeNumPairs(bytes), equals(6),
-          reason: 'pair count must match the pairs actually written');
-    });
+      '0xB92 omits the speedy key and counts 6 pairs even if one is supplied',
+      () {
+        // 0xB92 (verifierTypePbkdf2) is an internal key-derivation routing flag,
+        // NOT a wire verifier type. node-oracledb only emits the
+        // speedy key for the 12c verifier (0x4815), so 0xB92 must omit it. A
+        // speedyKey is deliberately supplied here to prove it is ignored.
+        final request = AuthPhaseTwoRequest(
+          encryptedProof: mockProof,
+          sessionKey: mockSessionKey,
+          speedyKey: mockSpeedyKey,
+          sequence: 2,
+          verifierType: verifierTypePbkdf2, // 0xB92
+        );
+        final bytes = request.toBytes();
+        expect(_containsKey(bytes, 'AUTH_PBKDF2_SPEEDY_KEY'), isFalse);
+        expect(
+          _decodeNumPairs(bytes),
+          equals(6),
+          reason: 'pair count must match the pairs actually written',
+        );
+      },
+    );
 
     test('12c verifier with null speedy key counts 6 pairs (no desync)', () {
       final request = AuthPhaseTwoRequest(
@@ -647,24 +706,37 @@ void main() {
   });
 
   group('AuthPhaseOneResponse TTC ERROR fail-loud', () {
-    test('decode raises OracleException carrying the parsed Oracle error code',
-        () {
-      final data = _buildPhaseOneError(errorCode: oraAccountLocked); // 28000
-      expect(
-        () => AuthPhaseOneResponse.decode(data),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraAccountLocked)),
-        reason: 'a TTC ERROR in AUTH_PHASE_ONE must fail loud, not return '
-            'empty session data',
-      );
-    });
+    test(
+      'decode raises OracleException carrying the parsed Oracle error code',
+      () {
+        final data = _buildPhaseOneError(errorCode: oraAccountLocked); // 28000
+        expect(
+          () => AuthPhaseOneResponse.decode(data),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraAccountLocked,
+            ),
+          ),
+          reason:
+              'a TTC ERROR in AUTH_PHASE_ONE must fail loud, not return '
+              'empty session data',
+        );
+      },
+    );
 
     test('decode error with extended code 0 defaults to ORA-01017', () {
       final data = _buildPhaseOneError(errorCode: 0);
       expect(
         () => AuthPhaseOneResponse.decode(data),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraInvalidCredentials)),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraInvalidCredentials,
+          ),
+        ),
       );
     });
 
@@ -682,30 +754,39 @@ void main() {
 
   group('Verifier parameter fallbacks are length-safe', () {
     test('missing AUTH_VFR_DATA → 16-byte salt fallback', () {
-      const response =
-          AuthPhaseOneResponse(sessionData: {}, verifierType: 0x4815);
+      const response = AuthPhaseOneResponse(
+        sessionData: {},
+        verifierType: 0x4815,
+      );
       final params = response.toVerifierParams();
       expect(params.salt.length, equals(16));
     });
 
     test('missing AUTH_SESSKEY → 16-byte serverNonce fallback', () {
-      const response =
-          AuthPhaseOneResponse(sessionData: {}, verifierType: 0x4815);
+      const response = AuthPhaseOneResponse(
+        sessionData: {},
+        verifierType: 0x4815,
+      );
       final params = response.toVerifierParams();
       expect(params.serverNonce.length, equals(16));
     });
 
-    test('malformed AUTH_SESSKEY hex → 16-byte serverNonce fallback, no leak',
-        () {
-      const response = AuthPhaseOneResponse(
-        sessionData: {'AUTH_SESSKEY': 'ZZZZ_not_hex'},
-        verifierType: 0x4815,
-      );
-      final params = response.toVerifierParams();
-      expect(params.serverNonce.length, equals(16),
+    test(
+      'malformed AUTH_SESSKEY hex → 16-byte serverNonce fallback, no leak',
+      () {
+        const response = AuthPhaseOneResponse(
+          sessionData: {'AUTH_SESSKEY': 'ZZZZ_not_hex'},
+          verifierType: 0x4815,
+        );
+        final params = response.toVerifierParams();
+        expect(
+          params.serverNonce.length,
+          equals(16),
           reason:
-              'malformed server key must fall back, not throw a parse error');
-    });
+              'malformed server key must fall back, not throw a parse error',
+        );
+      },
+    );
 
     test('malformed AUTH_PBKDF2_CSK_SALT hex → mixingSalt stays null', () {
       const response = AuthPhaseOneResponse(
@@ -717,8 +798,10 @@ void main() {
     });
 
     test('mixingSalt and mixingIterations are null unless supplied', () {
-      const response =
-          AuthPhaseOneResponse(sessionData: {}, verifierType: 0x4815);
+      const response = AuthPhaseOneResponse(
+        sessionData: {},
+        verifierType: 0x4815,
+      );
       final params = response.toVerifierParams();
       expect(params.mixingSalt, isNull);
       expect(params.mixingIterations, isNull);

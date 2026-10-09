@@ -53,16 +53,15 @@ class OracleTimestampTz implements Comparable<OracleTimestampTz> {
   /// [utc] is normalized with [DateTime.toUtc]. Throws [ArgumentError] when
   /// [offsetMinutes] is outside Oracle's documented `[-12:59, +14:00]` band
   /// (−779..840 minutes).
-  OracleTimestampTz(
-    DateTime utc, {
-    required this.offsetMinutes,
-  }) : utc = utc.toUtc() {
+  OracleTimestampTz(DateTime utc, {required this.offsetMinutes})
+    : utc = utc.toUtc() {
     if (offsetMinutes < -779 || offsetMinutes > 840) {
       throw ArgumentError.value(
-          offsetMinutes,
-          'offsetMinutes',
-          'must be within Oracle\'s [-12:59, +14:00] band '
-              '(-779..840 minutes)');
+        offsetMinutes,
+        'offsetMinutes',
+        'must be within Oracle\'s [-12:59, +14:00] band '
+            '(-779..840 minutes)',
+      );
     }
   }
 
@@ -87,10 +86,11 @@ class OracleTimestampTz implements Comparable<OracleTimestampTz> {
     }
     if (hour > 0 && minute < 0 || hour < 0 && minute > 0) {
       throw ArgumentError.value(
-          minute,
-          'minute',
-          'must have the same sign as the hour part '
-              '($hour:$minute)');
+        minute,
+        'minute',
+        'must have the same sign as the hour part '
+            '($hour:$minute)',
+      );
     }
     return OracleTimestampTz(utc, offsetMinutes: hour * 60 + minute);
   }
@@ -104,7 +104,10 @@ class OracleTimestampTz implements Comparable<OracleTimestampTz> {
   factory OracleTimestampTz.fromOffset(DateTime utc, Duration offset) {
     if (offset.inMicroseconds % Duration.microsecondsPerMinute != 0) {
       throw ArgumentError.value(
-          offset, 'offset', 'must be a whole number of minutes');
+        offset,
+        'offset',
+        'must be a whole number of minutes',
+      );
     }
     return OracleTimestampTz(utc, offsetMinutes: offset.inMinutes);
   }

@@ -153,7 +153,8 @@ class LobLocator {
           (locator[tnsLobLocOffsetFlag4] & tnsLobLocFlagsTemp) != 0);
 
   @override
-  String toString() => 'LobLocator(type: $oracleType, length: $length '
+  String toString() =>
+      'LobLocator(type: $oracleType, length: $length '
       '${oracleType == oraTypeBlob ? 'bytes' : 'chars'}, '
       'chunkSize: $chunkSize, temporary: $isTemporary, '
       'locator: ${locator.length} bytes)';
@@ -179,7 +180,8 @@ Uint8List encodeUtf16Be(String value) {
 String decodeUtf16Be(Uint8List bytes) {
   if (bytes.length.isOdd) {
     throw FormatException(
-        'UTF-16 LOB data has an odd byte count: ${bytes.length}');
+      'UTF-16 LOB data has an odd byte count: ${bytes.length}',
+    );
   }
   final units = Uint16List(bytes.length ~/ 2);
   for (var i = 0; i < units.length; i++) {

@@ -23,8 +23,11 @@ void main() {
 
         // Try to connect to a port that should not be listening
         expect(
-          () => socket.connect('127.0.0.1', 59999,
-              timeout: const Duration(seconds: 1)),
+          () => socket.connect(
+            '127.0.0.1',
+            59999,
+            timeout: const Duration(seconds: 1),
+          ),
           throwsA(isA<OracleException>()),
         );
       });
@@ -33,8 +36,11 @@ void main() {
         final socket = OracleSocket();
 
         try {
-          await socket.connect('127.0.0.1', 59999,
-              timeout: const Duration(seconds: 1));
+          await socket.connect(
+            '127.0.0.1',
+            59999,
+            timeout: const Duration(seconds: 1),
+          );
           fail('Should have thrown');
         } on OracleException catch (e) {
           // Should preserve original error as cause
@@ -66,14 +72,16 @@ void main() {
       // The full union is asserted so the mapping is correct on every supported
       // platform regardless of which OS the test happens to run on.
       for (final errno in [65, 113, 10065, 51, 101, 10051]) {
-        test('errno $errno (host/network unreachable) -> oraHostUnreachable',
-            () {
-          final e = SocketException(
-            'No route to host',
-            osError: OSError('No route to host', errno),
-          );
-          expect(OracleSocket.mapSocketError(e), oraHostUnreachable);
-        });
+        test(
+          'errno $errno (host/network unreachable) -> oraHostUnreachable',
+          () {
+            final e = SocketException(
+              'No route to host',
+              osError: OSError('No route to host', errno),
+            );
+            expect(OracleSocket.mapSocketError(e), oraHostUnreachable);
+          },
+        );
       }
 
       test('errno-based mapping ignores case of the message', () {
@@ -86,20 +94,21 @@ void main() {
         expect(OracleSocket.mapSocketError(e), oraHostUnreachable);
       });
 
-      test('"timed out" message wins even if errno present -> oraConnectTimeout',
-          () {
-        // dart:io reports connect timeouts as "Connection timed out…" with an
-        // errno (110 Linux / 60 macOS) that is NOT in the unreachable set, so
-        // the message branch must keep returning the timeout code.
-        const e = SocketException(
-          'Connection timed out, host: 10.255.255.1, port: 1521',
-          osError: OSError('Connection timed out', 110),
-        );
-        expect(OracleSocket.mapSocketError(e), oraConnectTimeout);
-      });
-
       test(
-          'message branch wins over an unreachable errno '
+        '"timed out" message wins even if errno present -> oraConnectTimeout',
+        () {
+          // dart:io reports connect timeouts as "Connection timed out…" with an
+          // errno (110 Linux / 60 macOS) that is NOT in the unreachable set, so
+          // the message branch must keep returning the timeout code.
+          const e = SocketException(
+            'Connection timed out, host: 10.255.255.1, port: 1521',
+            osError: OSError('Connection timed out', 110),
+          );
+          expect(OracleSocket.mapSocketError(e), oraConnectTimeout);
+        },
+      );
+
+      test('message branch wins over an unreachable errno '
           '(precedence guard) -> oraConnectTimeout', () {
         // Guards the ordering invariant directly: even when the errno IS in the
         // unreachable set, an explicit "timed out" message must NOT be
@@ -142,15 +151,17 @@ void main() {
         expect(OracleSocket.mapSocketError(e), oraNetworkError);
       });
 
-      test('unrelated errno (not unreachable) -> oraNetworkError (fallback)',
-          () {
-        // An errno outside the unreachable set must not be misclassified.
-        const e = SocketException(
-          'Some other socket failure',
-          osError: OSError('Some other socket failure', 22), // EINVAL
-        );
-        expect(OracleSocket.mapSocketError(e), oraNetworkError);
-      });
+      test(
+        'unrelated errno (not unreachable) -> oraNetworkError (fallback)',
+        () {
+          // An errno outside the unreachable set must not be misclassified.
+          const e = SocketException(
+            'Some other socket failure',
+            osError: OSError('Some other socket failure', 22), // EINVAL
+          );
+          expect(OracleSocket.mapSocketError(e), oraNetworkError);
+        },
+      );
     });
 
     group('close', () {
@@ -177,28 +188,27 @@ void main() {
         );
       });
 
-      test('exception includes appropriate error code when not connected',
-          () async {
-        final socket = OracleSocket();
+      test(
+        'exception includes appropriate error code when not connected',
+        () async {
+          final socket = OracleSocket();
 
-        try {
-          await socket.send(Uint8List.fromList([0x01]));
-          fail('Should have thrown');
-        } on OracleException catch (e) {
-          expect(e.errorCode, isPositive);
-          expect(e.message, contains('not connected'));
-        }
-      });
+          try {
+            await socket.send(Uint8List.fromList([0x01]));
+            fail('Should have thrown');
+          } on OracleException catch (e) {
+            expect(e.errorCode, isPositive);
+            expect(e.message, contains('not connected'));
+          }
+        },
+      );
     });
 
     group('read', () {
       test('throws OracleException when not connected', () async {
         final socket = OracleSocket();
 
-        expect(
-          () => socket.read(10),
-          throwsA(isA<OracleException>()),
-        );
+        expect(() => socket.read(10), throwsA(isA<OracleException>()));
       });
 
       test('exception includes byte counts when socket closed', () async {
@@ -222,8 +232,11 @@ void main() {
         server.listen((s) => s.destroy());
 
         final socket = OracleSocket();
-        await socket.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
+        await socket.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
 
         // Let the event loop deliver the close event; liveness is event-driven,
         // not polled, so it flips without us issuing a read.
@@ -232,8 +245,11 @@ void main() {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }
 
-        expect(socket.isConnected, isFalse,
-            reason: 'remote close must be reflected without a failed read');
+        expect(
+          socket.isConnected,
+          isFalse,
+          reason: 'remote close must be reflected without a failed read',
+        );
         await socket.close();
         await server.close();
       });
@@ -243,8 +259,11 @@ void main() {
         server.listen((s) => s.listen((_) {}));
 
         final socket = OracleSocket();
-        await socket.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
+        await socket.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
         expect(socket.isConnected, isTrue);
 
         socket.destroy();
@@ -262,27 +281,36 @@ void main() {
     // these Oracle-backed tests are cleanly excluded. The group-level env skip
     // replaces the previous per-test markTestSkipped pattern (single source of
     // truth).
-    group('integration tests',
-        tags: 'integration',
-        skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
-      test('connects to Oracle on the configured host/port', () async {
-        final socket = OracleSocket();
-        await socket.connect(testHost, testPort,
-            timeout: const Duration(seconds: 10));
-        expect(socket.isConnected, isTrue);
-        await socket.close();
-        expect(socket.isConnected, isFalse);
-      });
+    group(
+      'integration tests',
+      tags: 'integration',
+      skip: !integrationEnabled ? 'Integration tests disabled' : null,
+      () {
+        test('connects to Oracle on the configured host/port', () async {
+          final socket = OracleSocket();
+          await socket.connect(
+            testHost,
+            testPort,
+            timeout: const Duration(seconds: 10),
+          );
+          expect(socket.isConnected, isTrue);
+          await socket.close();
+          expect(socket.isConnected, isFalse);
+        });
 
-      test('times out on non-responsive host', () async {
-        final socket = OracleSocket();
-        // Use a non-routable IP to test timeout
-        expect(
-          () => socket.connect('10.255.255.1', 1521,
-              timeout: const Duration(seconds: 2)),
-          throwsA(isA<OracleException>()),
-        );
-      });
-    });
+        test('times out on non-responsive host', () async {
+          final socket = OracleSocket();
+          // Use a non-routable IP to test timeout
+          expect(
+            () => socket.connect(
+              '10.255.255.1',
+              1521,
+              timeout: const Duration(seconds: 2),
+            ),
+            throwsA(isA<OracleException>()),
+          );
+        });
+      },
+    );
   });
 }

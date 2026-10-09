@@ -117,10 +117,10 @@ class OracleLob {
     required OracleConnection connection,
     required LobLocator locator,
     bool createdTemporary = false,
-  })  : _connection = connection,
-        _locator = locator,
-        _length = locator.length,
-        _createdTemporary = createdTemporary;
+  }) : _connection = connection,
+       _locator = locator,
+       _length = locator.length,
+       _createdTemporary = createdTemporary;
 
   final OracleConnection _connection;
 
@@ -340,14 +340,14 @@ class OracleLob {
     // loud. Requesting only the units that DO exist keeps the overshoot contract
     // intact and never issues a needless READ past the end.
     final remaining = _length - offset + 1;
-    final expectedUnits =
-        effectiveAmount < remaining ? effectiveAmount : remaining;
+    final expectedUnits = effectiveAmount < remaining
+        ? effectiveAmount
+        : remaining;
     final bytes = (await _connection.runLobRead(
       sourceLocator: _locator.locator,
       offset: offset,
       amount: expectedUnits,
-    ))
-        .bytes;
+    )).bytes;
     // A legitimate in-range READ that comes back empty is a fault, not a valid
     // empty value (the empty cases were short-circuited above) — fail loud
     // rather than silently substituting an empty result, the same policy the
@@ -356,7 +356,8 @@ class OracleLob {
     if (bytes.isEmpty) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'LOB read returned no data for an in-range read (offset '
+        message:
+            'LOB read returned no data for an in-range read (offset '
             '$offset, amount $effectiveAmount)',
       );
     }
@@ -371,7 +372,8 @@ class OracleLob {
       if (bytes.length != expectedUnits) {
         throw OracleException(
           errorCode: oraProtocolError,
-          message: 'BLOB read length mismatch: expected $expectedUnits bytes '
+          message:
+              'BLOB read length mismatch: expected $expectedUnits bytes '
               'for the in-range request (offset $offset, amount '
               '$effectiveAmount) but ${bytes.length} were received',
         );
@@ -387,7 +389,8 @@ class OracleLob {
     } on FormatException catch (e) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'LOB read returned malformed '
+        message:
+            'LOB read returned malformed '
             '${_isUtf16 ? 'UTF-16' : 'UTF-8'} data',
         cause: e,
       );
@@ -399,7 +402,8 @@ class OracleLob {
     if (text.length != expectedUnits) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'CLOB read length mismatch: expected $expectedUnits chars for '
+        message:
+            'CLOB read length mismatch: expected $expectedUnits chars for '
             'the in-range request (offset $offset, amount $effectiveAmount) but '
             '${text.length} were received',
       );
@@ -608,7 +612,8 @@ class OracleLob {
     if (units > 0) return units;
     throw OracleException(
       errorCode: oraProtocolError,
-      message: 'LOB stream made no progress: the server returned data at offset '
+      message:
+          'LOB stream made no progress: the server returned data at offset '
           '$offset but reported $units units delivered',
     );
   }
@@ -631,7 +636,8 @@ class OracleLob {
     if ((units ?? 0) <= 0) return;
     throw OracleException(
       errorCode: oraProtocolError,
-      message: 'LOB read reply is internally inconsistent: the server reported '
+      message:
+          'LOB read reply is internally inconsistent: the server reported '
           '$units units delivered at offset $offset (requested $requested) but '
           'shipped no payload bytes',
     );
@@ -651,7 +657,8 @@ class OracleLob {
     if (units == null || units <= requested) return units;
     throw OracleException(
       errorCode: oraProtocolError,
-      message: 'LOB read overshot: the server reported $units units at offset '
+      message:
+          'LOB read overshot: the server reported $units units at offset '
           '$offset but only $requested were requested',
     );
   }
@@ -1050,14 +1057,16 @@ class OracleLob {
           // mirroring how OracleResultSet.markReclaimedByPool surfaces a clear
           // invalid-state error (not a leaked internal detail).
           errorCode: oraConnectionClosed,
-          message: 'the connection pool reclaimed this connection while this '
+          message:
+              'the connection pool reclaimed this connection while this '
               'OracleLob was still open; the handle was force-closed. Close '
               'each OracleLob before releasing the connection to the pool.',
         );
       }
       throw const OracleException(
         errorCode: oraProtocolError,
-        message: 'OracleLob is closed; fetch a new one to read or write more '
+        message:
+            'OracleLob is closed; fetch a new one to read or write more '
             'data',
       );
     }
@@ -1169,7 +1178,8 @@ class _LobTextDecoder {
     if (_byteCarry.length > _maxCarryBytes) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'LOB stream returned malformed '
+        message:
+            'LOB stream returned malformed '
             '${isUtf16 ? 'UTF-16' : 'UTF-8'} data: ${_byteCarry.length} '
             'trailing bytes cannot start a valid character sequence',
       );
@@ -1183,7 +1193,8 @@ class _LobTextDecoder {
     } on FormatException catch (e) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'LOB stream returned malformed '
+        message:
+            'LOB stream returned malformed '
             '${isUtf16 ? 'UTF-16' : 'UTF-8'} data',
         cause: e,
       );
@@ -1211,7 +1222,8 @@ class _LobTextDecoder {
     if (_byteCarry.isNotEmpty) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'LOB stream ended mid-character: ${_byteCarry.length} '
+        message:
+            'LOB stream ended mid-character: ${_byteCarry.length} '
             'trailing ${isUtf16 ? 'UTF-16' : 'UTF-8'} byte(s) do not complete '
             'a character',
       );

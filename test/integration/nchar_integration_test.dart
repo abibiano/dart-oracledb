@@ -121,13 +121,18 @@ void main() {
       // AC8 — both fixtures report AL16UTF16
       // -----------------------------------------------------------------
 
-      test('the connected fixture reports AL16UTF16 national charset (AC8)',
-          () {
-        final info = connection.charsetInfo;
-        expect(info.nationalCharset, equals('AL16UTF16'),
-            reason: 'standard 23ai/21c fixtures use AL16UTF16');
-        expect(info.supportsNationalCharacterSet, isTrue);
-      });
+      test(
+        'the connected fixture reports AL16UTF16 national charset (AC8)',
+        () {
+          final info = connection.charsetInfo;
+          expect(
+            info.nationalCharset,
+            equals('AL16UTF16'),
+            reason: 'standard 23ai/21c fixtures use AL16UTF16',
+          );
+          expect(info.supportsNationalCharacterSet, isTrue);
+        },
+      );
 
       // -----------------------------------------------------------------
       // AC3 — NVARCHAR2 / NCHAR SELECT decode as UTF-16BE.
@@ -152,8 +157,9 @@ void main() {
               'INSERT INTO $testTable (id, nv) VALUES ($id, :v)',
               {'v': entry.value},
             );
-            final result = await connection
-                .execute('SELECT nv FROM $testTable WHERE id = $id');
+            final result = await connection.execute(
+              'SELECT nv FROM $testTable WHERE id = $id',
+            );
             expect(result.rows.single['NV'], equals(entry.value));
           });
         }
@@ -162,30 +168,35 @@ void main() {
           if (!nationalCharsetOk()) return;
           final id = nextTestId();
           await connection.execute(
-              'INSERT INTO $testTable (id, nv) VALUES ($id, NULL)');
-          final result = await connection
-              .execute('SELECT nv FROM $testTable WHERE id = $id');
+            'INSERT INTO $testTable (id, nv) VALUES ($id, NULL)',
+          );
+          final result = await connection.execute(
+            'SELECT nv FROM $testTable WHERE id = $id',
+          );
           expect(result.rows.single['NV'], isNull);
         });
       });
 
-      test('NCHAR column decodes UTF-16BE (blank-padded to its width)',
-          () async {
-        if (!nationalCharsetOk()) return;
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, nc) VALUES ($id, :v)',
-          {'v': cjk}, // 5 chars; NCHAR(10) pads with 5 spaces
-        );
-        final result = await connection
-            .execute('SELECT nc FROM $testTable WHERE id = $id');
-        final value = result.rows.single['NC'] as String?;
-        expect(value, isNotNull);
-        // Fixed-width NCHAR is space-padded; the significant content is the
-        // original CJK string.
-        expect(value!.trimRight(), equals(cjk));
-        expect(value.length, equals(10));
-      });
+      test(
+        'NCHAR column decodes UTF-16BE (blank-padded to its width)',
+        () async {
+          if (!nationalCharsetOk()) return;
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, nc) VALUES ($id, :v)',
+            {'v': cjk}, // 5 chars; NCHAR(10) pads with 5 spaces
+          );
+          final result = await connection.execute(
+            'SELECT nc FROM $testTable WHERE id = $id',
+          );
+          final value = result.rows.single['NC'] as String?;
+          expect(value, isNotNull);
+          // Fixed-width NCHAR is space-padded; the significant content is the
+          // original CJK string.
+          expect(value!.trimRight(), equals(cjk));
+          expect(value.length, equals(10));
+        },
+      );
 
       // -----------------------------------------------------------------
       // AC4 — NCLOB SELECT materializes through the LOB path as UTF-16BE.
@@ -200,8 +211,9 @@ void main() {
             'INSERT INTO $testTable (id, ndoc) VALUES ($id, :v)',
             {'v': text},
           );
-          final result = await connection
-              .execute('SELECT ndoc FROM $testTable WHERE id = $id');
+          final result = await connection.execute(
+            'SELECT ndoc FROM $testTable WHERE id = $id',
+          );
           expect(result.rows.single['NDOC'], equals(text));
         });
 
@@ -209,9 +221,11 @@ void main() {
           if (!nationalCharsetOk()) return;
           final id = nextTestId();
           await connection.execute(
-              'INSERT INTO $testTable (id, ndoc) VALUES ($id, NULL)');
-          final result = await connection
-              .execute('SELECT ndoc FROM $testTable WHERE id = $id');
+            'INSERT INTO $testTable (id, ndoc) VALUES ($id, NULL)',
+          );
+          final result = await connection.execute(
+            'SELECT ndoc FROM $testTable WHERE id = $id',
+          );
           expect(result.rows.single['NDOC'], isNull);
         });
 
@@ -219,39 +233,48 @@ void main() {
           if (!nationalCharsetOk()) return;
           final id = nextTestId();
           await connection.execute(
-              'INSERT INTO $testTable (id, ndoc) VALUES ($id, EMPTY_CLOB())');
-          final result = await connection
-              .execute('SELECT ndoc FROM $testTable WHERE id = $id');
+            'INSERT INTO $testTable (id, ndoc) VALUES ($id, EMPTY_CLOB())',
+          );
+          final result = await connection.execute(
+            'SELECT ndoc FROM $testTable WHERE id = $id',
+          );
           expect(result.rows.single['NDOC'], equals(''));
         });
 
-        test('multi-chunk (>32 KB) NCLOB drains over multiple LOB read chunks',
-            () async {
-          if (!nationalCharsetOk()) return;
-          final id = nextTestId();
-          // 35,000 chars > 32 KB and far beyond the ~8060-char server chunk
-          // size, so the value streams back in several UTF-16BE LOB_DATA
-          // chunks; exact equality proves no chunk was lost or reordered.
-          final text =
-              List.generate(7000, (i) => 'n${i.toString().padLeft(4, '0')}')
-                  .join();
-          expect(text.length, equals(35000));
-          await connection.execute(
-            'INSERT INTO $testTable (id, ndoc) VALUES ($id, :v)',
-            {'v': text},
-          );
-          final readOpsBefore = connection.debugLobReadOps;
-          final result = await connection
-              .execute('SELECT ndoc FROM $testTable WHERE id = $id');
-          final value = result.rows.single['NDOC'] as String?;
-          expect(value, isNotNull);
-          expect(value!.length, equals(35000));
-          expect(value, equals(text));
-          // One full-length LOB READ per locator (node-oracledb getData
-          // parity); the server streams the chunks inside that one response.
-          expect(connection.debugLobReadOps - readOpsBefore, equals(1),
-              reason: 'NCLOB must be drained via exactly one full-length READ');
-        });
+        test(
+          'multi-chunk (>32 KB) NCLOB drains over multiple LOB read chunks',
+          () async {
+            if (!nationalCharsetOk()) return;
+            final id = nextTestId();
+            // 35,000 chars > 32 KB and far beyond the ~8060-char server chunk
+            // size, so the value streams back in several UTF-16BE LOB_DATA
+            // chunks; exact equality proves no chunk was lost or reordered.
+            final text = List.generate(
+              7000,
+              (i) => 'n${i.toString().padLeft(4, '0')}',
+            ).join();
+            expect(text.length, equals(35000));
+            await connection.execute(
+              'INSERT INTO $testTable (id, ndoc) VALUES ($id, :v)',
+              {'v': text},
+            );
+            final readOpsBefore = connection.debugLobReadOps;
+            final result = await connection.execute(
+              'SELECT ndoc FROM $testTable WHERE id = $id',
+            );
+            final value = result.rows.single['NDOC'] as String?;
+            expect(value, isNotNull);
+            expect(value!.length, equals(35000));
+            expect(value, equals(text));
+            // One full-length LOB READ per locator (node-oracledb getData
+            // parity); the server streams the chunks inside that one response.
+            expect(
+              connection.debugLobReadOps - readOpsBefore,
+              equals(1),
+              reason: 'NCLOB must be drained via exactly one full-length READ',
+            );
+          },
+        );
 
         test('multibyte NCLOB survives chunk boundaries', () async {
           if (!nationalCharsetOk()) return;
@@ -262,8 +285,9 @@ void main() {
             'INSERT INTO $testTable (id, ndoc) VALUES ($id, :v)',
             {'v': text},
           );
-          final result = await connection
-              .execute('SELECT ndoc FROM $testTable WHERE id = $id');
+          final result = await connection.execute(
+            'SELECT ndoc FROM $testTable WHERE id = $id',
+          );
           expect(result.rows.single['NDOC'], equals(text));
         });
       });
@@ -279,7 +303,10 @@ void main() {
             'BEGIN $nvCopyProc(:p_in, :p_out); END;',
             {
               'p_in': cjk, // plain String IN → server converts to NVARCHAR2
-              'p_out': OracleBind.out(type: OracleDbType.nVarchar, maxSize: 100),
+              'p_out': OracleBind.out(
+                type: OracleDbType.nVarchar,
+                maxSize: 100,
+              ),
             },
           );
           expect(result.outBinds['p_out'], equals(cjk));
@@ -290,37 +317,46 @@ void main() {
           final result = await connection.execute(
             'BEGIN $nvCopyProc(NULL, :p_out); END;',
             {
-              'p_out': OracleBind.out(type: OracleDbType.nVarchar, maxSize: 100),
+              'p_out': OracleBind.out(
+                type: OracleDbType.nVarchar,
+                maxSize: 100,
+              ),
             },
           );
           expect(result.outBinds['p_out'], isNull);
         });
 
-        test('IN OUT bind sends a value as UTF-16BE and reads it back modified',
-            () async {
-          if (!nationalCharsetOk()) return;
-          final result = await connection.execute(
-            'BEGIN $nvApndProc(:p); END;',
-            {
-              'p': OracleBind.inOut(
-                  value: accented, type: OracleDbType.nVarchar, maxSize: 100),
-            },
-          );
-          expect(result.outBinds['p'], equals('$accented-x'));
-        });
+        test(
+          'IN OUT bind sends a value as UTF-16BE and reads it back modified',
+          () async {
+            if (!nationalCharsetOk()) return;
+            final result = await connection
+                .execute('BEGIN $nvApndProc(:p); END;', {
+                  'p': OracleBind.inOut(
+                    value: accented,
+                    type: OracleDbType.nVarchar,
+                    maxSize: 100,
+                  ),
+                });
+            expect(result.outBinds['p'], equals('$accented-x'));
+          },
+        );
 
-        test('IN OUT bind with null input is seen as NULL by the procedure',
-            () async {
-          if (!nationalCharsetOk()) return;
-          final result = await connection.execute(
-            'BEGIN $nvApndProc(:p); END;',
-            {
-              'p': OracleBind.inOut(
-                  value: null, type: OracleDbType.nVarchar, maxSize: 100),
-            },
-          );
-          expect(result.outBinds['p'], equals('null-seen'));
-        });
+        test(
+          'IN OUT bind with null input is seen as NULL by the procedure',
+          () async {
+            if (!nationalCharsetOk()) return;
+            final result = await connection
+                .execute('BEGIN $nvApndProc(:p); END;', {
+                  'p': OracleBind.inOut(
+                    value: null,
+                    type: OracleDbType.nVarchar,
+                    maxSize: 100,
+                  ),
+                });
+            expect(result.outBinds['p'], equals('null-seen'));
+          },
+        );
       });
 
       group('NCLOB PL/SQL binds', () {
@@ -336,52 +372,62 @@ void main() {
           expect(result.outBinds['p_out'], equals(cjk));
         });
 
-        test('IN OUT bind round-trips a value through a temporary NCLOB',
-            () async {
-          if (!nationalCharsetOk()) return;
-          final result = await connection.execute(
-            'BEGIN $nclApndProc(:p); END;',
-            {
-              'p': OracleBind.inOut(
-                  value: accented, type: OracleDbType.nClob, maxSize: 4000),
-            },
-          );
-          expect(result.outBinds['p'], equals('$accented-y'));
-        });
+        test(
+          'IN OUT bind round-trips a value through a temporary NCLOB',
+          () async {
+            if (!nationalCharsetOk()) return;
+            final result = await connection
+                .execute('BEGIN $nclApndProc(:p); END;', {
+                  'p': OracleBind.inOut(
+                    value: accented,
+                    type: OracleDbType.nClob,
+                    maxSize: 4000,
+                  ),
+                });
+            expect(result.outBinds['p'], equals('$accented-y'));
+          },
+        );
 
-        test('IN OUT NCLOB with null input is seen as NULL by the procedure',
-            () async {
-          if (!nationalCharsetOk()) return;
-          final result = await connection.execute(
-            'BEGIN $nclApndProc(:p); END;',
-            {
-              'p': OracleBind.inOut(
-                  value: null, type: OracleDbType.nClob, maxSize: 4000),
-            },
-          );
-          expect(result.outBinds['p'], equals('null-seen'));
-        });
+        test(
+          'IN OUT NCLOB with null input is seen as NULL by the procedure',
+          () async {
+            if (!nationalCharsetOk()) return;
+            final result = await connection
+                .execute('BEGIN $nclApndProc(:p); END;', {
+                  'p': OracleBind.inOut(
+                    value: null,
+                    type: OracleDbType.nClob,
+                    maxSize: 4000,
+                  ),
+                });
+            expect(result.outBinds['p'], equals('null-seen'));
+          },
+        );
 
-        test('large NCLOB IN OUT round-trips through temp NCLOB + read-back',
-            () async {
-          if (!nationalCharsetOk()) return;
-          // An nClob bind always travels through a temporary NCLOB; this large
-          // value also forces a multi-chunk UTF-16BE read on the OUT side.
-          // Each unit is a fixed 5 chars ('q' + 4 digits) so the length is
-          // exactly 4000 * 5 = 20000.
-          final text =
-              List.generate(4000, (i) => 'q${i.toString().padLeft(4, '0')}')
-                  .join();
-          expect(text.length, equals(20000));
-          final result = await connection.execute(
-            'BEGIN $nclApndProc(:p); END;',
-            {
-              'p': OracleBind.inOut(
-                  value: text, type: OracleDbType.nClob, maxSize: 40000),
-            },
-          );
-          expect(result.outBinds['p'], equals('$text-y'));
-        });
+        test(
+          'large NCLOB IN OUT round-trips through temp NCLOB + read-back',
+          () async {
+            if (!nationalCharsetOk()) return;
+            // An nClob bind always travels through a temporary NCLOB; this large
+            // value also forces a multi-chunk UTF-16BE read on the OUT side.
+            // Each unit is a fixed 5 chars ('q' + 4 digits) so the length is
+            // exactly 4000 * 5 = 20000.
+            final text = List.generate(
+              4000,
+              (i) => 'q${i.toString().padLeft(4, '0')}',
+            ).join();
+            expect(text.length, equals(20000));
+            final result = await connection
+                .execute('BEGIN $nclApndProc(:p); END;', {
+                  'p': OracleBind.inOut(
+                    value: text,
+                    type: OracleDbType.nClob,
+                    maxSize: 40000,
+                  ),
+                });
+            expect(result.outBinds['p'], equals('$text-y'));
+          },
+        );
       });
     },
   );

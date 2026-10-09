@@ -76,8 +76,11 @@ void main() {
         capabilityOci8Lob,
         capabilitySessionState,
       };
-      expect(caps.length, equals(3),
-          reason: 'All capability flags should be distinct');
+      expect(
+        caps.length,
+        equals(3),
+        reason: 'All capability flags should be distinct',
+      );
     });
   });
 

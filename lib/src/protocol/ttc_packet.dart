@@ -87,7 +87,8 @@ class TtcPacket {
       );
       throw OracleException(
         errorCode: oraMalformedPacket,
-        message: 'TTC protocol error: insufficient data for header - '
+        message:
+            'TTC protocol error: insufficient data for header - '
             'got ${data.length} bytes, need at least $ttcHeaderSize',
       );
     }
@@ -101,8 +102,9 @@ class TtcPacket {
 
     // Read remaining payload
     final payloadLength = buffer.remaining;
-    final payload =
-        payloadLength > 0 ? buffer.readBytes(payloadLength) : Uint8List(0);
+    final payload = payloadLength > 0
+        ? buffer.readBytes(payloadLength)
+        : Uint8List(0);
 
     _log.fine(
       'Decoded TTC packet: func=$functionCode, seq=$sequence, '
@@ -118,7 +120,8 @@ class TtcPacket {
   }
 
   @override
-  String toString() => 'TtcPacket('
+  String toString() =>
+      'TtcPacket('
       'functionCode: $functionCode, '
       'sequence: $sequence, '
       'dataFlags: $dataFlags, '

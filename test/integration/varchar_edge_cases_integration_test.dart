@@ -53,22 +53,24 @@ void main() {
       });
 
       // CHAR(N) padding contract
-      test('CHAR(10) populated with "ab" returns server-side padding verbatim',
-          () async {
-        final id = nextTestId();
-        await connection.execute(
-          "INSERT INTO $testTable (id, char10) VALUES ($id, 'ab')",
-        );
-        final result = await connection.execute(
-          'SELECT char10 FROM $testTable WHERE id = $id',
-        );
-        final value = result.rows.single['CHAR10'];
-        expect(value, isA<String>());
-        // Oracle pads CHAR(N) to N bytes server-side; the driver returns the
-        // padded string verbatim (no client-side trim).
-        expect(value, equals('ab        '));
-        expect((value! as String).length, equals(10));
-      });
+      test(
+        'CHAR(10) populated with "ab" returns server-side padding verbatim',
+        () async {
+          final id = nextTestId();
+          await connection.execute(
+            "INSERT INTO $testTable (id, char10) VALUES ($id, 'ab')",
+          );
+          final result = await connection.execute(
+            'SELECT char10 FROM $testTable WHERE id = $id',
+          );
+          final value = result.rows.single['CHAR10'];
+          expect(value, isA<String>());
+          // Oracle pads CHAR(N) to N bytes server-side; the driver returns the
+          // padded string verbatim (no client-side trim).
+          expect(value, equals('ab        '));
+          expect((value! as String).length, equals(10));
+        },
+      );
 
       // multi-byte UTF-8 content (emoji, CJK, accented Latin)
       test('VARCHAR2 round-trips emoji', () async {
@@ -105,19 +107,21 @@ void main() {
       });
 
       // VARCHAR2(100) exact 100-byte payload succeeds
-      test('VARCHAR2(100) populated with exactly 100 ASCII bytes succeeds',
-          () async {
-        final s = 'A' * 100; // 100 ASCII bytes
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, v100) VALUES ($id, :1)',
-          [s],
-        );
-        final result = await connection.execute(
-          'SELECT v100 FROM $testTable WHERE id = $id',
-        );
-        expect(result.rows.single['V100'], equals(s));
-      });
+      test(
+        'VARCHAR2(100) populated with exactly 100 ASCII bytes succeeds',
+        () async {
+          final s = 'A' * 100; // 100 ASCII bytes
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, v100) VALUES ($id, :1)',
+            [s],
+          );
+          final result = await connection.execute(
+            'SELECT v100 FROM $testTable WHERE id = $id',
+          );
+          expect(result.rows.single['V100'], equals(s));
+        },
+      );
 
       // over-length raises ORA-12899
       test('VARCHAR2(100) populated with 101 bytes raises ORA-12899', () async {
@@ -128,41 +132,50 @@ void main() {
             'INSERT INTO $testTable (id, v100) VALUES ($id, :1)',
             [s],
           ),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', 12899)),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              12899,
+            ),
+          ),
         );
       });
 
       // '' vs NULL semantics (SQL literal path)
-      test("VARCHAR2 empty string '' is stored as NULL (Oracle convention)",
-          () async {
-        final id = nextTestId();
-        await connection.execute(
-          "INSERT INTO $testTable (id, v100) VALUES ($id, '')",
-        );
-        final result = await connection.execute(
-          'SELECT v100 FROM $testTable WHERE id = $id',
-        );
-        // Oracle treats '' as NULL on insert; the round-tripped value is null.
-        expect(result.rows.single['V100'], isNull);
-      });
+      test(
+        "VARCHAR2 empty string '' is stored as NULL (Oracle convention)",
+        () async {
+          final id = nextTestId();
+          await connection.execute(
+            "INSERT INTO $testTable (id, v100) VALUES ($id, '')",
+          );
+          final result = await connection.execute(
+            'SELECT v100 FROM $testTable WHERE id = $id',
+          );
+          // Oracle treats '' as NULL on insert; the round-tripped value is null.
+          expect(result.rows.single['V100'], isNull);
+        },
+      );
 
       // '' vs NULL semantics (driver bind path).
       // The SQL-literal test above only exercises Oracle's SQL parser. This
       // test forces the value through `encodeVarchar` to confirm the driver
       // also surfaces ''-as-NULL semantics end-to-end.
-      test("VARCHAR2 empty string '' bound via parameter is stored as NULL",
-          () async {
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, v100) VALUES ($id, :1)',
-          [''],
-        );
-        final result = await connection.execute(
-          'SELECT v100 FROM $testTable WHERE id = $id',
-        );
-        expect(result.rows.single['V100'], isNull);
-      });
+      test(
+        "VARCHAR2 empty string '' bound via parameter is stored as NULL",
+        () async {
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, v100) VALUES ($id, :1)',
+            [''],
+          );
+          final result = await connection.execute(
+            'SELECT v100 FROM $testTable WHERE id = $id',
+          );
+          expect(result.rows.single['V100'], isNull);
+        },
+      );
     },
   );
 }

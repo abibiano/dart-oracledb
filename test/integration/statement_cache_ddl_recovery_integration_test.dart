@@ -51,9 +51,7 @@ void main() {
         const [955], // ORA-00955: name already used
       );
       await ddlConn.execute('TRUNCATE TABLE $testTable');
-      await ddlConn.execute(
-        "INSERT INTO $testTable (a, b) VALUES (1, 'one')",
-      );
+      await ddlConn.execute("INSERT INTO $testTable (a, b) VALUES (1, 'one')");
       await ddlConn.commit();
     });
 
@@ -69,16 +67,18 @@ void main() {
       );
     });
 
-    test(
-        'a DROP COLUMN under a cached SELECT * is recovered by a transparent '
+    test('a DROP COLUMN under a cached SELECT * is recovered by a transparent '
         'single re-execute', () async {
       // 1. Cache the cursor, then prove it is reused (parse skipped).
       await conn.execute('SELECT * FROM $testTable');
       final reuseBefore = conn.debugReuseExecutes;
       final retriesBefore = conn.debugDescribeRetries;
       await conn.execute('SELECT * FROM $testTable');
-      expect(conn.debugReuseExecutes, greaterThan(reuseBefore),
-          reason: 'the second execute must reuse the cached cursor');
+      expect(
+        conn.debugReuseExecutes,
+        greaterThan(reuseBefore),
+        reason: 'the second execute must reuse the cached cursor',
+      );
 
       // 2. A separate session drops a column the cached cursor selected,
       //    invalidating its describe.
@@ -89,19 +89,24 @@ void main() {
       //    this surfaces the server's describe-mismatch error; with it the
       //    caller sees only correct rows against the new shape.
       final result = await conn.execute('SELECT * FROM $testTable');
-      expect(result.columnNames, equals(['A']),
-          reason: 'the re-parsed cursor reflects the post-DDL shape');
+      expect(
+        result.columnNames,
+        equals(['A']),
+        reason: 'the re-parsed cursor reflects the post-DDL shape',
+      );
       expect(result.rows.single['A'], equals(1));
-      expect(conn.debugDescribeRetries, equals(retriesBefore + 1),
-          reason: 'exactly one transparent describe-mismatch re-execute fired');
+      expect(
+        conn.debugDescribeRetries,
+        equals(retriesBefore + 1),
+        reason: 'exactly one transparent describe-mismatch re-execute fired',
+      );
 
       // 4. The session is left fully usable for the next borrower.
       final after = await conn.execute('SELECT a FROM $testTable');
       expect(after.rows.single['A'], equals(1));
     });
 
-    test(
-        'an ADD COLUMN under a cached SELECT * recovers with correct rows '
+    test('an ADD COLUMN under a cached SELECT * recovers with correct rows '
         '(server re-describe; no spurious error)', () async {
       // Cache + reuse.
       await conn.execute('SELECT * FROM $testTable');
@@ -114,8 +119,11 @@ void main() {
       // The re-execute returns the new shape without surfacing any error,
       // whether the server re-describes inline or the retry path engages.
       final result = await conn.execute('SELECT * FROM $testTable');
-      expect(result.columnNames, equals(['A', 'B', 'C']),
-          reason: 'the widened table is reflected transparently');
+      expect(
+        result.columnNames,
+        equals(['A', 'B', 'C']),
+        reason: 'the widened table is reflected transparently',
+      );
       expect(result.rows.single['A'], equals(1));
       expect(result.rows.single['C'], isNull);
     });

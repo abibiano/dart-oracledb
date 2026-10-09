@@ -71,9 +71,13 @@ void main() {
       // slow cold-JIT CI runner while still catching a ~10x algorithmic
       // regression (the previous 3000ms ceiling was ~400x the baseline and
       // could mask one).
-      expect(sw.elapsedMilliseconds, lessThan(500),
-          reason: 'per-packet TTC completion probe must stay cheap; took '
-              '${sw.elapsedMilliseconds}ms for $packets full scans');
+      expect(
+        sw.elapsedMilliseconds,
+        lessThan(500),
+        reason:
+            'per-packet TTC completion probe must stay cheap; took '
+            '${sw.elapsedMilliseconds}ms for $packets full scans',
+      );
     });
 
     // The 23ai `flags == 0x0000` error sub-path keeps reading until the
@@ -97,12 +101,17 @@ void main() {
         return buf.toBytes();
       }
 
-      test('trailing 0x1D marks the stream complete under endOfRequestSupport',
-          () {
-        final stream = buildErrorProbeStream(100);
-        expect(stream.last, equals(ttcMsgTypeEndOfRequest));
-        expect(ttcStreamIsComplete(stream, endOfRequestSupport: true), isTrue);
-      });
+      test(
+        'trailing 0x1D marks the stream complete under endOfRequestSupport',
+        () {
+          final stream = buildErrorProbeStream(100);
+          expect(stream.last, equals(ttcMsgTypeEndOfRequest));
+          expect(
+            ttcStreamIsComplete(stream, endOfRequestSupport: true),
+            isTrue,
+          );
+        },
+      );
 
       test('per-packet re-walk of the 0x1D error path stays bounded', () {
         final stream = buildErrorProbeStream(2000);
@@ -116,9 +125,13 @@ void main() {
         sw.stop();
         // Same baseline as the STATUS-path bound above — measured ~6-8ms
         // locally for 200 scans; 500ms documented there.
-        expect(sw.elapsedMilliseconds, lessThan(500),
-            reason: '23ai error-probe re-walk must stay cheap; took '
-                '${sw.elapsedMilliseconds}ms for $packets full scans');
+        expect(
+          sw.elapsedMilliseconds,
+          lessThan(500),
+          reason:
+              '23ai error-probe re-walk must stay cheap; took '
+              '${sw.elapsedMilliseconds}ms for $packets full scans',
+        );
       });
     });
   });

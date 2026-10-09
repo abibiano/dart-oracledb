@@ -40,22 +40,21 @@ ResultSetCursor build({
   Object Function(LobLocator locator)? wrapLob,
   bool Function(Object? value)? isLobHandle,
   Future<void> Function(Iterable<Object> handles)? closeLobHandles,
-}) =>
-    ResultSetCursor(
-      transport: Transport(),
-      cursorId: 7,
-      columns: [_col('N')],
-      firstBatch: const [
-        <Object?>[1]
-      ],
-      serverHasMoreRows: false,
-      prefetchRows: 50,
-      preserveTimestampTimeZone: false,
-      materializePerBatch: false,
-      wrapLob: wrapLob,
-      isLobHandle: isLobHandle,
-      closeLobHandles: closeLobHandles,
-    );
+}) => ResultSetCursor(
+  transport: Transport(),
+  cursorId: 7,
+  columns: [_col('N')],
+  firstBatch: const [
+    <Object?>[1],
+  ],
+  serverHasMoreRows: false,
+  prefetchRows: 50,
+  preserveTimestampTimeZone: false,
+  materializePerBatch: false,
+  wrapLob: wrapLob,
+  isLobHandle: isLobHandle,
+  closeLobHandles: closeLobHandles,
+);
 
 void main() {
   group('ResultSetCursor lazy-LOB-handle callbacks are all-or-nothing', () {
@@ -70,10 +69,13 @@ void main() {
       );
     });
 
-    test('none supplied constructs successfully — the materialize / eager-drain '
-        'shape (positive control)', () {
-      expect(build(), isA<ResultSetCursor>());
-    });
+    test(
+      'none supplied constructs successfully — the materialize / eager-drain '
+      'shape (positive control)',
+      () {
+        expect(build(), isA<ResultSetCursor>());
+      },
+    );
 
     // One case per omitted callback: each omission on its own must trip the
     // assert, so neither half of the `&&` can be deleted without a failure.
@@ -139,12 +141,14 @@ void main() {
   // negative case above could be passing for the wrong reason.
   test('the fixture callbacks match the constructor signatures', () {
     expect(
-      _wrap(LobLocator(
-        locator: Uint8List(40),
-        oracleType: 112,
-        length: 0,
-        chunkSize: 0,
-      )),
+      _wrap(
+        LobLocator(
+          locator: Uint8List(40),
+          oracleType: 112,
+          length: 0,
+          chunkSize: 0,
+        ),
+      ),
       isNotNull,
     );
     expect(_isHandle(null), isFalse);

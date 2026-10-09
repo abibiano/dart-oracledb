@@ -107,19 +107,23 @@ void main() {
 
       test('SQL NULL BLOB decodes to null', () async {
         final id = nextTestId();
-        await connection
-            .execute('INSERT INTO $testTable (id, body) VALUES ($id, NULL)');
-        final result = await connection
-            .execute('SELECT body FROM $testTable WHERE id = $id');
+        await connection.execute(
+          'INSERT INTO $testTable (id, body) VALUES ($id, NULL)',
+        );
+        final result = await connection.execute(
+          'SELECT body FROM $testTable WHERE id = $id',
+        );
         expect(result.rows.single['BODY'], isNull);
       });
 
       test('EMPTY_BLOB() decodes to an empty Uint8List, not null', () async {
         final id = nextTestId();
         await connection.execute(
-            'INSERT INTO $testTable (id, body) VALUES ($id, EMPTY_BLOB())');
-        final result = await connection
-            .execute('SELECT body FROM $testTable WHERE id = $id');
+          'INSERT INTO $testTable (id, body) VALUES ($id, EMPTY_BLOB())',
+        );
+        final result = await connection.execute(
+          'SELECT body FROM $testTable WHERE id = $id',
+        );
         final value = result.rows.single['BODY'];
         expect(value, isA<Uint8List>());
         expect(value, isEmpty);
@@ -132,13 +136,13 @@ void main() {
           'INSERT INTO $testTable (id, body) VALUES ($id, :body)',
           {'body': bytes},
         );
-        final result = await connection
-            .execute('SELECT body FROM $testTable WHERE id = $id');
+        final result = await connection.execute(
+          'SELECT body FROM $testTable WHERE id = $id',
+        );
         expect(result.rows.single['BODY'], equals(bytes));
       });
 
-      test('all 256 byte values round-trip, including 0x00 and 0xFF',
-          () async {
+      test('all 256 byte values round-trip, including 0x00 and 0xFF', () async {
         final id = nextTestId();
         final bytes = Uint8List.fromList(List.generate(256, (i) => i));
         expect(bytes.first, equals(0x00));
@@ -147,32 +151,36 @@ void main() {
           'INSERT INTO $testTable (id, body) VALUES ($id, :body)',
           {'body': bytes},
         );
-        final result = await connection
-            .execute('SELECT body FROM $testTable WHERE id = $id');
+        final result = await connection.execute(
+          'SELECT body FROM $testTable WHERE id = $id',
+        );
         final value = result.rows.single['BODY'] as Uint8List?;
         expect(value, isNotNull);
         expect(value!.length, equals(256));
         expect(value, equals(bytes));
       });
 
-      test('payload above 64 KiB round-trips exactly (multi-chunk LOB read)',
-          () async {
-        final id = nextTestId();
-        // > 8 server chunks (~8 KiB each) and > 32767 bytes, so this also
-        // exercises the large-data write path end-to-end. The pattern is
-        // non-repeating so chunk reordering cannot produce a false pass.
-        final bytes = patternBytes(70000, seed: 42);
-        await connection.execute(
-          'INSERT INTO $testTable (id, body) VALUES ($id, :body)',
-          {'body': bytes},
-        );
-        final result = await connection
-            .execute('SELECT body FROM $testTable WHERE id = $id');
-        final value = result.rows.single['BODY'] as Uint8List?;
-        expect(value, isNotNull);
-        expect(value!.length, equals(70000));
-        expect(value, equals(bytes));
-      });
+      test(
+        'payload above 64 KiB round-trips exactly (multi-chunk LOB read)',
+        () async {
+          final id = nextTestId();
+          // > 8 server chunks (~8 KiB each) and > 32767 bytes, so this also
+          // exercises the large-data write path end-to-end. The pattern is
+          // non-repeating so chunk reordering cannot produce a false pass.
+          final bytes = patternBytes(70000, seed: 42);
+          await connection.execute(
+            'INSERT INTO $testTable (id, body) VALUES ($id, :body)',
+            {'body': bytes},
+          );
+          final result = await connection.execute(
+            'SELECT body FROM $testTable WHERE id = $id',
+          );
+          final value = result.rows.single['BODY'] as Uint8List?;
+          expect(value, isNotNull);
+          expect(value!.length, equals(70000));
+          expect(value, equals(bytes));
+        },
+      );
 
       test('multiple rows with BLOBs materialize independently', () async {
         final baseId = nextTestId();
@@ -196,15 +204,17 @@ void main() {
         // CLOB behavior must remain intact next to BLOB decode.
         final aux = uniqueTableName('blobmix');
         await connection.execute(
-            'CREATE TABLE $aux (id NUMBER, b BLOB, c CLOB)');
+          'CREATE TABLE $aux (id NUMBER, b BLOB, c CLOB)',
+        );
         try {
           final bytes = Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]);
           await connection.execute(
             'INSERT INTO $aux (id, b, c) VALUES (1, :1, :2)',
             [bytes, 'mixed lob row'],
           );
-          final result =
-              await connection.execute('SELECT b, c FROM $aux WHERE id = 1');
+          final result = await connection.execute(
+            'SELECT b, c FROM $aux WHERE id = 1',
+          );
           expect(result.rows.single['B'], equals(bytes));
           expect(result.rows.single['C'], equals('mixed lob row'));
         } finally {
@@ -245,7 +255,7 @@ void main() {
         await connection.execute(
           'INSERT INTO $testTable (id, body) VALUES ($id, :1)',
           [
-            Uint8List.fromList([0xAA])
+            Uint8List.fromList([0xAA]),
           ],
         );
         final updated = Uint8List.fromList([0xBB, 0xCC]);
@@ -254,66 +264,82 @@ void main() {
           {'body': updated, 'id': id},
         );
         expect(update.rowsAffected, equals(1));
-        final result = await connection
-            .execute('SELECT body FROM $testTable WHERE id = $id');
+        final result = await connection.execute(
+          'SELECT body FROM $testTable WHERE id = $id',
+        );
         expect(result.rows.single['BODY'], equals(updated));
       });
 
-      test('empty Uint8List bound as a plain value in SQL DML stores NULL',
-          () async {
-        // Regression: a plain empty Uint8List travels as a
-        // zero-length RAW and Oracle's '' IS NULL rule stores SQL NULL. This
-        // matches node-oracledb. The empty-but-not-NULL BLOB guarantee applies
-        // only to the explicit OracleBind(type: blob) path (see the IN OUT
-        // empty-Uint8List test below).
-        final id = nextTestId();
-        final insert = await connection.execute(
-          'INSERT INTO $testTable (id, body) VALUES (:1, :2)',
-          [id, Uint8List(0)],
-        );
-        expect(insert.rowsAffected, equals(1));
-        final result = await connection.execute(
-          'SELECT body, '
-          'CASE WHEN body IS NULL THEN 1 ELSE 0 END AS is_null '
-          'FROM $testTable WHERE id = $id',
-        );
-        expect(result.rows.single['BODY'], isNull);
-        expect(result.rows.single['IS_NULL'], equals(1),
-            reason: 'empty plain Uint8List in SQL DML must store SQL NULL');
-      });
+      test(
+        'empty Uint8List bound as a plain value in SQL DML stores NULL',
+        () async {
+          // Regression: a plain empty Uint8List travels as a
+          // zero-length RAW and Oracle's '' IS NULL rule stores SQL NULL. This
+          // matches node-oracledb. The empty-but-not-NULL BLOB guarantee applies
+          // only to the explicit OracleBind(type: blob) path (see the IN OUT
+          // empty-Uint8List test below).
+          final id = nextTestId();
+          final insert = await connection.execute(
+            'INSERT INTO $testTable (id, body) VALUES (:1, :2)',
+            [id, Uint8List(0)],
+          );
+          expect(insert.rowsAffected, equals(1));
+          final result = await connection.execute(
+            'SELECT body, '
+            'CASE WHEN body IS NULL THEN 1 ELSE 0 END AS is_null '
+            'FROM $testTable WHERE id = $id',
+          );
+          expect(result.rows.single['BODY'], isNull);
+          expect(
+            result.rows.single['IS_NULL'],
+            equals(1),
+            reason: 'empty plain Uint8List in SQL DML must store SQL NULL',
+          );
+        },
+      );
 
-      test('DML INSERT above the 32767-byte scalar bind limit round-trips',
-          () async {
-        final id = nextTestId();
-        // 40,000 bytes > 32767: exercises the deferred long-data write
-        // ordering (the value is written after all other binds).
-        final bytes = patternBytes(40000, seed: 7);
-        final insert = await connection.execute(
-          'INSERT INTO $testTable (id, body, tag) VALUES (:1, :2, :3)',
-          [id, bytes, 'short-after-long'],
-        );
-        expect(insert.rowsAffected, equals(1));
-        final result = await connection
-            .execute('SELECT body, tag FROM $testTable WHERE id = $id');
-        expect((result.rows.single['BODY'] as Uint8List).length,
-            equals(40000));
-        expect(result.rows.single['BODY'], equals(bytes));
-        expect(result.rows.single['TAG'], equals('short-after-long'),
-            reason: 'binds after a deferred long value must stay aligned');
-      });
+      test(
+        'DML INSERT above the 32767-byte scalar bind limit round-trips',
+        () async {
+          final id = nextTestId();
+          // 40,000 bytes > 32767: exercises the deferred long-data write
+          // ordering (the value is written after all other binds).
+          final bytes = patternBytes(40000, seed: 7);
+          final insert = await connection.execute(
+            'INSERT INTO $testTable (id, body, tag) VALUES (:1, :2, :3)',
+            [id, bytes, 'short-after-long'],
+          );
+          expect(insert.rowsAffected, equals(1));
+          final result = await connection.execute(
+            'SELECT body, tag FROM $testTable WHERE id = $id',
+          );
+          expect(
+            (result.rows.single['BODY'] as Uint8List).length,
+            equals(40000),
+          );
+          expect(result.rows.single['BODY'], equals(bytes));
+          expect(
+            result.rows.single['TAG'],
+            equals('short-after-long'),
+            reason: 'binds after a deferred long value must stay aligned',
+          );
+        },
+      );
 
       // ---------------------------------------------------------------
       // PL/SQL OUT / IN OUT
       // ---------------------------------------------------------------
 
-      test('BLOB OUT bind returns null when the procedure assigns NULL',
-          () async {
-        final result = await connection.execute(
-          'BEGIN $copyProc(NULL, :ret); END;',
-          {'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 4000)},
-        );
-        expect(result.outBinds['ret'], isNull);
-      });
+      test(
+        'BLOB OUT bind returns null when the procedure assigns NULL',
+        () async {
+          final result = await connection.execute(
+            'BEGIN $copyProc(NULL, :ret); END;',
+            {'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 4000)},
+          );
+          expect(result.outBinds['ret'], isNull);
+        },
+      );
 
       test('BLOB OUT bind decodes a small value as Uint8List', () async {
         // The plain Uint8List IN bind travels as RAW; Oracle converts it to
@@ -340,52 +366,56 @@ void main() {
         expect(value, isEmpty);
       });
 
-      test('large plain Uint8List PL/SQL IN + BLOB OUT travel via temp BLOBs',
-          () async {
-        // 40,000 bytes > 32767: the plain Uint8List IN bind converts to an
-        // internal temporary BLOB (node-oracledb PL/SQL RAW>32K parity); the
-        // OUT side returns a locator drained over multiple LOB_DATA chunks.
-        final bytes = patternBytes(40000, seed: 11);
-        final result = await connection.execute(
-          'BEGIN $copyProc(:src, :ret); END;',
-          {
-            'src': bytes,
-            'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 50000),
-          },
-        );
-        final value = result.outBinds['ret'] as Uint8List?;
-        expect(value, isNotNull);
-        expect(value!.length, equals(40000));
-        expect(value, equals(bytes));
-      });
+      test(
+        'large plain Uint8List PL/SQL IN + BLOB OUT travel via temp BLOBs',
+        () async {
+          // 40,000 bytes > 32767: the plain Uint8List IN bind converts to an
+          // internal temporary BLOB (node-oracledb PL/SQL RAW>32K parity); the
+          // OUT side returns a locator drained over multiple LOB_DATA chunks.
+          final bytes = patternBytes(40000, seed: 11);
+          final result = await connection
+              .execute('BEGIN $copyProc(:src, :ret); END;', {
+                'src': bytes,
+                'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 50000),
+              });
+          final value = result.outBinds['ret'] as Uint8List?;
+          expect(value, isNotNull);
+          expect(value!.length, equals(40000));
+          expect(value, equals(bytes));
+        },
+      );
 
-      test('BLOB IN OUT bind sends bytes and reads the modified value',
-          () async {
-        final result = await connection.execute(
-          'BEGIN $flipProc(:p); END;',
-          {
+      test(
+        'BLOB IN OUT bind sends bytes and reads the modified value',
+        () async {
+          final result = await connection.execute('BEGIN $flipProc(:p); END;', {
             'p': OracleBind.inOut(
-                value: Uint8List.fromList([0x01, 0x02]),
-                type: OracleDbType.blob,
-                maxSize: 4000),
-          },
-        );
-        expect(result.outBinds['p'],
-            equals(Uint8List.fromList([0x01, 0x02, 0xCA, 0xFE])));
-      });
+              value: Uint8List.fromList([0x01, 0x02]),
+              type: OracleDbType.blob,
+              maxSize: 4000,
+            ),
+          });
+          expect(
+            result.outBinds['p'],
+            equals(Uint8List.fromList([0x01, 0x02, 0xCA, 0xFE])),
+          );
+        },
+      );
 
-      test('BLOB IN OUT with null input is seen as NULL by the procedure',
-          () async {
-        final result = await connection.execute(
-          'BEGIN $flipProc(:p); END;',
-          {
+      test(
+        'BLOB IN OUT with null input is seen as NULL by the procedure',
+        () async {
+          final result = await connection.execute('BEGIN $flipProc(:p); END;', {
             'p': OracleBind.inOut(
-                value: null, type: OracleDbType.blob, maxSize: 4000),
-          },
-        );
-        // The procedure replaces NULL with the 0x00 sentinel.
-        expect(result.outBinds['p'], equals(Uint8List.fromList([0x00])));
-      });
+              value: null,
+              type: OracleDbType.blob,
+              maxSize: 4000,
+            ),
+          });
+          // The procedure replaces NULL with the 0x00 sentinel.
+          expect(result.outBinds['p'], equals(Uint8List.fromList([0x00])));
+        },
+      );
 
       test('BLOB IN OUT with empty Uint8List binds as an empty BLOB, '
           'not SQL NULL', () async {
@@ -393,33 +423,34 @@ void main() {
         // where Oracle's '' IS NULL forces empty-string-as-NULL). The
         // procedure appends to the empty BLOB rather than taking the NULL
         // branch.
-        final result = await connection.execute(
-          'BEGIN $flipProc(:p); END;',
-          {
-            'p': OracleBind.inOut(
-                value: Uint8List(0), type: OracleDbType.blob, maxSize: 4000),
-          },
-        );
-        expect(result.outBinds['p'],
-            equals(Uint8List.fromList([0xCA, 0xFE])));
+        final result = await connection.execute('BEGIN $flipProc(:p); END;', {
+          'p': OracleBind.inOut(
+            value: Uint8List(0),
+            type: OracleDbType.blob,
+            maxSize: 4000,
+          ),
+        });
+        expect(result.outBinds['p'], equals(Uint8List.fromList([0xCA, 0xFE])));
       });
 
-      test('large BLOB IN OUT round-trips through temp BLOB and read-back',
-          () async {
-        final bytes = patternBytes(40000, seed: 13);
-        final result = await connection.execute(
-          'BEGIN $flipProc(:p); END;',
-          {
+      test(
+        'large BLOB IN OUT round-trips through temp BLOB and read-back',
+        () async {
+          final bytes = patternBytes(40000, seed: 13);
+          final result = await connection.execute('BEGIN $flipProc(:p); END;', {
             'p': OracleBind.inOut(
-                value: bytes, type: OracleDbType.blob, maxSize: 50000),
-          },
-        );
-        final value = result.outBinds['p'] as Uint8List?;
-        expect(value, isNotNull);
-        expect(value!.length, equals(40002));
-        expect(Uint8List.sublistView(value, 0, 40000), equals(bytes));
-        expect(value.sublist(40000), equals([0xCA, 0xFE]));
-      });
+              value: bytes,
+              type: OracleDbType.blob,
+              maxSize: 50000,
+            ),
+          });
+          final value = result.outBinds['p'] as Uint8List?;
+          expect(value, isNotNull);
+          expect(value!.length, equals(40002));
+          expect(Uint8List.sublistView(value, 0, 40000), equals(bytes));
+          expect(value.sublist(40000), equals([0xCA, 0xFE]));
+        },
+      );
 
       // ---------------------------------------------------------------
       // Temp-LOB large-write validation: wire-chunk boundaries + ~1 MB
@@ -442,16 +473,18 @@ void main() {
           // to an internal temporary BLOB and the WRITE payload is exactly
           // [size] bytes — straddling the 65,535-byte wire-chunk edge.
           final bytes = patternBytes(size, seed: size);
-          final result = await connection.execute(
-            'BEGIN $copyProc(:src, :ret); END;',
-            {
-              'src': bytes,
-              'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 70000),
-            },
+          final result = await connection
+              .execute('BEGIN $copyProc(:src, :ret); END;', {
+                'src': bytes,
+                'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 70000),
+              });
+          expect(
+            connection.debugPendingTempLobCount,
+            greaterThan(0),
+            reason:
+                'the IN bind must have traveled through an internal '
+                'temporary BLOB',
           );
-          expect(connection.debugPendingTempLobCount, greaterThan(0),
-              reason: 'the IN bind must have traveled through an internal '
-                  'temporary BLOB');
           final value = result.outBinds['ret'] as Uint8List?;
           expect(value, isNotNull);
           expect(value!.length, equals(size));
@@ -463,24 +496,28 @@ void main() {
       // `bytes.length > ttcMaxRawBindBytes` (32,767), so exactly 32,767
       // bytes must stay an inline RAW bind and 32,768 must convert.
 
-      test('exactly 32,767 bytes stays an inline RAW bind (no temp BLOB)',
-          () async {
-        // TO_BLOB(:src) isolates the client-side routing edge (which
-        // happens before encoding, independent of the SQL text) from
-        // server-version-dependent implicit RAW->BLOB conversion rules.
-        final bytes = patternBytes(32767, seed: 21);
-        final result = await connection.execute(
-          'BEGIN $copyProc(TO_BLOB(:src), :ret); END;',
-          {
-            'src': bytes,
-            'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 40000),
-          },
-        );
-        expect(connection.debugPendingTempLobCount, equals(0),
-            reason: 'a 32,767-byte value must take the inline RAW path '
-                'and create no temp BLOB');
-        expect(result.outBinds['ret'], equals(bytes));
-      });
+      test(
+        'exactly 32,767 bytes stays an inline RAW bind (no temp BLOB)',
+        () async {
+          // TO_BLOB(:src) isolates the client-side routing edge (which
+          // happens before encoding, independent of the SQL text) from
+          // server-version-dependent implicit RAW->BLOB conversion rules.
+          final bytes = patternBytes(32767, seed: 21);
+          final result = await connection
+              .execute('BEGIN $copyProc(TO_BLOB(:src), :ret); END;', {
+                'src': bytes,
+                'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 40000),
+              });
+          expect(
+            connection.debugPendingTempLobCount,
+            equals(0),
+            reason:
+                'a 32,767-byte value must take the inline RAW path '
+                'and create no temp BLOB',
+          );
+          expect(result.outBinds['ret'], equals(bytes));
+        },
+      );
 
       test('32,768 bytes converts to a temp BLOB', () async {
         final bytes = patternBytes(32768, seed: 22);
@@ -497,9 +534,13 @@ void main() {
         // discarding. The ROUTING signal this test cares about — that the value
         // converted rather than travelling inline — is `> 0` vs `0`; the inline
         // sibling above still asserts exactly `0`.
-        expect(connection.debugPendingTempLobCount, equals(2),
-            reason: 'one byte over the limit must convert to exactly one '
-                'temp BLOB (plus the OUT locator freed since Story 12.4)');
+        expect(
+          connection.debugPendingTempLobCount,
+          equals(2),
+          reason:
+              'one byte over the limit must convert to exactly one '
+              'temp BLOB (plus the OUT locator freed since Story 12.4)',
+        );
         expect(result.outBinds['ret'], equals(bytes));
       });
 
@@ -509,56 +550,66 @@ void main() {
         // is non-repeating so chunk loss, duplication, or reordering cannot
         // cancel out in the equality check.
         final bytes = patternBytes(1000000, seed: 17);
-        final result = await connection.execute(
-          'BEGIN $copyProc(:src, :ret); END;',
-          {
-            'src': bytes,
-            'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 1100000),
-          },
+        final result = await connection
+            .execute('BEGIN $copyProc(:src, :ret); END;', {
+              'src': bytes,
+              'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 1100000),
+            });
+        expect(
+          connection.debugPendingTempLobCount,
+          greaterThan(0),
+          reason:
+              'the IN bind must have traveled through an internal '
+              'temporary BLOB',
         );
-        expect(connection.debugPendingTempLobCount, greaterThan(0),
-            reason: 'the IN bind must have traveled through an internal '
-                'temporary BLOB');
         final value = result.outBinds['ret'] as Uint8List?;
         expect(value, isNotNull);
         expect(value!.length, equals(1000000));
         expect(value, equals(bytes));
       }, timeout: const Timeout(Duration(minutes: 5)));
 
-      test('~1 MB temp-BLOB IN OUT round-trips through write and read-back',
-          () async {
-        // The prefix equality below pins the full content; the appended
-        // 0xCAFE sentinel pins that the OUT data came from the server.
-        final bytes = patternBytes(1000000, seed: 19);
-        final result = await connection.execute(
-          'BEGIN $flipProc(:p); END;',
-          {
+      test(
+        '~1 MB temp-BLOB IN OUT round-trips through write and read-back',
+        () async {
+          // The prefix equality below pins the full content; the appended
+          // 0xCAFE sentinel pins that the OUT data came from the server.
+          final bytes = patternBytes(1000000, seed: 19);
+          final result = await connection.execute('BEGIN $flipProc(:p); END;', {
             'p': OracleBind.inOut(
-                value: bytes, type: OracleDbType.blob, maxSize: 1100000),
-          },
-        );
-        expect(connection.debugPendingTempLobCount, greaterThan(0),
-            reason: 'the IN side of the IN OUT bind must have traveled '
-                'through an internal temporary BLOB');
-        final value = result.outBinds['p'] as Uint8List?;
-        expect(value, isNotNull);
-        expect(value!.length, equals(1000002));
-        expect(Uint8List.sublistView(value, 0, 1000000), equals(bytes));
-        expect(value.sublist(1000000), equals([0xCA, 0xFE]));
-      }, timeout: const Timeout(Duration(minutes: 5)));
+              value: bytes,
+              type: OracleDbType.blob,
+              maxSize: 1100000,
+            ),
+          });
+          expect(
+            connection.debugPendingTempLobCount,
+            greaterThan(0),
+            reason:
+                'the IN side of the IN OUT bind must have traveled '
+                'through an internal temporary BLOB',
+          );
+          final value = result.outBinds['p'] as Uint8List?;
+          expect(value, isNotNull);
+          expect(value!.length, equals(1000002));
+          expect(Uint8List.sublistView(value, 0, 1000000), equals(bytes));
+          expect(value.sublist(1000000), equals([0xCA, 0xFE]));
+        },
+        timeout: const Timeout(Duration(minutes: 5)),
+      );
 
-      test('BLOB OUT value beyond maxSize fails loud, not truncated',
-          () async {
+      test('BLOB OUT value beyond maxSize fails loud, not truncated', () async {
         await expectLater(
-          connection.execute(
-            'BEGIN $copyProc(TO_BLOB(:src), :ret); END;',
-            {
-              'src': patternBytes(64, seed: 3),
-              'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 10),
-            },
+          connection.execute('BEGIN $copyProc(TO_BLOB(:src), :ret); END;', {
+            'src': patternBytes(64, seed: 3),
+            'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 10),
+          }),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              contains('maxSize'),
+            ),
           ),
-          throwsA(isA<OracleException>().having(
-              (e) => e.message, 'message', contains('maxSize'))),
         );
       });
 
@@ -566,52 +617,62 @@ void main() {
       // Statement cache interplay
       // ---------------------------------------------------------------
 
-      test('repeated BLOB SELECT through the statement cache stays correct',
-          () async {
-        final id = nextTestId();
-        final bytes = patternBytes(9000, seed: 21);
-        await connection.execute(
-          'INSERT INTO $testTable (id, body) VALUES (:1, :2)',
-          [id, bytes],
-        );
-        // Identical SQL between runs hits the statement cache. BLOB cursors
-        // are deliberately never blind-re-executed (the server drops the
-        // LOB-prefetch metadata without fresh defines — see connection.dart);
-        // the second run must re-parse and still decode correctly.
-        final query = 'SELECT body FROM $testTable WHERE id = :1';
-        final first = await connection.execute(query, [id]);
-        expect(first.rows.single['BODY'], equals(bytes));
-        final parseBefore = connection.debugFullParseExecutes;
-        final reuseBefore = connection.debugReuseExecutes;
-        final second = await connection.execute(query, [id]);
-        expect(second.rows.single['BODY'], equals(bytes));
-        expect(connection.debugFullParseExecutes, greaterThan(parseBefore),
-            reason: 'BLOB cursors are re-parsed, never blind-re-executed');
-        expect(connection.debugReuseExecutes, equals(reuseBefore),
-            reason: 'no blind cursor reuse may happen for BLOB queries');
-      });
-
-      test('BLOB SELECT spanning multiple fetch batches decodes every row',
-          () async {
-        // 60 rows > the 50-row prefetch window forces at least one FETCH
-        // continuation round; locator decode must stay aligned across the
-        // batch boundary.
-        final baseId = nextTestId();
-        for (var i = 0; i < 60; i++) {
+      test(
+        'repeated BLOB SELECT through the statement cache stays correct',
+        () async {
+          final id = nextTestId();
+          final bytes = patternBytes(9000, seed: 21);
           await connection.execute(
             'INSERT INTO $testTable (id, body) VALUES (:1, :2)',
-            [baseId + i, patternBytes(32, seed: i)],
+            [id, bytes],
           );
-        }
-        final result = await connection.execute(
-          'SELECT id, body FROM $testTable '
-          'WHERE id BETWEEN $baseId AND ${baseId + 59} ORDER BY id',
-        );
-        expect(result.rows.length, equals(60));
-        for (var i = 0; i < 60; i++) {
-          expect(result.rows[i]['BODY'], equals(patternBytes(32, seed: i)));
-        }
-      });
+          // Identical SQL between runs hits the statement cache. BLOB cursors
+          // are deliberately never blind-re-executed (the server drops the
+          // LOB-prefetch metadata without fresh defines — see connection.dart);
+          // the second run must re-parse and still decode correctly.
+          final query = 'SELECT body FROM $testTable WHERE id = :1';
+          final first = await connection.execute(query, [id]);
+          expect(first.rows.single['BODY'], equals(bytes));
+          final parseBefore = connection.debugFullParseExecutes;
+          final reuseBefore = connection.debugReuseExecutes;
+          final second = await connection.execute(query, [id]);
+          expect(second.rows.single['BODY'], equals(bytes));
+          expect(
+            connection.debugFullParseExecutes,
+            greaterThan(parseBefore),
+            reason: 'BLOB cursors are re-parsed, never blind-re-executed',
+          );
+          expect(
+            connection.debugReuseExecutes,
+            equals(reuseBefore),
+            reason: 'no blind cursor reuse may happen for BLOB queries',
+          );
+        },
+      );
+
+      test(
+        'BLOB SELECT spanning multiple fetch batches decodes every row',
+        () async {
+          // 60 rows > the 50-row prefetch window forces at least one FETCH
+          // continuation round; locator decode must stay aligned across the
+          // batch boundary.
+          final baseId = nextTestId();
+          for (var i = 0; i < 60; i++) {
+            await connection.execute(
+              'INSERT INTO $testTable (id, body) VALUES (:1, :2)',
+              [baseId + i, patternBytes(32, seed: i)],
+            );
+          }
+          final result = await connection.execute(
+            'SELECT id, body FROM $testTable '
+            'WHERE id BETWEEN $baseId AND ${baseId + 59} ORDER BY id',
+          );
+          expect(result.rows.length, equals(60));
+          for (var i = 0; i < 60; i++) {
+            expect(result.rows[i]['BODY'], equals(patternBytes(32, seed: i)));
+          }
+        },
+      );
 
       // ---------------------------------------------------------------
       // Connection / resource safety
@@ -625,8 +686,7 @@ void main() {
           'INSERT INTO $testTable (id, body) VALUES ($id, :1)',
           [patternBytes(20000, seed: 5)],
         );
-        await connection
-            .execute('SELECT body FROM $testTable WHERE id = $id');
+        await connection.execute('SELECT body FROM $testTable WHERE id = $id');
         final after = await connection.execute('SELECT 1 AS ok FROM dual');
         expect(after.rows.single['OK'], equals(1));
       });

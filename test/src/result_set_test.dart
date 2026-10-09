@@ -35,7 +35,8 @@ class _FakeResultSetTransport extends Transport {
   final ExecuteResponse? Function(
     int round,
     List<Object?>? previousRoundLastRow,
-  )? fetchBuilder;
+  )?
+  fetchBuilder;
 
   /// The first-batch response returned by [sendExecute].
   ExecuteResponse firstBatch;
@@ -509,8 +510,7 @@ void main() {
       await expectLater(rs.getRows(1), throwsA(isA<OracleException>()));
     });
 
-    test(
-        'an ordinary borrower close() keeps the generic "is closed" error '
+    test('an ordinary borrower close() keeps the generic "is closed" error '
         '(not the pool-reclaim error)', () async {
       // The borrower closed the result set itself — that is correct caller
       // feedback and must keep the existing generic message, NOT the
@@ -538,8 +538,7 @@ void main() {
       );
     });
 
-    test(
-        'forceCloseOpenResultSet() surfaces a clear pool-reclaim error to a '
+    test('forceCloseOpenResultSet() surfaces a clear pool-reclaim error to a '
         'mid-flight fetch, not the generic "is closed" detail', () async {
       // Simulates the pool reclaiming a connection (release()) while a stream /
       // getRow() loop is idle between pulls: forceCloseOpenResultSet() marks the
@@ -570,10 +569,16 @@ void main() {
 
       // The pool reclaims the connection while the stream is live.
       await conn.forceCloseOpenResultSet(reclaimedByPool: true);
-      expect(conn.hasOpenResultSet, isFalse,
-          reason: 'the cursor is reaped; the session stays reusable (no leak)');
-      expect(conn.debugPendingCloseCount, equals(1),
-          reason: 'the open cursor id is queued for the close-cursor piggyback');
+      expect(
+        conn.hasOpenResultSet,
+        isFalse,
+        reason: 'the cursor is reaped; the session stays reusable (no leak)',
+      );
+      expect(
+        conn.debugPendingCloseCount,
+        equals(1),
+        reason: 'the open cursor id is queued for the close-cursor piggyback',
+      );
 
       // The subscriber issues its next pull and gets the clear reclaim error.
       await expectLater(
@@ -587,8 +592,11 @@ void main() {
       await expectLater(
         rs.getRows(10),
         throwsA(
-          isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed),
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraConnectionClosed,
+          ),
         ),
       );
 
@@ -596,8 +604,7 @@ void main() {
       await conn.execute('SELECT 1 FROM dual');
     });
 
-    test(
-        'forceCloseOpenResultSet() default (execute-failure cleanup) keeps the '
+    test('forceCloseOpenResultSet() default (execute-failure cleanup) keeps the '
         'generic error — only the pool reclaim path marks reclaimed', () async {
       // forceCloseOpenResultSet() is also the generic "reap any leaked handles"
       // helper on the execute-failure cleanup path. Without reclaimedByPool it
@@ -1137,18 +1144,15 @@ void main() {
         ColumnMetadata(name: name, oracleType: oraTypeClob, maxLength: 0);
 
     _FakeResultSetTransport refCursorWithClob() => _FakeResultSetTransport(
-          firstBatch: ExecuteResponse(
-            isSuccess: true,
-            outBindValues: [
-              DecodedCursorResult(
-                columns: [clobCol('DOC')],
-                cursorId: 42,
-              ),
-            ],
-            outBindIndices: const [0],
-          ),
-          fetchBatches: const [],
-        );
+      firstBatch: ExecuteResponse(
+        isSuccess: true,
+        outBindValues: [
+          DecodedCursorResult(columns: [clobCol('DOC')], cursorId: 42),
+        ],
+        outBindIndices: const [0],
+      ),
+      fetchBatches: const [],
+    );
 
     test(
       'a CLOB column in a REF CURSOR OUT bind fails loud under fetchLobs: true',
@@ -1156,16 +1160,19 @@ void main() {
         final t = refCursorWithClob();
         final conn = OracleConnection.forTesting(transport: t);
         await expectLater(
-          conn.execute(
-            'BEGIN p(:1); END;',
-            [OracleBind.out(type: OracleDbType.cursor)],
-            const OracleExecuteOptions(fetchLobs: true),
+          conn.execute('BEGIN p(:1); END;', [
+            OracleBind.out(type: OracleDbType.cursor),
+          ], const OracleExecuteOptions(fetchLobs: true)),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having((e) => e.message, 'message', contains('REF CURSOR'))
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('cannot be decoded by this driver yet'),
+                ),
           ),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('REF CURSOR'))
-              .having((e) => e.message, 'message',
-                  contains('cannot be decoded by this driver yet'))),
         );
         // Rejected pre-wrap: no handle registered, and the REF cursor was never
         // handed back as an open result set — nothing wedges the connection.
@@ -1187,11 +1194,9 @@ void main() {
         final conn = OracleConnection.forTesting(transport: t);
         expect(conn.debugPendingCloseCount, equals(0));
         await expectLater(
-          conn.execute(
-            'BEGIN p(:1); END;',
-            [OracleBind.out(type: OracleDbType.cursor)],
-            const OracleExecuteOptions(fetchLobs: true),
-          ),
+          conn.execute('BEGIN p(:1); END;', [
+            OracleBind.out(type: OracleDbType.cursor),
+          ], const OracleExecuteOptions(fetchLobs: true)),
           throwsA(isA<OracleException>()),
         );
         expect(
@@ -1220,11 +1225,11 @@ void main() {
         ColumnMetadata(name: name, oracleType: oraTypeClob, maxLength: 0);
 
     LobLocator loc(int length) => LobLocator(
-          locator: Uint8List(tnsLobLocatorBufferSize),
-          oracleType: oraTypeClob,
-          length: length,
-          chunkSize: 0,
-        );
+      locator: Uint8List(tnsLobLocatorBufferSize),
+      oracleType: oraTypeClob,
+      length: length,
+      chunkSize: 0,
+    );
 
     ExecuteResponse lobBatch(
       List<List<Object?>> rows, {
@@ -1350,7 +1355,11 @@ void main() {
       await rs.close();
 
       // The four undelivered handles are gone; only the delivered one remains.
-      expect(conn.hasOpenLob, isTrue, reason: 'the delivered handle is still open');
+      expect(
+        conn.hasOpenLob,
+        isTrue,
+        reason: 'the delivered handle is still open',
+      );
       expect(delivered.isClosed, isFalse);
       await delivered.close();
       expect(conn.hasOpenLob, isFalse);
@@ -1376,8 +1385,11 @@ void main() {
       final rs = result.resultSet!;
       final delivered = (await rs.getRow())!['DOC']! as OracleLob;
       await rs.close();
-      expect(delivered.isClosed, isFalse,
-          reason: 'the reap must not touch a delivered handle');
+      expect(
+        delivered.isClosed,
+        isFalse,
+        reason: 'the reap must not touch a delivered handle',
+      );
       // It is still a live handle: length is readable and close() works.
       expect(delivered.length, equals(3));
       await delivered.close();
@@ -1406,8 +1418,11 @@ void main() {
       final rs = result.resultSet!;
       final delivered = (await rs.getRow())!['DOC']! as OracleLob;
       await rs.close();
-      expect(delivered.isClosed, isFalse,
-          reason: 'the aliased handle is the DELIVERED one; never reap it');
+      expect(
+        delivered.isClosed,
+        isFalse,
+        reason: 'the aliased handle is the DELIVERED one; never reap it',
+      );
       await delivered.close();
       t.firstBatch = ExecuteResponse(isSuccess: true);
       await conn.execute('SELECT 1 FROM dual');
@@ -1448,12 +1463,18 @@ void main() {
       // Pull row 2 (the carried alias) so the continuation FETCH happens and the
       // carried handle lands in the new batch.
       final second = (await rs.getRow())!['DOC']! as OracleLob;
-      expect(identical(first, second), isTrue,
-          reason: 'the sentinel carried the SAME handle object across batches');
+      expect(
+        identical(first, second),
+        isTrue,
+        reason: 'the sentinel carried the SAME handle object across batches',
+      );
       // Row 3 is still buffered and undelivered.
       await rs.close();
-      expect(first.isClosed, isFalse,
-          reason: 'a handle carried across the batch boundary was delivered');
+      expect(
+        first.isClosed,
+        isFalse,
+        reason: 'a handle carried across the batch boundary was delivered',
+      );
       await first.close();
       t.firstBatch = ExecuteResponse(isSuccess: true);
       await conn.execute('SELECT 1 FROM dual');
@@ -1542,76 +1563,94 @@ void main() {
       await first.close();
       // The two handles the failed batch wrapped are gone: nothing is left
       // holding the connection's in-flight slot.
-      expect(conn.hasOpenLob, isFalse,
-          reason: 'handles wrapped inside the failing materializeLobs call must '
-              'be reaped; otherwise the connection is wedged forever');
+      expect(
+        conn.hasOpenLob,
+        isFalse,
+        reason:
+            'handles wrapped inside the failing materializeLobs call must '
+            'be reaped; otherwise the connection is wedged forever',
+      );
       t.firstBatch = ExecuteResponse(isSuccess: true);
       await conn.execute('SELECT 1 FROM dual');
     });
 
-    test('closeLobs() reaches a streaming result set\'s BUFFERED handles',
-        () async {
-      final t = _FakeResultSetTransport(
-        firstBatch: lobBatch([
-          for (var i = 0; i < 4; i++) [i, loc(3)],
-        ], more: false),
-      );
-      final conn = OracleConnection.forTesting(transport: t);
-      final result = await conn.execute(
-        'SELECT id, doc FROM t',
-        null,
-        const OracleExecuteOptions(resultSet: true, fetchLobs: true),
-      );
-      final rs = result.resultSet!;
-      final delivered = (await rs.getRow())!['DOC']! as OracleLob;
-      // Three handles are still buffered; before Story 12.3 the walker could not
-      // see them at all and this returned 0.
-      final closed = await result.closeLobs();
-      expect(closed, equals(3));
-      expect(delivered.isClosed, isFalse,
-          reason: 'closeLobs sees only what the result still holds');
-      await delivered.close();
-      await rs.close();
-      expect(conn.hasOpenLob, isFalse);
-    });
+    test(
+      'closeLobs() reaches a streaming result set\'s BUFFERED handles',
+      () async {
+        final t = _FakeResultSetTransport(
+          firstBatch: lobBatch([
+            for (var i = 0; i < 4; i++) [i, loc(3)],
+          ], more: false),
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+        final result = await conn.execute(
+          'SELECT id, doc FROM t',
+          null,
+          const OracleExecuteOptions(resultSet: true, fetchLobs: true),
+        );
+        final rs = result.resultSet!;
+        final delivered = (await rs.getRow())!['DOC']! as OracleLob;
+        // Three handles are still buffered; before Story 12.3 the walker could not
+        // see them at all and this returned 0.
+        final closed = await result.closeLobs();
+        expect(closed, equals(3));
+        expect(
+          delivered.isClosed,
+          isFalse,
+          reason: 'closeLobs sees only what the result still holds',
+        );
+        await delivered.close();
+        await rs.close();
+        expect(conn.hasOpenLob, isFalse);
+      },
+    );
 
-    test('closeLobs() DOES close an already-delivered handle Oracle aliased into '
-        'a still-buffered row (documented consequence, unlike rs.close())',
-        () async {
-      // The duplicate-column shape from the reap test above, run through the
-      // bulk-close remedy instead: `bufferedLobHandles()` carries no delivered
-      // filter, so the ONE deduped handle is reachable while row 2 is still
-      // buffered — and closeLobs() closes it even though the caller holds it.
-      // rs.close() is the delivery-aware operation; this is the blunt one, and
-      // both dartdocs now say so.
-      final shared = loc(4);
-      final t = _FakeResultSetTransport(
-        firstBatch: lobBatch([
-          [1, shared],
-          [2, shared],
-        ], more: false),
-      );
-      final conn = OracleConnection.forTesting(transport: t);
-      final result = await conn.execute(
-        'SELECT id, doc FROM t',
-        null,
-        const OracleExecuteOptions(resultSet: true, fetchLobs: true),
-      );
-      final rs = result.resultSet!;
-      final delivered = (await rs.getRow())!['DOC']! as OracleLob;
-      expect(await result.closeLobs(), equals(1),
-          reason: 'the aliased handle is deduped to one');
-      expect(delivered.isClosed, isTrue,
-          reason: 'closeLobs() closes everything the result can reach, '
-              'including a delivered handle aliased into a buffered row');
-      // Idempotent and non-wedging all the same: closing again is a no-op and the
-      // connection is immediately reusable.
-      await delivered.close();
-      await rs.close();
-      expect(conn.hasOpenLob, isFalse);
-      t.firstBatch = ExecuteResponse(isSuccess: true);
-      await conn.execute('SELECT 1 FROM dual');
-    });
+    test(
+      'closeLobs() DOES close an already-delivered handle Oracle aliased into '
+      'a still-buffered row (documented consequence, unlike rs.close())',
+      () async {
+        // The duplicate-column shape from the reap test above, run through the
+        // bulk-close remedy instead: `bufferedLobHandles()` carries no delivered
+        // filter, so the ONE deduped handle is reachable while row 2 is still
+        // buffered — and closeLobs() closes it even though the caller holds it.
+        // rs.close() is the delivery-aware operation; this is the blunt one, and
+        // both dartdocs now say so.
+        final shared = loc(4);
+        final t = _FakeResultSetTransport(
+          firstBatch: lobBatch([
+            [1, shared],
+            [2, shared],
+          ], more: false),
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+        final result = await conn.execute(
+          'SELECT id, doc FROM t',
+          null,
+          const OracleExecuteOptions(resultSet: true, fetchLobs: true),
+        );
+        final rs = result.resultSet!;
+        final delivered = (await rs.getRow())!['DOC']! as OracleLob;
+        expect(
+          await result.closeLobs(),
+          equals(1),
+          reason: 'the aliased handle is deduped to one',
+        );
+        expect(
+          delivered.isClosed,
+          isTrue,
+          reason:
+              'closeLobs() closes everything the result can reach, '
+              'including a delivered handle aliased into a buffered row',
+        );
+        // Idempotent and non-wedging all the same: closing again is a no-op and the
+        // connection is immediately reusable.
+        await delivered.close();
+        await rs.close();
+        expect(conn.hasOpenLob, isFalse);
+        t.firstBatch = ExecuteResponse(isSuccess: true);
+        await conn.execute('SELECT 1 FROM dual');
+      },
+    );
 
     test('the reap is idempotent: rs.close() twice, plus closeLobs(), plus a '
         'caller close(), never double-frees or throws', () async {
@@ -1631,8 +1670,11 @@ void main() {
       final delivered = (await rs.getRow())!['DOC']! as OracleLob;
       await rs.close();
       await rs.close(); // no duplicate reap, no throw
-      expect(await result.closeLobs(), equals(1),
-          reason: 'only the delivered handle is still reachable');
+      expect(
+        await result.closeLobs(),
+        equals(1),
+        reason: 'only the delivered handle is still reachable',
+      );
       await delivered.close(); // already closed by closeLobs
       await delivered.close();
       expect(conn.hasOpenLob, isFalse);
@@ -1672,17 +1714,21 @@ void main() {
       // it, so the plain "is closed" detail is the accurate one.
       await expectLater(
         undelivered.single.read(),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-            .having((e) => e.message, 'message', contains('fetch a new one'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('fetch a new one')),
+        ),
       );
       // The DELIVERED handle the borrower still holds gets the clear
       // pool-reclaim error instead.
       await expectLater(
         delivered.read(),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)
-            .having((e) => e.message, 'message', contains('reclaimed'))),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)
+              .having((e) => e.message, 'message', contains('reclaimed')),
+        ),
       );
       expect(conn.hasOpenLob, isFalse);
     });
@@ -1714,11 +1760,19 @@ void main() {
           null,
           const OracleExecuteOptions(resultSet: true, fetchLobs: true),
         ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.message, 'message', contains('cursorId 0'))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('cursorId 0'),
+          ),
+        ),
       );
-      expect(conn.hasOpenLob, isFalse,
-          reason: 'first-batch handles must not be orphaned in _openLobs');
+      expect(
+        conn.hasOpenLob,
+        isFalse,
+        reason: 'first-batch handles must not be orphaned in _openLobs',
+      );
       expect(conn.hasOpenResultSet, isFalse);
       // The connection is immediately reusable.
       t.firstBatch = ExecuteResponse(isSuccess: true);
@@ -1742,16 +1796,26 @@ void main() {
       // With the result set open, execute() is rejected.
       await expectLater(
         conn.execute('SELECT 1 FROM dual'),
-        throwsA(isA<OracleException>()
-            .having((e) => e.message, 'message', contains('Concurrent'))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('Concurrent'),
+          ),
+        ),
       );
       final lob = (await rs.getRow())!['DOC']! as OracleLob;
       await rs.close();
       // The result set is gone but the DELIVERED handle still owns the slot.
       await expectLater(
         conn.execute('SELECT 1 FROM dual'),
-        throwsA(isA<OracleException>()
-            .having((e) => e.message, 'message', contains('OracleLob'))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('OracleLob'),
+          ),
+        ),
       );
       await lob.close();
       t.firstBatch = ExecuteResponse(isSuccess: true);

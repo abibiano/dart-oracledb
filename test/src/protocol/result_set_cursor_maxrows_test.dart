@@ -81,8 +81,9 @@ ExecuteResponse _batch(List<List<Object?>> rows, {required bool more}) =>
   return (cursor: cursor, transport: t);
 }
 
-List<List<Object?>> _rows(int from, int to) =>
-    [for (var i = from; i <= to; i++) <Object?>[i]];
+List<List<Object?>> _rows(int from, int to) => [
+  for (var i = from; i <= to; i++) <Object?>[i],
+];
 
 const _bigCap = 1000000;
 
@@ -96,42 +97,61 @@ void main() {
         firstBatchMore: true,
         fetchBatches: [_batch(_rows(11, 20), more: false)],
       );
-      final out =
-          await h.cursor.drainRemaining(maxFetchIterations: _bigCap, maxRows: 15);
+      final out = await h.cursor.drainRemaining(
+        maxFetchIterations: _bigCap,
+        maxRows: 15,
+      );
 
       expect(out.map((r) => r[0]), equals([for (var i = 1; i <= 15; i++) i]));
       expect(out, hasLength(15));
       expect(h.cursor.maxRowsCapped, isTrue);
-      expect(h.cursor.incompleteDrain, isFalse,
-          reason: 'a deliberate cap is not the safety backstop');
+      expect(
+        h.cursor.incompleteDrain,
+        isFalse,
+        reason: 'a deliberate cap is not the safety backstop',
+      );
     });
 
-    test('cap satisfied by the first batch issues ZERO continuation FETCH',
-        () async {
-      // First batch already holds 50 rows (server still has more); cap at 10.
-      final h = _cursor(firstBatch: _rows(1, 50), firstBatchMore: true);
-      final out =
-          await h.cursor.drainRemaining(maxFetchIterations: _bigCap, maxRows: 10);
+    test(
+      'cap satisfied by the first batch issues ZERO continuation FETCH',
+      () async {
+        // First batch already holds 50 rows (server still has more); cap at 10.
+        final h = _cursor(firstBatch: _rows(1, 50), firstBatchMore: true);
+        final out = await h.cursor.drainRemaining(
+          maxFetchIterations: _bigCap,
+          maxRows: 10,
+        );
 
-      expect(out, hasLength(10));
-      expect(out.map((r) => r[0]), equals([for (var i = 1; i <= 10; i++) i]));
-      expect(h.transport.fetchCalls, equals(0),
-          reason: 'never fetch past the cap (node-oracledb parity)');
-      expect(h.cursor.maxRowsCapped, isTrue);
-    });
+        expect(out, hasLength(10));
+        expect(out.map((r) => r[0]), equals([for (var i = 1; i <= 10; i++) i]));
+        expect(
+          h.transport.fetchCalls,
+          equals(0),
+          reason: 'never fetch past the cap (node-oracledb parity)',
+        );
+        expect(h.cursor.maxRowsCapped, isTrue);
+      },
+    );
 
-    test('cap exactly equal to the first batch size, more rows pending',
-        () async {
-      // Boundary: N == buffered count, but the server still has rows. Capped.
-      final h = _cursor(firstBatch: _rows(1, 10), firstBatchMore: true);
-      final out =
-          await h.cursor.drainRemaining(maxFetchIterations: _bigCap, maxRows: 10);
+    test(
+      'cap exactly equal to the first batch size, more rows pending',
+      () async {
+        // Boundary: N == buffered count, but the server still has rows. Capped.
+        final h = _cursor(firstBatch: _rows(1, 10), firstBatchMore: true);
+        final out = await h.cursor.drainRemaining(
+          maxFetchIterations: _bigCap,
+          maxRows: 10,
+        );
 
-      expect(out, hasLength(10));
-      expect(h.transport.fetchCalls, equals(0));
-      expect(h.cursor.maxRowsCapped, isTrue,
-          reason: 'rows remained server-side, so this is a cap');
-    });
+        expect(out, hasLength(10));
+        expect(h.transport.fetchCalls, equals(0));
+        expect(
+          h.cursor.maxRowsCapped,
+          isTrue,
+          reason: 'rows remained server-side, so this is a cap',
+        );
+      },
+    );
 
     test('cap >= total is a full drain, NOT a cap', () async {
       final h = _cursor(
@@ -139,12 +159,17 @@ void main() {
         firstBatchMore: true,
         fetchBatches: [_batch(_rows(11, 20), more: false)],
       );
-      final out =
-          await h.cursor.drainRemaining(maxFetchIterations: _bigCap, maxRows: 100);
+      final out = await h.cursor.drainRemaining(
+        maxFetchIterations: _bigCap,
+        maxRows: 100,
+      );
 
       expect(out, hasLength(20));
-      expect(h.cursor.maxRowsCapped, isFalse,
-          reason: 'the cap was never reached');
+      expect(
+        h.cursor.maxRowsCapped,
+        isFalse,
+        reason: 'the cap was never reached',
+      );
       expect(h.cursor.incompleteDrain, isFalse);
     });
 
@@ -161,24 +186,34 @@ void main() {
       expect(h.cursor.incompleteDrain, isFalse);
     });
 
-    test('single complete first batch larger than the cap is NOT trimmed here',
-        () async {
-      // When the first batch is the WHOLE result (no more rows) the SELECT path
-      // handles the single-batch trim in connection.dart, not drainRemaining:
-      // drainRemaining returns the full buffer untouched because there are no
-      // more rows to withhold via "stop fetching". This pins that contract so
-      // the connection-layer single-batch trim stays load-bearing.
-      final h = _cursor(firstBatch: _rows(1, 30), firstBatchMore: false);
-      final out =
-          await h.cursor.drainRemaining(maxFetchIterations: _bigCap, maxRows: 10);
+    test(
+      'single complete first batch larger than the cap is NOT trimmed here',
+      () async {
+        // When the first batch is the WHOLE result (no more rows) the SELECT path
+        // handles the single-batch trim in connection.dart, not drainRemaining:
+        // drainRemaining returns the full buffer untouched because there are no
+        // more rows to withhold via "stop fetching". This pins that contract so
+        // the connection-layer single-batch trim stays load-bearing.
+        final h = _cursor(firstBatch: _rows(1, 30), firstBatchMore: false);
+        final out = await h.cursor.drainRemaining(
+          maxFetchIterations: _bigCap,
+          maxRows: 10,
+        );
 
-      // serverHasMoreRows was false, so the cap branch that returns early on a
-      // longer buffer still trims to N (buffered rows are present locally).
-      expect(out, hasLength(10),
-          reason: 'a longer already-buffered batch is trimmed to N');
-      expect(h.transport.fetchCalls, equals(0));
-      expect(h.cursor.maxRowsCapped, isTrue,
-          reason: 'the buffer was longer than N, so the cap discarded rows');
-    });
+        // serverHasMoreRows was false, so the cap branch that returns early on a
+        // longer buffer still trims to N (buffered rows are present locally).
+        expect(
+          out,
+          hasLength(10),
+          reason: 'a longer already-buffered batch is trimmed to N',
+        );
+        expect(h.transport.fetchCalls, equals(0));
+        expect(
+          h.cursor.maxRowsCapped,
+          isTrue,
+          reason: 'the buffer was longer than N, so the cap discarded rows',
+        );
+      },
+    );
   });
 }

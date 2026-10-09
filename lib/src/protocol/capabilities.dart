@@ -54,13 +54,10 @@ class Capabilities {
   /// If [flags] is not provided, default client capabilities are used.
   /// If [protocolVersion] is not provided, uses default version.
   /// If [charset] is not provided, uses UTF-8.
-  Capabilities({
-    int? flags,
-    int? protocolVersion,
-    int? charset,
-  })  : flags = flags ?? defaultCapabilityFlags,
-        protocolVersion = protocolVersion ?? defaultProtocolVersion,
-        charset = charset ?? defaultCharset;
+  Capabilities({int? flags, int? protocolVersion, int? charset})
+    : flags = flags ?? defaultCapabilityFlags,
+      protocolVersion = protocolVersion ?? defaultProtocolVersion,
+      charset = charset ?? defaultCharset;
 
   /// The capability flags bitmap.
   final int flags;
@@ -113,7 +110,8 @@ class Capabilities {
       );
       throw OracleException(
         errorCode: oraMalformedPacket,
-        message: 'TTC protocol error: insufficient data for capabilities - '
+        message:
+            'TTC protocol error: insufficient data for capabilities - '
             'got ${data.length} bytes, need at least $_minCapabilitiesSize',
       );
     }
@@ -153,7 +151,8 @@ class Capabilities {
   }
 
   @override
-  String toString() => 'Capabilities('
+  String toString() =>
+      'Capabilities('
       'flags: 0x${flags.toRadixString(16)}, '
       'protocolVersion: $protocolVersion, '
       'charset: $charset)';

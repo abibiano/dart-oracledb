@@ -266,26 +266,28 @@ void main() {
       expect(tnsPacketMarker, isNot(equals(tnsPacketRefuse)));
     });
 
-    test('MARKER packet (type 12) is included in round-trip test for all types',
-        () {
-      final types = [
-        tnsPacketConnect,
-        tnsPacketAccept,
-        tnsPacketRefuse,
-        tnsPacketData,
-        tnsPacketResend,
-        tnsPacketMarker,
-      ];
+    test(
+      'MARKER packet (type 12) is included in round-trip test for all types',
+      () {
+        final types = [
+          tnsPacketConnect,
+          tnsPacketAccept,
+          tnsPacketRefuse,
+          tnsPacketData,
+          tnsPacketResend,
+          tnsPacketMarker,
+        ];
 
-      for (final type in types) {
-        final original = TnsPacket(
-          type: type,
-          payload: Uint8List.fromList([0xAB, 0xCD]),
-        );
-        final decoded = TnsPacket.decode(original.encode());
-        expect(decoded.type, equals(type), reason: 'Failed for type $type');
-      }
-    });
+        for (final type in types) {
+          final original = TnsPacket(
+            type: type,
+            payload: Uint8List.fromList([0xAB, 0xCD]),
+          );
+          final decoded = TnsPacket.decode(original.encode());
+          expect(decoded.type, equals(type), reason: 'Failed for type $type');
+        }
+      },
+    );
   });
 
   group('TnsPacketException', () {

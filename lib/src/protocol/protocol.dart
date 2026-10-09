@@ -59,9 +59,9 @@ enum ProtocolState {
 class TtcProtocol {
   /// Creates a new protocol orchestrator in disconnected state.
   TtcProtocol()
-      : _state = ProtocolState.disconnected,
-        _sequence = 0,
-        _capabilities = null;
+    : _state = ProtocolState.disconnected,
+      _sequence = 0,
+      _capabilities = null;
 
   ProtocolState _state;
   int _sequence;
@@ -152,18 +152,12 @@ class TtcProtocol {
 
   /// Creates a ping packet for connection health check.
   TtcPacket createPingPacket() {
-    return createPacket(
-      functionCode: ttcPing,
-      payload: Uint8List(0),
-    );
+    return createPacket(functionCode: ttcPing, payload: Uint8List(0));
   }
 
   /// Creates a close packet to terminate the connection.
   TtcPacket createClosePacket() {
-    return createPacket(
-      functionCode: ttcClose,
-      payload: Uint8List(0),
-    );
+    return createPacket(functionCode: ttcClose, payload: Uint8List(0));
   }
 
   /// Validates that a response matches the expected request.

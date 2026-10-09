@@ -102,11 +102,11 @@ class OracleResultSet {
     required ResultSetCursor cursor,
     required StatementCacheEntry? cacheEntry,
     required int cursorId,
-  })  : _connection = connection,
-        _cursor = cursor,
-        _cacheEntry = cacheEntry,
-        _cursorId = cursorId,
-        _rowBuilder = OracleRowBuilder(cursor.columns);
+  }) : _connection = connection,
+       _cursor = cursor,
+       _cacheEntry = cacheEntry,
+       _cursorId = cursorId,
+       _rowBuilder = OracleRowBuilder(cursor.columns);
 
   final OracleConnection _connection;
   final ResultSetCursor _cursor;
@@ -151,8 +151,9 @@ class OracleResultSet {
   /// Throws [OracleException] if the result set is closed or a FETCH fails.
   Future<OracleRow?> getRow() async {
     _ensureOpen();
-    final data =
-        await _connection.runResultSetFetch(() => _cursor.nextRowData());
+    final data = await _connection.runResultSetFetch(
+      () => _cursor.nextRowData(),
+    );
     if (data == null) return null;
     return _rowBuilder.build(data);
   }
@@ -178,8 +179,11 @@ class OracleResultSet {
             'rows',
       );
     }
-    final rows = await _connection.runResultSetFetch(() =>
-        count == null ? _cursor.nextAllRowsData() : _cursor.nextRowsData(count));
+    final rows = await _connection.runResultSetFetch(
+      () => count == null
+          ? _cursor.nextAllRowsData()
+          : _cursor.nextRowsData(count),
+    );
     return rows.map(_rowBuilder.build).toList();
   }
 

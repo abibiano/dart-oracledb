@@ -82,8 +82,7 @@ bool _isIdentStart(int c) {
 }
 
 /// True when [c] is SQL whitespace (space, tab, LF, CR).
-bool _isWhitespace(int c) =>
-    c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D;
+bool _isWhitespace(int c) => c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D;
 
 /// Matches [keyword] at [pos] in [sql] case-insensitively, requiring the
 /// next character to be a non-identifier char or end-of-string (word boundary).
@@ -222,7 +221,7 @@ const List<String> _cteVerbs = [
   'INSERT',
   'UPDATE',
   'DELETE',
-  'MERGE'
+  'MERGE',
 ];
 
 /// Scans past a `WITH` CTE header to locate the terminal statement verb.

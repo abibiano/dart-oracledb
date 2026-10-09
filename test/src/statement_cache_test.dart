@@ -33,8 +33,10 @@ void main() {
       });
 
       test('rejects maxSize one above the cap with ArgumentError', () {
-        expect(() => StatementCache(maxStatementCacheSize + 1),
-            throwsArgumentError);
+        expect(
+          () => StatementCache(maxStatementCacheSize + 1),
+          throwsArgumentError,
+        );
       });
 
       test('rejects pathological maxSize (1 << 31) with ArgumentError', () {
@@ -50,16 +52,20 @@ void main() {
 
       test('returns null when caching is disabled', () {
         final cache = StatementCache(0);
-        final entry =
-            StatementCacheEntry(key: _k('SELECT 1 FROM dual'), cursorId: 5);
+        final entry = StatementCacheEntry(
+          key: _k('SELECT 1 FROM dual'),
+          cursorId: 5,
+        );
         cache.store(entry);
         expect(cache.acquire(_k('SELECT 1 FROM dual')), isNull);
       });
 
       test('hit after store returns the entry and marks it inUse', () {
         final cache = StatementCache(10);
-        final entry =
-            StatementCacheEntry(key: _k('SELECT 1 FROM dual'), cursorId: 5);
+        final entry = StatementCacheEntry(
+          key: _k('SELECT 1 FROM dual'),
+          cursorId: 5,
+        );
         cache.store(entry);
 
         final hit = cache.acquire(_k('SELECT 1 FROM dual'));
@@ -70,8 +76,10 @@ void main() {
 
       test('second acquire returns null while entry is inUse', () {
         final cache = StatementCache(10);
-        final entry =
-            StatementCacheEntry(key: _k('SELECT 1 FROM dual'), cursorId: 5);
+        final entry = StatementCacheEntry(
+          key: _k('SELECT 1 FROM dual'),
+          cursorId: 5,
+        );
         cache.store(entry);
 
         cache.acquire(_k('SELECT 1 FROM dual')); // first acquirer holds it
@@ -80,8 +88,10 @@ void main() {
 
       test('acquire available again after release', () {
         final cache = StatementCache(10);
-        final entry =
-            StatementCacheEntry(key: _k('SELECT 1 FROM dual'), cursorId: 5);
+        final entry = StatementCacheEntry(
+          key: _k('SELECT 1 FROM dual'),
+          cursorId: 5,
+        );
         cache.store(entry);
 
         final held = cache.acquire(_k('SELECT 1 FROM dual'))!;
@@ -101,8 +111,10 @@ void main() {
 
       test('exact SQL string is part of the cache key (whitespace = miss)', () {
         final cache = StatementCache(10);
-        final entry =
-            StatementCacheEntry(key: _k('SELECT 1 FROM dual'), cursorId: 7);
+        final entry = StatementCacheEntry(
+          key: _k('SELECT 1 FROM dual'),
+          cursorId: 7,
+        );
         cache.store(entry);
 
         expect(cache.acquire(_k('SELECT  1 FROM dual')), isNull);
@@ -114,11 +126,11 @@ void main() {
     // The bind signature participates in cache identity.
     group('bind-signature keys', () {
       StatementCacheKey numberKey(String sql) => StatementCacheKey(sql, const [
-            BindSlotSignature(oraType: 2, dir: BindDir.input), // NUMBER
-          ]);
+        BindSlotSignature(oraType: 2, dir: BindDir.input), // NUMBER
+      ]);
       StatementCacheKey varcharKey(String sql) => StatementCacheKey(sql, const [
-            BindSlotSignature(oraType: 1, dir: BindDir.input), // VARCHAR2
-          ]);
+        BindSlotSignature(oraType: 1, dir: BindDir.input), // VARCHAR2
+      ]);
 
       test('same SQL with different bind signatures are separate entries', () {
         final cache = StatementCache(10);
@@ -126,8 +138,11 @@ void main() {
         cache.store(StatementCacheEntry(key: numberKey(sql), cursorId: 11));
         cache.store(StatementCacheEntry(key: varcharKey(sql), cursorId: 22));
 
-        expect(cache.size, equals(2),
-            reason: 'distinct signatures must not collide on SQL text alone');
+        expect(
+          cache.size,
+          equals(2),
+          reason: 'distinct signatures must not collide on SQL text alone',
+        );
 
         final numberHit = cache.acquire(numberKey(sql));
         final varcharHit = cache.acquire(varcharKey(sql));
@@ -146,22 +161,27 @@ void main() {
 
       test('bind direction is part of the signature', () {
         const sql = 'BEGIN :1 := 1; END;'; // shape only — testing key identity
-        final inKey = StatementCacheKey(
-            sql, const [BindSlotSignature(oraType: 2, dir: BindDir.input)]);
-        final outKey = StatementCacheKey(
-            sql, const [BindSlotSignature(oraType: 2, dir: BindDir.output)]);
+        final inKey = StatementCacheKey(sql, const [
+          BindSlotSignature(oraType: 2, dir: BindDir.input),
+        ]);
+        final outKey = StatementCacheKey(sql, const [
+          BindSlotSignature(oraType: 2, dir: BindDir.output),
+        ]);
         expect(inKey == outKey, isFalse);
-        expect(inKey.hashCode == outKey.hashCode, isFalse,
-            reason: 'distinct directions should (practically) differ in hash');
+        expect(
+          inKey.hashCode == outKey.hashCode,
+          isFalse,
+          reason: 'distinct directions should (practically) differ in hash',
+        );
       });
 
       test('declared max size participates in the signature', () {
         const sql = 'SELECT :1 FROM DUAL';
         final small = StatementCacheKey(sql, const [
-          BindSlotSignature(oraType: 1, dir: BindDir.input, maxSize: 10)
+          BindSlotSignature(oraType: 1, dir: BindDir.input, maxSize: 10),
         ]);
         final large = StatementCacheKey(sql, const [
-          BindSlotSignature(oraType: 1, dir: BindDir.input, maxSize: 4000)
+          BindSlotSignature(oraType: 1, dir: BindDir.input, maxSize: 4000),
         ]);
         expect(small == large, isFalse);
       });
@@ -174,47 +194,56 @@ void main() {
         expect(a.hashCode, equals(b.hashCode));
       });
 
-      test(
-          'LRU eviction stays deterministic across signatures, cursor queued '
+      test('LRU eviction stays deterministic across signatures, cursor queued '
           'exactly once', () {
         final cache = StatementCache(2);
         const sql = 'SELECT :1 FROM DUAL';
         cache.store(StatementCacheEntry(key: numberKey(sql), cursorId: 1));
         cache.store(StatementCacheEntry(key: varcharKey(sql), cursorId: 2));
         // Third distinct signature evicts the LRU (number, cursorId 1).
-        final thirdKey = StatementCacheKey(sql,
-            const [BindSlotSignature(oraType: 12, dir: BindDir.input)]); // DATE
+        final thirdKey = StatementCacheKey(sql, const [
+          BindSlotSignature(oraType: 12, dir: BindDir.input),
+        ]); // DATE
         cache.store(StatementCacheEntry(key: thirdKey, cursorId: 3));
 
         expect(cache.size, equals(2));
         expect(cache.acquire(numberKey(sql)), isNull, reason: 'number evicted');
         final toClose = cache.drainCursorsToClose();
-        expect(toClose, equals([1]),
-            reason: 'evicted cursor queued exactly once');
+        expect(
+          toClose,
+          equals([1]),
+          reason: 'evicted cursor queued exactly once',
+        );
       });
     });
 
     group('LRU recency refresh', () {
-      test('acquire refreshes recency — later-used entry survives eviction',
-          () {
-        final cache = StatementCache(2);
-        final e1 = StatementCacheEntry(key: _k('A'), cursorId: 1);
-        final e2 = StatementCacheEntry(key: _k('B'), cursorId: 2);
-        cache.store(e1);
-        cache.store(e2);
+      test(
+        'acquire refreshes recency — later-used entry survives eviction',
+        () {
+          final cache = StatementCache(2);
+          final e1 = StatementCacheEntry(key: _k('A'), cursorId: 1);
+          final e2 = StatementCacheEntry(key: _k('B'), cursorId: 2);
+          cache.store(e1);
+          cache.store(e2);
 
-        // Acquire A to refresh it to most-recently-used.
-        final held = cache.acquire(_k('A'))!;
-        cache.release(held);
+          // Acquire A to refresh it to most-recently-used.
+          final held = cache.acquire(_k('A'))!;
+          cache.release(held);
 
-        // Add C — should evict B (LRU), not A.
-        final e3 = StatementCacheEntry(key: _k('C'), cursorId: 3);
-        cache.store(e3);
+          // Add C — should evict B (LRU), not A.
+          final e3 = StatementCacheEntry(key: _k('C'), cursorId: 3);
+          cache.store(e3);
 
-        expect(cache.acquire(_k('A')), isNotNull, reason: 'A should survive');
-        expect(cache.acquire(_k('B')), isNull, reason: 'B should be evicted');
-        expect(cache.acquire(_k('C')), isNotNull, reason: 'C should be cached');
-      });
+          expect(cache.acquire(_k('A')), isNotNull, reason: 'A should survive');
+          expect(cache.acquire(_k('B')), isNull, reason: 'B should be evicted');
+          expect(
+            cache.acquire(_k('C')),
+            isNotNull,
+            reason: 'C should be cached',
+          );
+        },
+      );
     });
 
     group('LRU eviction order', () {
@@ -274,55 +303,83 @@ void main() {
     // must never have its server cursor closed out from under its owner by an
     // LRU eviction. The cursor close is deferred until the owner releases it.
     group('in-use LRU eviction safety (AC2)', () {
-      test('evicting an in-use entry defers its close and clears returnToCache',
-          () {
-        final cache = StatementCache(1);
-        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 10));
-        final held = cache.acquire(_k('A'))!; // A is now in-use
-        expect(held.inUse, isTrue);
-        expect(held.returnToCache, isTrue);
+      test(
+        'evicting an in-use entry defers its close and clears returnToCache',
+        () {
+          final cache = StatementCache(1);
+          cache.store(StatementCacheEntry(key: _k('A'), cursorId: 10));
+          final held = cache.acquire(_k('A'))!; // A is now in-use
+          expect(held.inUse, isTrue);
+          expect(held.returnToCache, isTrue);
 
-        // Storing B exceeds maxSize (1) and evicts A — but A is in-use, so its
-        // cursor must NOT be queued for close yet.
-        cache.store(StatementCacheEntry(key: _k('B'), cursorId: 20));
-        expect(held.returnToCache, isFalse,
-            reason: 'an evicted in-use entry is marked not-to-cache');
-        expect(cache.drainCursorsToClose(), isEmpty,
-            reason: 'the in-use cursor is not queued until its owner releases');
-        expect(cache.acquire(_k('A')), isNull,
-            reason: 'the evicted entry is no longer acquireable');
+          // Storing B exceeds maxSize (1) and evicts A — but A is in-use, so its
+          // cursor must NOT be queued for close yet.
+          cache.store(StatementCacheEntry(key: _k('B'), cursorId: 20));
+          expect(
+            held.returnToCache,
+            isFalse,
+            reason: 'an evicted in-use entry is marked not-to-cache',
+          );
+          expect(
+            cache.drainCursorsToClose(),
+            isEmpty,
+            reason: 'the in-use cursor is not queued until its owner releases',
+          );
+          expect(
+            cache.acquire(_k('A')),
+            isNull,
+            reason: 'the evicted entry is no longer acquireable',
+          );
 
-        // When the owner finally releases, the cursor is queued exactly once.
-        cache.release(held);
-        expect(held.inUse, isFalse);
-        expect(cache.drainCursorsToClose(), equals([10]),
-            reason: 'release queues the deferred cursor id exactly once');
-      });
+          // When the owner finally releases, the cursor is queued exactly once.
+          cache.release(held);
+          expect(held.inUse, isFalse);
+          expect(
+            cache.drainCursorsToClose(),
+            equals([10]),
+            reason: 'release queues the deferred cursor id exactly once',
+          );
+        },
+      );
 
-      test('a not-in-use entry evicted by the same store is queued immediately',
-          () {
-        final cache = StatementCache(1);
-        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 10));
-        final held = cache.acquire(_k('A'))!;
-        cache.release(held); // A back in cache, no longer in use
+      test(
+        'a not-in-use entry evicted by the same store is queued immediately',
+        () {
+          final cache = StatementCache(1);
+          cache.store(StatementCacheEntry(key: _k('A'), cursorId: 10));
+          final held = cache.acquire(_k('A'))!;
+          cache.release(held); // A back in cache, no longer in use
 
-        cache.store(StatementCacheEntry(key: _k('B'), cursorId: 20)); // evicts A
-        expect(cache.drainCursorsToClose(), equals([10]),
-            reason: 'a not-in-use evicted cursor is queued immediately');
-      });
+          cache.store(
+            StatementCacheEntry(key: _k('B'), cursorId: 20),
+          ); // evicts A
+          expect(
+            cache.drainCursorsToClose(),
+            equals([10]),
+            reason: 'a not-in-use evicted cursor is queued immediately',
+          );
+        },
+      );
 
-      test('release of an in-use-evicted entry never double-queues its cursor',
-          () {
-        final cache = StatementCache(1);
-        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 10));
-        final held = cache.acquire(_k('A'))!;
-        cache.store(StatementCacheEntry(key: _k('B'), cursorId: 20)); // evicts A
-        cache.release(held);
+      test(
+        'release of an in-use-evicted entry never double-queues its cursor',
+        () {
+          final cache = StatementCache(1);
+          cache.store(StatementCacheEntry(key: _k('A'), cursorId: 10));
+          final held = cache.acquire(_k('A'))!;
+          cache.store(
+            StatementCacheEntry(key: _k('B'), cursorId: 20),
+          ); // evicts A
+          cache.release(held);
 
-        expect(cache.drainCursorsToClose(), equals([10]));
-        expect(cache.drainCursorsToClose(), isEmpty,
-            reason: 'the deferred cursor id is queued exactly once');
-      });
+          expect(cache.drainCursorsToClose(), equals([10]));
+          expect(
+            cache.drainCursorsToClose(),
+            isEmpty,
+            reason: 'the deferred cursor id is queued exactly once',
+          );
+        },
+      );
     });
 
     group('invalidate', () {
@@ -357,8 +414,7 @@ void main() {
     // and E2/E3 (invalidateEntry). Each contrasts the old buggy primitive with
     // the fix so the leak is demonstrated, not just the corrected behaviour.
     group('identity-safe cursor reclamation (E2/E3/E4)', () {
-      test(
-          'E4: release of a stale in-use-evicted entry reaps its own cursor and '
+      test('E4: release of a stale in-use-evicted entry reaps its own cursor and '
           'leaves a newer same-key entry intact', () {
         final cache = StatementCache(10);
         final stale = StatementCacheEntry(key: _k('A'), cursorId: 10);
@@ -376,8 +432,11 @@ void main() {
         // ...and the newer live entry survives. Before the identity guard,
         // release() removed it by key and leaked its cursor (20).
         final live = cache.acquire(_k('A'));
-        expect(live, isNotNull,
-            reason: 'newer same-key entry must survive release of the stale one');
+        expect(
+          live,
+          isNotNull,
+          reason: 'newer same-key entry must survive release of the stale one',
+        );
         expect(live!.cursorId, equals(20));
       });
 
@@ -388,10 +447,16 @@ void main() {
         buggy.store(StatementCacheEntry(key: _k('A'), cursorId: 10)); // stale
         buggy.store(StatementCacheEntry(key: _k('A'), cursorId: 20)); // newer
         buggy.invalidate(_k('A'));
-        expect(buggy.acquire(_k('A')), isNull,
-            reason: 'demonstrates E2: invalidate(key) evicts the newer entry');
-        expect(buggy.drainCursorsToClose(), equals([20]),
-            reason: 'and queues the WRONG (newer) cursor');
+        expect(
+          buggy.acquire(_k('A')),
+          isNull,
+          reason: 'demonstrates E2: invalidate(key) evicts the newer entry',
+        );
+        expect(
+          buggy.drainCursorsToClose(),
+          equals([20]),
+          reason: 'and queues the WRONG (newer) cursor',
+        );
 
         // Fixed path: invalidateEntry reaps the held entry by identity.
         final fixed = StatementCache(10);
@@ -399,40 +464,55 @@ void main() {
         fixed.store(stale);
         fixed.store(StatementCacheEntry(key: _k('A'), cursorId: 20)); // newer
         fixed.invalidateEntry(stale);
-        expect(fixed.drainCursorsToClose(), equals([10]),
-            reason: 'the held cursor is reaped by its own id');
+        expect(
+          fixed.drainCursorsToClose(),
+          equals([10]),
+          reason: 'the held cursor is reaped by its own id',
+        );
         final live = fixed.acquire(_k('A'));
-        expect(live, isNotNull,
-            reason: 'invalidateEntry must not drop a newer same-key entry');
+        expect(
+          live,
+          isNotNull,
+          reason: 'invalidateEntry must not drop a newer same-key entry',
+        );
         expect(live!.cursorId, equals(20));
       });
 
-      test('E3: invalidateEntry reaps the held cursor after closeAll removed it',
-          () {
-        // Buggy path: invalidate(key) after closeAll is a silent no-op — leak.
-        final buggy = StatementCache(10);
-        final a = StatementCacheEntry(key: _k('A'), cursorId: 10);
-        buggy.store(a);
-        buggy.acquire(_k('A')); // inUse → closeAll defers its close to release
-        buggy.closeAll();
-        buggy.invalidate(_k('A')); // entry already gone → no-op
-        expect(buggy.drainCursorsToClose(), isEmpty,
-            reason: 'demonstrates E3: invalidate(key) reaps nothing → leak');
-
-        // Fixed path: invalidateEntry queues the held cursor by its own id.
-        final fixed = StatementCache(10);
-        final held = StatementCacheEntry(key: _k('A'), cursorId: 10);
-        fixed.store(held);
-        fixed.acquire(_k('A'));
-        fixed.closeAll();
-        expect(fixed.pendingCloseCount, equals(0));
-        fixed.invalidateEntry(held);
-        expect(fixed.drainCursorsToClose(), equals([10]),
-            reason: 'invalidateEntry reaps the held cursor even when gone');
-      });
-
       test(
-          'invalidateEntry on the current entry removes it and queues '
+        'E3: invalidateEntry reaps the held cursor after closeAll removed it',
+        () {
+          // Buggy path: invalidate(key) after closeAll is a silent no-op — leak.
+          final buggy = StatementCache(10);
+          final a = StatementCacheEntry(key: _k('A'), cursorId: 10);
+          buggy.store(a);
+          buggy.acquire(
+            _k('A'),
+          ); // inUse → closeAll defers its close to release
+          buggy.closeAll();
+          buggy.invalidate(_k('A')); // entry already gone → no-op
+          expect(
+            buggy.drainCursorsToClose(),
+            isEmpty,
+            reason: 'demonstrates E3: invalidate(key) reaps nothing → leak',
+          );
+
+          // Fixed path: invalidateEntry queues the held cursor by its own id.
+          final fixed = StatementCache(10);
+          final held = StatementCacheEntry(key: _k('A'), cursorId: 10);
+          fixed.store(held);
+          fixed.acquire(_k('A'));
+          fixed.closeAll();
+          expect(fixed.pendingCloseCount, equals(0));
+          fixed.invalidateEntry(held);
+          expect(
+            fixed.drainCursorsToClose(),
+            equals([10]),
+            reason: 'invalidateEntry reaps the held cursor even when gone',
+          );
+        },
+      );
+
+      test('invalidateEntry on the current entry removes it and queues '
           '(regression)', () {
         final cache = StatementCache(10);
         final entry = StatementCacheEntry(key: _k('A'), cursorId: 10);
@@ -440,8 +520,11 @@ void main() {
 
         cache.invalidateEntry(entry);
 
-        expect(cache.acquire(_k('A')), isNull,
-            reason: 'the current entry is removed from the cache');
+        expect(
+          cache.acquire(_k('A')),
+          isNull,
+          reason: 'the current entry is removed from the cache',
+        );
         expect(cache.drainCursorsToClose(), equals([10]));
       });
     });
@@ -462,19 +545,24 @@ void main() {
         expect(cache.acquire(_k('C')), isNotNull);
       });
 
-      test('inUse entry is dropped but its cursor is queued on later release',
-          () {
-        final cache = StatementCache(10);
-        cache.store(StatementCacheEntry(key: _k('A'), cursorId: 5));
-        final held = cache.acquire(_k('A'))!; // mark inUse
+      test(
+        'inUse entry is dropped but its cursor is queued on later release',
+        () {
+          final cache = StatementCache(10);
+          cache.store(StatementCacheEntry(key: _k('A'), cursorId: 5));
+          final held = cache.acquire(_k('A'))!; // mark inUse
 
-        cache.invalidateAll();
-        expect(cache.drainCursorsToClose(), isNot(contains(5)),
-            reason: 'in-use cursor not queued until released');
+          cache.invalidateAll();
+          expect(
+            cache.drainCursorsToClose(),
+            isNot(contains(5)),
+            reason: 'in-use cursor not queued until released',
+          );
 
-        cache.release(held); // returnToCache was cleared → queue now
-        expect(cache.drainCursorsToClose(), contains(5));
-      });
+          cache.release(held); // returnToCache was cleared → queue now
+          expect(cache.drainCursorsToClose(), contains(5));
+        },
+      );
 
       test('no stale in-use entry remains acquireable after invalidateAll', () {
         // AC6: invalidateAll drops in-use entries from the map immediately, so a
@@ -483,8 +571,11 @@ void main() {
         cache.store(StatementCacheEntry(key: _k('A'), cursorId: 5));
         cache.acquire(_k('A')); // mark in-use
         cache.invalidateAll();
-        expect(cache.acquire(_k('A')), isNull,
-            reason: 'an invalidated in-use entry is no longer acquireable');
+        expect(
+          cache.acquire(_k('A')),
+          isNull,
+          reason: 'an invalidated in-use entry is no longer acquireable',
+        );
       });
     });
 

@@ -76,12 +76,12 @@ class BindSlotSignature {
 class StatementCacheKey {
   /// Creates a cache key for [sql] with the given ordered [bindSignature].
   StatementCacheKey(this.sql, List<BindSlotSignature> bindSignature)
-      : bindSignature = List<BindSlotSignature>.unmodifiable(bindSignature),
-        _hash = Object.hash(sql, Object.hashAll(bindSignature));
+    : bindSignature = List<BindSlotSignature>.unmodifiable(bindSignature),
+      _hash = Object.hash(sql, Object.hashAll(bindSignature));
 
   /// Convenience key for a statement with no binds.
   StatementCacheKey.noBinds(String sql)
-      : this(sql, const <BindSlotSignature>[]);
+    : this(sql, const <BindSlotSignature>[]);
 
   /// Exact SQL text (never normalized).
   final String sql;
@@ -168,8 +168,11 @@ class StatementCache {
       throw ArgumentError.value(maxSize, 'maxSize', 'must be >= 0');
     }
     if (maxSize > maxStatementCacheSize) {
-      throw ArgumentError.value(maxSize, 'maxSize',
-          'must be <= $maxStatementCacheSize (the maximum statement cache size)');
+      throw ArgumentError.value(
+        maxSize,
+        'maxSize',
+        'must be <= $maxStatementCacheSize (the maximum statement cache size)',
+      );
     }
     return maxSize;
   }

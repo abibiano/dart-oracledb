@@ -32,11 +32,13 @@ Future<bool> _serverAdvertisesFastAuth() async {
   final transport = Transport();
   try {
     await transport.connect(testHost, testPort);
-    final descriptor = '(DESCRIPTION='
+    final descriptor =
+        '(DESCRIPTION='
         '(ADDRESS=(PROTOCOL=TCP)(HOST=$testHost)(PORT=$testPort))'
         '(CONNECT_DATA=(SERVICE_NAME=$testService)))';
-    final connectData =
-        buildConnectPacketBody(Uint8List.fromList(utf8.encode(descriptor)));
+    final connectData = buildConnectPacketBody(
+      Uint8List.fromList(utf8.encode(descriptor)),
+    );
     await transport.sendConnectReceiveAccept(connectData);
     return transport.supportsFastAuth;
   } finally {
@@ -60,21 +62,27 @@ void main() {
     test('connects with valid credentials on pre-23 server', () async {
       if (fastAuthAdvertised) {
         markTestSkipped(
-            'Skipping classical auth test — server advertises FAST_AUTH');
+          'Skipping classical auth test — server advertises FAST_AUTH',
+        );
         return;
       }
 
       final probeTransport = Transport();
       try {
         await probeTransport.connect(testHost, testPort);
-        final descriptor = '(DESCRIPTION='
+        final descriptor =
+            '(DESCRIPTION='
             '(ADDRESS=(PROTOCOL=TCP)(HOST=$testHost)(PORT=$testPort))'
             '(CONNECT_DATA=(SERVICE_NAME=$testService)))';
-        final connectData =
-            buildConnectPacketBody(Uint8List.fromList(utf8.encode(descriptor)));
+        final connectData = buildConnectPacketBody(
+          Uint8List.fromList(utf8.encode(descriptor)),
+        );
         await probeTransport.sendConnectReceiveAccept(connectData);
-        expect(probeTransport.supportsFastAuth, isFalse,
-            reason: 'Pre-23 server must not advertise FAST_AUTH for this test');
+        expect(
+          probeTransport.supportsFastAuth,
+          isFalse,
+          reason: 'Pre-23 server must not advertise FAST_AUTH for this test',
+        );
       } finally {
         await probeTransport.disconnect();
       }
@@ -91,7 +99,8 @@ void main() {
     test('wrong password on pre-23 yields oraInvalidCredentials', () async {
       if (fastAuthAdvertised) {
         markTestSkipped(
-            'Skipping classical auth test — server advertises FAST_AUTH');
+          'Skipping classical auth test — server advertises FAST_AUTH',
+        );
         return;
       }
 

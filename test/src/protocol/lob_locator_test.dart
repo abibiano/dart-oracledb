@@ -21,12 +21,12 @@ Uint8List _locatorBytes([Map<int, int> mutations = const <int, int>{}]) {
 }
 
 LobLocator _clobFrom(Uint8List bytes, {bool isTemporary = false}) => LobLocator(
-      locator: bytes,
-      oracleType: oraTypeClob,
-      length: 0,
-      chunkSize: 0,
-      isTemporary: isTemporary,
-    );
+  locator: bytes,
+  oracleType: oraTypeClob,
+  length: 0,
+  chunkSize: 0,
+  isTemporary: isTemporary,
+);
 
 void main() {
   group('LobLocator.isTemporary flag decode', () {

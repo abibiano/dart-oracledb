@@ -22,11 +22,7 @@ void main() {
         throwsA(
           isA<OracleException>()
               .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having(
-                (e) => e.message,
-                'message',
-                contains('not connected'),
-              ),
+              .having((e) => e.message, 'message', contains('not connected')),
         ),
       );
     });

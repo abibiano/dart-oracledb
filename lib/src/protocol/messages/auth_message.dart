@@ -221,9 +221,11 @@ class AuthPhaseOneResponse {
       final numParams = buffer.readUB2();
       _log.fine('Number of parameters: $numParams');
       _log.fine(
-          'Buffer position after numParams: ${buffer.position}, remaining: ${buffer.remaining}');
+        'Buffer position after numParams: ${buffer.position}, remaining: ${buffer.remaining}',
+      );
       _log.fine(
-          'First 32 bytes of buffer: ${_bytesToHex(data.sublist(0, data.length > 32 ? 32 : data.length))}');
+        'First 32 bytes of buffer: ${_bytesToHex(data.sublist(0, data.length > 32 ? 32 : data.length))}',
+      );
 
       for (var i = 0; i < numParams; i++) {
         _log.fine('Processing parameter $i of $numParams');
@@ -252,7 +254,8 @@ class AuthPhaseOneResponse {
 
         sessionData[key] = value;
         _log.fine(
-            'Session param: $key = ${value.length > 50 ? '${value.substring(0, 50)}...' : value}');
+          'Session param: $key = ${value.length > 50 ? '${value.substring(0, 50)}...' : value}',
+        );
       }
     } else if (msgType == ttcMsgTypeError) {
       // Fail loud. A TTC ERROR during AUTH_PHASE_ONE carries a real Oracle
@@ -285,13 +288,15 @@ class AuthPhaseOneResponse {
     // DEBUG: Log entire sessionData map
     _log.fine('sessionData keys: ${sessionData.keys.toList()}');
     _log.fine(
-        'sessionData entries: ${sessionData.entries.map((e) => '${e.key}=${e.value.length}b').toList()}');
+      'sessionData entries: ${sessionData.entries.map((e) => '${e.key}=${e.value.length}b').toList()}',
+    );
 
     // Parse AUTH_VFR_DATA which contains salt and iterations
     final vfrData = sessionData['AUTH_VFR_DATA'] ?? '';
     final serverNonceHex = sessionData['AUTH_SESSKEY'] ?? '';
     _log.fine(
-        'vfrData length: ${vfrData.length}, serverNonceHex length: ${serverNonceHex.length}');
+      'vfrData length: ${vfrData.length}, serverNonceHex length: ${serverNonceHex.length}',
+    );
 
     // Decode hex-encoded salt from AUTH_VFR_DATA
     Uint8List salt;
@@ -309,7 +314,8 @@ class AuthPhaseOneResponse {
         }
         // Iterations might be encoded after salt
         if (vfrBytes.length >= 20) {
-          iterations = (vfrBytes[16] << 24) |
+          iterations =
+              (vfrBytes[16] << 24) |
               (vfrBytes[17] << 16) |
               (vfrBytes[18] << 8) |
               vfrBytes[19];
@@ -491,10 +497,14 @@ class AuthPhaseTwoRequest {
     // Primary client charset: AL32UTF8/UTF-8 (ttcCharsetUtf8). The server
     // converts to/from its database charset; no client-side codec is selected.
     buffer.writeKeyValue('SESSION_CLIENT_CHARSET', ttcCharsetUtf8.toString());
-    buffer.writeKeyValue('SESSION_CLIENT_DRIVER_NAME',
-        'dart-oracledb : 0.1.0 thn'); // Match node-oracledb format
-    buffer.writeKeyValue('SESSION_CLIENT_VERSION',
-        '111149056'); // Oracle 11.1 client version format
+    buffer.writeKeyValue(
+      'SESSION_CLIENT_DRIVER_NAME',
+      'dart-oracledb : 0.1.0 thn',
+    ); // Match node-oracledb format
+    buffer.writeKeyValue(
+      'SESSION_CLIENT_VERSION',
+      '111149056',
+    ); // Oracle 11.1 client version format
 
     // Timezone alter session
     final tzStatement = _getAlterTimezoneStatement();

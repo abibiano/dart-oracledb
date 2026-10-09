@@ -168,6 +168,5 @@ class OracleBatchError {
   }
 
   @override
-  String toString() =>
-      'OracleBatchError(row $offset): $code: $message';
+  String toString() => 'OracleBatchError(row $offset): $code: $message';
 }

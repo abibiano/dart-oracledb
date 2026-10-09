@@ -26,8 +26,11 @@ void main() {
       test('throws on connection to invalid port', () async {
         final transport = Transport();
         expect(
-          () => transport.connect('127.0.0.1', 59999,
-              timeout: const Duration(seconds: 1)),
+          () => transport.connect(
+            '127.0.0.1',
+            59999,
+            timeout: const Duration(seconds: 1),
+          ),
           throwsException,
         );
       });
@@ -123,21 +126,19 @@ void main() {
         final transport = Transport();
         final header = Uint8List.fromList([0x00]); // Only 1 byte
 
-        expect(
-          () => transport.readPacketLength(header),
-          throwsException,
-        );
+        expect(() => transport.readPacketLength(header), throwsException);
       });
 
       test('readPacketType throws on header too short', () {
         final transport = Transport();
-        final header =
-            Uint8List.fromList([0x00, 0x08, 0x00, 0x00]); // Only 4 bytes
+        final header = Uint8List.fromList([
+          0x00,
+          0x08,
+          0x00,
+          0x00,
+        ]); // Only 4 bytes
 
-        expect(
-          () => transport.readPacketType(header),
-          throwsException,
-        );
+        expect(() => transport.readPacketType(header), throwsException);
       });
     });
 
@@ -157,17 +158,23 @@ void main() {
       test('FAST_AUTH uses sequence=1 (first nextSequence() call)', () {
         final transport = Transport();
         final fastAuthSeq = transport.nextSequence();
-        expect(fastAuthSeq, equals(1),
-            reason:
-                'FAST_AUTH must use sequence=1 to match Oracle 23ai requirements');
+        expect(
+          fastAuthSeq,
+          equals(1),
+          reason:
+              'FAST_AUTH must use sequence=1 to match Oracle 23ai requirements',
+        );
       });
 
       test('AUTH_PHASE_TWO uses sequence=2 (second nextSequence() call)', () {
         final transport = Transport();
         transport.nextSequence(); // sequence=1 used by FAST_AUTH
         final phaseTwoSeq = transport.nextSequence();
-        expect(phaseTwoSeq, equals(2),
-            reason: 'AUTH_PHASE_TWO increments to sequence=2');
+        expect(
+          phaseTwoSeq,
+          equals(2),
+          reason: 'AUTH_PHASE_TWO increments to sequence=2',
+        );
       });
 
       test('sequence counter progresses monotonically', () {
@@ -177,13 +184,17 @@ void main() {
       });
 
       test(
-          'shouldWriteTokenNumber is true by default (ttcFieldVersion=24 >= 18)',
-          () {
-        final transport = Transport();
-        expect(transport.shouldWriteTokenNumber, isTrue,
+        'shouldWriteTokenNumber is true by default (ttcFieldVersion=24 >= 18)',
+        () {
+          final transport = Transport();
+          expect(
+            transport.shouldWriteTokenNumber,
+            isTrue,
             reason:
-                'Default ttcFieldVersion is 24, which exceeds the 18 threshold');
-      });
+                'Default ttcFieldVersion is 24, which exceeds the 18 threshold',
+          );
+        },
+      );
 
       // The one-byte TTC sequence must wrap at 256, matching node-oracledb
       // `writeSeqNum` (`seq = (seq + 1) % 256`, starting at 1). The cycle is
@@ -196,11 +207,17 @@ void main() {
         // First 255 calls produce 1..255.
         expect(seq.sublist(0, 255), equals(List.generate(255, (i) => i + 1)));
         // 256th call (index 255) wraps through 0...
-        expect(seq[255], equals(0),
-            reason: '0 is a valid value in Oracle\'s mod-256 sequence cycle');
+        expect(
+          seq[255],
+          equals(0),
+          reason: '0 is a valid value in Oracle\'s mod-256 sequence cycle',
+        );
         // ...and the 257th call (index 256) returns to 1 (0x01).
-        expect(seq[256], equals(1),
-            reason: 'After 0x00 the counter wraps back to 0x01');
+        expect(
+          seq[256],
+          equals(1),
+          reason: 'After 0x00 the counter wraps back to 0x01',
+        );
         // The counter is always one byte.
         expect(seq.every((s) => s >= 0 && s <= 0xFF), isTrue);
       });
@@ -210,20 +227,32 @@ void main() {
         final transport = Transport();
 
         transport.debugTtcFieldVersion = 18;
-        expect(transport.shouldWriteTokenNumber, isTrue,
-            reason: 'version 18 is the inclusive threshold');
+        expect(
+          transport.shouldWriteTokenNumber,
+          isTrue,
+          reason: 'version 18 is the inclusive threshold',
+        );
 
         transport.debugTtcFieldVersion = 17;
-        expect(transport.shouldWriteTokenNumber, isFalse,
-            reason: 'version 17 is below the threshold');
+        expect(
+          transport.shouldWriteTokenNumber,
+          isFalse,
+          reason: 'version 17 is below the threshold',
+        );
 
         transport.debugTtcFieldVersion = 0;
-        expect(transport.shouldWriteTokenNumber, isFalse,
-            reason: 'version 0 is below the threshold');
+        expect(
+          transport.shouldWriteTokenNumber,
+          isFalse,
+          reason: 'version 0 is below the threshold',
+        );
 
         transport.debugTtcFieldVersion = 24;
-        expect(transport.shouldWriteTokenNumber, isTrue,
-            reason: 'default version 24 exceeds the threshold');
+        expect(
+          transport.shouldWriteTokenNumber,
+          isTrue,
+          reason: 'default version 24 exceeds the threshold',
+        );
       });
 
       // AUTH_PHASE_TWO 23ai token must be gated on FAST_AUTH presence so a
@@ -245,8 +274,11 @@ void main() {
         // still at its default 24 → MUST NOT write the 23ai token.
         transport.debugSupportsFastAuth = false;
         transport.debugTtcFieldVersion = 24;
-        expect(transport.shouldWriteAuthPhaseTwoToken, isFalse,
-            reason: 'a pre-23 server must never be given use23aiFormat=true');
+        expect(
+          transport.shouldWriteAuthPhaseTwoToken,
+          isFalse,
+          reason: 'a pre-23 server must never be given use23aiFormat=true',
+        );
 
         transport.debugTtcFieldVersion = 18;
         expect(transport.shouldWriteAuthPhaseTwoToken, isFalse);
@@ -278,8 +310,10 @@ void main() {
       test('a larger SDU yields a proportionally larger bound', () {
         final small = Transport()..debugSdu = 8192;
         final large = Transport()..debugSdu = 65535;
-        expect(large.closeCursorChunkLimit,
-            greaterThan(small.closeCursorChunkLimit));
+        expect(
+          large.closeCursorChunkLimit,
+          greaterThan(small.closeCursorChunkLimit),
+        );
       });
     });
 
@@ -287,37 +321,53 @@ void main() {
     // ServerSocket accepts and drains input but never replies, so the
     // transport-layer timeout fires without needing a wedged live Oracle.
     group('classical AUTH_PHASE_ONE timeout', () {
-      test('sendAuthPhaseOne times out, throws oraConnectTimeout, and poisons',
-          () async {
-        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-        server.listen((s) => s.listen((_) {}, onError: (_) {}));
+      test(
+        'sendAuthPhaseOne times out, throws oraConnectTimeout, and poisons',
+        () async {
+          final server = await ServerSocket.bind(
+            InternetAddress.loopbackIPv4,
+            0,
+          );
+          server.listen((s) => s.listen((_) {}, onError: (_) {}));
 
-        final transport = Transport();
-        await transport.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
-        expect(transport.isConnected, isTrue);
+          final transport = Transport();
+          await transport.connect(
+            '127.0.0.1',
+            server.port,
+            timeout: const Duration(seconds: 2),
+          );
+          expect(transport.isConnected, isTrue);
 
-        final request = AuthPhaseOneRequest(
-          username: 'someuser',
-          clientNonce: Uint8List(16),
-          sequence: transport.nextSequence(),
-        );
+          final request = AuthPhaseOneRequest(
+            username: 'someuser',
+            clientNonce: Uint8List(16),
+            sequence: transport.nextSequence(),
+          );
 
-        await expectLater(
-          transport.sendAuthPhaseOne(request,
-              timeout: const Duration(milliseconds: 200)),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraConnectTimeout)
-              .having((e) => e.message, 'message', contains('AUTH_PHASE_ONE'))),
-        );
+          await expectLater(
+            transport.sendAuthPhaseOne(
+              request,
+              timeout: const Duration(milliseconds: 200),
+            ),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraConnectTimeout)
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    contains('AUTH_PHASE_ONE'),
+                  ),
+            ),
+          );
 
-        // Transport must be poisoned and reporting disconnected after timeout.
-        expect(transport.isCorrupted, isTrue);
-        expect(transport.isConnected, isFalse);
+          // Transport must be poisoned and reporting disconnected after timeout.
+          expect(transport.isCorrupted, isTrue);
+          expect(transport.isConnected, isFalse);
 
-        await transport.disconnect();
-        await server.close();
-      });
+          await transport.disconnect();
+          await server.close();
+        },
+      );
     });
 
     // The receive loop must be bounded. A server that keeps sending
@@ -355,14 +405,19 @@ void main() {
         });
 
         final transport = Transport()..debugMaxReceivePackets = 5;
-        await transport.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
+        await transport.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
 
         await expectLater(
           transport.sendCommit(timeout: const Duration(seconds: 5)),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('receive-loop'))),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having((e) => e.message, 'message', contains('receive-loop')),
+          ),
         );
 
         // Cap exhaustion is a framing hazard: the transport must be poisoned.
@@ -383,8 +438,7 @@ void main() {
     // oraProtocolError AND poison the transport — no receive-loop spin, no
     // 30 s timeout.
     group('malformed TTC stream detected by the completion probe', () {
-      test('probe malformation throws oraProtocolError and poisons',
-          () async {
+      test('probe malformation throws oraProtocolError and poisons', () async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         server.listen((s) {
           // The client poisons (destroying its socket) as soon as the probe
@@ -408,21 +462,32 @@ void main() {
         });
 
         final transport = Transport();
-        await transport.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
+        await transport.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
 
         await expectLater(
           transport.sendCommit(timeout: const Duration(seconds: 5)),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message',
-                  contains('Malformed TTC stream'))
-              .having((e) => e.message, 'message', contains('poisoned'))
-              // Pin the cause chain: transport wrapper -> probe error ->
-              // originating BufferException.
-              .having((e) => e.cause, 'cause', isA<OracleException>())
-              .having((e) => (e.cause as OracleException?)?.cause,
-                  'cause.cause', isA<BufferException>())),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('Malformed TTC stream'),
+                )
+                .having((e) => e.message, 'message', contains('poisoned'))
+                // Pin the cause chain: transport wrapper -> probe error ->
+                // originating BufferException.
+                .having((e) => e.cause, 'cause', isA<OracleException>())
+                .having(
+                  (e) => (e.cause as OracleException?)?.cause,
+                  'cause.cause',
+                  isA<BufferException>(),
+                ),
+          ),
         );
 
         // A malformed stream is a framing hazard: the transport must be
@@ -432,8 +497,13 @@ void main() {
         expect(transport.isConnected, isFalse);
         await expectLater(
           transport.sendRollback(timeout: const Duration(seconds: 5)),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraConnectionClosed,
+            ),
+          ),
         );
 
         await transport.disconnect();
@@ -449,8 +519,7 @@ void main() {
     // payload (no ERROR message), which for a query decodes to "success, more
     // rows pending" — without the cap the drain would spin unbounded.
     group('fetch-drain iteration cap (moreRowsToFetch backstop)', () {
-      test('the shared cursor engine drain honors the eager fetch cap',
-          () async {
+      test('the shared cursor engine drain honors the eager fetch cap', () async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         var requestsSeen = 0;
         server.listen((s) {
@@ -478,8 +547,11 @@ void main() {
         });
 
         final transport = Transport();
-        await transport.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
+        await transport.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
 
         // cursorId != 0 simulates a cached-cursor re-execute so sendExecute's
         // effective-cursor-id fallback engages (the server echoes cursorId 0).
@@ -492,11 +564,18 @@ void main() {
         );
         expect(first.isSuccess, isTrue);
         expect(first.moreRowsToFetch, isTrue);
-        expect(first.cursorId, equals(5),
-            reason: 'sendExecute normalizes to the effective cursor id when '
-                'more rows remain so the engine can continue fetching');
-        expect(requestsSeen, equals(1),
-            reason: 'sendExecute issues exactly one EXECUTE and does not drain');
+        expect(
+          first.cursorId,
+          equals(5),
+          reason:
+              'sendExecute normalizes to the effective cursor id when '
+              'more rows remain so the engine can continue fetching',
+        );
+        expect(
+          requestsSeen,
+          equals(1),
+          reason: 'sendExecute issues exactly one EXECUTE and does not drain',
+        );
 
         // The shared engine drains the rest, bounded by the cap; hitting it
         // reports the result honestly incomplete rather than truncating.
@@ -511,14 +590,25 @@ void main() {
           materializePerBatch: false,
         );
         final drained = await cursor.drainRemaining(maxFetchIterations: 3);
-        expect(cursor.incompleteDrain, isTrue,
-            reason: 'reaching the cap with rows still pending marks the drain '
-                'incomplete (→ moreRowsAvailable at the connection level)');
-        expect(drained, isEmpty,
-            reason: 'the fake server returns only zero-row batches');
-        expect(requestsSeen, greaterThanOrEqualTo(2),
-            reason: 'the engine must have issued at least one FETCH after the '
-                'initial EXECUTE before tripping the cap');
+        expect(
+          cursor.incompleteDrain,
+          isTrue,
+          reason:
+              'reaching the cap with rows still pending marks the drain '
+              'incomplete (→ moreRowsAvailable at the connection level)',
+        );
+        expect(
+          drained,
+          isEmpty,
+          reason: 'the fake server returns only zero-row batches',
+        );
+        expect(
+          requestsSeen,
+          greaterThanOrEqualTo(2),
+          reason:
+              'the engine must have issued at least one FETCH after the '
+              'initial EXECUTE before tripping the cap',
+        );
 
         await transport.disconnect();
         await server.close();
@@ -528,34 +618,47 @@ void main() {
     // sendConnectReceiveAccept must honor a poisoned transport and fail fast
     // before reading stale bytes off the wire.
     group('poisoned-state guard on CONNECT/ACCEPT', () {
-      test('sendConnectReceiveAccept fails fast on a poisoned transport',
-          () async {
-        // Poison the transport via the existing timeout seam: a server that
-        // accepts but never replies makes sendPing time out and poison.
-        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-        server.listen((s) => s.listen((_) {}, onError: (_) {}));
+      test(
+        'sendConnectReceiveAccept fails fast on a poisoned transport',
+        () async {
+          // Poison the transport via the existing timeout seam: a server that
+          // accepts but never replies makes sendPing time out and poison.
+          final server = await ServerSocket.bind(
+            InternetAddress.loopbackIPv4,
+            0,
+          );
+          server.listen((s) => s.listen((_) {}, onError: (_) {}));
 
-        final transport = Transport();
-        await transport.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
+          final transport = Transport();
+          await transport.connect(
+            '127.0.0.1',
+            server.port,
+            timeout: const Duration(seconds: 2),
+          );
 
-        await expectLater(
-          transport.sendPing(timeout: const Duration(milliseconds: 200)),
-          throwsA(isA<OracleException>()),
-        );
-        expect(transport.isCorrupted, isTrue);
+          await expectLater(
+            transport.sendPing(timeout: const Duration(milliseconds: 200)),
+            throwsA(isA<OracleException>()),
+          );
+          expect(transport.isCorrupted, isTrue);
 
-        // The poisoned transport must reject a CONNECT/ACCEPT attempt with the
-        // distinct connection-closed error, not attempt to read the wire.
-        await expectLater(
-          transport.sendConnectReceiveAccept(Uint8List.fromList([0x01])),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
-        );
+          // The poisoned transport must reject a CONNECT/ACCEPT attempt with the
+          // distinct connection-closed error, not attempt to read the wire.
+          await expectLater(
+            transport.sendConnectReceiveAccept(Uint8List.fromList([0x01])),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'errorCode',
+                oraConnectionClosed,
+              ),
+            ),
+          );
 
-        await transport.disconnect();
-        await server.close();
-      });
+          await transport.disconnect();
+          await server.close();
+        },
+      );
     });
 
     group('send', () {
@@ -566,10 +669,7 @@ void main() {
           payload: Uint8List.fromList([0x01]),
         );
 
-        expect(
-          () => transport.send(packet),
-          throwsException,
-        );
+        expect(() => transport.send(packet), throwsException);
       });
     });
 
@@ -577,10 +677,7 @@ void main() {
       test('throws when not connected', () async {
         final transport = Transport();
 
-        expect(
-          () => transport.receive(),
-          throwsException,
-        );
+        expect(() => transport.receive(), throwsException);
       });
     });
 
@@ -599,47 +696,63 @@ void main() {
     // ServerSocket (no Oracle required). Each test owns its server and tears it
     // down so the suite stays hermetic.
     group('RPC timeout poisoning', () {
-      test('timed-out commit poisons the transport and fails subsequent RPCs',
-          () async {
-        // A server that accepts the connection, drains input, but never replies.
-        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-        server.listen((s) => s.listen((_) {}, onError: (_) {}));
+      test(
+        'timed-out commit poisons the transport and fails subsequent RPCs',
+        () async {
+          // A server that accepts the connection, drains input, but never replies.
+          final server = await ServerSocket.bind(
+            InternetAddress.loopbackIPv4,
+            0,
+          );
+          server.listen((s) => s.listen((_) {}, onError: (_) {}));
 
-        final transport = Transport();
-        await transport.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
-        expect(transport.isConnected, isTrue);
-        expect(transport.isCorrupted, isFalse);
+          final transport = Transport();
+          await transport.connect(
+            '127.0.0.1',
+            server.port,
+            timeout: const Duration(seconds: 2),
+          );
+          expect(transport.isConnected, isTrue);
+          expect(transport.isCorrupted, isFalse);
 
-        // The timeout error names the operation and the elapsed wait.
-        await expectLater(
-          transport.sendCommit(timeout: const Duration(milliseconds: 200)),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraConnectTimeout)
-              .having((e) => e.message, 'message', contains('Commit'))
-              .having((e) => e.message, 'message', contains('200ms'))),
-        );
+          // The timeout error names the operation and the elapsed wait.
+          await expectLater(
+            transport.sendCommit(timeout: const Duration(milliseconds: 200)),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraConnectTimeout)
+                  .having((e) => e.message, 'message', contains('Commit'))
+                  .having((e) => e.message, 'message', contains('200ms')),
+            ),
+          );
 
-        // The transport is poisoned and its socket force-destroyed.
-        expect(transport.isCorrupted, isTrue);
-        expect(transport.isConnected, isFalse);
+          // The transport is poisoned and its socket force-destroyed.
+          expect(transport.isCorrupted, isTrue);
+          expect(transport.isConnected, isFalse);
 
-        // A subsequent RPC fails fast with a DISTINCT error (not a second
-        // timeout) so callers know the transport itself is unusable.
-        await expectLater(
-          transport.sendRollback(timeout: const Duration(seconds: 5)),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
-        );
+          // A subsequent RPC fails fast with a DISTINCT error (not a second
+          // timeout) so callers know the transport itself is unusable.
+          await expectLater(
+            transport.sendRollback(timeout: const Duration(seconds: 5)),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'errorCode',
+                oraConnectionClosed,
+              ),
+            ),
+          );
 
-        await transport.disconnect();
-        await server.close();
-      });
+          await transport.disconnect();
+          await server.close();
+        },
+      );
     });
 
     group('sendData DATA-flags contract', () {
       Future<Uint8List> captureFirstPacket(
-          Future<void> Function(Transport t) act) async {
+        Future<void> Function(Transport t) act,
+      ) async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         final firstPacket = Completer<Uint8List>();
         server.listen((s) {
@@ -650,11 +763,15 @@ void main() {
           });
         });
         final transport = Transport();
-        await transport.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
+        await transport.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
         await act(transport);
-        final bytes =
-            await firstPacket.future.timeout(const Duration(seconds: 2));
+        final bytes = await firstPacket.future.timeout(
+          const Duration(seconds: 2),
+        );
         await transport.disconnect();
         await server.close();
         return bytes;
@@ -663,15 +780,18 @@ void main() {
       test('defaults to 0x0800 END_OF_RPC flag for Oracle 23ai', () async {
         // Default serverMajorVersion is 23, so the version-gated default applies.
         final bytes = await captureFirstPacket(
-            (t) => t.sendData(Uint8List.fromList([0xAA, 0xBB])));
+          (t) => t.sendData(Uint8List.fromList([0xAA, 0xBB])),
+        );
         // 8-byte TNS header, then the 2-byte big-endian data-flags field.
         expect(bytes[8], equals(0x08));
         expect(bytes[9], equals(0x00));
       });
 
       test('honours an explicit dataFlags override', () async {
-        final bytes = await captureFirstPacket((t) =>
-            t.sendData(Uint8List.fromList([0xAA, 0xBB]), dataFlags: 0x0000));
+        final bytes = await captureFirstPacket(
+          (t) =>
+              t.sendData(Uint8List.fromList([0xAA, 0xBB]), dataFlags: 0x0000),
+        );
         expect(bytes[8], equals(0x00));
         expect(bytes[9], equals(0x00));
       });
@@ -692,8 +812,10 @@ void main() {
       //   bytes[11]   = ttcPing (0x93)
       //   bytes[12]   = sequence byte (nextSequence() & 0xFF)
       //   bytes[13]   = UB8 token 0x00 — present only when field version >= 18
-      Future<Uint8List> captureFirstPingPacket(int fieldVersion,
-          {required int expectedSeq}) async {
+      Future<Uint8List> captureFirstPingPacket(
+        int fieldVersion, {
+        required int expectedSeq,
+      }) async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         final firstPacket = Completer<Uint8List>();
         server.listen((s) {
@@ -704,8 +826,11 @@ void main() {
           });
         });
         final transport = Transport();
-        await transport.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
+        await transport.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
         // connect() may reset the field version during negotiation, so drive
         // the branch selector AFTER connect returns but BEFORE sendPing builds
         // the header.
@@ -713,137 +838,201 @@ void main() {
         // The sequence counter returns-then-advances starting at 1; pin the
         // expected outbound byte so the assertion is load-bearing, not a
         // tautology that re-reads whatever the implementation emitted.
-        expect(transport.debugSequence, equals(expectedSeq),
-            reason: 'fresh transport sequence should be the documented start');
+        expect(
+          transport.debugSequence,
+          equals(expectedSeq),
+          reason: 'fresh transport sequence should be the documented start',
+        );
 
         // Fire-and-forget: the server never replies, so sendPing's reply probe
         // will time out / the disconnect below will tear the socket down.
         // Swallow that error so it does not surface as an unhandled async error.
-        unawaited(transport
-            .sendPing(timeout: const Duration(milliseconds: 200))
-            .catchError((_) {}));
+        unawaited(
+          transport
+              .sendPing(timeout: const Duration(milliseconds: 200))
+              .catchError((_) {}),
+        );
 
-        final bytes =
-            await firstPacket.future.timeout(const Duration(seconds: 2));
+        final bytes = await firstPacket.future.timeout(
+          const Duration(seconds: 2),
+        );
         await transport.disconnect();
         await server.close();
         return bytes;
       }
 
-      test('field version >= 18 (23.1+) appends a trailing UB8 0x00 token',
-          () async {
-        // Fresh transport starts at sequence 1; nextSequence() returns 1.
-        final bytes = await captureFirstPingPacket(24, expectedSeq: 1);
+      test(
+        'field version >= 18 (23.1+) appends a trailing UB8 0x00 token',
+        () async {
+          // Fresh transport starts at sequence 1; nextSequence() returns 1.
+          final bytes = await captureFirstPingPacket(24, expectedSeq: 1);
 
-        // Parse the framed TNS packet length so the payload boundary is exact,
-        // not hard-indexed past the end.
-        final packetLen = (bytes[0] << 8) | bytes[1];
-        expect(packetLen, equals(bytes.length),
-            reason: 'TNS length field must cover the whole captured packet');
+          // Parse the framed TNS packet length so the payload boundary is exact,
+          // not hard-indexed past the end.
+          final packetLen = (bytes[0] << 8) | bytes[1];
+          expect(
+            packetLen,
+            equals(bytes.length),
+            reason: 'TNS length field must cover the whole captured packet',
+          );
 
-        expect(bytes[4], equals(tnsPacketData),
-            reason: 'ping is framed as a TNS DATA packet');
-        expect(bytes[10], equals(ttcMsgTypeFunction),
-            reason: 'message type FUNCTION (0x03)');
-        expect(bytes[11], equals(ttcPing),
-            reason: 'function code PING (0x93)');
-        expect(bytes[12], equals(1),
-            reason: 'sequence byte from nextSequence() & 0xFF');
+          expect(
+            bytes[4],
+            equals(tnsPacketData),
+            reason: 'ping is framed as a TNS DATA packet',
+          );
+          expect(
+            bytes[10],
+            equals(ttcMsgTypeFunction),
+            reason: 'message type FUNCTION (0x03)',
+          );
+          expect(
+            bytes[11],
+            equals(ttcPing),
+            reason: 'function code PING (0x93)',
+          );
+          expect(
+            bytes[12],
+            equals(1),
+            reason: 'sequence byte from nextSequence() & 0xFF',
+          );
 
-        // TTC payload runs from byte 10 (after 8-byte header + 2-byte flags) to
-        // the end of the framed packet: type + function + sequence + UB8 token.
-        const ttcPayloadStart = tnsHeaderSize + 2;
-        final ttcPayloadLen = packetLen - ttcPayloadStart;
-        expect(ttcPayloadLen, equals(4),
-            reason: 'FUNCTION header + trailing UB8 token = 4 bytes');
-        expect(bytes[13], equals(0x00),
-            reason: 'writeUB8(0) emits the single 0x00 length-0 form');
-      });
+          // TTC payload runs from byte 10 (after 8-byte header + 2-byte flags) to
+          // the end of the framed packet: type + function + sequence + UB8 token.
+          const ttcPayloadStart = tnsHeaderSize + 2;
+          final ttcPayloadLen = packetLen - ttcPayloadStart;
+          expect(
+            ttcPayloadLen,
+            equals(4),
+            reason: 'FUNCTION header + trailing UB8 token = 4 bytes',
+          );
+          expect(
+            bytes[13],
+            equals(0x00),
+            reason: 'writeUB8(0) emits the single 0x00 length-0 form',
+          );
+        },
+      );
 
-      test('field version < 18 (pre-23 / 21c) omits the trailing UB8 token',
-          () async {
-        // Fresh transport starts at sequence 1; nextSequence() returns 1.
-        final bytes = await captureFirstPingPacket(17, expectedSeq: 1);
+      test(
+        'field version < 18 (pre-23 / 21c) omits the trailing UB8 token',
+        () async {
+          // Fresh transport starts at sequence 1; nextSequence() returns 1.
+          final bytes = await captureFirstPingPacket(17, expectedSeq: 1);
 
-        final packetLen = (bytes[0] << 8) | bytes[1];
-        expect(packetLen, equals(bytes.length),
-            reason: 'TNS length field must cover the whole captured packet');
+          final packetLen = (bytes[0] << 8) | bytes[1];
+          expect(
+            packetLen,
+            equals(bytes.length),
+            reason: 'TNS length field must cover the whole captured packet',
+          );
 
-        expect(bytes[4], equals(tnsPacketData),
-            reason: 'ping is framed as a TNS DATA packet');
-        expect(bytes[10], equals(ttcMsgTypeFunction),
-            reason: 'message type FUNCTION (0x03)');
-        expect(bytes[11], equals(ttcPing),
-            reason: 'function code PING (0x93)');
-        expect(bytes[12], equals(1),
-            reason: 'sequence byte from nextSequence() & 0xFF');
+          expect(
+            bytes[4],
+            equals(tnsPacketData),
+            reason: 'ping is framed as a TNS DATA packet',
+          );
+          expect(
+            bytes[10],
+            equals(ttcMsgTypeFunction),
+            reason: 'message type FUNCTION (0x03)',
+          );
+          expect(
+            bytes[11],
+            equals(ttcPing),
+            reason: 'function code PING (0x93)',
+          );
+          expect(
+            bytes[12],
+            equals(1),
+            reason: 'sequence byte from nextSequence() & 0xFF',
+          );
 
-        // TTC payload must end right after the sequence byte: NO trailing UB8.
-        // Computing the boundary from the framed length means a stray UB8 byte
-        // would make this assertion fail (payload would be 4, not 3).
-        const ttcPayloadStart = tnsHeaderSize + 2;
-        final ttcPayloadLen = packetLen - ttcPayloadStart;
-        expect(ttcPayloadLen, equals(3),
-            reason: 'pre-23 FUNCTION header has no trailing UB8 token; '
-                'the payload is exactly one byte shorter than the >=18 branch');
-      });
+          // TTC payload must end right after the sequence byte: NO trailing UB8.
+          // Computing the boundary from the framed length means a stray UB8 byte
+          // would make this assertion fail (payload would be 4, not 3).
+          const ttcPayloadStart = tnsHeaderSize + 2;
+          final ttcPayloadLen = packetLen - ttcPayloadStart;
+          expect(
+            ttcPayloadLen,
+            equals(3),
+            reason:
+                'pre-23 FUNCTION header has no trailing UB8 token; '
+                'the payload is exactly one byte shorter than the >=18 branch',
+          );
+        },
+      );
     });
 
     group('sendData SDU fragmentation', () {
-      test('a TTC message larger than the SDU spans multiple DATA packets',
-          () async {
-        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-        final received = BytesBuilder(copy: true);
-        final done = Completer<void>();
-        // 3 packets expected: capacity = SDU(50) - 8 header - 2 flags = 40;
-        // 100 payload bytes → 40 + 40 + 20, each packet 10 bytes of framing.
-        const expectedTotal = 100 + 3 * 10;
-        server.listen((s) {
-          s.listen((data) {
-            received.add(data);
-            if (received.length >= expectedTotal && !done.isCompleted) {
-              done.complete();
-            }
+      test(
+        'a TTC message larger than the SDU spans multiple DATA packets',
+        () async {
+          final server = await ServerSocket.bind(
+            InternetAddress.loopbackIPv4,
+            0,
+          );
+          final received = BytesBuilder(copy: true);
+          final done = Completer<void>();
+          // 3 packets expected: capacity = SDU(50) - 8 header - 2 flags = 40;
+          // 100 payload bytes → 40 + 40 + 20, each packet 10 bytes of framing.
+          const expectedTotal = 100 + 3 * 10;
+          server.listen((s) {
+            s.listen((data) {
+              received.add(data);
+              if (received.length >= expectedTotal && !done.isCompleted) {
+                done.complete();
+              }
+            });
           });
-        });
-        final transport = Transport();
-        await transport.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
-        transport.debugSdu = 50;
-        final message =
-            Uint8List.fromList(List.generate(100, (i) => i & 0xFF));
-        await transport.sendData(message);
-        await done.future.timeout(const Duration(seconds: 2));
-        await transport.disconnect();
-        await server.close();
+          final transport = Transport();
+          await transport.connect(
+            '127.0.0.1',
+            server.port,
+            timeout: const Duration(seconds: 2),
+          );
+          transport.debugSdu = 50;
+          final message = Uint8List.fromList(
+            List.generate(100, (i) => i & 0xFF),
+          );
+          await transport.sendData(message);
+          await done.future.timeout(const Duration(seconds: 2));
+          await transport.disconnect();
+          await server.close();
 
-        final bytes = received.toBytes();
-        final reassembled = BytesBuilder(copy: true);
-        final packetFlags = <int>[];
-        var pos = 0;
-        while (pos < bytes.length) {
-          final len = (bytes[pos] << 8) | bytes[pos + 1];
-          expect(len, lessThanOrEqualTo(50),
-              reason: 'no packet may exceed the negotiated SDU');
-          expect(bytes[pos + 4], equals(tnsPacketData));
-          packetFlags.add((bytes[pos + 8] << 8) | bytes[pos + 9]);
-          reassembled.add(bytes.sublist(pos + 10, pos + len));
-          pos += len;
-        }
-        expect(packetFlags.length, equals(3));
-        // Intermediate packets carry flags 0x0000; only the final packet
-        // carries the request flags (END_OF_RPC for the default 23ai).
-        expect(packetFlags[0], equals(0x0000));
-        expect(packetFlags[1], equals(0x0000));
-        expect(packetFlags[2], equals(0x0800));
-        expect(reassembled.toBytes(), equals(message),
-            reason: 'fragments must reassemble to the original TTC message');
-      });
+          final bytes = received.toBytes();
+          final reassembled = BytesBuilder(copy: true);
+          final packetFlags = <int>[];
+          var pos = 0;
+          while (pos < bytes.length) {
+            final len = (bytes[pos] << 8) | bytes[pos + 1];
+            expect(
+              len,
+              lessThanOrEqualTo(50),
+              reason: 'no packet may exceed the negotiated SDU',
+            );
+            expect(bytes[pos + 4], equals(tnsPacketData));
+            packetFlags.add((bytes[pos + 8] << 8) | bytes[pos + 9]);
+            reassembled.add(bytes.sublist(pos + 10, pos + len));
+            pos += len;
+          }
+          expect(packetFlags.length, equals(3));
+          // Intermediate packets carry flags 0x0000; only the final packet
+          // carries the request flags (END_OF_RPC for the default 23ai).
+          expect(packetFlags[0], equals(0x0000));
+          expect(packetFlags[1], equals(0x0000));
+          expect(packetFlags[2], equals(0x0800));
+          expect(
+            reassembled.toBytes(),
+            equals(message),
+            reason: 'fragments must reassemble to the original TTC message',
+          );
+        },
+      );
     });
 
     group('mid-query REFUSE handling', () {
-      test('surfaces the real refuse reason, not invalid-credentials',
-          () async {
+      test('surfaces the real refuse reason, not invalid-credentials', () async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
         server.listen((s) {
           s.listen((_) {
@@ -871,17 +1060,25 @@ void main() {
         });
 
         final transport = Transport();
-        await transport.connect('127.0.0.1', server.port,
-            timeout: const Duration(seconds: 2));
+        await transport.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
 
         await expectLater(
           transport.sendCommit(timeout: const Duration(seconds: 3)),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('REFUSE'))
-              .having((e) => e.message, 'message', contains('(ERR=12514)'))
-              .having((e) => e.errorCode, 'not invalid creds',
-                  isNot(oraInvalidCredentials))),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having((e) => e.message, 'message', contains('REFUSE'))
+                .having((e) => e.message, 'message', contains('(ERR=12514)'))
+                .having(
+                  (e) => e.errorCode,
+                  'not invalid creds',
+                  isNot(oraInvalidCredentials),
+                ),
+          ),
         );
 
         await transport.disconnect();
@@ -917,33 +1114,49 @@ void main() {
         );
       });
 
-      test('indices array shorter than the OUT values throws oraProtocolError',
-          () {
-        expect(
-          () => Transport.resolveOutBindMaxSize(
-            valueIndex: 1,
-            outBindIndices: const [1],
-            bindMetadata: metadata,
-          ),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('misalignment'))),
-        );
-      });
+      test(
+        'indices array shorter than the OUT values throws oraProtocolError',
+        () {
+          expect(
+            () => Transport.resolveOutBindMaxSize(
+              valueIndex: 1,
+              outBindIndices: const [1],
+              bindMetadata: metadata,
+            ),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    contains('misalignment'),
+                  ),
+            ),
+          );
+        },
+      );
 
-      test('bind index beyond the declared metadata throws oraProtocolError',
-          () {
-        expect(
-          () => Transport.resolveOutBindMaxSize(
-            valueIndex: 0,
-            outBindIndices: const [2],
-            bindMetadata: metadata,
-          ),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('misalignment'))),
-        );
-      });
+      test(
+        'bind index beyond the declared metadata throws oraProtocolError',
+        () {
+          expect(
+            () => Transport.resolveOutBindMaxSize(
+              valueIndex: 0,
+              outBindIndices: const [2],
+              bindMetadata: metadata,
+            ),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    contains('misalignment'),
+                  ),
+            ),
+          );
+        },
+      );
     });
 
     group('verifyBlobReadLength (completed BLOB range-read guard)', () {
@@ -959,25 +1172,40 @@ void main() {
       test('short read blames the LOB, not a round-trip size limit', () {
         expect(
           () => Transport.verifyBlobReadLength(80, 100),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message',
-                  contains('fewer bytes than its locator advertises'))
-              .having((e) => e.message, 'message',
-                  isNot(contains('not yet supported')))
-              .having((e) => e.message, 'message',
-                  isNot(contains('single round-trip')))),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('fewer bytes than its locator advertises'),
+                )
+                .having(
+                  (e) => e.message,
+                  'message',
+                  isNot(contains('not yet supported')),
+                )
+                .having(
+                  (e) => e.message,
+                  'message',
+                  isNot(contains('single round-trip')),
+                ),
+          ),
         );
       });
 
-      test('overrun reports a plain mismatch without the size-limit hint',
-          () {
+      test('overrun reports a plain mismatch without the size-limit hint', () {
         expect(
           () => Transport.verifyBlobReadLength(120, 100),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message',
-                  isNot(contains('single round-trip read limit')))),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  isNot(contains('single round-trip read limit')),
+                ),
+          ),
         );
       });
     });
@@ -986,8 +1214,11 @@ void main() {
   group('encodeDataTypesMessage (classical DataTypes negotiation)', () {
     test('encodes exact charset/flags/caps field layout', () {
       // AC1: the classical path's primary client charset is constant-driven.
-      expect(ttcCharsetUtf8, equals(873),
-          reason: 'Primary client charset constant must be AL32UTF8 (873)');
+      expect(
+        ttcCharsetUtf8,
+        equals(873),
+        reason: 'Primary client charset constant must be AL32UTF8 (873)',
+      );
 
       final transport = Transport();
       final compileCaps = Uint8List.fromList([0x01, 0x02, 0x03]);
@@ -1012,12 +1243,21 @@ void main() {
       // The national charset slot stays UTF-8 too (node-oracledb dataType.js):
       // NCHAR/NVARCHAR2/NCLOB are marked by the per-column csfrm byte, not this
       // slot — writing AL16UTF16 (2000) here corrupts the handshake.
-      expect(bytes[3], equals(lo),
-          reason: 'National charset slot must also be UTF-8 LE low byte');
-      expect(bytes[4], equals(hi),
-          reason: 'National charset slot must also be UTF-8 LE high byte');
-      expect(bytes[5], equals(0x01 | 0x02),
-          reason: 'Encoding flags must be MULTI_BYTE | CONV_LENGTH');
+      expect(
+        bytes[3],
+        equals(lo),
+        reason: 'National charset slot must also be UTF-8 LE low byte',
+      );
+      expect(
+        bytes[4],
+        equals(hi),
+        reason: 'National charset slot must also be UTF-8 LE high byte',
+      );
+      expect(
+        bytes[5],
+        equals(0x01 | 0x02),
+        reason: 'Encoding flags must be MULTI_BYTE | CONV_LENGTH',
+      );
 
       // Compile caps: length byte then the bytes verbatim.
       expect(bytes[6], equals(compileCaps.length));
@@ -1028,31 +1268,36 @@ void main() {
       expect(bytes[runtimeLenIndex], equals(runtimeCaps.length));
       expect(
         bytes.sublist(
-            runtimeLenIndex + 1, runtimeLenIndex + 1 + runtimeCaps.length),
+          runtimeLenIndex + 1,
+          runtimeLenIndex + 1 + runtimeCaps.length,
+        ),
         equals(runtimeCaps),
       );
     });
 
     test('terminates with a uint16BE zero after the data type mappings', () {
       final transport = Transport();
-      final bytes =
-          transport.encodeDataTypesMessage(Uint8List(0), Uint8List(0));
+      final bytes = transport.encodeDataTypesMessage(
+        Uint8List(0),
+        Uint8List(0),
+      );
       // The message ends with the 2-byte terminator (0x00 0x00).
       expect(bytes.length, greaterThan(8));
       expect(bytes[bytes.length - 2], equals(0));
       expect(bytes[bytes.length - 1], equals(0));
     });
 
-    test('FAST_AUTH and classical paths advertise the same primary charset',
-        () {
+    test('FAST_AUTH and classical paths advertise the same primary charset', () {
       // AC3: both negotiation paths must advertise the same UTF-8 client
       // charset, both sourced from ttcCharsetUtf8.
       const lo = ttcCharsetUtf8 & 0xFF;
       const hi = (ttcCharsetUtf8 >> 8) & 0xFF;
 
       final transport = Transport();
-      final classical =
-          transport.encodeDataTypesMessage(Uint8List(0), Uint8List(0));
+      final classical = transport.encodeDataTypesMessage(
+        Uint8List(0),
+        Uint8List(0),
+      );
       final classicalCharset = <int>[classical[1], classical[2]];
 
       final fastBuffer = WriteBuffer();
@@ -1079,25 +1324,41 @@ void main() {
           break;
         }
       }
-      expect(dt, greaterThan(-1),
-          reason: 'FAST_AUTH must embed a DataTypes header with the UTF-8 '
-              'primary charset');
+      expect(
+        dt,
+        greaterThan(-1),
+        reason:
+            'FAST_AUTH must embed a DataTypes header with the UTF-8 '
+            'primary charset',
+      );
       final fastCharset = <int>[fastBytes[dt + 1], fastBytes[dt + 2]];
 
-      expect(classicalCharset, equals(<int>[lo, hi]),
-          reason: 'Classical path primary charset must be ttcCharsetUtf8 LE');
-      expect(fastCharset, equals(classicalCharset),
-          reason: 'Both paths must advertise the same primary charset');
+      expect(
+        classicalCharset,
+        equals(<int>[lo, hi]),
+        reason: 'Classical path primary charset must be ttcCharsetUtf8 LE',
+      );
+      expect(
+        fastCharset,
+        equals(classicalCharset),
+        reason: 'Both paths must advertise the same primary charset',
+      );
 
       // Both paths must also advertise UTF-8 in the national charset slot
       // (the two bytes immediately after the primary charset): national types
       // are marked per-column by the csfrm byte, not by this negotiation slot.
       final classicalNational = <int>[classical[3], classical[4]];
       final fastNational = <int>[fastBytes[dt + 3], fastBytes[dt + 4]];
-      expect(classicalNational, equals(<int>[lo, hi]),
-          reason: 'Classical path national charset slot must be UTF-8 LE');
-      expect(fastNational, equals(<int>[lo, hi]),
-          reason: 'FAST_AUTH national charset slot must be UTF-8 LE');
+      expect(
+        classicalNational,
+        equals(<int>[lo, hi]),
+        reason: 'Classical path national charset slot must be UTF-8 LE',
+      );
+      expect(
+        fastNational,
+        equals(<int>[lo, hi]),
+        reason: 'FAST_AUTH national charset slot must be UTF-8 LE',
+      );
     });
 
     test('encodes production-length caps (53 compile + 7 runtime) intact', () {
@@ -1112,18 +1373,27 @@ void main() {
       // Guard the seam: these are the documented production sizes (TNS_CCAP_MAX
       // = 53, TNS_RCAP_MAX = 7). If these change the deferred-work analysis and
       // this test must be revisited together.
-      expect(compileCaps.length, equals(53),
-          reason: 'Production compile caps must be TNS_CCAP_MAX (53) bytes');
-      expect(runtimeCaps.length, equals(7),
-          reason: 'Production runtime caps must be TNS_RCAP_MAX (7) bytes');
+      expect(
+        compileCaps.length,
+        equals(53),
+        reason: 'Production compile caps must be TNS_CCAP_MAX (53) bytes',
+      );
+      expect(
+        runtimeCaps.length,
+        equals(7),
+        reason: 'Production runtime caps must be TNS_RCAP_MAX (7) bytes',
+      );
 
       final bytes = transport.encodeDataTypesMessage(compileCaps, runtimeCaps);
 
       // The single-byte length prefix must carry the full 53/7 lengths and the
       // cap bytes must round-trip verbatim at the documented offsets.
       const compileLenIndex = 6; // after type(1) + 2 charsets(4) + flags(1)
-      expect(bytes[compileLenIndex], equals(53),
-          reason: 'Compile-cap length prefix must hold the full 53 bytes');
+      expect(
+        bytes[compileLenIndex],
+        equals(53),
+        reason: 'Compile-cap length prefix must hold the full 53 bytes',
+      );
       expect(
         bytes.sublist(compileLenIndex + 1, compileLenIndex + 1 + 53),
         equals(compileCaps),
@@ -1131,8 +1401,11 @@ void main() {
       );
 
       const runtimeLenIndex = compileLenIndex + 1 + 53;
-      expect(bytes[runtimeLenIndex], equals(7),
-          reason: 'Runtime-cap length prefix must hold the full 7 bytes');
+      expect(
+        bytes[runtimeLenIndex],
+        equals(7),
+        reason: 'Runtime-cap length prefix must hold the full 7 bytes',
+      );
       expect(
         bytes.sublist(runtimeLenIndex + 1, runtimeLenIndex + 1 + 7),
         equals(runtimeCaps),
@@ -1144,18 +1417,23 @@ void main() {
       expect(bytes[bytes.length - 1], equals(0));
     });
 
-    test('compile-caps field-version slot carries the default ttcFieldVersion',
-        () {
-      // Index 7 (TNS_CCAP_FIELD_VERSION) must reflect the client maximum when
-      // no clamp has occurred. node-oracledb capabilities.js `_init` writes
-      // compileCaps[TNS_CCAP_FIELD_VERSION] = this.ttcFieldVersion, whose
-      // default is TNS_CCAP_FIELD_VERSION_MAX = 24.
-      const fieldVersionIndex = 7;
-      final transport = Transport();
-      final compileCaps = transport.debugBuildCompileCapabilities();
-      expect(compileCaps[fieldVersionIndex], equals(24),
-          reason: 'Default field-version slot must be FIELD_VERSION_MAX (24)');
-    });
+    test(
+      'compile-caps field-version slot carries the default ttcFieldVersion',
+      () {
+        // Index 7 (TNS_CCAP_FIELD_VERSION) must reflect the client maximum when
+        // no clamp has occurred. node-oracledb capabilities.js `_init` writes
+        // compileCaps[TNS_CCAP_FIELD_VERSION] = this.ttcFieldVersion, whose
+        // default is TNS_CCAP_FIELD_VERSION_MAX = 24.
+        const fieldVersionIndex = 7;
+        final transport = Transport();
+        final compileCaps = transport.debugBuildCompileCapabilities();
+        expect(
+          compileCaps[fieldVersionIndex],
+          equals(24),
+          reason: 'Default field-version slot must be FIELD_VERSION_MAX (24)',
+        );
+      },
+    );
 
     test('compile-caps field-version slot tracks a clamp to a lower value', () {
       // Pins the fix for the deferred-work finding: the field-version slot must
@@ -1178,15 +1456,21 @@ void main() {
       transport.debugTtcFieldVersion = clampedFieldVersion;
 
       final compileCaps = transport.debugBuildCompileCapabilities();
-      expect(compileCaps[fieldVersionIndex], equals(clampedFieldVersion),
-          reason: 'Field-version slot must emit the clamped _ttcFieldVersion, '
-              'not the hard-coded client maximum');
-      expect(transport.ttcFieldVersion, equals(clampedFieldVersion),
-          reason: 'Sanity: the seam set the negotiated field version');
+      expect(
+        compileCaps[fieldVersionIndex],
+        equals(clampedFieldVersion),
+        reason:
+            'Field-version slot must emit the clamped _ttcFieldVersion, '
+            'not the hard-coded client maximum',
+      );
+      expect(
+        transport.ttcFieldVersion,
+        equals(clampedFieldVersion),
+        reason: 'Sanity: the seam set the negotiated field version',
+      );
     });
 
-    test('throws (not truncates) when compile caps exceed the 1-byte prefix',
-        () {
+    test('throws (not truncates) when compile caps exceed the 1-byte prefix', () {
       // WITHOUT the guard, writeUint8(256) wraps to 0: the length prefix would
       // read as 0, the server would consume zero cap bytes, then misparse the
       // 256 cap bytes as the runtime-cap block + data-type mappings — a silent
@@ -1205,21 +1489,23 @@ void main() {
       );
     });
 
-    test('throws (not truncates) when runtime caps exceed the 1-byte prefix',
-        () {
-      final transport = Transport();
-      final compile = Uint8List(53);
-      final oversized = Uint8List(256);
+    test(
+      'throws (not truncates) when runtime caps exceed the 1-byte prefix',
+      () {
+        final transport = Transport();
+        final compile = Uint8List(53);
+        final oversized = Uint8List(256);
 
-      expect(
-        () => transport.encodeDataTypesMessage(compile, oversized),
-        throwsA(
-          isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('runtime')),
-        ),
-      );
-    });
+        expect(
+          () => transport.encodeDataTypesMessage(compile, oversized),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having((e) => e.message, 'message', contains('runtime')),
+          ),
+        );
+      },
+    );
 
     test('accepts exactly 255 cap bytes (the single-byte prefix boundary)', () {
       // 255 fits the prefix exactly and must encode without throwing; 256 is
@@ -1229,8 +1515,11 @@ void main() {
 
       final bytes = transport.encodeDataTypesMessage(caps255, caps255);
       const compileLenIndex = 6;
-      expect(bytes[compileLenIndex], equals(255),
-          reason: '255 is the max value the single-byte prefix can hold');
+      expect(
+        bytes[compileLenIndex],
+        equals(255),
+        reason: '255 is the max value the single-byte prefix can hold',
+      );
       const runtimeLenIndex = compileLenIndex + 1 + 255;
       expect(bytes[runtimeLenIndex], equals(255));
     });
@@ -1261,27 +1550,28 @@ void main() {
       return buf.toBytes();
     }
 
-    test('drains a standalone response with no preamble/caps to the terminator',
-        () {
-      // VARCHAR(1)->VARCHAR(1), NUMBER(2)->NUMBER(2), DATE(12)->DATE(12).
-      final resp = buildResponse([
-        [1, 1],
-        [2, 2],
-        [12, 12],
-      ]);
-      // Must consume the whole buffer (type byte + 3 pairs + terminator)
-      // without throwing — i.e. the parser does NOT skip a non-existent
-      // preamble/caps before the loop.
-      expect(() => Transport.parseDataTypesResponse(resp), returnsNormally);
-    });
+    test(
+      'drains a standalone response with no preamble/caps to the terminator',
+      () {
+        // VARCHAR(1)->VARCHAR(1), NUMBER(2)->NUMBER(2), DATE(12)->DATE(12).
+        final resp = buildResponse([
+          [1, 1],
+          [2, 2],
+          [12, 12],
+        ]);
+        // Must consume the whole buffer (type byte + 3 pairs + terminator)
+        // without throwing — i.e. the parser does NOT skip a non-existent
+        // preamble/caps before the loop.
+        expect(() => Transport.parseDataTypesResponse(resp), returnsNormally);
+      },
+    );
 
     test('tolerates an empty mapping list (immediate terminator)', () {
       final resp = buildResponse(const []);
       expect(() => Transport.parseDataTypesResponse(resp), returnsNormally);
     });
 
-    test(
-        'a hypothetical preamble/caps skip would desync — proving its ABSENCE '
+    test('a hypothetical preamble/caps skip would desync — proving its ABSENCE '
         'is load-bearing', () {
       // Reconstruct the WRONG variant the deferred-work item proposed: skip the
       // 5-byte charset/flags preamble + two length-prefixed caps blocks before

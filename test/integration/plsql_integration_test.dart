@@ -87,10 +87,10 @@ void main() {
     });
 
     test('positional IN binds call procedure and insert row', () async {
-      await conn.execute(
-        'BEGIN story31_proc_values(:1, :2); END;',
-        [42, 'Alice'],
-      );
+      await conn.execute('BEGIN story31_proc_values(:1, :2); END;', [
+        42,
+        'Alice',
+      ]);
       await conn.execute('COMMIT');
 
       final result = await conn.execute(
@@ -107,35 +107,36 @@ void main() {
       expect(result.rows, isEmpty);
       await conn.execute('COMMIT');
 
-      final check =
-          await conn.execute('SELECT COUNT(*) FROM $s31Table WHERE id = 99');
+      final check = await conn.execute(
+        'SELECT COUNT(*) FROM $s31Table WHERE id = 99',
+      );
       final count = check.rows.first[0];
       expect(count, equals(1));
     });
 
     // procedure that raises an Oracle error
     test(
-        'procedure raising RAISE_APPLICATION_ERROR throws OracleException',
-        () async {
-      await expectLater(
-        conn.execute('BEGIN story31_raise_error(); END;'),
-        throwsA(
-          isA<OracleException>().having(
-            (e) => e.errorCode,
-            'errorCode',
-            equals(20031),
+      'procedure raising RAISE_APPLICATION_ERROR throws OracleException',
+      () async {
+        await expectLater(
+          conn.execute('BEGIN story31_raise_error(); END;'),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              equals(20031),
+            ),
           ),
-        ),
-      );
-    });
+        );
+      },
+    );
 
     // named bind syntax produces the same result as positional
-    test('named IN binds produce identical result to positional',
-        () async {
-      await conn.execute(
-        'BEGIN story31_proc_values(:p_id, :p_name); END;',
-        {'p_id': 7, 'p_name': 'Bob'},
-      );
+    test('named IN binds produce identical result to positional', () async {
+      await conn.execute('BEGIN story31_proc_values(:p_id, :p_name); END;', {
+        'p_id': 7,
+        'p_name': 'Bob',
+      });
       await conn.execute('COMMIT');
 
       final result = await conn.execute(
@@ -149,20 +150,21 @@ void main() {
 
     // named binds with different ordering
     test(
-        'named binds pass correct values regardless of map iteration order',
-        () async {
-      await conn.execute(
-        'BEGIN story31_proc_values(:p_id, :p_name); END;',
-        {'p_name': 'Carol', 'p_id': 13},
-      );
-      await conn.execute('COMMIT');
+      'named binds pass correct values regardless of map iteration order',
+      () async {
+        await conn.execute('BEGIN story31_proc_values(:p_id, :p_name); END;', {
+          'p_name': 'Carol',
+          'p_id': 13,
+        });
+        await conn.execute('COMMIT');
 
-      final result = await conn.execute(
-        'SELECT id, name FROM $s31Table WHERE id = :1',
-        [13],
-      );
-      expect(result.rows.first[1], equals('Carol'));
-    });
+        final result = await conn.execute(
+          'SELECT id, name FROM $s31Table WHERE id = :1',
+          [13],
+        );
+        expect(result.rows.first[1], equals('Carol'));
+      },
+    );
 
     // rowsAffected is null for PL/SQL (not a DML count)
     test('PL/SQL result has null rowsAffected', () async {
@@ -170,25 +172,26 @@ void main() {
         'BEGIN story31_proc_values(:1, :2); END;',
         [1, 'Test'],
       );
-      expect(result.rowsAffected, isNull,
-          reason: 'PL/SQL calls must not expose a DML row count');
+      expect(
+        result.rowsAffected,
+        isNull,
+        reason: 'PL/SQL calls must not expose a DML row count',
+      );
     });
 
     // SELECT regression
-    test('SELECT still works after PL/SQL classification is added',
-        () async {
+    test('SELECT still works after PL/SQL classification is added', () async {
       final result = await conn.execute('SELECT 1 + 1 FROM dual');
       expect(result.rows, hasLength(1));
       expect(result.rows.first[0], equals(2));
     });
 
     // DML regression: rowsAffected still populated
-    test('DML rowsAffected is still populated after PL/SQL changes',
-        () async {
-      await conn.execute(
-        'INSERT INTO $s31Table (id, name) VALUES (:1, :2)',
-        [100, 'DML'],
-      );
+    test('DML rowsAffected is still populated after PL/SQL changes', () async {
+      await conn.execute('INSERT INTO $s31Table (id, name) VALUES (:1, :2)', [
+        100,
+        'DML',
+      ]);
       final result = await conn.execute(
         'UPDATE $s31Table SET name = :1 WHERE id = :2',
         ['DML-updated', 100],
@@ -208,23 +211,25 @@ void main() {
       );
       await conn.execute('COMMIT');
 
-      final check =
-          await conn.execute('SELECT COUNT(*) FROM $s31Table WHERE id = 99');
+      final check = await conn.execute(
+        'SELECT COUNT(*) FROM $s31Table WHERE id = 99',
+      );
       expect(check.rows.first[0], equals(1));
     });
 
     // Multiple calls in sequence on the same connection
     test('multiple sequential PL/SQL calls succeed', () async {
       for (var i = 1; i <= 5; i++) {
-        await conn.execute(
-          'BEGIN story31_proc_values(:1, :2); END;',
-          [i, 'row$i'],
-        );
+        await conn.execute('BEGIN story31_proc_values(:1, :2); END;', [
+          i,
+          'row$i',
+        ]);
       }
       await conn.execute('COMMIT');
 
-      final result =
-          await conn.execute('SELECT COUNT(*) FROM $s31Table WHERE id <= 5');
+      final result = await conn.execute(
+        'SELECT COUNT(*) FROM $s31Table WHERE id <= 5',
+      );
       expect(result.rows.first[0], equals(5));
     });
   });
@@ -319,27 +324,22 @@ void main() {
     });
 
     // NUMBER return value with IN binds
-    test('NUMBER return — named OUT bind reads via result.outBinds[ret]',
-        () async {
-      final result = await conn.execute(
-        'BEGIN :ret := story32_add(:a, :b); END;',
-        {
-          'ret': OracleBind.out(type: OracleDbType.number),
-          'a': 2,
-          'b': 3,
-        },
-      );
-      expect(result.outBinds['ret'], equals(5));
-    });
+    test(
+      'NUMBER return — named OUT bind reads via result.outBinds[ret]',
+      () async {
+        final result = await conn.execute(
+          'BEGIN :ret := story32_add(:a, :b); END;',
+          {'ret': OracleBind.out(type: OracleDbType.number), 'a': 2, 'b': 3},
+        );
+        expect(result.outBinds['ret'], equals(5));
+      },
+    );
 
     // NUMBER return decoded as Dart numeric
     test('NUMBER return decoded as Dart int', () async {
       final result = await conn.execute(
         'BEGIN :ret := story32_employee_count(:dept_id); END;',
-        {
-          'ret': OracleBind.out(type: OracleDbType.number),
-          'dept_id': 7,
-        },
+        {'ret': OracleBind.out(type: OracleDbType.number), 'dept_id': 7},
       );
       final ret = result.outBinds['ret'];
       expect(ret, isA<num>());
@@ -347,25 +347,23 @@ void main() {
     });
 
     // VARCHAR2 return honors maxSize
-    test('VARCHAR2 return decoded as Dart String with explicit maxSize',
-        () async {
-      final result = await conn.execute(
-        'BEGIN :ret := story32_greeting(:name); END;',
-        {
-          'ret': OracleBind.out(type: OracleDbType.varchar, maxSize: 100),
-          'name': 'Alex',
-        },
-      );
-      expect(result.outBinds['ret'], equals('Hello, Alex'));
-    });
+    test(
+      'VARCHAR2 return decoded as Dart String with explicit maxSize',
+      () async {
+        final result = await conn
+            .execute('BEGIN :ret := story32_greeting(:name); END;', {
+              'ret': OracleBind.out(type: OracleDbType.varchar, maxSize: 100),
+              'name': 'Alex',
+            });
+        expect(result.outBinds['ret'], equals('Hello, Alex'));
+      },
+    );
 
     // NULL return decodes as Dart null
     test('NULL return value surfaces as Dart null', () async {
       final result = await conn.execute(
         'BEGIN :ret := story32_null_text; END;',
-        {
-          'ret': OracleBind.out(type: OracleDbType.varchar, maxSize: 100),
-        },
+        {'ret': OracleBind.out(type: OracleDbType.varchar, maxSize: 100)},
       );
       expect(result.outBinds['ret'], isNull);
     });
@@ -381,20 +379,22 @@ void main() {
 
     // RAISE_APPLICATION_ERROR inside function still surfaces ORA-20032
     test(
-        'function raising RAISE_APPLICATION_ERROR(-20032) throws OracleException',
-        () async {
-      await expectLater(
-        conn.execute(
-          'BEGIN :ret := story32_raise_error; END;',
-          {'ret': OracleBind.out(type: OracleDbType.number)},
-        ),
-        throwsA(isA<OracleException>().having(
-          (e) => e.errorCode,
-          'errorCode',
-          equals(20032),
-        )),
-      );
-    });
+      'function raising RAISE_APPLICATION_ERROR(-20032) throws OracleException',
+      () async {
+        await expectLater(
+          conn.execute('BEGIN :ret := story32_raise_error; END;', {
+            'ret': OracleBind.out(type: OracleDbType.number),
+          }),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              equals(20032),
+            ),
+          ),
+        );
+      },
+    );
 
     // procedure regression: IN-only PL/SQL still works
     test('IN-only procedure call still succeeds', () async {
@@ -461,23 +461,25 @@ void main() {
     });
 
     // DML rowsAffected is still populated after OUT bind plumbing
-    test('DML rowsAffected is still populated after OUT bind changes',
-        () async {
-      final dmlTable = uniqueTableName('s32_dml');
-      await conn.execute(
-        'CREATE TABLE $dmlTable (id NUMBER)',
-      );
-      try {
-        await conn.execute('INSERT INTO $dmlTable VALUES (1)');
-        final result = await conn.execute('DELETE FROM $dmlTable WHERE id = 1');
-        expect(result.rowsAffected, equals(1));
-      } finally {
-        await _ignoreOraCodes(
-          () => conn.execute('DROP TABLE $dmlTable'),
-          const <int>[942],
-        );
-      }
-    });
+    test(
+      'DML rowsAffected is still populated after OUT bind changes',
+      () async {
+        final dmlTable = uniqueTableName('s32_dml');
+        await conn.execute('CREATE TABLE $dmlTable (id NUMBER)');
+        try {
+          await conn.execute('INSERT INTO $dmlTable VALUES (1)');
+          final result = await conn.execute(
+            'DELETE FROM $dmlTable WHERE id = 1',
+          );
+          expect(result.rowsAffected, equals(1));
+        } finally {
+          await _ignoreOraCodes(
+            () => conn.execute('DROP TABLE $dmlTable'),
+            const <int>[942],
+          );
+        }
+      },
+    );
   });
 
   group('PL/SQL OUT and IN OUT parameters', () {
@@ -571,92 +573,86 @@ void main() {
     });
 
     // scalar OUT parameters expose their values via outBinds
-    test('procedure with NUMBER+VARCHAR2 OUT params exposes both values',
-        () async {
-      final result = await conn.execute(
-        'BEGIN story33_out_values(:id, :name); END;',
-        {
-          'id': OracleBind.out(type: OracleDbType.number),
-          'name': OracleBind.out(type: OracleDbType.varchar, maxSize: 80),
-        },
-      );
-      expect(result.outBinds['id'], equals(42));
-      expect(result.outBinds['name'], equals('Smith'));
-    });
+    test(
+      'procedure with NUMBER+VARCHAR2 OUT params exposes both values',
+      () async {
+        final result = await conn
+            .execute('BEGIN story33_out_values(:id, :name); END;', {
+              'id': OracleBind.out(type: OracleDbType.number),
+              'name': OracleBind.out(type: OracleDbType.varchar, maxSize: 80),
+            });
+        expect(result.outBinds['id'], equals(42));
+        expect(result.outBinds['name'], equals('Smith'));
+      },
+    );
 
     // IN OUT parameter modified by the procedure surfaces the new value
     test('IN OUT NUMBER parameter returns the modified value', () async {
       final result = await conn.execute(
         'BEGIN story33_inout_increment(:value); END;',
-        {
-          'value': OracleBind.inOut(value: 41, type: OracleDbType.number),
-        },
+        {'value': OracleBind.inOut(value: 41, type: OracleDbType.number)},
       );
       expect(result.outBinds['value'], equals(42));
     });
 
     // multiple OUT/IN OUT via named binds accessible by name
-    test('mixed IN/OUT/IN OUT named binds — outputs accessible by name',
-        () async {
-      final result = await conn.execute(
-        'BEGIN story33_multi_out(:in_val, :out_val, :inout_val); END;',
-        {
-          'in_val': 10,
-          'out_val': OracleBind.out(type: OracleDbType.number),
-          'inout_val': OracleBind.inOut(value: 5, type: OracleDbType.number),
-        },
-      );
-      expect(result.outBinds['out_val'], equals(20));
-      expect(result.outBinds['inout_val'], equals(15));
-      // IN bind has no output entry.
-      expect(result.outBinds['in_val'], isNull);
-    });
+    test(
+      'mixed IN/OUT/IN OUT named binds — outputs accessible by name',
+      () async {
+        final result = await conn.execute(
+          'BEGIN story33_multi_out(:in_val, :out_val, :inout_val); END;',
+          {
+            'in_val': 10,
+            'out_val': OracleBind.out(type: OracleDbType.number),
+            'inout_val': OracleBind.inOut(value: 5, type: OracleDbType.number),
+          },
+        );
+        expect(result.outBinds['out_val'], equals(20));
+        expect(result.outBinds['inout_val'], equals(15));
+        // IN bind has no output entry.
+        expect(result.outBinds['in_val'], isNull);
+      },
+    );
 
     // positional binds: outputs are indexed by output position only
     test(
-        'positional mixed binds expose outputs at zero-based output index',
-        () async {
-      final result = await conn.execute(
-        'BEGIN story33_multi_out(:1, :2, :3); END;',
-        [
-          10,
-          OracleBind.out(type: OracleDbType.number),
-          OracleBind.inOut(value: 5, type: OracleDbType.number),
-        ],
-      );
-      // The IN bind does NOT take a slot in outBinds; outBinds[0] is the
-      // first OUT/IN OUT in SQL order, outBinds[1] is the next.
-      expect(result.outBinds[0], equals(20));
-      expect(result.outBinds[1], equals(15));
-      // Length is 2 — the IN bind never occupies an output slot.
-      expect(result.outBinds.length, equals(2));
-    });
+      'positional mixed binds expose outputs at zero-based output index',
+      () async {
+        final result = await conn
+            .execute('BEGIN story33_multi_out(:1, :2, :3); END;', [
+              10,
+              OracleBind.out(type: OracleDbType.number),
+              OracleBind.inOut(value: 5, type: OracleDbType.number),
+            ]);
+        // The IN bind does NOT take a slot in outBinds; outBinds[0] is the
+        // first OUT/IN OUT in SQL order, outBinds[1] is the next.
+        expect(result.outBinds[0], equals(20));
+        expect(result.outBinds[1], equals(15));
+        // Length is 2 — the IN bind never occupies an output slot.
+        expect(result.outBinds.length, equals(2));
+      },
+    );
 
     // explicit NULL OUT surfaces as Dart null
     test('explicit NULL OUT parameter surfaces as Dart null', () async {
       final result = await conn.execute(
         'BEGIN story33_null_out(:value); END;',
-        {
-          'value': OracleBind.out(type: OracleDbType.varchar, maxSize: 80),
-        },
+        {'value': OracleBind.out(type: OracleDbType.varchar, maxSize: 80)},
       );
       expect(result.outBinds['value'], isNull);
     });
 
     // IN OUT VARCHAR2 grows in length; maxSize must cover the result
-    test(
-        'IN OUT VARCHAR2 with sufficient maxSize returns the longer '
+    test('IN OUT VARCHAR2 with sufficient maxSize returns the longer '
         'value', () async {
-      final result = await conn.execute(
-        'BEGIN story33_inout_text(:text_value); END;',
-        {
-          'text_value': OracleBind.inOut(
-            value: 'abc',
-            type: OracleDbType.varchar,
-            maxSize: 100,
-          ),
-        },
-      );
+      final result = await conn
+          .execute('BEGIN story33_inout_text(:text_value); END;', {
+            'text_value': OracleBind.inOut(
+              value: 'abc',
+              type: OracleDbType.varchar,
+              maxSize: 100,
+            ),
+          });
       expect(result.outBinds['text_value'], equals('abc_suffix'));
     });
 
@@ -667,26 +663,24 @@ void main() {
     // 21c and 23ai when the PL/SQL assignment exceeds the bind's declared
     // maxSize. Asserting the code rather than message text keeps the test
     // resilient to translation/wording differences across server versions.
-    test(
-        'undersized IN OUT VARCHAR2 maxSize raises ORA-06502 and the '
+    test('undersized IN OUT VARCHAR2 maxSize raises ORA-06502 and the '
         'session remains usable', () async {
       // 'abc_suffix' is 10 bytes; declare maxSize=5 to force overflow.
       await expectLater(
-        conn.execute(
-          'BEGIN story33_inout_text(:text_value); END;',
-          {
-            'text_value': OracleBind.inOut(
-              value: 'abc',
-              type: OracleDbType.varchar,
-              maxSize: 5,
-            ),
-          },
+        conn.execute('BEGIN story33_inout_text(:text_value); END;', {
+          'text_value': OracleBind.inOut(
+            value: 'abc',
+            type: OracleDbType.varchar,
+            maxSize: 5,
+          ),
+        }),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(6502),
+          ),
         ),
-        throwsA(isA<OracleException>().having(
-          (e) => e.errorCode,
-          'errorCode',
-          equals(6502),
-        )),
       );
 
       // Session must still be usable after a buffer overflow error.
@@ -695,8 +689,7 @@ void main() {
     });
 
     // regression: pure OUT function return still works
-    test('OUT-only function return remains unchanged',
-        () async {
+    test('OUT-only function return remains unchanged', () async {
       await conn.execute('''
         CREATE OR REPLACE FUNCTION story33_add(
           p_a IN NUMBER, p_b IN NUMBER
@@ -708,11 +701,7 @@ void main() {
       try {
         final result = await conn.execute(
           'BEGIN :ret := story33_add(:a, :b); END;',
-          {
-            'ret': OracleBind.out(type: OracleDbType.number),
-            'a': 7,
-            'b': 11,
-          },
+          {'ret': OracleBind.out(type: OracleDbType.number), 'a': 7, 'b': 11},
         );
         expect(result.outBinds['ret'], equals(18));
       } finally {
@@ -724,8 +713,7 @@ void main() {
     });
 
     // regression: pure IN-only procedure call still works
-    test('IN-only procedure call remains unchanged',
-        () async {
+    test('IN-only procedure call remains unchanged', () async {
       await conn.execute('''
         CREATE OR REPLACE PROCEDURE story33_in_only(p_x IN NUMBER) AS
           v NUMBER;
@@ -734,10 +722,7 @@ void main() {
         END;
       ''');
       try {
-        await conn.execute(
-          'BEGIN story33_in_only(:x); END;',
-          {'x': 99},
-        );
+        await conn.execute('BEGIN story33_in_only(:x); END;', {'x': 99});
       } finally {
         await _ignoreOraCodes(
           () => conn.execute('DROP PROCEDURE story33_in_only'),
@@ -747,9 +732,7 @@ void main() {
     });
 
     // regression: SELECT and DML still work after OUT/IN OUT plumbing
-    test(
-        'SELECT and DML still work alongside OUT/IN OUT binds',
-        () async {
+    test('SELECT and DML still work alongside OUT/IN OUT binds', () async {
       final sel = await conn.execute('SELECT 7 FROM dual');
       expect(sel.rows.first[0], equals(7));
       expect(sel.outBinds.isEmpty, isTrue);
@@ -768,16 +751,13 @@ void main() {
     });
 
     // Multiple OUT parameters in one call, all returned together
-    test(
-        'multiple OUT parameters: both values present and indexable by name '
+    test('multiple OUT parameters: both values present and indexable by name '
         'and output position', () async {
-      final result = await conn.execute(
-        'BEGIN story33_out_values(:id, :name); END;',
-        {
-          'id': OracleBind.out(type: OracleDbType.number),
-          'name': OracleBind.out(type: OracleDbType.varchar, maxSize: 80),
-        },
-      );
+      final result = await conn
+          .execute('BEGIN story33_out_values(:id, :name); END;', {
+            'id': OracleBind.out(type: OracleDbType.number),
+            'name': OracleBind.out(type: OracleDbType.varchar, maxSize: 80),
+          });
       // Named lookup
       expect(result.outBinds['id'], equals(42));
       expect(result.outBinds['name'], equals('Smith'));
@@ -794,18 +774,18 @@ void main() {
         'name': OracleBind.out(type: OracleDbType.varchar, maxSize: 80),
       };
       final snapshot = Map<String, Object?>.of(binds);
-      await conn.execute(
-        'BEGIN story33_out_values(:id, :name); END;',
+      await conn.execute('BEGIN story33_out_values(:id, :name); END;', binds);
+      expect(
         binds,
+        equals(snapshot),
+        reason:
+            'execute() must copy bind collections; caller map must be '
+            'unchanged after the call',
       );
-      expect(binds, equals(snapshot),
-          reason: 'execute() must copy bind collections; caller map must be '
-              'unchanged after the call');
     });
 
     // IN OUT NUMBER with null IN value
-    test(
-        'IN OUT NUMBER with null input value: procedure sees NULL and may '
+    test('IN OUT NUMBER with null input value: procedure sees NULL and may '
         'replace it', () async {
       await conn.execute('''
         CREATE OR REPLACE PROCEDURE story33_inout_null_in(
@@ -822,9 +802,7 @@ void main() {
       try {
         final result = await conn.execute(
           'BEGIN story33_inout_null_in(:value); END;',
-          {
-            'value': OracleBind.inOut(value: null, type: OracleDbType.number),
-          },
+          {'value': OracleBind.inOut(value: null, type: OracleDbType.number)},
         );
         expect(result.outBinds['value'], equals(100));
       } finally {
@@ -869,25 +847,33 @@ void main() {
       await cleanUpConnection(c);
     });
 
-    test(
-        'repeated PL/SQL block leaves cache empty — same BEGIN ... END; '
+    test('repeated PL/SQL block leaves cache empty — same BEGIN ... END; '
         'executed 5x adds zero cache entries', () async {
-      expect(conn.debugCacheSize, equals(0),
-          reason: 'fresh connection must start with an empty cache');
+      expect(
+        conn.debugCacheSize,
+        equals(0),
+        reason: 'fresh connection must start with an empty cache',
+      );
 
       const plsql = 'BEGIN NULL; END;';
       for (var i = 0; i < 5; i++) {
         final r = await conn.execute(plsql);
-        expect(r.rowsAffected, isNull,
-            reason: 'PL/SQL must keep rowsAffected null');
-        expect(conn.debugCacheSize, equals(0),
-            reason: 'PL/SQL block must never enter the statement cache '
-                '(iteration ${i + 1})');
+        expect(
+          r.rowsAffected,
+          isNull,
+          reason: 'PL/SQL must keep rowsAffected null',
+        );
+        expect(
+          conn.debugCacheSize,
+          equals(0),
+          reason:
+              'PL/SQL block must never enter the statement cache '
+              '(iteration ${i + 1})',
+        );
       }
     });
 
-    test(
-        'distinct PL/SQL block variants do not accumulate in the cache '
+    test('distinct PL/SQL block variants do not accumulate in the cache '
         '— 3 different DECLARE blocks add zero cache entries', () async {
       expect(conn.debugCacheSize, equals(0));
 
@@ -902,12 +888,14 @@ void main() {
       for (final sql in blocks) {
         await conn.execute(sql);
       }
-      expect(conn.debugCacheSize, equals(0),
-          reason: 'No PL/SQL variant must enter the cache');
+      expect(
+        conn.debugCacheSize,
+        equals(0),
+        reason: 'No PL/SQL variant must enter the cache',
+      );
     });
 
-    test(
-        'cache is functional in the same session — control SELECT adds one '
+    test('cache is functional in the same session — control SELECT adds one '
         'entry per distinct SQL', () async {
       expect(conn.debugCacheSize, equals(0));
 
@@ -917,8 +905,11 @@ void main() {
       for (var i = 0; i < 5; i++) {
         await conn.execute(selectMarker);
       }
-      expect(conn.debugCacheSize, equals(1),
-          reason: 'Repeated SELECT must occupy exactly one cache slot');
+      expect(
+        conn.debugCacheSize,
+        equals(1),
+        reason: 'Repeated SELECT must occupy exactly one cache slot',
+      );
 
       // A second distinct SELECT adds another entry — control that cache
       // capacity is honored.
@@ -926,8 +917,7 @@ void main() {
       expect(conn.debugCacheSize, equals(2));
     });
 
-    test(
-        'mixed workload — interleaving PL/SQL and SELECT only grows cache '
+    test('mixed workload — interleaving PL/SQL and SELECT only grows cache '
         'for the SELECT', () async {
       expect(conn.debugCacheSize, equals(0));
 
@@ -946,9 +936,13 @@ void main() {
       // SELECT entry).
       for (var i = 0; i < 4; i++) {
         await conn.execute(plsql);
-        expect(conn.debugCacheSize, equals(1),
-            reason: 'PL/SQL must not displace or duplicate the SELECT entry '
-                '(iteration ${i + 1})');
+        expect(
+          conn.debugCacheSize,
+          equals(1),
+          reason:
+              'PL/SQL must not displace or duplicate the SELECT entry '
+              '(iteration ${i + 1})',
+        );
       }
     });
 
@@ -967,8 +961,11 @@ void main() {
         for (var i = 0; i < 3; i++) {
           await conn.execute('CALL story73_noop()');
         }
-        expect(conn.debugCacheSize, equals(0),
-            reason: 'CALL is PL/SQL — must not enter the cache');
+        expect(
+          conn.debugCacheSize,
+          equals(0),
+          reason: 'CALL is PL/SQL — must not enter the cache',
+        );
       } finally {
         await _ignoreOraCodes(
           () => conn.execute('DROP PROCEDURE story73_noop'),
@@ -997,22 +994,27 @@ void main() {
     });
 
     test(
-        'case-mismatched named bind (:RET vs key "ret") fails at '
-        'bind preparation with oraBindMismatch and message naming :RET',
-        () async {
-      await expectLater(
-        () => conn.execute(
-          'BEGIN :RET := 1; END;',
-          {'ret': OracleBind.out(type: OracleDbType.number)},
-        ),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', equals(oraBindMismatch))
-            .having((e) => e.message, 'message', contains(':RET'))),
-      );
-    });
+      'case-mismatched named bind (:RET vs key "ret") fails at '
+      'bind preparation with oraBindMismatch and message naming :RET',
+      () async {
+        await expectLater(
+          () => conn.execute('BEGIN :RET := 1; END;', {
+            'ret': OracleBind.out(type: OracleDbType.number),
+          }),
+          throwsA(
+            isA<OracleException>()
+                .having(
+                  (e) => e.errorCode,
+                  'errorCode',
+                  equals(oraBindMismatch),
+                )
+                .having((e) => e.message, 'message', contains(':RET')),
+          ),
+        );
+      },
+    );
 
-    test(
-        'repeated named IN bind reuses the same value in both '
+    test('repeated named IN bind reuses the same value in both '
         'placeholders (first-occurrence contract)', () async {
       // Oracle's PL/SQL parser rejects the strictest shape — repeating
       // an OUT placeholder (e.g. `BEGIN p(:v); p(:v); END;`) raises
@@ -1029,10 +1031,9 @@ void main() {
       // first-occurrence mapping at bind-preparation time
       // (connection.dart:218-233 builds bindList by mapping each parsed
       // bind name back to bindValues[name], so duplicates share the value).
-      final result = await conn.execute(
-        'SELECT :v AS a, :v AS b FROM dual',
-        {'v': 7},
-      );
+      final result = await conn.execute('SELECT :v AS a, :v AS b FROM dual', {
+        'v': 7,
+      });
       expect(result.rows.first.toList(), equals([7, 7]));
     });
   });

@@ -6,26 +6,30 @@ void main() {
   group('BindParser', () {
     group('parseNamedBinds', () {
       test('parses single named bind', () {
-        final binds =
-            BindParser.parseNamedBinds('SELECT * FROM emp WHERE dept = :dept');
+        final binds = BindParser.parseNamedBinds(
+          'SELECT * FROM emp WHERE dept = :dept',
+        );
         expect(binds, equals(['dept']));
       });
 
       test('parses multiple named binds', () {
         final binds = BindParser.parseNamedBinds(
-            'SELECT * FROM emp WHERE dept = :dept AND id = :id');
+          'SELECT * FROM emp WHERE dept = :dept AND id = :id',
+        );
         expect(binds, equals(['dept', 'id']));
       });
 
       test('parses bind with underscore', () {
         final binds = BindParser.parseNamedBinds(
-            'SELECT * FROM emp WHERE dept_id = :dept_id');
+          'SELECT * FROM emp WHERE dept_id = :dept_id',
+        );
         expect(binds, equals(['dept_id']));
       });
 
       test('parses bind with numbers in name', () {
-        final binds =
-            BindParser.parseNamedBinds('SELECT * FROM emp WHERE val = :val1');
+        final binds = BindParser.parseNamedBinds(
+          'SELECT * FROM emp WHERE val = :val1',
+        );
         expect(binds, equals(['val1']));
       });
 
@@ -36,19 +40,22 @@ void main() {
 
       test('ignores binds inside string literals', () {
         final binds = BindParser.parseNamedBinds(
-            "SELECT ':not_a_bind' as col, :real_bind FROM dual");
+          "SELECT ':not_a_bind' as col, :real_bind FROM dual",
+        );
         expect(binds, equals(['real_bind']));
       });
 
       test('handles escaped quotes in string literals', () {
         final binds = BindParser.parseNamedBinds(
-            "SELECT 'it''s :not_a_bind' as col, :real FROM dual");
+          "SELECT 'it''s :not_a_bind' as col, :real FROM dual",
+        );
         expect(binds, equals(['real']));
       });
 
       test('parses same bind name appearing multiple times', () {
         final binds = BindParser.parseNamedBinds(
-            'SELECT * FROM emp WHERE a = :val OR b = :val');
+          'SELECT * FROM emp WHERE a = :val OR b = :val',
+        );
         expect(binds, equals(['val', 'val']));
       });
     });
@@ -56,13 +63,15 @@ void main() {
     group('parsePositionalBinds', () {
       test('parses single positional bind', () {
         final count = BindParser.parsePositionalBinds(
-            'SELECT * FROM emp WHERE dept = :1');
+          'SELECT * FROM emp WHERE dept = :1',
+        );
         expect(count, equals(1));
       });
 
       test('parses multiple positional binds', () {
         final count = BindParser.parsePositionalBinds(
-            'SELECT * FROM emp WHERE dept = :1 AND id = :2');
+          'SELECT * FROM emp WHERE dept = :1 AND id = :2',
+        );
         expect(count, equals(2));
       });
 
@@ -73,25 +82,30 @@ void main() {
 
       test('ignores positional binds inside string literals', () {
         final count = BindParser.parsePositionalBinds(
-            "SELECT ':1' as col, :1 as real FROM dual");
+          "SELECT ':1' as col, :1 as real FROM dual",
+        );
         expect(count, equals(1));
       });
 
       test('throws on non-sequential positional binds', () {
         expect(
           () => BindParser.parsePositionalBinds(
-              'SELECT * FROM emp WHERE a = :1 AND b = :3'),
-          throwsA(isA<OracleException>().having(
-            (e) => e.errorCode,
-            'errorCode',
-            oraBindMismatch,
-          )),
+            'SELECT * FROM emp WHERE a = :1 AND b = :3',
+          ),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraBindMismatch,
+            ),
+          ),
         );
       });
 
       test('handles two-digit positional binds', () {
         final count = BindParser.parsePositionalBinds(
-            'SELECT :1, :2, :3, :4, :5, :6, :7, :8, :9, :10 FROM dual');
+          'SELECT :1, :2, :3, :4, :5, :6, :7, :8, :9, :10 FROM dual',
+        );
         expect(count, equals(10));
       });
     });
@@ -112,21 +126,21 @@ void main() {
       });
 
       test('returns false for no binds', () {
-        expect(
-          BindParser.isNamedBinds('SELECT * FROM emp'),
-          isFalse,
-        );
+        expect(BindParser.isNamedBinds('SELECT * FROM emp'), isFalse);
       });
 
       test('throws on mixed binds', () {
         expect(
           () => BindParser.isNamedBinds(
-              'SELECT * FROM emp WHERE dept = :dept AND id = :1'),
-          throwsA(isA<OracleException>().having(
-            (e) => e.errorCode,
-            'errorCode',
-            oraBindMismatch,
-          )),
+            'SELECT * FROM emp WHERE dept = :dept AND id = :1',
+          ),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraBindMismatch,
+            ),
+          ),
         );
       });
     });
@@ -140,8 +154,7 @@ void main() {
     // name. Exercised via the package-internal helper so no live Oracle
     // session is required.
     group('validateNamedBindCount', () {
-      test(
-          'PL/SQL block with duplicate placeholder and wrong bind-map count '
+      test('PL/SQL block with duplicate placeholder and wrong bind-map count '
           'throws ORA-01008', () {
         // `BEGIN p(:a, :a, :b); END;` — two distinct names, three positions.
         // Bind map provides three values, but only two are needed (the
@@ -149,24 +162,32 @@ void main() {
         final bindNames = BindParser.parseNamedBinds(
           'BEGIN proc_x(:a, :a, :b); END;',
         );
-        expect(bindNames, equals(['a', 'a', 'b']),
-            reason: 'parseNamedBinds preserves duplicates in SQL order');
+        expect(
+          bindNames,
+          equals(['a', 'a', 'b']),
+          reason: 'parseNamedBinds preserves duplicates in SQL order',
+        );
 
         expect(
           () => BindParser.validateNamedBindCount(bindNames, 3),
           throwsA(
             isA<OracleException>()
                 .having((e) => e.errorCode, 'errorCode', oraBindMismatch)
-                .having((e) => e.message, 'message',
-                    contains('2 unique placeholders'))
                 .having(
-                    (e) => e.message, 'message', contains('3 values provided')),
+                  (e) => e.message,
+                  'message',
+                  contains('2 unique placeholders'),
+                )
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('3 values provided'),
+                ),
           ),
         );
       });
 
-      test(
-          'PL/SQL block with duplicate placeholder and correct bind-map count '
+      test('PL/SQL block with duplicate placeholder and correct bind-map count '
           'passes', () {
         // Same SQL as above, but the caller provides one value per *unique*
         // name (a, b). This is the contract the validator must accept.
@@ -179,8 +200,7 @@ void main() {
         );
       });
 
-      test(
-          'PL/SQL DECLARE block with repeated :ret duplicate counts collapse '
+      test('PL/SQL DECLARE block with repeated :ret duplicate counts collapse '
           'via toSet()', () {
         // PL/SQL DECLARE shape with a repeated placeholder name. The
         // `uniqueNames.toSet()` path must collapse `:ret` to a single unique
@@ -197,8 +217,13 @@ void main() {
         // values is wrong — must throw.
         expect(
           () => BindParser.validateNamedBindCount(bindNames, 3),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraBindMismatch)),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraBindMismatch,
+            ),
+          ),
         );
 
         // Providing two values (one per unique name) is correct.
@@ -208,24 +233,31 @@ void main() {
         );
       });
 
-      test('plain SELECT with duplicate :val and wrong count throws ORA-01008',
-          () {
-        // Regression — the existing SELECT/DML path that previously embedded
-        // the same logic now routes through the extracted helper.
-        final bindNames = BindParser.parseNamedBinds(
-          'SELECT :val AS a, :val AS b FROM dual',
-        );
-        expect(bindNames, equals(['val', 'val']));
-        expect(
-          () => BindParser.validateNamedBindCount(bindNames, 2),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraBindMismatch)),
-        );
-        expect(
-          () => BindParser.validateNamedBindCount(bindNames, 1),
-          returnsNormally,
-        );
-      });
+      test(
+        'plain SELECT with duplicate :val and wrong count throws ORA-01008',
+        () {
+          // Regression — the existing SELECT/DML path that previously embedded
+          // the same logic now routes through the extracted helper.
+          final bindNames = BindParser.parseNamedBinds(
+            'SELECT :val AS a, :val AS b FROM dual',
+          );
+          expect(bindNames, equals(['val', 'val']));
+          expect(
+            () => BindParser.validateNamedBindCount(bindNames, 2),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'errorCode',
+                oraBindMismatch,
+              ),
+            ),
+          );
+          expect(
+            () => BindParser.validateNamedBindCount(bindNames, 1),
+            returnsNormally,
+          );
+        },
+      );
     });
   });
 }

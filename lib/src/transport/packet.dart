@@ -173,8 +173,9 @@ class TnsPacket {
     }
 
     // Read payload
-    final payload =
-        payloadLength > 0 ? buffer.readBytes(payloadLength) : Uint8List(0);
+    final payload = payloadLength > 0
+        ? buffer.readBytes(payloadLength)
+        : Uint8List(0);
 
     return TnsPacket(
       type: type,
@@ -466,8 +467,9 @@ TnsPacket decodeTnsPacket(Uint8List data, {bool useLargeSdu = false}) {
     );
   }
 
-  final payload =
-      payloadLength > 0 ? buffer.readBytes(payloadLength) : Uint8List(0);
+  final payload = payloadLength > 0
+      ? buffer.readBytes(payloadLength)
+      : Uint8List(0);
 
   return TnsPacket(
     type: type,

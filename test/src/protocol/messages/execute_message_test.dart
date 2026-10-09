@@ -4751,8 +4751,7 @@ void main() {
       expect(buf.hasRemaining, isFalse);
     });
 
-    test('a slot long in one row but short in another defers EVERY row value',
-        () {
+    test('a slot long in one row but short in another defers EVERY row value', () {
       // Story 11.5 AC3 (closes the Story 11.1 deferred coverage gap): the
       // long-data deferral is keyed on the SHARED slot's declared max size, not
       // on each individual value's length. When one row's value in a slot
@@ -4788,7 +4787,8 @@ void main() {
       expect(
         buf.readBytesWithLength(),
         equals(utf8.encode(shortValue)),
-        reason: 'a short value in a long-metadata slot is deferred like the '
+        reason:
+            'a short value in a long-metadata slot is deferred like the '
             'long ones — the deferral is per-slot, not per-value',
       );
       // Row 1: NUMBER first; the long string deferred to close out the row.
@@ -4798,8 +4798,7 @@ void main() {
       expect(buf.hasRemaining, isFalse);
     });
 
-    test(
-        'a slot long in the FIRST row but short in the second still defers '
+    test('a slot long in the FIRST row but short in the second still defers '
         'EVERY row value', () {
       // Same invariant as the test above, with the long/short rows in the
       // opposite order, so the "per-slot, not per-value" deferral is pinned
@@ -4833,7 +4832,8 @@ void main() {
       expect(
         buf.readBytesWithLength(),
         equals(utf8.encode(shortValue)),
-        reason: 'a short value in a long-metadata slot is deferred like the '
+        reason:
+            'a short value in a long-metadata slot is deferred like the '
             'long ones, even when it is not the row that made the slot long',
       );
       expect(buf.hasRemaining, isFalse);
@@ -4935,8 +4935,10 @@ void main() {
         bulkRows: rows(),
       ).toBytes();
       expect(_readOptionsFromHeader(bytes) & ttcExecOptionBatchErrors, 0);
-      expect(_openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
-          0);
+      expect(
+        _openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
+        0,
+      );
       final block = _readArrayDmlRowCountBlock(bytes);
       expect(block.pointer, 0);
       expect(block.count, 0);
@@ -4953,11 +4955,15 @@ void main() {
         batchErrors: true,
       ).toBytes();
       expect(ttcExecOptionBatchErrors, 0x80000);
-      expect(_readOptionsFromHeader(bytes) & ttcExecOptionBatchErrors,
-          ttcExecOptionBatchErrors);
+      expect(
+        _readOptionsFromHeader(bytes) & ttcExecOptionBatchErrors,
+        ttcExecOptionBatchErrors,
+      );
       // batchErrors alone leaves the DML-row-count exec-flag and pointer clear.
-      expect(_openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
-          0);
+      expect(
+        _openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
+        0,
+      );
       expect(_readArrayDmlRowCountBlock(bytes).pointer, 0);
     });
 
@@ -4971,8 +4977,10 @@ void main() {
         dmlRowCounts: true,
       ).toBytes();
       expect(ttcExecOptionDmlRowCounts, 0x4000);
-      expect(_openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
-          ttcExecOptionDmlRowCounts);
+      expect(
+        _openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
+        ttcExecOptionDmlRowCounts,
+      );
       // The pointer block carries the executeMany iteration count (3 rows).
       final block = _readArrayDmlRowCountBlock(bytes);
       expect(block.pointer, 1);
@@ -4991,10 +4999,14 @@ void main() {
         batchErrors: true,
         dmlRowCounts: true,
       ).toBytes();
-      expect(_readOptionsFromHeader(bytes) & ttcExecOptionBatchErrors,
-          ttcExecOptionBatchErrors);
-      expect(_openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
-          ttcExecOptionDmlRowCounts);
+      expect(
+        _readOptionsFromHeader(bytes) & ttcExecOptionBatchErrors,
+        ttcExecOptionBatchErrors,
+      );
+      expect(
+        _openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
+        ttcExecOptionDmlRowCounts,
+      );
       expect(_readArrayDmlRowCountBlock(bytes).count, 3);
     });
 
@@ -5035,32 +5047,34 @@ void main() {
   });
 
   group('batch errors / dml row counts response decoding (Story 11.3)', () {
-    test('a batch-error ERROR body decodes to a SUCCESS with per-row errors',
-        () {
-      final payload = _buildPayload([
-        _batchErrorMessage(
-          errors: const [
-            (code: 1, offset: 0, message: 'ORA-00001: unique constraint'),
-            (code: 1, offset: 2, message: 'ORA-00001: unique constraint'),
-          ],
-          rowCount: 2,
-        ),
-        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-      ]);
-      final r = decodeExecuteResponse(payload, isQuery: false);
-      // ORA-24381 at the statement level is NOT a thrown failure when a batch
-      // array is present — it is a success returning row errors as data.
-      expect(r.isSuccess, isTrue);
-      expect(r.errorCode, isNull);
-      expect(r.batchErrors, hasLength(2));
-      expect(r.batchErrors[0].offset, 0);
-      expect(r.batchErrors[0].errorCode, 1);
-      expect(r.batchErrors[0].code, 'ORA-00001');
-      expect(r.batchErrors[0].message, contains('unique constraint'));
-      expect(r.batchErrors[1].offset, 2);
-      // The extended row count still surfaces as rowsAffected (valid rows).
-      expect(r.rowsAffected, 2);
-    });
+    test(
+      'a batch-error ERROR body decodes to a SUCCESS with per-row errors',
+      () {
+        final payload = _buildPayload([
+          _batchErrorMessage(
+            errors: const [
+              (code: 1, offset: 0, message: 'ORA-00001: unique constraint'),
+              (code: 1, offset: 2, message: 'ORA-00001: unique constraint'),
+            ],
+            rowCount: 2,
+          ),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        final r = decodeExecuteResponse(payload, isQuery: false);
+        // ORA-24381 at the statement level is NOT a thrown failure when a batch
+        // array is present — it is a success returning row errors as data.
+        expect(r.isSuccess, isTrue);
+        expect(r.errorCode, isNull);
+        expect(r.batchErrors, hasLength(2));
+        expect(r.batchErrors[0].offset, 0);
+        expect(r.batchErrors[0].errorCode, 1);
+        expect(r.batchErrors[0].code, 'ORA-00001');
+        expect(r.batchErrors[0].message, contains('unique constraint'));
+        expect(r.batchErrors[1].offset, 2);
+        // The extended row count still surfaces as rowsAffected (valid rows).
+        expect(r.rowsAffected, 2);
+      },
+    );
 
     test('an ordinary DML error (no batch array) still throws-shaped '
         '(isSuccess false, empty batchErrors)', () {
@@ -5085,7 +5099,11 @@ void main() {
         _errorMessage(errorNum: 0, rowCount: 2),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
-      final r = decodeExecuteResponse(payload, isQuery: false, dmlRowCounts: true);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        dmlRowCounts: true,
+      );
       expect(r.isSuccess, isTrue);
       expect(r.dmlRowCounts, [1, 0, 1]);
       expect(r.rowsAffected, 2);
@@ -5125,7 +5143,11 @@ void main() {
         ),
         [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
       ]);
-      final r = decodeExecuteResponse(payload, isQuery: false, dmlRowCounts: true);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        dmlRowCounts: true,
+      );
       expect(r.isSuccess, isTrue);
       expect(r.batchErrors.map((e) => e.offset), [0, 2]);
       expect(r.dmlRowCounts, [0, 1, 0]);
@@ -5156,8 +5178,11 @@ void main() {
         _errorMessage(errorNum: 0, rowCount: 2),
       ]);
       expect(
-        ttcStreamIsComplete(payload, endOfRequestSupport: false,
-            dmlRowCounts: true),
+        ttcStreamIsComplete(
+          payload,
+          endOfRequestSupport: false,
+          dmlRowCounts: true,
+        ),
         isTrue,
       );
     });
@@ -5492,7 +5517,8 @@ void main() {
       expect(
         r.outBindValues,
         isEmpty,
-        reason: 'executeMany OUT values live in outBindRows, not the flat '
+        reason:
+            'executeMany OUT values live in outBindRows, not the flat '
             'single-execute container',
       );
 
@@ -5585,11 +5611,7 @@ void main() {
       const bindMetadata = [
         BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
         BindMetadata(oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
-        BindMetadata(
-          oraType: oraTypeVarchar,
-          maxSize: 40,
-          dir: BindDir.output,
-        ),
+        BindMetadata(oraType: oraTypeVarchar, maxSize: 40, dir: BindDir.output),
       ];
 
       final r = decodeExecuteResponse(
@@ -5679,7 +5701,8 @@ void main() {
       expect(
         parsed.numParams,
         equals(2),
-        reason: 'every bind (IN and RETURNING OUT) is written in the metadata '
+        reason:
+            'every bind (IN and RETURNING OUT) is written in the metadata '
             'block, matching node-oracledb processBindParams',
       );
     });
@@ -5739,27 +5762,30 @@ void main() {
       );
     });
 
-    test('OUT bind on a non-PL/SQL statement is rejected without dmlReturning',
-        () {
-      expect(
-        () => ExecuteRequest(
-          sql: sql,
-          isQuery: false,
-          bindValues: slots(), // slot 1 is an OUT bind
-          bulkRows: [
-            ['Alice', null],
-          ],
-        ),
-        throwsA(
-          isA<OracleException>().having(
-            (e) => e.message,
-            'message',
-            allOf(contains('OUT'), contains('RETURNING')),
+    test(
+      'OUT bind on a non-PL/SQL statement is rejected without dmlReturning',
+      () {
+        expect(
+          () => ExecuteRequest(
+            sql: sql,
+            isQuery: false,
+            bindValues: slots(), // slot 1 is an OUT bind
+            bulkRows: [
+              ['Alice', null],
+            ],
           ),
-        ),
-        reason: 'ordinary array DML must never smuggle OUT binds onto the wire',
-      );
-    });
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('OUT'), contains('RETURNING')),
+            ),
+          ),
+          reason:
+              'ordinary array DML must never smuggle OUT binds onto the wire',
+        );
+      },
+    );
   });
 
   group('DML RETURNING executeMany OUT decode', () {
@@ -5894,8 +5920,16 @@ void main() {
         isQuery: false,
         bindMetadata: const [
           BindMetadata(oraType: oraTypeNumber, dir: BindDir.input),
-          BindMetadata(oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
-          BindMetadata(oraType: oraTypeNumber, maxSize: 22, dir: BindDir.output),
+          BindMetadata(
+            oraType: oraTypeNumber,
+            maxSize: 22,
+            dir: BindDir.output,
+          ),
+          BindMetadata(
+            oraType: oraTypeNumber,
+            maxSize: 22,
+            dir: BindDir.output,
+          ),
         ],
         dmlReturning: true,
         presetOutBindIndices: const [1, 2],
@@ -5966,48 +6000,50 @@ void main() {
       );
     });
 
-    test('a trailing FLUSH_OUT_BINDS marker terminates and flags the response',
-        () {
-      // DML RETURNING error path: the execute response carries the per-row
-      // returning data then ends with FLUSH_OUT_BINDS (19) — no ERROR body
-      // (the error arrives in the follow-up flush response). The marker is
-      // terminal and sets flushOutBinds so the transport sends the flush.
-      final payload = _buildPayload([
-        returningRow([
-          [1],
-        ]),
-        returningRow([<int>[]]), // failed row returned nothing
-        [ttcMsgTypeFlushOutBinds],
-      ]);
-      final r = decodeExecuteResponse(
-        payload,
-        isQuery: false,
-        bindMetadata: oneBindMeta,
-        dmlReturning: true,
-        presetOutBindIndices: const [0],
-      );
-      expect(r.isSuccess, isTrue, reason: 'no ERROR body in this response');
-      expect(r.flushOutBinds, isTrue);
-      expect(
-        r.outBindRows,
-        equals([
-          [
-            [5],
-          ],
-          [<Object?>[]],
-        ]),
-      );
-      // The completion probe must accept the FLUSH_OUT_BINDS terminator too.
-      expect(
-        ttcStreamIsComplete(
+    test(
+      'a trailing FLUSH_OUT_BINDS marker terminates and flags the response',
+      () {
+        // DML RETURNING error path: the execute response carries the per-row
+        // returning data then ends with FLUSH_OUT_BINDS (19) — no ERROR body
+        // (the error arrives in the follow-up flush response). The marker is
+        // terminal and sets flushOutBinds so the transport sends the flush.
+        final payload = _buildPayload([
+          returningRow([
+            [1],
+          ]),
+          returningRow([<int>[]]), // failed row returned nothing
+          [ttcMsgTypeFlushOutBinds],
+        ]);
+        final r = decodeExecuteResponse(
           payload,
+          isQuery: false,
           bindMetadata: oneBindMeta,
           dmlReturning: true,
           presetOutBindIndices: const [0],
-        ),
-        isTrue,
-      );
-    });
+        );
+        expect(r.isSuccess, isTrue, reason: 'no ERROR body in this response');
+        expect(r.flushOutBinds, isTrue);
+        expect(
+          r.outBindRows,
+          equals([
+            [
+              [5],
+            ],
+            [<Object?>[]],
+          ]),
+        );
+        // The completion probe must accept the FLUSH_OUT_BINDS terminator too.
+        expect(
+          ttcStreamIsComplete(
+            payload,
+            bindMetadata: oneBindMeta,
+            dmlReturning: true,
+            presetOutBindIndices: const [0],
+          ),
+          isTrue,
+        );
+      },
+    );
 
     test('a returning CLOB bind decodes to a nested LobLocator', () {
       // CLOB LOB-prefetch wire shape inside the [numRows] count.
@@ -6250,9 +6286,7 @@ List<int> _batchErrorMessage({
     }
   }
   if (topErrorNum != 0) {
-    out.addAll(
-      _bytesWithLength('ORA-24381: error(s) in array DML'.codeUnits),
-    );
+    out.addAll(_bytesWithLength('ORA-24381: error(s) in array DML'.codeUnits));
   }
   return out;
 }

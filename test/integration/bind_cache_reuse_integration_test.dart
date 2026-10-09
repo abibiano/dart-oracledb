@@ -57,8 +57,7 @@ void main() {
       );
     });
 
-    test(
-        'a cursor first executed with a null VARCHAR bind is reused for a long '
+    test('a cursor first executed with a null VARCHAR bind is reused for a long '
         'string without truncation', () async {
       final sql = 'INSERT INTO $testTable (id, v) VALUES (:id, :v)';
       final longValue = 'X' * 3000;
@@ -76,16 +75,20 @@ void main() {
 
       // Reuse actually happened (otherwise the test would not exercise the
       // cursor-reuse path).
-      expect(conn.debugReuseExecutes, greaterThan(reuseBefore),
-          reason:
-              'second execute of identical SQL must reuse the cached cursor');
+      expect(
+        conn.debugReuseExecutes,
+        greaterThan(reuseBefore),
+        reason: 'second execute of identical SQL must reuse the cached cursor',
+      );
 
       final result = await conn.execute(
         'SELECT v FROM $testTable WHERE id = 2',
       );
-      expect(result.rows.single['V'], equals(longValue),
-          reason:
-              'reused cursor must not under-allocate the longer bind value');
+      expect(
+        result.rows.single['V'],
+        equals(longValue),
+        reason: 'reused cursor must not under-allocate the longer bind value',
+      );
       expect((result.rows.single['V'] as String).length, equals(3000));
 
       // The null row is still null (Oracle stores '' / null VARCHAR2 as NULL).

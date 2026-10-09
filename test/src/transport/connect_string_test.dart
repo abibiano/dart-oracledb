@@ -84,10 +84,7 @@ void main() {
 
     group('invalid formats', () {
       test('throws on empty string', () {
-        expect(
-          () => parseEZConnect(''),
-          throwsA(isA<OracleException>()),
-        );
+        expect(() => parseEZConnect(''), throwsA(isA<OracleException>()));
       });
 
       test('throws on missing service name', () {
@@ -140,10 +137,7 @@ void main() {
       });
 
       test('throws on missing host with slash', () {
-        expect(
-          () => parseEZConnect('/ORCL'),
-          throwsA(isA<OracleException>()),
-        );
+        expect(() => parseEZConnect('/ORCL'), throwsA(isA<OracleException>()));
       });
 
       test('exception includes helpful error message', () {

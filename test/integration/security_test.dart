@@ -17,7 +17,8 @@ void main() {
   if (!integrationEnabled) {
     test('Security tests require RUN_INTEGRATION_TESTS=true', () {
       Logger.root.info(
-          'Skipping security integration tests - set RUN_INTEGRATION_TESTS=true');
+        'Skipping security integration tests - set RUN_INTEGRATION_TESTS=true',
+      );
     });
     return;
   }
@@ -56,8 +57,11 @@ void main() {
 
       // Verify password not in any log message
       for (final logMsg in logMessages) {
-        expect(logMsg, isNot(contains(testPassword)),
-            reason: 'Password found in log: $logMsg');
+        expect(
+          logMsg,
+          isNot(contains(testPassword)),
+          reason: 'Password found in log: $logMsg',
+        );
       }
     });
 
@@ -75,8 +79,11 @@ void main() {
 
       // Verify password not in any log message
       for (final logMsg in logMessages) {
-        expect(logMsg, isNot(contains(invalidPassword)),
-            reason: 'Password found in log: $logMsg');
+        expect(
+          logMsg,
+          isNot(contains(invalidPassword)),
+          reason: 'Password found in log: $logMsg',
+        );
       }
     });
 
@@ -90,8 +97,11 @@ void main() {
         fail('Should have thrown OracleException');
       } on OracleException catch (e) {
         // Error message should NOT contain username
-        expect(e.message, isNot(contains(testUser)),
-            reason: 'Username should not be in error message');
+        expect(
+          e.message,
+          isNot(contains(testUser)),
+          reason: 'Username should not be in error message',
+        );
 
         // Error message should be generic
         expect(e.message, contains('Authentication failed'));
@@ -108,18 +118,30 @@ void main() {
         fail('Should have thrown OracleException');
       } on OracleException catch (e) {
         // Verify neither username nor password in error
-        expect(e.message, isNot(contains(testUser)),
-            reason: 'Username found in error message');
-        expect(e.message, isNot(contains(testSecret)),
-            reason: 'Password found in error message');
-        expect(e.toString(), isNot(contains(testSecret)),
-            reason: 'Password found in exception toString');
+        expect(
+          e.message,
+          isNot(contains(testUser)),
+          reason: 'Username found in error message',
+        );
+        expect(
+          e.message,
+          isNot(contains(testSecret)),
+          reason: 'Password found in error message',
+        );
+        expect(
+          e.toString(),
+          isNot(contains(testSecret)),
+          reason: 'Password found in exception toString',
+        );
       }
 
       // Double-check logs
       for (final logMsg in logMessages) {
-        expect(logMsg, isNot(contains(testSecret)),
-            reason: 'Password found in log: $logMsg');
+        expect(
+          logMsg,
+          isNot(contains(testSecret)),
+          reason: 'Password found in log: $logMsg',
+        );
       }
     });
 
@@ -141,15 +163,21 @@ void main() {
       }
 
       // Assertions run after finally — stopwatch is always stopped before these
-      expect(stopwatch.elapsed.inSeconds, inInclusiveRange(4, 6),
-          reason: 'Wrong password should timeout in ~5 seconds');
+      expect(
+        stopwatch.elapsed.inSeconds,
+        inInclusiveRange(4, 6),
+        reason: 'Wrong password should timeout in ~5 seconds',
+      );
       expect(authError.errorCode, equals(1017));
       expect(authError.message, isNot(contains(testSecret)));
       expect(authError.message, isNot(contains(testUser)));
 
       for (final logMsg in logMessages) {
-        expect(logMsg, isNot(contains(testSecret)),
-            reason: 'Password found in log after timeout: $logMsg');
+        expect(
+          logMsg,
+          isNot(contains(testSecret)),
+          reason: 'Password found in log after timeout: $logMsg',
+        );
       }
     });
 
@@ -171,12 +199,16 @@ void main() {
             password: password,
           );
           fail(
-              'Expected authentication to fail for user "$user" but it succeeded — '
-              'credential-protection assertions were skipped');
+            'Expected authentication to fail for user "$user" but it succeeded — '
+            'credential-protection assertions were skipped',
+          );
         } on OracleException catch (e) {
           // Verify credentials NOT in error
-          expect(e.message, isNot(contains(password)),
-              reason: 'Password "$password" found in error for user "$user"');
+          expect(
+            e.message,
+            isNot(contains(password)),
+            reason: 'Password "$password" found in error for user "$user"',
+          );
 
           // Generic error message only
           expect(e.message, matches(r'Authentication failed'));
@@ -187,8 +219,11 @@ void main() {
       for (final testCase in testCases) {
         final password = testCase['password']!;
         for (final logMsg in logMessages) {
-          expect(logMsg, isNot(contains(password)),
-              reason: 'Password found in log: $logMsg');
+          expect(
+            logMsg,
+            isNot(contains(password)),
+            reason: 'Password found in log: $logMsg',
+          );
         }
       }
     });

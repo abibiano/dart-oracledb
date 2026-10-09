@@ -701,9 +701,8 @@ class OracleConnection {
   /// poisons the transport), so it is rejected rather than wrapped — see
   /// [_rejectCursorEmbeddedLob] for the rationale and the owning follow-up.
   static bool _cursorCarriesLob(List<ColumnMetadata> columns) => columns.any(
-        (c) =>
-            c.oracleType == oc.oraTypeClob || c.oracleType == oc.oraTypeBlob,
-      );
+    (c) => c.oracleType == oc.oraTypeClob || c.oracleType == oc.oraTypeBlob,
+  );
 
   /// Fails loud when `fetchLobs: true` would have to hand back a LOB carried by
   /// a nested `CURSOR(...)` result column or a REF CURSOR OUT bind's rows.
@@ -848,10 +847,10 @@ class OracleConnection {
         onBatchDecoded: nestedCursorIndices.isEmpty
             ? null
             : (batch) => _materializeNestedCursorsInBatch(
-                  batch,
-                  nestedCursorIndices,
-                  fetchLobs: fetchLobs,
-                ),
+                batch,
+                nestedCursorIndices,
+                fetchLobs: fetchLobs,
+              ),
         // Deliberately NOT wrapping (AC6): a REF cursor's own LOB columns were
         // already rejected above, and this cursor's batches stay on the
         // materialize path. Stated explicitly so the wrap decision is visible at
@@ -1077,11 +1076,13 @@ class OracleConnection {
     try {
       final out = <Object>[];
       for (final descriptor in descriptors) {
-        out.add(await _drainOneImplicitResult(
-          descriptor,
-          maxRows: maxRows,
-          fetchLobs: fetchLobs,
-        ));
+        out.add(
+          await _drainOneImplicitResult(
+            descriptor,
+            maxRows: maxRows,
+            fetchLobs: fetchLobs,
+          ),
+        );
       }
       return out;
     } finally {
@@ -1223,10 +1224,10 @@ class OracleConnection {
         onBatchDecoded: nestedCursorIndices.isEmpty
             ? null
             : (batch) => _materializeNestedCursorsInBatch(
-                  batch,
-                  nestedCursorIndices,
-                  fetchLobs: false,
-                ),
+                batch,
+                nestedCursorIndices,
+                fetchLobs: false,
+              ),
         // Deliberately NOT wrapping (AC6): `resultSet: true` + `fetchLobs: true`
         // on a PL/SQL block is rejected pre-wire in `execute()` precisely so this
         // GROUP of lazy result sets never enables an unwired wrap. Stated here
@@ -2429,9 +2430,7 @@ class OracleConnection {
         if (value is OracleLob) {
           throw OracleException(
             errorCode: oraBindTypeError,
-            message: _lobInExecuteManyMessage(
-              'row $r, $slotLabel',
-            ),
+            message: _lobInExecuteManyMessage('row $r, $slotLabel'),
           );
         }
         final oraType = dt.inferOraTypeForValue(value);
@@ -2930,8 +2929,7 @@ class OracleConnection {
         ];
         if (slotDefs != null) {
           for (var s = 0; s < slotCount; s++) {
-            if (slotDefs[s].direction == BindDir.output &&
-                values[s] != null) {
+            if (slotDefs[s].direction == BindDir.output && values[s] != null) {
               throw OracleException(
                 errorCode: oraBindMismatch,
                 message:
@@ -3931,10 +3929,9 @@ class OracleConnection {
             _validateLobBindValue(
               rawValue,
               declaredType: raw.type,
-              slotLabel:
-                  bindNames != null
-                      ? 'bind ":${bindNames[i]}"'
-                      : 'bind :${i + 1}',
+              slotLabel: bindNames != null
+                  ? 'bind ":${bindNames[i]}"'
+                  : 'bind :${i + 1}',
             );
             bindValue = lobLocatorOf(rawValue);
           } else {
@@ -4401,10 +4398,10 @@ class OracleConnection {
         onBatchDecoded: cursorColumnIndices.isEmpty
             ? null
             : (batch) => _materializeNestedCursorsInBatch(
-                  batch,
-                  cursorColumnIndices,
-                  fetchLobs: fetchLobs,
-                ),
+                batch,
+                cursorColumnIndices,
+                fetchLobs: fetchLobs,
+              ),
         // Story 12.3 AC4/AC5: under fetchLobs each continuation batch's LOB
         // columns are wrapped as handles, and the cursor is given the predicate +
         // closer it needs to reap the ones the caller never retrieves. All three
@@ -4778,8 +4775,10 @@ class OracleConnection {
       // fail, but close() must never throw (and it runs inside the pool's
       // release path). Surface the anomaly in the log instead of the call stack;
       // the worst case is a temp LOB reclaimed at session end.
-      _log.warning('Failed to queue a temporary LOB for the free piggyback; '
-          'it will be reclaimed at session end: $e');
+      _log.warning(
+        'Failed to queue a temporary LOB for the free piggyback; '
+        'it will be reclaimed at session end: $e',
+      );
     }
   }
 

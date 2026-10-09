@@ -57,14 +57,22 @@ void main() {
         );
       });
 
-      test('charsetInfo is exposed on a freshly connected session (AC6)',
-          () async {
-        final info = connection.charsetInfo;
-        expect(info.databaseCharset, isNotEmpty,
-            reason: 'database charset must be detected at connect');
-        expect(info.nationalCharset, isNotEmpty,
-            reason: 'national charset must be detected at connect');
-      });
+      test(
+        'charsetInfo is exposed on a freshly connected session (AC6)',
+        () async {
+          final info = connection.charsetInfo;
+          expect(
+            info.databaseCharset,
+            isNotEmpty,
+            reason: 'database charset must be detected at connect',
+          );
+          expect(
+            info.nationalCharset,
+            isNotEmpty,
+            reason: 'national charset must be detected at connect',
+          );
+        },
+      );
 
       // Round-trip matrix: each value is bound (UTF-8 client encode path) and
       // read back (UTF-8 client decode path). The server converts to/from its
@@ -88,20 +96,27 @@ void main() {
       };
 
       cases.forEach((label, value) {
-        test('VARCHAR2 round-trips $label text through the bind path', () async {
-          final id = nextTestId();
-          await connection.execute(
-            'INSERT INTO $testTable (id, v) VALUES ($id, :1)',
-            [value],
-          );
-          final result = await connection.execute(
-            'SELECT v FROM $testTable WHERE id = :1',
-            [id],
-          );
-          expect(result.rows.single['V'], equals(value),
-              reason: '$label value must survive UTF-8 client negotiation '
-                  'and server-side conversion unchanged');
-        });
+        test(
+          'VARCHAR2 round-trips $label text through the bind path',
+          () async {
+            final id = nextTestId();
+            await connection.execute(
+              'INSERT INTO $testTable (id, v) VALUES ($id, :1)',
+              [value],
+            );
+            final result = await connection.execute(
+              'SELECT v FROM $testTable WHERE id = :1',
+              [id],
+            );
+            expect(
+              result.rows.single['V'],
+              equals(value),
+              reason:
+                  '$label value must survive UTF-8 client negotiation '
+                  'and server-side conversion unchanged',
+            );
+          },
+        );
       });
     },
   );

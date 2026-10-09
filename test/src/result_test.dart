@@ -11,7 +11,10 @@ void main() {
       final result = OracleResult(
         columnMetadata: const [
           ColumnMetadata(
-              name: 'NAME', oracleType: oraTypeVarchar, maxLength: 100),
+            name: 'NAME',
+            oracleType: oraTypeVarchar,
+            maxLength: 100,
+          ),
         ],
         rowData: const [
           ['Alice'],
@@ -27,13 +30,13 @@ void main() {
       const columns = [
         ColumnMetadata(name: 'ID', oracleType: oraTypeNumber, maxLength: 22),
         ColumnMetadata(
-            name: 'NAME', oracleType: oraTypeVarchar, maxLength: 100),
+          name: 'NAME',
+          oracleType: oraTypeVarchar,
+          maxLength: 100,
+        ),
       ];
 
-      final result = OracleResult(
-        columnMetadata: columns,
-        rowData: const [],
-      );
+      final result = OracleResult(columnMetadata: columns, rowData: const []);
 
       expect(result.columns, hasLength(2));
       expect(result.columns[0].name, equals('ID'));
@@ -44,9 +47,15 @@ void main() {
       final result = OracleResult(
         columnMetadata: const [
           ColumnMetadata(
-              name: 'FIRST', oracleType: oraTypeVarchar, maxLength: 50),
+            name: 'FIRST',
+            oracleType: oraTypeVarchar,
+            maxLength: 50,
+          ),
           ColumnMetadata(
-              name: 'SECOND', oracleType: oraTypeVarchar, maxLength: 50),
+            name: 'SECOND',
+            oracleType: oraTypeVarchar,
+            maxLength: 50,
+          ),
         ],
         rowData: const [],
       );
@@ -58,7 +67,10 @@ void main() {
       final result = OracleResult(
         columnMetadata: const [
           ColumnMetadata(
-              name: 'COL', oracleType: oraTypeVarchar, maxLength: 10),
+            name: 'COL',
+            oracleType: oraTypeVarchar,
+            maxLength: 10,
+          ),
         ],
         rowData: const [],
       );
@@ -78,10 +90,7 @@ void main() {
     });
 
     test('outBinds defaults to an empty container', () {
-      final result = OracleResult(
-        columnMetadata: const [],
-        rowData: const [],
-      );
+      final result = OracleResult(columnMetadata: const [], rowData: const []);
       expect(result.outBinds.isEmpty, isTrue);
       expect(result.outBinds['ret'], isNull);
       expect(result.outBinds[0], isNull);
@@ -91,10 +100,7 @@ void main() {
       final result = OracleResult(
         columnMetadata: const [],
         rowData: const [],
-        outBinds: OracleOutBinds(
-          values: const [42],
-          names: const {'ret': 0},
-        ),
+        outBinds: OracleOutBinds(values: const [42], names: const {'ret': 0}),
       );
       expect(result.outBinds['ret'], equals(42));
       expect(result.outBinds[0], equals(42));
@@ -110,7 +116,10 @@ void main() {
         columnMetadata: const [
           ColumnMetadata(name: 'ID', oracleType: oraTypeNumber, maxLength: 22),
           ColumnMetadata(
-              name: 'NAME', oracleType: oraTypeVarchar, maxLength: 100),
+            name: 'NAME',
+            oracleType: oraTypeVarchar,
+            maxLength: 100,
+          ),
           ColumnMetadata(name: 'AGE', oracleType: oraTypeNumber, maxLength: 22),
         ],
         rowData: const [

@@ -38,7 +38,8 @@ void main() {
           'SELECT LEVEL AS ID FROM dual CONNECT BY LEVEL <= $total ORDER BY 1';
 
       // PL/SQL block returning one implicit result of `total` ordered rows.
-      const implicitBlock = '''
+      const implicitBlock =
+          '''
         DECLARE
           c1 SYS_REFCURSOR;
         BEGIN
@@ -61,114 +62,141 @@ void main() {
 
       // --- Eager SELECT path ----------------------------------------------
 
-      test('SELECT maxRows: N caps a multi-batch result to exactly N', () async {
-        // N spans more than one prefetch batch (50) and lands below `total`.
-        const n = 137;
-        final result = await connection.execute(
-          selectAll,
-          null,
-          const OracleExecuteOptions(maxRows: n),
-        );
-
-        expect(result.rows, hasLength(n));
-        expect(result.rows.map((r) => r['ID']),
-            equals([for (var i = 1; i <= n; i++) i]),
-            reason: 'the first N rows in order, no gaps');
-        expect(result.moreRowsAvailable, isTrue,
-            reason: 'a cap that bounds a longer result reports rows remain');
-      });
-
-      test('SELECT maxRows: N below the first prefetch batch caps cleanly',
-          () async {
-        // N (< 50) is satisfied entirely within the first EXECUTE batch.
-        const n = 10;
-        final result = await connection.execute(
-          selectAll,
-          null,
-          const OracleExecuteOptions(maxRows: n),
-        );
-
-        expect(result.rows, hasLength(n));
-        expect(result.rows.last['ID'], equals(n));
-        expect(result.moreRowsAvailable, isTrue);
-      });
-
-      test('SELECT maxRows: 0 (default) returns every row, unchanged', () async {
-        final capped = await connection.execute(selectAll);
-        final explicit = await connection.execute(
-          selectAll,
-          null,
-          const OracleExecuteOptions(maxRows: 0),
-        );
-
-        expect(capped.rows, hasLength(total));
-        expect(explicit.rows, hasLength(total));
-        expect(capped.moreRowsAvailable, isFalse);
-        expect(explicit.moreRowsAvailable, isFalse);
-        expect(capped.rows.last['ID'], equals(total));
-      });
-
-      test('SELECT maxRows >= total returns all rows, no false cap signal',
-          () async {
-        final result = await connection.execute(
-          selectAll,
-          null,
-          const OracleExecuteOptions(maxRows: total + 50),
-        );
-        expect(result.rows, hasLength(total));
-        expect(result.moreRowsAvailable, isFalse,
-            reason: 'cap never reached ⇒ result is a full drain, not capped');
-      });
-
-      test('SELECT negative maxRows throws ArgumentError before any wire trip',
-          () async {
-        expect(
-          () => connection.execute(
+      test(
+        'SELECT maxRows: N caps a multi-batch result to exactly N',
+        () async {
+          // N spans more than one prefetch batch (50) and lands below `total`.
+          const n = 137;
+          final result = await connection.execute(
             selectAll,
             null,
-            const OracleExecuteOptions(maxRows: -1),
-          ),
-          throwsA(isA<ArgumentError>()),
-        );
-        // The connection is still usable (no cursor was opened).
-        final after = await connection.execute('SELECT 1 AS C FROM dual');
-        expect(after.rows.single['C'], equals(1));
-      });
+            const OracleExecuteOptions(maxRows: n),
+          );
+
+          expect(result.rows, hasLength(n));
+          expect(
+            result.rows.map((r) => r['ID']),
+            equals([for (var i = 1; i <= n; i++) i]),
+            reason: 'the first N rows in order, no gaps',
+          );
+          expect(
+            result.moreRowsAvailable,
+            isTrue,
+            reason: 'a cap that bounds a longer result reports rows remain',
+          );
+        },
+      );
+
+      test(
+        'SELECT maxRows: N below the first prefetch batch caps cleanly',
+        () async {
+          // N (< 50) is satisfied entirely within the first EXECUTE batch.
+          const n = 10;
+          final result = await connection.execute(
+            selectAll,
+            null,
+            const OracleExecuteOptions(maxRows: n),
+          );
+
+          expect(result.rows, hasLength(n));
+          expect(result.rows.last['ID'], equals(n));
+          expect(result.moreRowsAvailable, isTrue);
+        },
+      );
+
+      test(
+        'SELECT maxRows: 0 (default) returns every row, unchanged',
+        () async {
+          final capped = await connection.execute(selectAll);
+          final explicit = await connection.execute(
+            selectAll,
+            null,
+            const OracleExecuteOptions(maxRows: 0),
+          );
+
+          expect(capped.rows, hasLength(total));
+          expect(explicit.rows, hasLength(total));
+          expect(capped.moreRowsAvailable, isFalse);
+          expect(explicit.moreRowsAvailable, isFalse);
+          expect(capped.rows.last['ID'], equals(total));
+        },
+      );
+
+      test(
+        'SELECT maxRows >= total returns all rows, no false cap signal',
+        () async {
+          final result = await connection.execute(
+            selectAll,
+            null,
+            const OracleExecuteOptions(maxRows: total + 50),
+          );
+          expect(result.rows, hasLength(total));
+          expect(
+            result.moreRowsAvailable,
+            isFalse,
+            reason: 'cap never reached ⇒ result is a full drain, not capped',
+          );
+        },
+      );
+
+      test(
+        'SELECT negative maxRows throws ArgumentError before any wire trip',
+        () async {
+          expect(
+            () => connection.execute(
+              selectAll,
+              null,
+              const OracleExecuteOptions(maxRows: -1),
+            ),
+            throwsA(isA<ArgumentError>()),
+          );
+          // The connection is still usable (no cursor was opened).
+          final after = await connection.execute('SELECT 1 AS C FROM dual');
+          expect(after.rows.single['C'], equals(1));
+        },
+      );
 
       // --- Eager implicit-result path -------------------------------------
 
-      test('implicit result maxRows: N caps a multi-batch implicit to exactly N',
-          () async {
-        const n = 137;
-        final result = await connection.execute(
-          implicitBlock,
-          null,
-          const OracleExecuteOptions(maxRows: n),
-        );
+      test(
+        'implicit result maxRows: N caps a multi-batch implicit to exactly N',
+        () async {
+          const n = 137;
+          final result = await connection.execute(
+            implicitBlock,
+            null,
+            const OracleExecuteOptions(maxRows: n),
+          );
 
-        expect(result.implicitResults, hasLength(1));
-        final rows = result.implicitResults.single as List<OracleRow>;
-        expect(rows, hasLength(n));
-        expect(rows.map((r) => r['ID']),
+          expect(result.implicitResults, hasLength(1));
+          final rows = result.implicitResults.single as List<OracleRow>;
+          expect(rows, hasLength(n));
+          expect(
+            rows.map((r) => r['ID']),
             equals([for (var i = 1; i <= n; i++) i]),
-            reason: 'the first N rows in order across FETCH rounds');
-      });
+            reason: 'the first N rows in order across FETCH rounds',
+          );
+        },
+      );
 
-      test('implicit result maxRows: 0 (default) drains every row, unchanged',
-          () async {
-        final capped = await connection.execute(implicitBlock);
-        final explicit = await connection.execute(
-          implicitBlock,
-          null,
-          const OracleExecuteOptions(maxRows: 0),
-        );
+      test(
+        'implicit result maxRows: 0 (default) drains every row, unchanged',
+        () async {
+          final capped = await connection.execute(implicitBlock);
+          final explicit = await connection.execute(
+            implicitBlock,
+            null,
+            const OracleExecuteOptions(maxRows: 0),
+          );
 
-        final cappedRows = capped.implicitResults.single as List<OracleRow>;
-        final explicitRows = explicit.implicitResults.single as List<OracleRow>;
-        expect(cappedRows, hasLength(total));
-        expect(explicitRows, hasLength(total));
-        expect(cappedRows.last['ID'], equals(total));
-      });
+          final cappedRows = capped.implicitResults.single as List<OracleRow>;
+          final explicitRows =
+              explicit.implicitResults.single as List<OracleRow>;
+          expect(cappedRows, hasLength(total));
+          expect(explicitRows, hasLength(total));
+          expect(cappedRows.last['ID'], equals(total));
+        },
+      );
     },
   );
 }

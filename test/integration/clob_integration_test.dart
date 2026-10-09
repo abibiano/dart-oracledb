@@ -112,19 +112,23 @@ void main() {
 
       test('SQL NULL CLOB decodes to null', () async {
         final id = nextTestId();
-        await connection
-            .execute('INSERT INTO $testTable (id, doc) VALUES ($id, NULL)');
-        final result = await connection
-            .execute('SELECT doc FROM $testTable WHERE id = $id');
+        await connection.execute(
+          'INSERT INTO $testTable (id, doc) VALUES ($id, NULL)',
+        );
+        final result = await connection.execute(
+          'SELECT doc FROM $testTable WHERE id = $id',
+        );
         expect(result.rows.single['DOC'], isNull);
       });
 
       test('EMPTY_CLOB() decodes to the empty string', () async {
         final id = nextTestId();
         await connection.execute(
-            'INSERT INTO $testTable (id, doc) VALUES ($id, EMPTY_CLOB())');
-        final result = await connection
-            .execute('SELECT doc FROM $testTable WHERE id = $id');
+          'INSERT INTO $testTable (id, doc) VALUES ($id, EMPTY_CLOB())',
+        );
+        final result = await connection.execute(
+          'SELECT doc FROM $testTable WHERE id = $id',
+        );
         expect(result.rows.single['DOC'], equals(''));
       });
 
@@ -135,8 +139,9 @@ void main() {
           'INSERT INTO $testTable (id, doc) VALUES ($id, :doc)',
           {'doc': text},
         );
-        final result = await connection
-            .execute('SELECT doc FROM $testTable WHERE id = $id');
+        final result = await connection.execute(
+          'SELECT doc FROM $testTable WHERE id = $id',
+        );
         final value = result.rows.single['DOC'];
         expect(value, isA<String>());
         expect(value, equals(text));
@@ -149,8 +154,9 @@ void main() {
           'INSERT INTO $testTable (id, doc) VALUES ($id, :doc)',
           {'doc': text},
         );
-        final result = await connection
-            .execute('SELECT doc FROM $testTable WHERE id = $id');
+        final result = await connection.execute(
+          'SELECT doc FROM $testTable WHERE id = $id',
+        );
         expect(result.rows.single['DOC'], equals(text));
       });
 
@@ -160,15 +166,19 @@ void main() {
         // size, so the server streams the value back in several LOB_DATA
         // chunks; exact equality proves no chunk was lost, duplicated or
         // reordered.
-        final text = List.generate(7000, (i) => 'chunk${i.toString().padLeft(5, '0')}').join();
+        final text = List.generate(
+          7000,
+          (i) => 'chunk${i.toString().padLeft(5, '0')}',
+        ).join();
         expect(text.length, equals(70000));
         await connection.execute(
           'INSERT INTO $testTable (id, doc) VALUES ($id, :doc)',
           {'doc': text},
         );
         final readOpsBefore = connection.debugLobReadOps;
-        final result = await connection
-            .execute('SELECT doc FROM $testTable WHERE id = $id');
+        final result = await connection.execute(
+          'SELECT doc FROM $testTable WHERE id = $id',
+        );
         final value = result.rows.single['DOC'] as String?;
         expect(value, isNotNull);
         expect(value!.length, equals(70000));
@@ -179,9 +189,13 @@ void main() {
         // `getData` parity) and the server streams the 70,000 chars back as
         // multiple LOB_DATA chunks inside that single response, so the
         // expected delta is exactly one READ operation.
-        expect(connection.debugLobReadOps - readOpsBefore, equals(1),
-            reason: 'the >64 KiB CLOB must be drained via exactly one '
-                'full-length LOB READ');
+        expect(
+          connection.debugLobReadOps - readOpsBefore,
+          equals(1),
+          reason:
+              'the >64 KiB CLOB must be drained via exactly one '
+              'full-length LOB READ',
+        );
       });
 
       test('large multibyte CLOB survives chunk boundaries', () async {
@@ -194,8 +208,9 @@ void main() {
           'INSERT INTO $testTable (id, doc) VALUES ($id, :doc)',
           {'doc': text},
         );
-        final result = await connection
-            .execute('SELECT doc FROM $testTable WHERE id = $id');
+        final result = await connection.execute(
+          'SELECT doc FROM $testTable WHERE id = $id',
+        );
         expect(result.rows.single['DOC'], equals(text));
       });
 
@@ -226,8 +241,9 @@ void main() {
           'INSERT INTO $testTable (id, doc) VALUES ($id, :doc)',
           {'doc': text},
         );
-        final result = await connection
-            .execute('SELECT doc FROM $testTable WHERE id = $id');
+        final result = await connection.execute(
+          'SELECT doc FROM $testTable WHERE id = $id',
+        );
         final value = result.rows.single['DOC'] as String?;
         expect(value, isNotNull);
         expect(value!.length, equals(text.length));
@@ -276,63 +292,72 @@ void main() {
         expect(result.rows[1]['DOC'], equals('positional bind value'));
       });
 
-      test('UPDATE binds a String into a CLOB column and reports rowsAffected',
-          () async {
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, doc) VALUES ($id, :1)',
-          ['before'],
-        );
-        final update = await connection.execute(
-          'UPDATE $testTable SET doc = :doc WHERE id = :id',
-          {'doc': 'after update', 'id': id},
-        );
-        expect(update.rowsAffected, equals(1));
-        final result = await connection
-            .execute('SELECT doc FROM $testTable WHERE id = $id');
-        expect(result.rows.single['DOC'], equals('after update'));
-      });
+      test(
+        'UPDATE binds a String into a CLOB column and reports rowsAffected',
+        () async {
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES ($id, :1)',
+            ['before'],
+          );
+          final update = await connection.execute(
+            'UPDATE $testTable SET doc = :doc WHERE id = :id',
+            {'doc': 'after update', 'id': id},
+          );
+          expect(update.rowsAffected, equals(1));
+          final result = await connection.execute(
+            'SELECT doc FROM $testTable WHERE id = $id',
+          );
+          expect(result.rows.single['DOC'], equals('after update'));
+        },
+      );
 
-      test('DML INSERT above the 32767-byte VARCHAR bind limit round-trips',
-          () async {
-        final id = nextTestId();
-        // 40,000 ASCII chars > 32767 bytes: exercises the deferred long-data
-        // write ordering (the value is written after all other binds).
-        final text = 'L' * 40000;
-        final insert = await connection.execute(
-          'INSERT INTO $testTable (id, doc, tag) VALUES (:1, :2, :3)',
-          [id, text, 'short-after-long'],
-        );
-        expect(insert.rowsAffected, equals(1));
-        final result = await connection.execute(
-            'SELECT doc, tag FROM $testTable WHERE id = $id');
-        expect((result.rows.single['DOC'] as String).length, equals(40000));
-        expect(result.rows.single['DOC'], equals(text));
-        expect(result.rows.single['TAG'], equals('short-after-long'),
-            reason: 'binds after a deferred long value must stay aligned');
-      });
+      test(
+        'DML INSERT above the 32767-byte VARCHAR bind limit round-trips',
+        () async {
+          final id = nextTestId();
+          // 40,000 ASCII chars > 32767 bytes: exercises the deferred long-data
+          // write ordering (the value is written after all other binds).
+          final text = 'L' * 40000;
+          final insert = await connection.execute(
+            'INSERT INTO $testTable (id, doc, tag) VALUES (:1, :2, :3)',
+            [id, text, 'short-after-long'],
+          );
+          expect(insert.rowsAffected, equals(1));
+          final result = await connection.execute(
+            'SELECT doc, tag FROM $testTable WHERE id = $id',
+          );
+          expect((result.rows.single['DOC'] as String).length, equals(40000));
+          expect(result.rows.single['DOC'], equals(text));
+          expect(
+            result.rows.single['TAG'],
+            equals('short-after-long'),
+            reason: 'binds after a deferred long value must stay aligned',
+          );
+        },
+      );
 
       // ---------------------------------------------------------------
       // PL/SQL OUT / IN OUT
       // ---------------------------------------------------------------
 
-      test('CLOB OUT bind returns null when the procedure assigns NULL',
-          () async {
-        final result = await connection.execute(
-          'BEGIN $copyProc(NULL, :ret); END;',
-          {'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 4000)},
-        );
-        expect(result.outBinds['ret'], isNull);
-      });
+      test(
+        'CLOB OUT bind returns null when the procedure assigns NULL',
+        () async {
+          final result = await connection.execute(
+            'BEGIN $copyProc(NULL, :ret); END;',
+            {'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 4000)},
+          );
+          expect(result.outBinds['ret'], isNull);
+        },
+      );
 
       test('CLOB OUT bind decodes a small value as String', () async {
-        final result = await connection.execute(
-          'BEGIN $copyProc(:src, :ret); END;',
-          {
-            'src': 'plsql clob value',
-            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 4000),
-          },
-        );
+        final result = await connection
+            .execute('BEGIN $copyProc(:src, :ret); END;', {
+              'src': 'plsql clob value',
+              'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 4000),
+            });
         expect(result.outBinds['ret'], equals('plsql clob value'));
       });
 
@@ -344,8 +369,7 @@ void main() {
         expect(result.outBinds['ret'], equals(''));
       });
 
-      test('large PL/SQL String IN + CLOB OUT travel via temp CLOBs',
-          () async {
+      test('large PL/SQL String IN + CLOB OUT travel via temp CLOBs', () async {
         // 40,000 chars > 32767 bytes: the plain String IN bind converts to an
         // internal temporary CLOB; the OUT side returns a locator drained
         // over multiple LOB READ chunks.
@@ -363,73 +387,86 @@ void main() {
         expect(value, equals(text));
       });
 
-      test('CLOB IN OUT bind sends a String and reads the modified value',
-          () async {
-        final result = await connection.execute(
-          'BEGIN $appendProc(:p); END;',
-          {
-            'p': OracleBind.inOut(
-                value: 'hello', type: OracleDbType.clob, maxSize: 4000),
-          },
-        );
-        expect(result.outBinds['p'], equals('hello world'));
-      });
+      test(
+        'CLOB IN OUT bind sends a String and reads the modified value',
+        () async {
+          final result = await connection
+              .execute('BEGIN $appendProc(:p); END;', {
+                'p': OracleBind.inOut(
+                  value: 'hello',
+                  type: OracleDbType.clob,
+                  maxSize: 4000,
+                ),
+              });
+          expect(result.outBinds['p'], equals('hello world'));
+        },
+      );
 
-      test('CLOB IN OUT with null input is seen as NULL by the procedure',
-          () async {
-        final result = await connection.execute(
-          'BEGIN $appendProc(:p); END;',
-          {
-            'p': OracleBind.inOut(
-                value: null, type: OracleDbType.clob, maxSize: 4000),
-          },
-        );
-        expect(result.outBinds['p'], equals('was null'));
-      });
+      test(
+        'CLOB IN OUT with null input is seen as NULL by the procedure',
+        () async {
+          final result = await connection.execute(
+            'BEGIN $appendProc(:p); END;',
+            {
+              'p': OracleBind.inOut(
+                value: null,
+                type: OracleDbType.clob,
+                maxSize: 4000,
+              ),
+            },
+          );
+          expect(result.outBinds['p'], equals('was null'));
+        },
+      );
 
       test('CLOB IN OUT with empty string binds as SQL NULL', () async {
         // Oracle treats '' as NULL; the driver binds an empty CLOB String as
         // SQL NULL (node-oracledb parity), so the procedure sees NULL.
-        final result = await connection.execute(
-          'BEGIN $appendProc(:p); END;',
-          {
-            'p': OracleBind.inOut(
-                value: '', type: OracleDbType.clob, maxSize: 4000),
-          },
-        );
+        final result = await connection.execute('BEGIN $appendProc(:p); END;', {
+          'p': OracleBind.inOut(
+            value: '',
+            type: OracleDbType.clob,
+            maxSize: 4000,
+          ),
+        });
         expect(result.outBinds['p'], equals('was null'));
       });
 
-      test('large CLOB IN OUT round-trips through temp CLOB and read-back',
-          () async {
-        final text = 'Q' * 40000;
-        final result = await connection.execute(
-          'BEGIN $appendProc(:p); END;',
-          {
-            'p': OracleBind.inOut(
-                value: text, type: OracleDbType.clob, maxSize: 50000),
-          },
-        );
-        expect(result.outBinds['p'], equals('$text world'));
-      });
-
-      test('CLOB OUT value beyond maxSize fails loud, not truncated',
-          () async {
-        await expectLater(
-          connection.execute(
-            'BEGIN $copyProc(:src, :ret); END;',
+      test(
+        'large CLOB IN OUT round-trips through temp CLOB and read-back',
+        () async {
+          final text = 'Q' * 40000;
+          final result = await connection.execute(
+            'BEGIN $appendProc(:p); END;',
             {
-              'src': 'this value is longer than ten characters',
-              'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 10),
+              'p': OracleBind.inOut(
+                value: text,
+                type: OracleDbType.clob,
+                maxSize: 50000,
+              ),
             },
+          );
+          expect(result.outBinds['p'], equals('$text world'));
+        },
+      );
+
+      test('CLOB OUT value beyond maxSize fails loud, not truncated', () async {
+        await expectLater(
+          connection.execute('BEGIN $copyProc(:src, :ret); END;', {
+            'src': 'this value is longer than ten characters',
+            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 10),
+          }),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              contains('maxSize'),
+            ),
           ),
-          throwsA(isA<OracleException>().having(
-              (e) => e.message, 'message', contains('maxSize'))),
         );
       });
 
-      test('multibyte 40k-char temp-CLOB IN OUT round-trips exactly',
-          () async {
+      test('multibyte 40k-char temp-CLOB IN OUT round-trips exactly', () async {
         // Non-ASCII including supplementary-plane emoji, sized so the IN
         // side travels through an internal temporary CLOB and exercises the
         // UTF-8-vs-UTF-16BE charset selection for temp locators with
@@ -439,13 +476,13 @@ void main() {
         const chunk = 'aé日本語😀ñüz';
         final text = chunk * 4000;
         expect(text.length, equals(40000));
-        final result = await connection.execute(
-          'BEGIN $appendProc(:p); END;',
-          {
-            'p': OracleBind.inOut(
-                value: text, type: OracleDbType.clob, maxSize: 50000),
-          },
-        );
+        final result = await connection.execute('BEGIN $appendProc(:p); END;', {
+          'p': OracleBind.inOut(
+            value: text,
+            type: OracleDbType.clob,
+            maxSize: 50000,
+          ),
+        });
         expect(result.outBinds['p'], equals('$text world'));
       });
 
@@ -482,16 +519,18 @@ void main() {
         test('temp-CLOB boundary WRITE of $chars chars '
             '($encodedBytes-byte payload) round-trips exactly', () async {
           final text = patternLatin1Text(chars, seed: chars);
-          final result = await connection.execute(
-            'BEGIN $copyProc(:src, :ret); END;',
-            {
-              'src': text,
-              'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
-            },
+          final result = await connection
+              .execute('BEGIN $copyProc(:src, :ret); END;', {
+                'src': text,
+                'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
+              });
+          expect(
+            connection.debugPendingTempLobCount,
+            greaterThan(0),
+            reason:
+                'the IN bind must have traveled through an internal '
+                'temporary CLOB',
           );
-          expect(connection.debugPendingTempLobCount, greaterThan(0),
-              reason: 'the IN bind must have traveled through an internal '
-                  'temporary CLOB');
           final value = result.outBinds['ret'] as String?;
           expect(value, isNotNull);
           expect(value!.length, equals(chars));
@@ -509,9 +548,9 @@ void main() {
       test('exactly 32,767 UTF-8 bytes stays an inline VARCHAR bind '
           '(no temp CLOB)', () async {
         final text = List.generate(
-            3277, (i) => 'inl${i.toString().padLeft(7, '0')}')
-            .join()
-            .substring(0, 32767);
+          3277,
+          (i) => 'inl${i.toString().padLeft(7, '0')}',
+        ).join().substring(0, 32767);
         expect(utf8.encode(text).length, equals(32767));
         final result = await connection.execute(
           'BEGIN $copyProc(:src, :ret); END;',
@@ -520,17 +559,21 @@ void main() {
             'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
           },
         );
-        expect(connection.debugPendingTempLobCount, equals(0),
-            reason: 'a 32,767-byte value must take the inline VARCHAR '
-                'path and create no temp CLOB');
+        expect(
+          connection.debugPendingTempLobCount,
+          equals(0),
+          reason:
+              'a 32,767-byte value must take the inline VARCHAR '
+              'path and create no temp CLOB',
+        );
         expect(result.outBinds['ret'], equals(text));
       });
 
       test('32,768 UTF-8 bytes converts to a temp CLOB', () async {
         final text = List.generate(
-            3277, (i) => 'cnv${i.toString().padLeft(7, '0')}')
-            .join()
-            .substring(0, 32768);
+          3277,
+          (i) => 'cnv${i.toString().padLeft(7, '0')}',
+        ).join().substring(0, 32768);
         expect(utf8.encode(text).length, equals(32768));
         final result = await connection.execute(
           'BEGIN $copyProc(:src, :ret); END;',
@@ -545,9 +588,13 @@ void main() {
         // discarding. The ROUTING signal this test cares about — that the value
         // converted rather than travelling inline — is `> 0` vs `0`; the inline
         // sibling above still asserts exactly `0`.
-        expect(connection.debugPendingTempLobCount, equals(2),
-            reason: 'one byte over the limit must convert to exactly one '
-                'temp CLOB (plus the OUT locator freed since Story 12.4)');
+        expect(
+          connection.debugPendingTempLobCount,
+          equals(2),
+          reason:
+              'one byte over the limit must convert to exactly one '
+              'temp CLOB (plus the OUT locator freed since Story 12.4)',
+        );
         expect(result.outBinds['ret'], equals(text));
       });
 
@@ -566,9 +613,13 @@ void main() {
             'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
           },
         );
-        expect(connection.debugPendingTempLobCount, equals(0),
-            reason: 'exactly 32,767 UTF-8 bytes must stay inline even '
-                'when the character count is far below the limit');
+        expect(
+          connection.debugPendingTempLobCount,
+          equals(0),
+          reason:
+              'exactly 32,767 UTF-8 bytes must stay inline even '
+              'when the character count is far below the limit',
+        );
         expect(result.outBinds['ret'], equals(text));
       });
 
@@ -593,9 +644,13 @@ void main() {
         // discarding. The ROUTING signal this test cares about — that the value
         // converted rather than travelling inline — is `> 0` vs `0`; the inline
         // sibling above still asserts exactly `0`.
-        expect(connection.debugPendingTempLobCount, equals(2),
-            reason: 'the threshold must be measured in UTF-8 bytes, '
-                'not characters (input temp CLOB + the Story 12.4 OUT free)');
+        expect(
+          connection.debugPendingTempLobCount,
+          equals(2),
+          reason:
+              'the threshold must be measured in UTF-8 bytes, '
+              'not characters (input temp CLOB + the Story 12.4 OUT free)',
+        );
         expect(result.outBinds['ret'], equals(text));
       });
 
@@ -606,7 +661,9 @@ void main() {
         // indexed segments make the content non-repeating, so chunk loss,
         // duplication, or reordering cannot cancel out.
         final text = List.generate(
-            50000, (i) => 'large${i.toString().padLeft(5, '0')}').join();
+          50000,
+          (i) => 'large${i.toString().padLeft(5, '0')}',
+        ).join();
         expect(text.length, equals(500000));
         final result = await connection.execute(
           'BEGIN $copyProc(:src, :ret); END;',
@@ -615,45 +672,54 @@ void main() {
             'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 600000),
           },
         );
-        expect(connection.debugPendingTempLobCount, greaterThan(0),
-            reason: 'the IN bind must have traveled through an internal '
-                'temporary CLOB');
+        expect(
+          connection.debugPendingTempLobCount,
+          greaterThan(0),
+          reason:
+              'the IN bind must have traveled through an internal '
+              'temporary CLOB',
+        );
         final value = result.outBinds['ret'] as String?;
         expect(value, isNotNull);
         expect(value!.length, equals(500000));
         expect(value, equals(text));
       }, timeout: const Timeout(Duration(minutes: 5)));
 
-      test('~1 MB-scale multibyte temp-CLOB IN round-trips char-exactly',
-          () async {
-        // Mixes 2-byte UTF-8 chars (é, ñ, ü), 3-byte UTF-8 chars (日本語),
-        // and a supplementary-plane emoji (😀 — a surrogate pair, 4-byte
-        // UTF-8) with an ASCII counter. Each segment is 16 UTF-16 code
-        // units; 31,250 segments give exactly 500,000 units -> a
-        // 1,000,000-byte UTF-16BE WRITE payload whose 65,535-byte wire
-        // chunks split mid-segment, so any boundary corruption (split
-        // surrogate pair, mis-spliced chunk) breaks the equality below.
-        final buffer = StringBuffer();
-        for (var i = 0; i < 31250; i++) {
-          buffer.write('s${i.toString().padLeft(7, '0')}é日本語😀ñü');
-        }
-        final text = buffer.toString();
-        expect(text.length, equals(500000));
-        final result = await connection.execute(
-          'BEGIN $copyProc(:src, :ret); END;',
-          {
-            'src': text,
-            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 600000),
-          },
-        );
-        expect(connection.debugPendingTempLobCount, greaterThan(0),
-            reason: 'the IN bind must have traveled through an internal '
-                'temporary CLOB');
-        final value = result.outBinds['ret'] as String?;
-        expect(value, isNotNull);
-        expect(value!.length, equals(500000));
-        expect(value, equals(text));
-      }, timeout: const Timeout(Duration(minutes: 5)));
+      test(
+        '~1 MB-scale multibyte temp-CLOB IN round-trips char-exactly',
+        () async {
+          // Mixes 2-byte UTF-8 chars (é, ñ, ü), 3-byte UTF-8 chars (日本語),
+          // and a supplementary-plane emoji (😀 — a surrogate pair, 4-byte
+          // UTF-8) with an ASCII counter. Each segment is 16 UTF-16 code
+          // units; 31,250 segments give exactly 500,000 units -> a
+          // 1,000,000-byte UTF-16BE WRITE payload whose 65,535-byte wire
+          // chunks split mid-segment, so any boundary corruption (split
+          // surrogate pair, mis-spliced chunk) breaks the equality below.
+          final buffer = StringBuffer();
+          for (var i = 0; i < 31250; i++) {
+            buffer.write('s${i.toString().padLeft(7, '0')}é日本語😀ñü');
+          }
+          final text = buffer.toString();
+          expect(text.length, equals(500000));
+          final result = await connection
+              .execute('BEGIN $copyProc(:src, :ret); END;', {
+                'src': text,
+                'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 600000),
+              });
+          expect(
+            connection.debugPendingTempLobCount,
+            greaterThan(0),
+            reason:
+                'the IN bind must have traveled through an internal '
+                'temporary CLOB',
+          );
+          final value = result.outBinds['ret'] as String?;
+          expect(value, isNotNull);
+          expect(value!.length, equals(500000));
+          expect(value, equals(text));
+        },
+        timeout: const Timeout(Duration(minutes: 5)),
+      );
 
       test('~1 MB-scale CLOB IN OUT round-trips through temp CLOB and '
           'read-back', () async {
@@ -661,16 +727,20 @@ void main() {
         // value (the prefix equality below pins the content; the appended
         // suffix pins that the OUT data came from the server).
         final text = patternLatin1Text(500000, seed: 99);
-        final result = await connection.execute(
-          'BEGIN $appendProc(:p); END;',
-          {
-            'p': OracleBind.inOut(
-                value: text, type: OracleDbType.clob, maxSize: 600000),
-          },
+        final result = await connection.execute('BEGIN $appendProc(:p); END;', {
+          'p': OracleBind.inOut(
+            value: text,
+            type: OracleDbType.clob,
+            maxSize: 600000,
+          ),
+        });
+        expect(
+          connection.debugPendingTempLobCount,
+          greaterThan(0),
+          reason:
+              'the IN side of the IN OUT bind must have traveled '
+              'through an internal temporary CLOB',
         );
-        expect(connection.debugPendingTempLobCount, greaterThan(0),
-            reason: 'the IN side of the IN OUT bind must have traveled '
-                'through an internal temporary CLOB');
         final value = result.outBinds['p'] as String?;
         expect(value, isNotNull);
         expect(value!.length, equals(500006));
@@ -689,16 +759,20 @@ void main() {
         }
         final text = buffer.toString();
         expect(text.length, equals(500000));
-        final result = await connection.execute(
-          'BEGIN $appendProc(:p); END;',
-          {
-            'p': OracleBind.inOut(
-                value: text, type: OracleDbType.clob, maxSize: 600000),
-          },
+        final result = await connection.execute('BEGIN $appendProc(:p); END;', {
+          'p': OracleBind.inOut(
+            value: text,
+            type: OracleDbType.clob,
+            maxSize: 600000,
+          ),
+        });
+        expect(
+          connection.debugPendingTempLobCount,
+          greaterThan(0),
+          reason:
+              'the IN side of the IN OUT bind must have traveled '
+              'through an internal temporary CLOB',
         );
-        expect(connection.debugPendingTempLobCount, greaterThan(0),
-            reason: 'the IN side of the IN OUT bind must have traveled '
-                'through an internal temporary CLOB');
         final value = result.outBinds['p'] as String?;
         expect(value, isNotNull);
         expect(value!.length, equals(500006));
@@ -713,19 +787,25 @@ void main() {
         // locator must stay queued for the free-temp piggyback...
         final text = 'F' * 40000;
         await expectLater(
-          connection.execute(
-            'BEGIN $copyProc(:src, :ret); END;',
-            {
-              'src': text,
-              'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 10),
-            },
+          connection.execute('BEGIN $copyProc(:src, :ret); END;', {
+            'src': text,
+            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 10),
+          }),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              contains('maxSize'),
+            ),
           ),
-          throwsA(isA<OracleException>().having(
-              (e) => e.message, 'message', contains('maxSize'))),
         );
-        expect(connection.debugPendingTempLobCount, greaterThan(0),
-            reason: 'the failed execute\'s temp CLOB must stay queued for '
-                'the next free-temp piggyback');
+        expect(
+          connection.debugPendingTempLobCount,
+          greaterThan(0),
+          reason:
+              'the failed execute\'s temp CLOB must stay queued for '
+              'the next free-temp piggyback',
+        );
         // ...and the connection must remain fully usable: the next execute
         // succeeds and its piggyback frees the queued temp LOB.
         final id = nextTestId();
@@ -733,12 +813,18 @@ void main() {
           'INSERT INTO $testTable (id, doc) VALUES ($id, :doc)',
           {'doc': 'recovered after failed execute'},
         );
-        expect(connection.debugPendingTempLobCount, equals(0),
-            reason: 'the next execute must drain the temp-LOB free queue');
-        final result = await connection
-            .execute('SELECT doc FROM $testTable WHERE id = $id');
-        expect(result.rows.single['DOC'],
-            equals('recovered after failed execute'));
+        expect(
+          connection.debugPendingTempLobCount,
+          equals(0),
+          reason: 'the next execute must drain the temp-LOB free queue',
+        );
+        final result = await connection.execute(
+          'SELECT doc FROM $testTable WHERE id = $id',
+        );
+        expect(
+          result.rows.single['DOC'],
+          equals('recovered after failed execute'),
+        );
       });
 
       test('CLOB SELECT on a closed connection fails fast', () async {
@@ -746,8 +832,13 @@ void main() {
         await closed.close();
         await expectLater(
           closed.execute('SELECT doc FROM $testTable WHERE id = 1'),
-          throwsA(isA<OracleException>().having(
-              (e) => e.errorCode, 'errorCode', 3113)), // connection closed
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              3113,
+            ),
+          ), // connection closed
         );
       });
 
@@ -755,52 +846,62 @@ void main() {
       // Statement cache interplay
       // ---------------------------------------------------------------
 
-      test('repeated CLOB SELECT through the statement cache stays correct',
-          () async {
-        final id = nextTestId();
-        final text = 'cached cursor clob ${'r' * 9000}';
-        await connection.execute(
-          'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
-          [id, text],
-        );
-        // Identical SQL between runs hits the statement cache. CLOB cursors
-        // are deliberately never blind-re-executed (the server drops the
-        // LOB-prefetch metadata without fresh defines — see connection.dart);
-        // the second run must re-parse and still decode correctly.
-        final query = 'SELECT doc FROM $testTable WHERE id = :1';
-        final first = await connection.execute(query, [id]);
-        expect(first.rows.single['DOC'], equals(text));
-        final parseBefore = connection.debugFullParseExecutes;
-        final reuseBefore = connection.debugReuseExecutes;
-        final second = await connection.execute(query, [id]);
-        expect(second.rows.single['DOC'], equals(text));
-        expect(connection.debugFullParseExecutes, greaterThan(parseBefore),
-            reason: 'CLOB cursors are re-parsed, never blind-re-executed');
-        expect(connection.debugReuseExecutes, equals(reuseBefore),
-            reason: 'no blind cursor reuse may happen for CLOB queries');
-      });
-
-      test('CLOB SELECT spanning multiple fetch batches decodes every row',
-          () async {
-        // 60 rows > the 50-row prefetch window forces at least one FETCH
-        // continuation round; locator decode must stay aligned across the
-        // batch boundary.
-        final baseId = nextTestId();
-        for (var i = 0; i < 60; i++) {
+      test(
+        'repeated CLOB SELECT through the statement cache stays correct',
+        () async {
+          final id = nextTestId();
+          final text = 'cached cursor clob ${'r' * 9000}';
           await connection.execute(
             'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
-            [baseId + i, 'batch row $i'],
+            [id, text],
           );
-        }
-        final result = await connection.execute(
-          'SELECT id, doc FROM $testTable '
-          'WHERE id BETWEEN $baseId AND ${baseId + 59} ORDER BY id',
-        );
-        expect(result.rows.length, equals(60));
-        for (var i = 0; i < 60; i++) {
-          expect(result.rows[i]['DOC'], equals('batch row $i'));
-        }
-      });
+          // Identical SQL between runs hits the statement cache. CLOB cursors
+          // are deliberately never blind-re-executed (the server drops the
+          // LOB-prefetch metadata without fresh defines — see connection.dart);
+          // the second run must re-parse and still decode correctly.
+          final query = 'SELECT doc FROM $testTable WHERE id = :1';
+          final first = await connection.execute(query, [id]);
+          expect(first.rows.single['DOC'], equals(text));
+          final parseBefore = connection.debugFullParseExecutes;
+          final reuseBefore = connection.debugReuseExecutes;
+          final second = await connection.execute(query, [id]);
+          expect(second.rows.single['DOC'], equals(text));
+          expect(
+            connection.debugFullParseExecutes,
+            greaterThan(parseBefore),
+            reason: 'CLOB cursors are re-parsed, never blind-re-executed',
+          );
+          expect(
+            connection.debugReuseExecutes,
+            equals(reuseBefore),
+            reason: 'no blind cursor reuse may happen for CLOB queries',
+          );
+        },
+      );
+
+      test(
+        'CLOB SELECT spanning multiple fetch batches decodes every row',
+        () async {
+          // 60 rows > the 50-row prefetch window forces at least one FETCH
+          // continuation round; locator decode must stay aligned across the
+          // batch boundary.
+          final baseId = nextTestId();
+          for (var i = 0; i < 60; i++) {
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [baseId + i, 'batch row $i'],
+            );
+          }
+          final result = await connection.execute(
+            'SELECT id, doc FROM $testTable '
+            'WHERE id BETWEEN $baseId AND ${baseId + 59} ORDER BY id',
+          );
+          expect(result.rows.length, equals(60));
+          for (var i = 0; i < 60; i++) {
+            expect(result.rows[i]['DOC'], equals('batch row $i'));
+          }
+        },
+      );
     },
   );
 }

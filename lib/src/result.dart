@@ -54,11 +54,13 @@ class OracleResult {
   }) {
     final nameToIndex = _buildNameMap(columnMetadata);
     final rows = rowData
-        .map((data) => OracleRow._(
-              data: data,
-              columnMetadata: columnMetadata,
-              nameToIndex: nameToIndex,
-            ))
+        .map(
+          (data) => OracleRow._(
+            data: data,
+            columnMetadata: columnMetadata,
+            nameToIndex: nameToIndex,
+          ),
+        )
         .toList();
     return OracleResult._(
       columnMetadata: columnMetadata,
@@ -379,8 +381,8 @@ class OracleRowBuilder {
   /// Creates a builder for rows shaped by [columnMetadata], precomputing the
   /// shared case-insensitive name → index map once.
   OracleRowBuilder(List<ColumnMetadata> columnMetadata)
-      : _columnMetadata = columnMetadata,
-        _nameToIndex = OracleResult._buildNameMap(columnMetadata);
+    : _columnMetadata = columnMetadata,
+      _nameToIndex = OracleResult._buildNameMap(columnMetadata);
 
   final List<ColumnMetadata> _columnMetadata;
   final Map<String, int> _nameToIndex;
@@ -388,8 +390,8 @@ class OracleRowBuilder {
   /// Wraps a single raw decoded value list in an [OracleRow], sharing the
   /// precomputed column metadata and name map.
   OracleRow build(List<dynamic> data) => OracleRow._(
-        data: data,
-        columnMetadata: _columnMetadata,
-        nameToIndex: _nameToIndex,
-      );
+    data: data,
+    columnMetadata: _columnMetadata,
+    nameToIndex: _nameToIndex,
+  );
 }

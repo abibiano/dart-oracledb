@@ -244,8 +244,11 @@ void main() {
 
         // ONE following execute carries the FREE_TEMP piggyback...
         final ok = await connection.execute('SELECT 1 AS V FROM dual');
-        expect(ok.rows.single['V'], equals(1),
-            reason: 'the piggyback must not disturb its carrier statement');
+        expect(
+          ok.rows.single['V'],
+          equals(1),
+          reason: 'the piggyback must not disturb its carrier statement',
+        );
         expect(connection.debugPendingTempLobCount, equals(0));
 
         // ...and the server-side LOB is gone.
@@ -255,59 +258,63 @@ void main() {
         }
       });
 
-      test('three temp LOBs each queue once and all drain on one execute',
-          () async {
-        final baseline = await tempLobCount(connection);
-        final a = await connection.createTemporaryClob();
-        final b = await connection.createTemporaryBlob();
-        final c = await connection.createTemporaryClob();
-        final whileOpen = await tempLobCount(connection);
-        if (baseline != null && whileOpen != null) {
-          expect(whileOpen, equals(baseline + 3));
-        }
-        await a.close();
-        await b.close();
-        await c.close();
-        // A double close must not queue twice.
-        await a.close();
-        expect(connection.debugPendingTempLobCount, equals(3));
-        final ok = await connection.execute('SELECT 7 AS V FROM dual');
-        expect(ok.rows.single['V'], equals(7));
-        expect(connection.debugPendingTempLobCount, equals(0));
-        final afterFree = await tempLobCount(connection);
-        if (baseline != null && afterFree != null) {
-          expect(afterFree, equals(baseline));
-        }
-      });
+      test(
+        'three temp LOBs each queue once and all drain on one execute',
+        () async {
+          final baseline = await tempLobCount(connection);
+          final a = await connection.createTemporaryClob();
+          final b = await connection.createTemporaryBlob();
+          final c = await connection.createTemporaryClob();
+          final whileOpen = await tempLobCount(connection);
+          if (baseline != null && whileOpen != null) {
+            expect(whileOpen, equals(baseline + 3));
+          }
+          await a.close();
+          await b.close();
+          await c.close();
+          // A double close must not queue twice.
+          await a.close();
+          expect(connection.debugPendingTempLobCount, equals(3));
+          final ok = await connection.execute('SELECT 7 AS V FROM dual');
+          expect(ok.rows.single['V'], equals(7));
+          expect(connection.debugPendingTempLobCount, equals(0));
+          final afterFree = await tempLobCount(connection);
+          if (baseline != null && afterFree != null) {
+            expect(afterFree, equals(baseline));
+          }
+        },
+      );
 
       // ---------------------------------------------------------------
       // AC5 / AC9: binding an OracleLob
       // ---------------------------------------------------------------
 
-      test('a written temp CLOB binds into INSERT and SELECTs back byte-exact',
-          () async {
-        final id = nextTestId();
-        const text = 'bound through a temporary CLOB locator';
-        final lob = await connection.createTemporaryClob();
-        try {
-          await lob.write(1, text);
-          await connection.execute(
-            'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
-            {'v': lob},
-          );
-          await connection.commit();
-          // The temp LOB survives commit (session duration, not transaction).
-          expect(lob.isClosed, isFalse);
-          expect(await lob.read(), equals(text));
+      test(
+        'a written temp CLOB binds into INSERT and SELECTs back byte-exact',
+        () async {
+          final id = nextTestId();
+          const text = 'bound through a temporary CLOB locator';
+          final lob = await connection.createTemporaryClob();
+          try {
+            await lob.write(1, text);
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
+              {'v': lob},
+            );
+            await connection.commit();
+            // The temp LOB survives commit (session duration, not transaction).
+            expect(lob.isClosed, isFalse);
+            expect(await lob.read(), equals(text));
 
-          final rr = await connection.execute(
-            'SELECT doc FROM $testTable WHERE id = $id',
-          );
-          expect(rr.rows.single['DOC'], equals(text));
-        } finally {
-          await lob.close();
-        }
-      });
+            final rr = await connection.execute(
+              'SELECT doc FROM $testTable WHERE id = $id',
+            );
+            expect(rr.rows.single['DOC'], equals(text));
+          } finally {
+            await lob.close();
+          }
+        },
+      );
 
       test('a written temp CLOB binds POSITIONALLY too', () async {
         final id = nextTestId();
@@ -329,85 +336,97 @@ void main() {
         }
       });
 
-      test('a written temp BLOB binds into INSERT and SELECTs back byte-exact',
-          () async {
-        final id = nextTestId();
-        final bytes = Uint8List.fromList([0, 1, 2, 250, 251, 252, 255, 128]);
-        final lob = await connection.createTemporaryBlob();
-        try {
-          await lob.write(1, bytes);
-          await connection.execute(
-            'INSERT INTO $testTable (id, bin) VALUES ($id, :v)',
-            {'v': lob},
-          );
-          await connection.commit();
-          final rr = await connection.execute(
-            'SELECT bin FROM $testTable WHERE id = $id',
-          );
-          expect(rr.rows.single['BIN'], equals(bytes));
-        } finally {
-          await lob.close();
-        }
-      });
+      test(
+        'a written temp BLOB binds into INSERT and SELECTs back byte-exact',
+        () async {
+          final id = nextTestId();
+          final bytes = Uint8List.fromList([0, 1, 2, 250, 251, 252, 255, 128]);
+          final lob = await connection.createTemporaryBlob();
+          try {
+            await lob.write(1, bytes);
+            await connection.execute(
+              'INSERT INTO $testTable (id, bin) VALUES ($id, :v)',
+              {'v': lob},
+            );
+            await connection.commit();
+            final rr = await connection.execute(
+              'SELECT bin FROM $testTable WHERE id = $id',
+            );
+            expect(rr.rows.single['BIN'], equals(bytes));
+          } finally {
+            await lob.close();
+          }
+        },
+      );
 
-      test('a written temp NCLOB binds into INSERT and SELECTs back byte-exact',
-          () async {
-        if (!nationalCharsetSupported(connection)) return;
-        final id = nextTestId();
-        const text = '$accented $cjk $emoji';
-        final lob = await connection.createTemporaryNClob();
-        try {
-          await lob.write(1, text);
-          await connection.execute(
-            'INSERT INTO $testTable (id, ndoc) VALUES ($id, :v)',
-            {'v': lob},
-          );
-          await connection.commit();
-          final rr = await connection.execute(
-            'SELECT ndoc FROM $testTable WHERE id = $id',
-          );
-          expect(rr.rows.single['NDOC'], equals(text));
-        } finally {
-          await lob.close();
-        }
-      });
+      test(
+        'a written temp NCLOB binds into INSERT and SELECTs back byte-exact',
+        () async {
+          if (!nationalCharsetSupported(connection)) return;
+          final id = nextTestId();
+          const text = '$accented $cjk $emoji';
+          final lob = await connection.createTemporaryNClob();
+          try {
+            await lob.write(1, text);
+            await connection.execute(
+              'INSERT INTO $testTable (id, ndoc) VALUES ($id, :v)',
+              {'v': lob},
+            );
+            await connection.commit();
+            final rr = await connection.execute(
+              'SELECT ndoc FROM $testTable WHERE id = $id',
+            );
+            expect(rr.rows.single['NDOC'], equals(text));
+          } finally {
+            await lob.close();
+          }
+        },
+      );
 
-      test('an EMPTY created temp LOB binds as an EMPTY LOB, not SQL NULL',
-          () async {
-        // Deliberately different from binding an empty String (Oracle's
-        // "'' IS NULL" semantics store NULL). Pin it so nobody "harmonizes" the
-        // two later.
-        final emptyLobId = nextTestId();
-        final emptyStringId = nextTestId();
-        final lob = await connection.createTemporaryClob();
-        try {
-          await connection.execute(
-            'INSERT INTO $testTable (id, doc) VALUES ($emptyLobId, :v)',
-            {'v': lob},
-          );
-          await connection.execute(
-            'INSERT INTO $testTable (id, doc) VALUES ($emptyStringId, :v)',
-            {'v': ''},
-          );
-          await connection.commit();
-          final rr = await connection.execute(
-            'SELECT id, doc, '
-            "CASE WHEN doc IS NULL THEN 'Y' ELSE 'N' END AS ISNULL "
-            'FROM $testTable WHERE id IN ($emptyLobId, $emptyStringId) '
-            'ORDER BY id',
-          );
-          final byId = <Object?, OracleRow>{
-            for (final row in rr.rows) row['ID']: row,
-          };
-          expect(byId[emptyLobId]!['ISNULL'], equals('N'),
-              reason: 'an empty temporary LOB stores an EMPTY LOB');
-          expect(byId[emptyLobId]!['DOC'], equals(''));
-          expect(byId[emptyStringId]!['ISNULL'], equals('Y'),
-              reason: "an empty String keeps Oracle's '' IS NULL semantics");
-        } finally {
-          await lob.close();
-        }
-      });
+      test(
+        'an EMPTY created temp LOB binds as an EMPTY LOB, not SQL NULL',
+        () async {
+          // Deliberately different from binding an empty String (Oracle's
+          // "'' IS NULL" semantics store NULL). Pin it so nobody "harmonizes" the
+          // two later.
+          final emptyLobId = nextTestId();
+          final emptyStringId = nextTestId();
+          final lob = await connection.createTemporaryClob();
+          try {
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES ($emptyLobId, :v)',
+              {'v': lob},
+            );
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES ($emptyStringId, :v)',
+              {'v': ''},
+            );
+            await connection.commit();
+            final rr = await connection.execute(
+              'SELECT id, doc, '
+              "CASE WHEN doc IS NULL THEN 'Y' ELSE 'N' END AS ISNULL "
+              'FROM $testTable WHERE id IN ($emptyLobId, $emptyStringId) '
+              'ORDER BY id',
+            );
+            final byId = <Object?, OracleRow>{
+              for (final row in rr.rows) row['ID']: row,
+            };
+            expect(
+              byId[emptyLobId]!['ISNULL'],
+              equals('N'),
+              reason: 'an empty temporary LOB stores an EMPTY LOB',
+            );
+            expect(byId[emptyLobId]!['DOC'], equals(''));
+            expect(
+              byId[emptyStringId]!['ISNULL'],
+              equals('Y'),
+              reason: "an empty String keeps Oracle's '' IS NULL semantics",
+            );
+          } finally {
+            await lob.close();
+          }
+        },
+      );
 
       test('a temp CLOB binds into a PL/SQL block as a plain IN bind and the '
           'value is observable server-side', () async {
@@ -420,10 +439,7 @@ void main() {
           // concern, so each observation runs its own block.
           final r = await connection.execute(
             'BEGIN :len := DBMS_LOB.GETLENGTH(:v); END;',
-            {
-              'len': OracleBind.out(type: OracleDbType.number),
-              'v': lob,
-            },
+            {'len': OracleBind.out(type: OracleDbType.number), 'v': lob},
           );
           expect(r.outBinds['len'], equals(text.length));
           final r2 = await connection.execute(
@@ -440,8 +456,7 @@ void main() {
       });
 
       test('a temp CLOB binds IN OUT into PL/SQL: the returned value comes back, '
-          'and the bound handle is CONSUMED (measured server behavior)',
-          () async {
+          'and the bound handle is CONSUMED (measured server behavior)', () async {
         const text = 'in out base';
         const appended = ' appended by plsql';
         final lob = await connection.createTemporaryClob();
@@ -476,8 +491,11 @@ void main() {
         } on OracleException catch (e) {
           caught = e;
         }
-        expect(caught, isNotNull,
-            reason: 'the bound handle is invalidated server-side by IN OUT');
+        expect(
+          caught,
+          isNotNull,
+          reason: 'the bound handle is invalidated server-side by IN OUT',
+        );
         expect(caught!.errorCode, equals(22922));
 
         // Story 12.4 AC4: the REPLACEMENT LOB Oracle put behind the IN OUT bind
@@ -485,18 +503,27 @@ void main() {
         // caller can never see or free it, so before 12.4 it leaked one session
         // temporary LOB per call (the measured leak that story closes). It is
         // already pending here, before close() is even called.
-        expect(connection.debugPendingTempLobCount, equals(1),
-            reason: 'the server replacement LOB is queued by materialize');
+        expect(
+          connection.debugPendingTempLobCount,
+          equals(1),
+          reason: 'the server replacement LOB is queued by materialize',
+        );
 
         // The critical safety property: closing the now-stale handle queues its
         // locator for FREE_TEMP too, and that piggyback must NOT poison the
         // unrelated statement it rides on.
         await lob.close();
-        expect(connection.debugPendingTempLobCount, equals(2),
-            reason: 'the server replacement LOB plus the caller original');
+        expect(
+          connection.debugPendingTempLobCount,
+          equals(2),
+          reason: 'the server replacement LOB plus the caller original',
+        );
         final ok = await connection.execute('SELECT 11 AS V FROM dual');
-        expect(ok.rows.single['V'], equals(11),
-            reason: 'a stale FREE_TEMP locator must never break its carrier');
+        expect(
+          ok.rows.single['V'],
+          equals(11),
+          reason: 'a stale FREE_TEMP locator must never break its carrier',
+        );
         expect(connection.debugPendingTempLobCount, equals(0));
         // ...and the session stays healthy for further work.
         final ok2 = await connection.execute('SELECT 12 AS V FROM dual');
@@ -538,28 +565,34 @@ void main() {
         expect(connection.debugPendingTempLobCount, equals(0));
       });
 
-      test('binding a temp LOB does NOT free it: the handle stays usable across '
-          'several executes', () async {
-        const text = 'reused across executes';
-        final lob = await connection.createTemporaryClob();
-        try {
-          await lob.write(1, text);
-          for (var i = 0; i < 3; i++) {
-            final id = nextTestId();
-            await connection.execute(
-              'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
-              {'v': lob},
-            );
-            expect(connection.debugPendingTempLobCount, equals(0),
-                reason: 'a caller-owned handle is never auto-freed');
-            expect(await lob.read(), equals(text));
+      test(
+        'binding a temp LOB does NOT free it: the handle stays usable across '
+        'several executes',
+        () async {
+          const text = 'reused across executes';
+          final lob = await connection.createTemporaryClob();
+          try {
+            await lob.write(1, text);
+            for (var i = 0; i < 3; i++) {
+              final id = nextTestId();
+              await connection.execute(
+                'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
+                {'v': lob},
+              );
+              expect(
+                connection.debugPendingTempLobCount,
+                equals(0),
+                reason: 'a caller-owned handle is never auto-freed',
+              );
+              expect(await lob.read(), equals(text));
+            }
+            await connection.commit();
+          } finally {
+            await lob.close();
           }
-          await connection.commit();
-        } finally {
-          await lob.close();
-        }
-        expect(connection.debugPendingTempLobCount, equals(1));
-      });
+          expect(connection.debugPendingTempLobCount, equals(1));
+        },
+      );
 
       test('binding a CLOSED handle fails loud pre-wire and leaves the '
           'connection usable', () async {
@@ -573,8 +606,13 @@ void main() {
             'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
             {'v': lob},
           ),
-          throwsA(isA<OracleException>()
-              .having((e) => e.message, 'message', contains('closed'))),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              contains('closed'),
+            ),
+          ),
         );
         // Nothing extra was queued and no statement ran.
         expect(connection.debugPendingTempLobCount, equals(pendingBefore));
@@ -600,8 +638,13 @@ void main() {
               'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
               {'v': foreign},
             ),
-            throwsA(isA<OracleException>()
-                .having((e) => e.message, 'message', contains('DIFFERENT'))),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.message,
+                'message',
+                contains('DIFFERENT'),
+              ),
+            ),
           );
           final ok = await connection.execute('SELECT 6 AS V FROM dual');
           expect(ok.rows.single['V'], equals(6));
@@ -625,11 +668,13 @@ void main() {
                 [nextTestId(), lob],
               ],
             ),
-            throwsA(isA<OracleException>().having(
-              (e) => e.message,
-              'message',
-              allOf(contains('OracleLob'), contains('execute()')),
-            )),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.message,
+                'message',
+                allOf(contains('OracleLob'), contains('execute()')),
+              ),
+            ),
           );
         } finally {
           await lob.close();
@@ -656,8 +701,10 @@ void main() {
         expect(ok.rows.single['V'], equals(1));
         // ...and a second creation works while the first is open.
         final temp2 = await connection.createTemporaryBlob();
-        expect(await connection.execute('SELECT 2 AS V FROM dual'),
-            isA<OracleResult>());
+        expect(
+          await connection.execute('SELECT 2 AS V FROM dual'),
+          isA<OracleResult>(),
+        );
 
         // A FETCHED handle still holds the in-flight slot (12.1 unchanged) —
         // even with created-temp handles also open.
@@ -669,9 +716,11 @@ void main() {
         final fetched = fetchedResult.rows.single['DOC'] as OracleLob;
         await expectLater(
           connection.execute('SELECT 3 FROM dual'),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('OracleLob'))),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having((e) => e.message, 'message', contains('OracleLob')),
+          ),
         );
         // Closing only the FETCHED handle frees the connection again.
         await fetched.close();
@@ -722,9 +771,13 @@ void main() {
         expect(lob.isTemporary, isFalse);
         expect(await lob.read(), equals('reclaim me'));
         await lob.close();
-        expect(connection.debugPendingTempLobCount, equals(0),
-            reason: 'a non-temporary fetched locator must never be queued for '
-                'FREE_TEMP — the piggyback rides an unrelated statement');
+        expect(
+          connection.debugPendingTempLobCount,
+          equals(0),
+          reason:
+              'a non-temporary fetched locator must never be queued for '
+              'FREE_TEMP — the piggyback rides an unrelated statement',
+        );
 
         // The piggyback-poisoning guard: the next unrelated execute is intact.
         final ok = await connection.execute('SELECT 8 AS V FROM dual');
@@ -737,14 +790,10 @@ void main() {
 
       test('a FETCHED PL/SQL CLOB OUT-bind locator matches the measured '
           'isTemporary reality, and the next execute still succeeds', () async {
-        final r = await connection.execute(
-          'BEGIN :ret := :src; END;',
-          {
-            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 4000),
-            'src': 'out bind measurement',
-          },
-          const OracleExecuteOptions(fetchLobs: true),
-        );
+        final r = await connection.execute('BEGIN :ret := :src; END;', {
+          'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 4000),
+          'src': 'out bind measurement',
+        }, const OracleExecuteOptions(fetchLobs: true));
         final lob = r.outBinds['ret'] as OracleLob;
         expect(lob.isTemporary, isFalse); // measured on 23ai and 21c
         expect(await lob.read(), equals('out bind measurement'));
@@ -758,7 +807,10 @@ void main() {
         final id = nextTestId();
         await connection.execute(
           'INSERT INTO $testTable (id, doc, bin) VALUES ($id, :d, :b)',
-          {'d': 'plain table clob', 'b': Uint8List.fromList([1, 2, 3])},
+          {
+            'd': 'plain table clob',
+            'b': Uint8List.fromList([1, 2, 3]),
+          },
         );
         await connection.commit();
         final r = await connection.execute(
@@ -823,8 +875,11 @@ void main() {
             // AND queue its temp locator for the free piggyback.
             await pool.release(conn);
             expect(lob.isClosed, isTrue);
-            expect(conn.debugPendingTempLobCount, equals(1),
-                reason: 'a forgetful borrower must not leak temp-LOB space');
+            expect(
+              conn.debugPendingTempLobCount,
+              equals(1),
+              reason: 'a forgetful borrower must not leak temp-LOB space',
+            );
 
             // The borrower's next read surfaces the clear reclaim error.
             OracleException? caught;

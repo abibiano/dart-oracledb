@@ -118,29 +118,28 @@ class ResultSetCursor {
     bool Function(Object? value)? isLobHandle,
     Future<void> Function(Iterable<Object> handles)? closeLobHandles,
     Duration? fetchTimeout = const Duration(minutes: 2),
-  })  : _transport = transport,
-        _cursorId = cursorId,
-        _columns = columns,
-        _serverHasMoreRows = serverHasMoreRows,
-        _requiresFullExecute = requiresFullExecute,
-        _prefetchRows = prefetchRows,
-        _preserveTimestampTimeZone = preserveTimestampTimeZone,
-        _materializePerBatch = materializePerBatch,
-        _onBatchDecoded = onBatchDecoded,
-        _wrapLob = wrapLob,
-        _isLobHandle = isLobHandle,
-        _closeLobHandles = closeLobHandles,
-        _fetchTimeout = fetchTimeout,
-        _buffer = Queue<List<Object?>>.of(firstBatch),
-        _previousRoundLastRow =
-            firstBatch.isNotEmpty ? firstBatch.last : null,
-        assert(
-          (wrapLob == null) == (isLobHandle == null) &&
-              (wrapLob == null) == (closeLobHandles == null),
-          'wrapLob, isLobHandle and closeLobHandles must be supplied together '
-          'or not at all: a partial set registers handles nothing can ever '
-          'reap, wedging the connection with no way to find them.',
-        );
+  }) : _transport = transport,
+       _cursorId = cursorId,
+       _columns = columns,
+       _serverHasMoreRows = serverHasMoreRows,
+       _requiresFullExecute = requiresFullExecute,
+       _prefetchRows = prefetchRows,
+       _preserveTimestampTimeZone = preserveTimestampTimeZone,
+       _materializePerBatch = materializePerBatch,
+       _onBatchDecoded = onBatchDecoded,
+       _wrapLob = wrapLob,
+       _isLobHandle = isLobHandle,
+       _closeLobHandles = closeLobHandles,
+       _fetchTimeout = fetchTimeout,
+       _buffer = Queue<List<Object?>>.of(firstBatch),
+       _previousRoundLastRow = firstBatch.isNotEmpty ? firstBatch.last : null,
+       assert(
+         (wrapLob == null) == (isLobHandle == null) &&
+             (wrapLob == null) == (closeLobHandles == null),
+         'wrapLob, isLobHandle and closeLobHandles must be supplied together '
+         'or not at all: a partial set registers handles nothing can ever '
+         'reap, wedging the connection with no way to find them.',
+       );
 
   final Transport _transport;
   final int _cursorId;
@@ -372,8 +371,10 @@ class ResultSetCursor {
   /// caller learns the result was bounded via [maxRowsCapped]. The cap and the
   /// [maxFetchIterations] backstop are independent: the backstop still guards
   /// the unlimited (`maxRows == 0`) case.
-  Future<List<List<Object?>>> drainRemaining(
-      {required int maxFetchIterations, int maxRows = 0}) async {
+  Future<List<List<Object?>>> drainRemaining({
+    required int maxFetchIterations,
+    int maxRows = 0,
+  }) async {
     final out = <List<Object?>>[];
     out.addAll(_buffer);
     _buffer.clear();
@@ -586,7 +587,8 @@ class ResultSetCursor {
   static OracleException _failureException(ExecuteResponse failure) {
     return OracleException(
       errorCode: failure.errorCode ?? oraProtocolError,
-      message: failure.errorMessage ??
+      message:
+          failure.errorMessage ??
           'FETCH failed while reading the result set; the cursor cannot be '
               'drained further',
       offset: failure.errorOffset,

@@ -92,59 +92,83 @@ void main() {
       buf.readUint16BE();
       buf.readUint16BE();
       buf.readBytes(40); // locator
-      expect(buf.readUint8(), equals(ttcMsgTypeLobData),
-          reason: 'write data is preceded by the LOB_DATA message-type byte');
+      expect(
+        buf.readUint8(),
+        equals(ttcMsgTypeLobData),
+        reason: 'write data is preceded by the LOB_DATA message-type byte',
+      );
       expect(buf.readBytesWithLength(), equals(data));
-      expect(buf.hasRemaining, isFalse,
-          reason: 'no amount is written when sendAmount is false');
+      expect(
+        buf.hasRemaining,
+        isFalse,
+        reason: 'no amount is written when sendAmount is false',
+      );
     });
 
-    test('CREATE_TEMP op: charset/boolean pointers, duration, UTF-8 charset',
-        () {
-      final req = LobOpRequest(
-        operation: tnsLobOpCreateTemp,
-        sourceLocator: Uint8List(tnsLobLocatorBufferSize),
-        sourceOffset: ttcCsfrmImplicit,
-        destOffset: oraTypeClob,
-        destLength: tnsDurationSession,
-      );
-      final buf = ReadBuffer(req.toBytes());
-      buf.readUint8(); // msg type
-      buf.readUint8(); // func code
-      buf.readUint8(); // seq
-      buf.skipUB8(); // token
-      expect(buf.readUint8(), equals(1));
-      expect(buf.readUB4(), equals(tnsLobLocatorBufferSize));
-      buf.readUint8(); // dest locator ptr
-      expect(buf.readUB4(), equals(tnsDurationSession),
-          reason: 'dest length carries the temp-LOB duration');
-      buf.readUB4(); // short src offset
-      buf.readUB4(); // short dest offset
-      expect(buf.readUint8(), equals(1), reason: 'charset pointer set');
-      buf.readUint8(); // short amount ptr
-      expect(buf.readUint8(), equals(1), reason: 'boolean-out pointer set');
-      expect(buf.readUB4(), equals(tnsLobOpCreateTemp));
-      buf.readUint8(); // SCN ptr
-      buf.readUint8(); // SCN len
-      expect(buf.readUB8(), equals(ttcCsfrmImplicit),
-          reason: 'source offset carries the charset form');
-      expect(buf.readUB8(), equals(oraTypeClob),
-          reason: 'dest offset carries the Oracle type');
-      expect(buf.readUint8(), equals(0), reason: 'sendAmount false');
-      buf.readUint16BE();
-      buf.readUint16BE();
-      buf.readUint16BE();
-      buf.readBytes(tnsLobLocatorBufferSize); // zeroed locator
-      expect(buf.readUB4(), equals(ttcCharsetUtf8),
-          reason: 'CREATE_TEMP appends the implicit charset id');
-      expect(buf.hasRemaining, isFalse);
-    });
+    test(
+      'CREATE_TEMP op: charset/boolean pointers, duration, UTF-8 charset',
+      () {
+        final req = LobOpRequest(
+          operation: tnsLobOpCreateTemp,
+          sourceLocator: Uint8List(tnsLobLocatorBufferSize),
+          sourceOffset: ttcCsfrmImplicit,
+          destOffset: oraTypeClob,
+          destLength: tnsDurationSession,
+        );
+        final buf = ReadBuffer(req.toBytes());
+        buf.readUint8(); // msg type
+        buf.readUint8(); // func code
+        buf.readUint8(); // seq
+        buf.skipUB8(); // token
+        expect(buf.readUint8(), equals(1));
+        expect(buf.readUB4(), equals(tnsLobLocatorBufferSize));
+        buf.readUint8(); // dest locator ptr
+        expect(
+          buf.readUB4(),
+          equals(tnsDurationSession),
+          reason: 'dest length carries the temp-LOB duration',
+        );
+        buf.readUB4(); // short src offset
+        buf.readUB4(); // short dest offset
+        expect(buf.readUint8(), equals(1), reason: 'charset pointer set');
+        buf.readUint8(); // short amount ptr
+        expect(buf.readUint8(), equals(1), reason: 'boolean-out pointer set');
+        expect(buf.readUB4(), equals(tnsLobOpCreateTemp));
+        buf.readUint8(); // SCN ptr
+        buf.readUint8(); // SCN len
+        expect(
+          buf.readUB8(),
+          equals(ttcCsfrmImplicit),
+          reason: 'source offset carries the charset form',
+        );
+        expect(
+          buf.readUB8(),
+          equals(oraTypeClob),
+          reason: 'dest offset carries the Oracle type',
+        );
+        expect(buf.readUint8(), equals(0), reason: 'sendAmount false');
+        buf.readUint16BE();
+        buf.readUint16BE();
+        buf.readUint16BE();
+        buf.readBytes(tnsLobLocatorBufferSize); // zeroed locator
+        expect(
+          buf.readUB4(),
+          equals(ttcCharsetUtf8),
+          reason: 'CREATE_TEMP appends the implicit charset id',
+        );
+        expect(buf.hasRemaining, isFalse);
+      },
+    );
 
     test('token number UB8 only written when ttcFieldVersion >= 18', () {
-      final v24 = LobOpRequest(operation: tnsLobOpRead, ttcFieldVersion: 24)
-          .toBytes();
-      final v17 = LobOpRequest(operation: tnsLobOpRead, ttcFieldVersion: 17)
-          .toBytes();
+      final v24 = LobOpRequest(
+        operation: tnsLobOpRead,
+        ttcFieldVersion: 24,
+      ).toBytes();
+      final v17 = LobOpRequest(
+        operation: tnsLobOpRead,
+        ttcFieldVersion: 17,
+      ).toBytes();
       expect(v24.length, greaterThan(v17.length));
     });
   });
@@ -160,8 +184,12 @@ void main() {
         ..._sb8(9), // SB8 amount (sendAmount true)
         ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0),
       ]);
-      final r = decodeLobOpResponse(payload,
-          operation: tnsLobOpRead, sourceLocatorLength: 40, sendAmount: true);
+      final r = decodeLobOpResponse(
+        payload,
+        operation: tnsLobOpRead,
+        sourceLocatorLength: 40,
+        sendAmount: true,
+      );
       expect(r.isSuccess, isTrue);
       expect(r.data, equals('clob data'.codeUnits));
       expect(r.updatedLocator, equals(locatorEcho));
@@ -174,10 +202,16 @@ void main() {
         ..._bytesWithLength('first '.codeUnits),
         ttcMsgTypeLobData,
         ..._bytesWithLength('second'.codeUnits),
-        ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0),
+        ttcMsgTypeStatus,
+        ..._ub4(0),
+        ..._ub2(0),
       ]);
-      final r = decodeLobOpResponse(payload,
-          operation: tnsLobOpRead, sourceLocatorLength: 0, sendAmount: false);
+      final r = decodeLobOpResponse(
+        payload,
+        operation: tnsLobOpRead,
+        sourceLocatorLength: 0,
+        sendAmount: false,
+      );
       expect(String.fromCharCodes(r.data!), equals('first second'));
     });
 
@@ -190,12 +224,16 @@ void main() {
         ttcMsgTypeParameter,
         ...locatorEcho,
         ..._sb8(lobLength),
-        ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0),
+        ttcMsgTypeStatus,
+        ..._ub4(0),
+        ..._ub2(0),
       ]);
-      final r = decodeLobOpResponse(payload,
-          operation: tnsLobOpGetLength,
-          sourceLocatorLength: 40,
-          sendAmount: true);
+      final r = decodeLobOpResponse(
+        payload,
+        operation: tnsLobOpGetLength,
+        sourceLocatorLength: 40,
+        sendAmount: true,
+      );
       expect(r.isSuccess, isTrue);
       expect(r.updatedLocator, equals(locatorEcho));
       expect(r.amount, equals(lobLength));
@@ -210,10 +248,12 @@ void main() {
         7, // trailing flags byte
         ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0),
       ]);
-      final r = decodeLobOpResponse(payload,
-          operation: tnsLobOpCreateTemp,
-          sourceLocatorLength: 40,
-          sendAmount: false);
+      final r = decodeLobOpResponse(
+        payload,
+        operation: tnsLobOpCreateTemp,
+        sourceLocatorLength: 40,
+        sendAmount: false,
+      );
       expect(r.isSuccess, isTrue);
       expect(r.updatedLocator, equals(newLocator));
       expect(r.amount, isNull);
@@ -222,10 +262,16 @@ void main() {
     test('ERROR response surfaces the Oracle code and message', () {
       final payload = Uint8List.fromList([
         ..._errorMessage(errorNum: 22922, errorMessage: 'no such temp LOB'),
-        ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0),
+        ttcMsgTypeStatus,
+        ..._ub4(0),
+        ..._ub2(0),
       ]);
-      final r = decodeLobOpResponse(payload,
-          operation: tnsLobOpRead, sourceLocatorLength: 0, sendAmount: false);
+      final r = decodeLobOpResponse(
+        payload,
+        operation: tnsLobOpRead,
+        sourceLocatorLength: 0,
+        sendAmount: false,
+      );
       expect(r.isSuccess, isFalse);
       expect(r.errorCode, equals(22922));
       expect(r.errorMessage, contains('no such temp LOB'));
@@ -233,12 +279,15 @@ void main() {
 
     test('pre-23.4: ERROR terminates the response without STATUS', () {
       final payload = Uint8List.fromList(
-          _errorMessage(errorNum: 1031, errorMessage: 'insufficient privs'));
-      final r = decodeLobOpResponse(payload,
-          operation: tnsLobOpRead,
-          sourceLocatorLength: 0,
-          sendAmount: false,
-          endOfRequestSupport: false);
+        _errorMessage(errorNum: 1031, errorMessage: 'insufficient privs'),
+      );
+      final r = decodeLobOpResponse(
+        payload,
+        operation: tnsLobOpRead,
+        sourceLocatorLength: 0,
+        sendAmount: false,
+        endOfRequestSupport: false,
+      );
       expect(r.isSuccess, isFalse);
       expect(r.errorCode, equals(1031));
     });
@@ -246,10 +295,19 @@ void main() {
     test('unknown TTC message type fails loud', () {
       final payload = Uint8List.fromList([99, 0, 0, 0]);
       expect(
-        () => decodeLobOpResponse(payload,
-            operation: tnsLobOpRead, sourceLocatorLength: 0, sendAmount: false),
-        throwsA(isA<OracleException>().having(
-            (e) => e.message, 'message', contains('Unknown TTC message'))),
+        () => decodeLobOpResponse(
+          payload,
+          operation: tnsLobOpRead,
+          sourceLocatorLength: 0,
+          sendAmount: false,
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('Unknown TTC message'),
+          ),
+        ),
       );
     });
 
@@ -257,10 +315,19 @@ void main() {
       // RETURN_PARAMETER promising a 40-byte locator with only 3 bytes left.
       final payload = Uint8List.fromList([ttcMsgTypeParameter, 1, 2, 3]);
       expect(
-        () => decodeLobOpResponse(payload,
-            operation: tnsLobOpRead, sourceLocatorLength: 40, sendAmount: true),
-        throwsA(isA<OracleException>()
-            .having((e) => e.cause, 'cause', isA<BufferException>())),
+        () => decodeLobOpResponse(
+          payload,
+          operation: tnsLobOpRead,
+          sourceLocatorLength: 40,
+          sendAmount: true,
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.cause,
+            'cause',
+            isA<BufferException>(),
+          ),
+        ),
       );
     });
   });
@@ -270,14 +337,19 @@ void main() {
       final payload = Uint8List.fromList([
         ttcMsgTypeLobData,
         ..._bytesWithLength('x'.codeUnits),
-        ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0),
+        ttcMsgTypeStatus,
+        ..._ub4(0),
+        ..._ub2(0),
       ]);
       expect(
-          lobOpStreamIsComplete(payload,
-              operation: tnsLobOpRead,
-              sourceLocatorLength: 0,
-              sendAmount: false),
-          isTrue);
+        lobOpStreamIsComplete(
+          payload,
+          operation: tnsLobOpRead,
+          sourceLocatorLength: 0,
+          sendAmount: false,
+        ),
+        isTrue,
+      );
     });
 
     test('truncated response returns false (more packets needed)', () {
@@ -286,11 +358,14 @@ void main() {
         1, 2, 3, // 3 of 40 promised locator bytes
       ]);
       expect(
-          lobOpStreamIsComplete(payload,
-              operation: tnsLobOpRead,
-              sourceLocatorLength: 40,
-              sendAmount: true),
-          isFalse);
+        lobOpStreamIsComplete(
+          payload,
+          operation: tnsLobOpRead,
+          sourceLocatorLength: 40,
+          sendAmount: true,
+        ),
+        isFalse,
+      );
     });
 
     test('response without terminal message returns false', () {
@@ -299,11 +374,14 @@ void main() {
         ..._bytesWithLength('x'.codeUnits),
       ]);
       expect(
-          lobOpStreamIsComplete(payload,
-              operation: tnsLobOpRead,
-              sourceLocatorLength: 0,
-              sendAmount: false),
-          isFalse);
+        lobOpStreamIsComplete(
+          payload,
+          operation: tnsLobOpRead,
+          sourceLocatorLength: 0,
+          sendAmount: false,
+        ),
+        isFalse,
+      );
     });
 
     test('malformed encoding escalates to OracleException, not '
@@ -311,18 +389,29 @@ void main() {
       // STATUS call-status UB4 position carries a sign-bit size byte with
       // its value bytes present — not an underflow, malformed on its face.
       final payload = Uint8List.fromList([
-        ttcMsgTypeStatus, 0x81, 0x05, 0xAA, 0xBB,
+        ttcMsgTypeStatus,
+        0x81,
+        0x05,
+        0xAA,
+        0xBB,
       ]);
       expect(
-        () => lobOpStreamIsComplete(payload,
-            operation: tnsLobOpRead,
-            sourceLocatorLength: 0,
-            sendAmount: false),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-            .having((e) => e.message, 'message',
-                contains('LOB completion probe'))
-            .having((e) => e.cause, 'cause', isA<BufferException>())),
+        () => lobOpStreamIsComplete(
+          payload,
+          operation: tnsLobOpRead,
+          sourceLocatorLength: 0,
+          sendAmount: false,
+        ),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having(
+                (e) => e.message,
+                'message',
+                contains('LOB completion probe'),
+              )
+              .having((e) => e.cause, 'cause', isA<BufferException>()),
+        ),
       );
     });
   });
@@ -332,21 +421,23 @@ void main() {
       final nclobLocator = Uint8List(40);
       nclobLocator[tnsLobLocOffsetFlag3] = tnsLobLocFlagsVarLengthCharset;
       expect(
-          LobLocator(
-                  locator: nclobLocator,
-                  oracleType: oraTypeClob,
-                  length: 1,
-                  chunkSize: 0)
-              .usesVarLengthCharset,
-          isTrue);
+        LobLocator(
+          locator: nclobLocator,
+          oracleType: oraTypeClob,
+          length: 1,
+          chunkSize: 0,
+        ).usesVarLengthCharset,
+        isTrue,
+      );
       expect(
-          LobLocator(
-                  locator: Uint8List(40),
-                  oracleType: oraTypeClob,
-                  length: 1,
-                  chunkSize: 0)
-              .usesVarLengthCharset,
-          isFalse);
+        LobLocator(
+          locator: Uint8List(40),
+          oracleType: oraTypeClob,
+          length: 1,
+          chunkSize: 0,
+        ).usesVarLengthCharset,
+        isFalse,
+      );
     });
   });
 
@@ -354,8 +445,11 @@ void main() {
     test('round-trips BMP and supplementary characters', () {
       const text = 'héllo 日本語 😀';
       final bytes = encodeUtf16Be(text);
-      expect(bytes.length, equals(text.length * 2),
-          reason: '2 bytes per UTF-16 code unit (surrogates included)');
+      expect(
+        bytes.length,
+        equals(text.length * 2),
+        reason: '2 bytes per UTF-16 code unit (surrogates included)',
+      );
       expect(decodeUtf16Be(bytes), equals(text));
     });
 
@@ -365,8 +459,10 @@ void main() {
     });
 
     test('decode rejects an odd byte count', () {
-      expect(() => decodeUtf16Be(Uint8List.fromList([0x00, 0x41, 0x00])),
-          throwsFormatException);
+      expect(
+        () => decodeUtf16Be(Uint8List.fromList([0x00, 0x41, 0x00])),
+        throwsFormatException,
+      );
     });
   });
 }

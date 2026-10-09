@@ -40,7 +40,8 @@ void main() {
 
       // The query reused by every test: each parent row carries a correlated
       // nested cursor of its children, ordered deterministically.
-      late final String selectWithCursor = '''
+      late final String selectWithCursor =
+          '''
         SELECT p.id,
                CURSOR(
                  SELECT c.val FROM $childTab c
@@ -101,26 +102,43 @@ void main() {
       // Asserts the three parent rows carry the expected nested cursor rows:
       // parent 1 -> [10,20,30], parent 2 -> [], parent 3 -> [1..bigChildCount].
       void expectNestedShape(List<OracleRow> rows) {
-        expect(rows.map((r) => r['ID']), equals([1, 2, 3]),
-            reason: 'parent rows arrive in id order');
+        expect(
+          rows.map((r) => r['ID']),
+          equals([1, 2, 3]),
+          reason: 'parent rows arrive in id order',
+        );
 
         final nc1 = rows[0]['NC'];
-        expect(nc1, isA<List<OracleRow>>(),
-            reason: 'a cursor column materializes to List<OracleRow>');
-        expect((nc1! as List<OracleRow>).map((r) => r['VAL']),
-            equals([10, 20, 30]));
+        expect(
+          nc1,
+          isA<List<OracleRow>>(),
+          reason: 'a cursor column materializes to List<OracleRow>',
+        );
+        expect(
+          (nc1! as List<OracleRow>).map((r) => r['VAL']),
+          equals([10, 20, 30]),
+        );
 
         final nc2 = rows[1]['NC'];
         expect(nc2, isA<List<OracleRow>>());
-        expect((nc2! as List<OracleRow>), isEmpty,
-            reason: 'an empty nested cursor materializes to []');
+        expect(
+          (nc2! as List<OracleRow>),
+          isEmpty,
+          reason: 'an empty nested cursor materializes to []',
+        );
 
         final nc3 = rows[2]['NC']! as List<OracleRow>;
-        expect(nc3, hasLength(bigChildCount),
-            reason: 'a nested cursor larger than the prefetch size is fully '
-                'drained across multiple FETCH rounds');
-        expect(nc3.map((r) => r['VAL']),
-            equals([for (var i = 1; i <= bigChildCount; i++) i]));
+        expect(
+          nc3,
+          hasLength(bigChildCount),
+          reason:
+              'a nested cursor larger than the prefetch size is fully '
+              'drained across multiple FETCH rounds',
+        );
+        expect(
+          nc3.map((r) => r['VAL']),
+          equals([for (var i = 1; i <= bigChildCount; i++) i]),
+        );
       }
 
       test('eager execute() materializes nested cursor columns', () async {
@@ -130,8 +148,11 @@ void main() {
         final ncCol = result.columns[1];
         expect(ncCol.name, equals('NC'));
         expect(ncCol.oracleType, equals(102));
-        expect(ncCol.maxLength, equals(4),
-            reason: 'cursor column reports the wire buffer size 4');
+        expect(
+          ncCol.maxLength,
+          equals(4),
+          reason: 'cursor column reports the wire buffer size 4',
+        );
         expectNestedShape(result.rows);
       });
 
@@ -140,21 +161,23 @@ void main() {
         expectNestedShape(rows);
       });
 
-      test('execute(resultSet: true) materializes nested cursor columns',
-          () async {
-        final result = await connection.execute(
-          selectWithCursor,
-          null,
-          const OracleExecuteOptions(resultSet: true),
-        );
-        final rs = result.resultSet!;
-        try {
-          final rows = await rs.getRows(); // drain all
-          expectNestedShape(rows);
-        } finally {
-          await rs.close();
-        }
-      });
+      test(
+        'execute(resultSet: true) materializes nested cursor columns',
+        () async {
+          final result = await connection.execute(
+            selectWithCursor,
+            null,
+            const OracleExecuteOptions(resultSet: true),
+          );
+          final rs = result.resultSet!;
+          try {
+            final rows = await rs.getRows(); // drain all
+            expectNestedShape(rows);
+          } finally {
+            await rs.close();
+          }
+        },
+      );
 
       // A genuinely NULL cursor COLUMN value (vs. an empty nested cursor, which
       // materializes to []) is not producible through Oracle's `CURSOR()`
@@ -162,11 +185,15 @@ void main() {
       // opens a (non-null) cursor that yields zero rows. The decode-level NULL
       // paths — numBytes 0/0xFF and server cursor id 0 -> null — are covered by
       // the execute_message unit tests instead. Documented here as N/A.
-      test('NULL nested cursor value is N/A for CURSOR() (see unit tests)',
-          () {
-        expect(true, isTrue);
-      }, skip: 'Oracle CURSOR() never yields a SQL NULL cursor column; '
-          'numBytes-0 / cursor-id-0 NULL decode is unit-tested');
+      test(
+        'NULL nested cursor value is N/A for CURSOR() (see unit tests)',
+        () {
+          expect(true, isTrue);
+        },
+        skip:
+            'Oracle CURSOR() never yields a SQL NULL cursor column; '
+            'numBytes-0 / cursor-id-0 NULL decode is unit-tested',
+      );
     },
   );
 }

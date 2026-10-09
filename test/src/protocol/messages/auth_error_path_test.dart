@@ -29,81 +29,97 @@ void main() {
     // relying on the env-var skip alone.
     final runNetworkTests =
         Platform.environment['RUN_INTEGRATION_TESTS'] == 'true';
-    group('Connection failure during auth',
-        tags: 'integration',
-        skip: runNetworkTests
-            ? null
-            : 'Network calls: set RUN_INTEGRATION_TESTS=true to run', () {
-      test('connect to non-existent host throws OracleException', () async {
-        await expectLater(
-          OracleConnection.connect(
-            'nonexistent.invalid.host:1521/ORCL',
-            user: 'test',
-            password: 'test',
-            timeout: const Duration(seconds: 3),
-          ),
-          throwsA(isA<OracleException>().having(
-            (e) => e.errorCode,
-            'errorCode',
-            // oraConnectionRefused (12514) is returned when DNS resolution fails
-            // ('host not found' / 'no address associated' in socket._mapSocketError)
-            anyOf([
-              oraNetworkError,
-              oraHostUnreachable,
-              oraConnectTimeout,
-              oraConnectionRefused,
-            ]),
-          )),
-        );
-      });
-
-      test('OracleException preserves cause on connection failure', () async {
-        try {
-          await OracleConnection.connect(
-            'nonexistent.invalid.host:1521/ORCL',
-            user: 'test',
-            password: 'test',
-            timeout: const Duration(seconds: 3),
+    group(
+      'Connection failure during auth',
+      tags: 'integration',
+      skip: runNetworkTests
+          ? null
+          : 'Network calls: set RUN_INTEGRATION_TESTS=true to run',
+      () {
+        test('connect to non-existent host throws OracleException', () async {
+          await expectLater(
+            OracleConnection.connect(
+              'nonexistent.invalid.host:1521/ORCL',
+              user: 'test',
+              password: 'test',
+              timeout: const Duration(seconds: 3),
+            ),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'errorCode',
+                // oraConnectionRefused (12514) is returned when DNS resolution fails
+                // ('host not found' / 'no address associated' in socket._mapSocketError)
+                anyOf([
+                  oraNetworkError,
+                  oraHostUnreachable,
+                  oraConnectTimeout,
+                  oraConnectionRefused,
+                ]),
+              ),
+            ),
           );
-          fail('Expected OracleException');
-        } on OracleException catch (e) {
-          expect(e.cause, isNotNull,
-              reason: 'Original cause must be preserved for debugging');
-          expect(e.message, isNotEmpty);
-        }
-      });
+        });
 
-      test('connection failure error message never contains password',
+        test('OracleException preserves cause on connection failure', () async {
+          try {
+            await OracleConnection.connect(
+              'nonexistent.invalid.host:1521/ORCL',
+              user: 'test',
+              password: 'test',
+              timeout: const Duration(seconds: 3),
+            );
+            fail('Expected OracleException');
+          } on OracleException catch (e) {
+            expect(
+              e.cause,
+              isNotNull,
+              reason: 'Original cause must be preserved for debugging',
+            );
+            expect(e.message, isNotEmpty);
+          }
+        });
+
+        test(
+          'connection failure error message never contains password',
           () async {
-        const secretPassword = 'VERY_SECRET_PASSWORD_789';
-        try {
-          await OracleConnection.connect(
-            'nonexistent.invalid.host:1521/ORCL',
-            user: 'testuser',
-            password: secretPassword,
-            timeout: const Duration(seconds: 3),
-          );
-          fail('Expected OracleException');
-        } on OracleException catch (e) {
-          expect(e.message, isNot(contains(secretPassword)),
-              reason: 'password must never appear in error messages');
-          expect(e.toString(), isNot(contains(secretPassword)),
-              reason: 'password must never appear in toString()');
-        }
-      });
-
-      test('connection refused throws OracleException', () async {
-        await expectLater(
-          OracleConnection.connect(
-            '127.0.0.1:59999/ORCL',
-            user: 'test',
-            password: 'test',
-            timeout: const Duration(seconds: 2),
-          ),
-          throwsA(isA<OracleException>()),
+            const secretPassword = 'VERY_SECRET_PASSWORD_789';
+            try {
+              await OracleConnection.connect(
+                'nonexistent.invalid.host:1521/ORCL',
+                user: 'testuser',
+                password: secretPassword,
+                timeout: const Duration(seconds: 3),
+              );
+              fail('Expected OracleException');
+            } on OracleException catch (e) {
+              expect(
+                e.message,
+                isNot(contains(secretPassword)),
+                reason: 'password must never appear in error messages',
+              );
+              expect(
+                e.toString(),
+                isNot(contains(secretPassword)),
+                reason: 'password must never appear in toString()',
+              );
+            }
+          },
         );
-      });
-    });
+
+        test('connection refused throws OracleException', () async {
+          await expectLater(
+            OracleConnection.connect(
+              '127.0.0.1:59999/ORCL',
+              user: 'test',
+              password: 'test',
+              timeout: const Duration(seconds: 2),
+            ),
+            throwsA(isA<OracleException>()),
+          );
+        });
+      },
+    );
 
     // =========================================================================
     // Protocol errors
@@ -138,20 +154,22 @@ void main() {
         );
       });
 
-      test('invalid packet length (< header size) throws TnsPacketException',
-          () {
-        final data = Uint8List.fromList([
-          0x00, 0x04, // Length: 4 (less than 8-byte header)
-          0x00, 0x00,
-          0x06, // DATA type
-          0x00,
-          0x00, 0x00,
-        ]);
-        expect(
-          () => TnsPacket.decode(data),
-          throwsA(isA<TnsPacketException>()),
-        );
-      });
+      test(
+        'invalid packet length (< header size) throws TnsPacketException',
+        () {
+          final data = Uint8List.fromList([
+            0x00, 0x04, // Length: 4 (less than 8-byte header)
+            0x00, 0x00,
+            0x06, // DATA type
+            0x00,
+            0x00, 0x00,
+          ]);
+          expect(
+            () => TnsPacket.decode(data),
+            throwsA(isA<TnsPacketException>()),
+          );
+        },
+      );
 
       test('OracleException implements Exception', () {
         const e = OracleException(
@@ -175,22 +193,25 @@ void main() {
     // Malformed auth responses
     // =========================================================================
     group('Malformed auth responses', () {
-      test('AuthPhaseOneResponse.decode throws BufferException on empty data',
-          () {
-        expect(
-          () => AuthPhaseOneResponse.decode(Uint8List(0)),
-          throwsA(isA<BufferException>()),
-        );
-      });
+      test(
+        'AuthPhaseOneResponse.decode throws BufferException on empty data',
+        () {
+          expect(
+            () => AuthPhaseOneResponse.decode(Uint8List(0)),
+            throwsA(isA<BufferException>()),
+          );
+        },
+      );
 
       test(
-          'AuthPhaseOneResponse.decode handles unknown message type without throwing',
-          () {
-        final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
-        final response = AuthPhaseOneResponse.decode(data);
-        expect(response, isNotNull);
-        expect(response.sessionData, isEmpty);
-      });
+        'AuthPhaseOneResponse.decode handles unknown message type without throwing',
+        () {
+          final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
+          final response = AuthPhaseOneResponse.decode(data);
+          expect(response, isNotNull);
+          expect(response.sessionData, isEmpty);
+        },
+      );
 
       test('AuthPhaseOneResponse.decode handles status message type (9)', () {
         final data = Uint8List.fromList([
@@ -202,53 +223,61 @@ void main() {
         expect(response.sessionData, isEmpty);
       });
 
-      test('toVerifierParams returns non-null salt when AUTH_VFR_DATA missing',
-          () {
-        final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
-        final response = AuthPhaseOneResponse.decode(data);
-        final params = response.toVerifierParams();
-        expect(params.salt, isNotNull);
-        expect(params.salt.length, greaterThan(0));
-      });
+      test(
+        'toVerifierParams returns non-null salt when AUTH_VFR_DATA missing',
+        () {
+          final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
+          final response = AuthPhaseOneResponse.decode(data);
+          final params = response.toVerifierParams();
+          expect(params.salt, isNotNull);
+          expect(params.salt.length, greaterThan(0));
+        },
+      );
 
       test(
-          'toVerifierParams returns positive iterations when AUTH_VFR_DATA missing',
-          () {
-        final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
-        final response = AuthPhaseOneResponse.decode(data);
-        final params = response.toVerifierParams();
-        expect(params.iterations, greaterThan(0));
-      });
+        'toVerifierParams returns positive iterations when AUTH_VFR_DATA missing',
+        () {
+          final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
+          final response = AuthPhaseOneResponse.decode(data);
+          final params = response.toVerifierParams();
+          expect(params.iterations, greaterThan(0));
+        },
+      );
 
       test(
-          'toVerifierParams returns non-null serverNonce when AUTH_SESSKEY missing',
-          () {
-        final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
-        final response = AuthPhaseOneResponse.decode(data);
-        final params = response.toVerifierParams();
-        expect(params.serverNonce, isNotNull);
-      });
+        'toVerifierParams returns non-null serverNonce when AUTH_SESSKEY missing',
+        () {
+          final data = Uint8List.fromList([0xFF, 0x00, 0x00, 0x00]);
+          final response = AuthPhaseOneResponse.decode(data);
+          final params = response.toVerifierParams();
+          expect(params.serverNonce, isNotNull);
+        },
+      );
 
-      test('toVerifierParams handles invalid hex in AUTH_VFR_DATA gracefully',
-          () {
-        const response = AuthPhaseOneResponse(
-          sessionData: {'AUTH_VFR_DATA': 'GGGG_NOT_HEX'},
-          verifierType: 0x4815,
-        );
-        final params = response.toVerifierParams();
-        expect(params.salt, isNotNull);
-        expect(params.iterations, greaterThan(0));
-      });
+      test(
+        'toVerifierParams handles invalid hex in AUTH_VFR_DATA gracefully',
+        () {
+          const response = AuthPhaseOneResponse(
+            sessionData: {'AUTH_VFR_DATA': 'GGGG_NOT_HEX'},
+            verifierType: 0x4815,
+          );
+          final params = response.toVerifierParams();
+          expect(params.salt, isNotNull);
+          expect(params.iterations, greaterThan(0));
+        },
+      );
 
-      test('toVerifierParams uses default 4096 iterations when not parseable',
-          () {
-        const response = AuthPhaseOneResponse(
-          sessionData: {'AUTH_VFR_DATA': ''},
-          verifierType: 0x4815,
-        );
-        final params = response.toVerifierParams();
-        expect(params.iterations, equals(4096));
-      });
+      test(
+        'toVerifierParams uses default 4096 iterations when not parseable',
+        () {
+          const response = AuthPhaseOneResponse(
+            sessionData: {'AUTH_VFR_DATA': ''},
+            verifierType: 0x4815,
+          );
+          final params = response.toVerifierParams();
+          expect(params.iterations, equals(4096));
+        },
+      );
     });
 
     // =========================================================================
@@ -282,8 +311,11 @@ void main() {
           errorCode: oraInvalidCredentials,
           message: 'Authentication failed: invalid username or password',
         );
-        expect(timeoutError.message, isNot(contains(secretPassword)),
-            reason: 'password must never appear in timeout error');
+        expect(
+          timeoutError.message,
+          isNot(contains(secretPassword)),
+          reason: 'password must never appear in timeout error',
+        );
         expect(timeoutError.toString(), isNot(contains(secretPassword)));
       });
 
@@ -295,21 +327,25 @@ void main() {
           message: 'Authentication failed: invalid username or password',
         );
         // Canonical 5-digit ORA padding for codes below 10000.
-        expect(e.toString(), contains('ORA-01017'),
-            reason: 'ORA-01017 is the Oracle invalid-credentials error code');
+        expect(
+          e.toString(),
+          contains('ORA-01017'),
+          reason: 'ORA-01017 is the Oracle invalid-credentials error code',
+        );
         // The ~5-second Oracle 23ai brute-force delay is validated by the
         // stopwatch assertion in test/integration/security_test.dart.
       });
 
       test(
-          'OracleException cause is nullable (no cause for timeout-triggered error)',
-          () {
-        const timeoutError = OracleException(
-          errorCode: oraInvalidCredentials,
-          message: 'Authentication failed: invalid username or password',
-        );
-        expect(timeoutError.cause, isNull);
-      });
+        'OracleException cause is nullable (no cause for timeout-triggered error)',
+        () {
+          const timeoutError = OracleException(
+            errorCode: oraInvalidCredentials,
+            message: 'Authentication failed: invalid username or password',
+          );
+          expect(timeoutError.cause, isNull);
+        },
+      );
     });
   });
 }

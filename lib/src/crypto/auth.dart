@@ -38,7 +38,8 @@ Uint8List requirePasswordHashPrefix(Uint8List fullHash, int length) {
   if (fullHash.length < length) {
     throw OracleException(
       errorCode: oraProtocolError,
-      message: 'Authentication verifier hash too short: expected at least '
+      message:
+          'Authentication verifier hash too short: expected at least '
           '$length bytes for AES-256 key derivation but got '
           '${fullHash.length}. The server auth response may be corrupted.',
     );
@@ -185,8 +186,10 @@ class AuthFlow {
     required VerifierParams params,
     required Uint8List clientNonce,
   }) {
-    _log.fine('Generating password proof with verifier type: '
-        '0x${params.verifierType.toRadixString(16)}');
+    _log.fine(
+      'Generating password proof with verifier type: '
+      '0x${params.verifierType.toRadixString(16)}',
+    );
 
     // Password is used as-is (UTF-8 bytes) - NOT uppercased for Oracle 12c
     final passwordBytes = Uint8List.fromList(utf8.encode(password));
@@ -196,16 +199,21 @@ class AuthFlow {
     Uint8List passwordHash;
 
     _log.fine(
-        'DEBUG: params.isPbkdf2=${params.isPbkdf2}, verifierType=0x${params.verifierType.toRadixString(16)}');
+      'DEBUG: params.isPbkdf2=${params.isPbkdf2}, verifierType=0x${params.verifierType.toRadixString(16)}',
+    );
     if (params.isPbkdf2) {
       // Step 1: PBKDF2 to derive password key
       // Salt = AUTH_VFR_DATA + "AUTH_PBKDF2_SPEEDY_KEY" (as bytes)
-      final speedyKeySalt =
-          Uint8List.fromList(utf8.encode('AUTH_PBKDF2_SPEEDY_KEY'));
+      final speedyKeySalt = Uint8List.fromList(
+        utf8.encode('AUTH_PBKDF2_SPEEDY_KEY'),
+      );
       final combinedSalt = Uint8List(params.salt.length + speedyKeySalt.length);
       combinedSalt.setRange(0, params.salt.length, params.salt);
       combinedSalt.setRange(
-          params.salt.length, combinedSalt.length, speedyKeySalt);
+        params.salt.length,
+        combinedSalt.length,
+        speedyKeySalt,
+      );
 
       passwordKey = pbkdf2Sha512(
         password: passwordBytes,
@@ -214,7 +222,8 @@ class AuthFlow {
         keyLength: 64,
       );
       _log.fine(
-          'PBKDF2 key derivation complete (${params.iterations} iterations)');
+        'PBKDF2 key derivation complete (${params.iterations} iterations)',
+      );
 
       // Step 2: Hash passwordKey with AUTH_VFR_DATA to get passwordHash
       // passwordHash = SHA512(passwordKey + AUTH_VFR_DATA)[0:32]
@@ -224,10 +233,13 @@ class AuthFlow {
       final fullHash = sha512Hash(hashInput);
       // Guard the slice so a short/corrupted digest raises a meaningful
       // OracleException instead of an opaque RangeError.
-      passwordHash =
-          requirePasswordHashPrefix(fullHash, 32); // First 32 bytes for AES-256
+      passwordHash = requirePasswordHashPrefix(
+        fullHash,
+        32,
+      ); // First 32 bytes for AES-256
       _log.fine(
-          'Password hash derived (${passwordHash.length} bytes from ${fullHash.length} byte hash)');
+        'Password hash derived (${passwordHash.length} bytes from ${fullHash.length} byte hash)',
+      );
     } else {
       // SHA512 (O5LOGON / pre-12c) verifier: simple salted hash.
       //
@@ -237,11 +249,15 @@ class AuthFlow {
       // bytes — consistent with the PBKDF2 branch above and node-oracledb's
       // 32-byte keyLen for the modern verifier — so this defensive branch can
       // never crash on block/key misalignment.
-      final saltedPassword =
-          Uint8List(passwordBytes.length + params.salt.length);
+      final saltedPassword = Uint8List(
+        passwordBytes.length + params.salt.length,
+      );
       saltedPassword.setRange(0, passwordBytes.length, passwordBytes);
       saltedPassword.setRange(
-          passwordBytes.length, saltedPassword.length, params.salt);
+        passwordBytes.length,
+        saltedPassword.length,
+        params.salt,
+      );
       passwordHash = requirePasswordHashPrefix(sha512Hash(saltedPassword), 32);
       passwordKey = passwordHash; // For the SHA512 path, key == hash (32 bytes)
       _log.fine('SHA512 hash complete');
@@ -257,14 +273,16 @@ class AuthFlow {
     if (encodedServerKey.length < 32 || encodedServerKey.length % 16 != 0) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'Server session key (AUTH_SESSKEY) has an invalid length '
+        message:
+            'Server session key (AUTH_SESSKEY) has an invalid length '
             '(${encodedServerKey.length}); expected a multiple of 16 and at '
             'least 32 bytes for AES-CBC. The server auth response may be '
             'corrupted.',
       );
     }
     _log.fine(
-        'passwordHash.length=${passwordHash.length}, encodedServerKey.length=${encodedServerKey.length}');
+      'passwordHash.length=${passwordHash.length}, encodedServerKey.length=${encodedServerKey.length}',
+    );
     final sessionKeyParta = aes256CbcDecrypt(
       key: passwordHash,
       iv: Uint8List(16), // IV is zeros for session key decryption
@@ -275,7 +293,8 @@ class AuthFlow {
     // Step 4: Generate random sessionKeyPartb - MUST match length of sessionKeyParta!
     final sessionKeyPartb = generateNonce(sessionKeyParta.length);
     _log.fine(
-        'Generated client session key part (${sessionKeyPartb.length} bytes)');
+      'Generated client session key part (${sessionKeyPartb.length} bytes)',
+    );
 
     // Step 5: Encrypt sessionKeyPartb with passwordHash to get client's AUTH_SESSKEY
     final encodedClientKey = aes256CbcEncrypt(
@@ -288,12 +307,16 @@ class AuthFlow {
         .map((b) => b.toRadixString(16).padLeft(2, '0'))
         .join()
         .toUpperCase();
-    final sessionKeyHexSliced =
-        sessionKeyHex.substring(0, 64); // First 64 hex chars = 32 bytes
+    final sessionKeyHexSliced = sessionKeyHex.substring(
+      0,
+      64,
+    ); // First 64 hex chars = 32 bytes
     _sessionKey = Uint8List.fromList(
-        utf8.encode(sessionKeyHexSliced)); // Store as UTF-8 string bytes
+      utf8.encode(sessionKeyHexSliced),
+    ); // Store as UTF-8 string bytes
     _log.fine(
-        'Encrypted client session key (${encodedClientKey.length} bytes → ${sessionKeyHexSliced.length} hex chars)');
+      'Encrypted client session key (${encodedClientKey.length} bytes → ${sessionKeyHexSliced.length} hex chars)',
+    );
 
     // Step 6: Derive comboKey from mixing sessionKeyParta and sessionKeyPartb
     // Mix the keys using AUTH_PBKDF2_CSK_SALT
@@ -349,9 +372,11 @@ class AuthFlow {
           .join()
           .toUpperCase();
       _speedyKey = Uint8List.fromList(
-          utf8.encode(speedyKeyHex)); // Store as UTF-8 string bytes
+        utf8.encode(speedyKeyHex),
+      ); // Store as UTF-8 string bytes
       _log.fine(
-          'Generated speedy key (${speedyKeyBytes.length} bytes → ${speedyKeyHex.length} hex chars)');
+        'Generated speedy key (${speedyKeyBytes.length} bytes → ${speedyKeyHex.length} hex chars)',
+      );
     } else {
       // SHA512/11g path: no speedy key (mirrors node-oracledb's verifier11G).
       _speedyKey = null;
@@ -376,11 +401,13 @@ class AuthFlow {
         .map((b) => b.toRadixString(16).padLeft(2, '0'))
         .join()
         .toUpperCase();
-    final encryptedPasswordBytes =
-        Uint8List.fromList(utf8.encode(encryptedPasswordHex));
+    final encryptedPasswordBytes = Uint8List.fromList(
+      utf8.encode(encryptedPasswordHex),
+    );
 
     _log.fine(
-        'Password encrypted (${encryptedPassword.length} bytes → ${encryptedPasswordHex.length} hex chars)');
+      'Password encrypted (${encryptedPassword.length} bytes → ${encryptedPasswordHex.length} hex chars)',
+    );
     return encryptedPasswordBytes;
   }
 
@@ -446,7 +473,8 @@ class AuthFlow {
       }
     } else {
       _log.fine(
-          'Server does not advertise FAST_AUTH; using classical AUTH_PHASE_ONE/TWO');
+        'Server does not advertise FAST_AUTH; using classical AUTH_PHASE_ONE/TWO',
+      );
       // Protocol negotiation runs BEFORE any state advance. If it throws,
       // the phase-one packet was never written, so state stays `notStarted`.
       await transport.sendProtocolNegotiation();
@@ -490,7 +518,8 @@ class AuthFlow {
       }
     }
     _log.fine(
-        'Received AUTH_PHASE_ONE response (${phaseOneResponseData.length} bytes)');
+      'Received AUTH_PHASE_ONE response (${phaseOneResponseData.length} bytes)',
+    );
 
     // AuthPhaseOneResponse.decode raises on a TTC ERROR message.
     // Mark auth failed so a fail-loud server error does not strand state.
@@ -506,8 +535,9 @@ class AuthFlow {
     }
     final verifierParams = phaseOneResponse.toVerifierParams();
     _log.fine(
-        'Received verifier params: type=0x${verifierParams.verifierType.toRadixString(16)}, '
-        'iterations=${verifierParams.iterations}');
+      'Received verifier params: type=0x${verifierParams.verifierType.toRadixString(16)}, '
+      'iterations=${verifierParams.iterations}',
+    );
 
     // Step 4: Generate password proof using crypto layer
     final encryptedProof = generatePasswordProof(
@@ -553,7 +583,8 @@ class AuthFlow {
           // Oracle 23ai closes connection silently on wrong password
           // Timeout indicates authentication failure
           _log.warning(
-              'AUTH_PHASE_TWO response timeout (${authTimeout.inSeconds}s) - likely invalid credentials');
+            'AUTH_PHASE_TWO response timeout (${authTimeout.inSeconds}s) - likely invalid credentials',
+          );
           updateState(AuthState.failed);
           throw const OracleException(
             errorCode: oraInvalidCredentials,
@@ -562,7 +593,8 @@ class AuthFlow {
         },
       );
       _log.fine(
-          'Received AUTH_PHASE_TWO response (${phaseTwoResponseData.length} bytes)');
+        'Received AUTH_PHASE_TWO response (${phaseTwoResponseData.length} bytes)',
+      );
     } on OracleException catch (e) {
       // If connection closes during AUTH_PHASE_TWO, treat it as authentication failure
       // (Oracle closes connection on wrong password)

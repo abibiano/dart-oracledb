@@ -82,103 +82,109 @@ void main() {
       // Reading (CLOB / NCLOB / BLOB) via OracleLob
       // ---------------------------------------------------------------
 
-      test('a CLOB column is fetched as an OracleLob and read whole + bounded',
-          () async {
-        final id = nextTestId();
-        const text = 'hello lob world';
-        await connection.execute(
-          'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
-          {'v': text},
-        );
-        final result = await connection.execute(
-          'SELECT doc FROM $testTable WHERE id = $id',
-          null,
-          const OracleExecuteOptions(fetchLobs: true),
-        );
-        final lob = result.rows.single['DOC'] as OracleLob;
-        expect(lob.type, equals(OracleDbType.clob));
-        expect(lob.length, equals(text.length));
+      test(
+        'a CLOB column is fetched as an OracleLob and read whole + bounded',
+        () async {
+          final id = nextTestId();
+          const text = 'hello lob world';
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
+            {'v': text},
+          );
+          final result = await connection.execute(
+            'SELECT doc FROM $testTable WHERE id = $id',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+          final lob = result.rows.single['DOC'] as OracleLob;
+          expect(lob.type, equals(OracleDbType.clob));
+          expect(lob.length, equals(text.length));
 
-        final readOpsBefore = connection.debugLobReadOps;
-        // Full read at offset 1.
-        expect(await lob.read(), equals(text));
-        // Bounded read at a non-1 offset: 'lob' is at 1-based offset 7, len 3.
-        expect(await lob.read(offset: 7, amount: 3), equals('lob'));
-        // Exactly one LOB READ round trip per read() call.
-        expect(connection.debugLobReadOps - readOpsBefore, equals(2));
+          final readOpsBefore = connection.debugLobReadOps;
+          // Full read at offset 1.
+          expect(await lob.read(), equals(text));
+          // Bounded read at a non-1 offset: 'lob' is at 1-based offset 7, len 3.
+          expect(await lob.read(offset: 7, amount: 3), equals('lob'));
+          // Exactly one LOB READ round trip per read() call.
+          expect(connection.debugLobReadOps - readOpsBefore, equals(2));
 
-        await lob.close();
-      });
+          await lob.close();
+        },
+      );
 
-      test('an NCLOB with multibyte + supplemental text reads correctly',
-          () async {
-        if (!nationalCharsetSupported(connection)) return;
-        final id = nextTestId();
-        // 'café crème 中文日本語 😀🎉' — accented + CJK + a surrogate-pair emoji.
-        const text = '$accented $cjk $emoji';
-        await connection.execute(
-          'INSERT INTO $testTable (id, ndoc) VALUES ($id, :v)',
-          {'v': text},
-        );
-        final result = await connection.execute(
-          'SELECT ndoc FROM $testTable WHERE id = $id',
-          null,
-          const OracleExecuteOptions(fetchLobs: true),
-        );
-        final lob = result.rows.single['NDOC'] as OracleLob;
-        expect(lob.type, equals(OracleDbType.nClob));
-        // length is in UCS-2 code units (a supplemental char is 2 units).
-        expect(lob.length, equals(text.length));
+      test(
+        'an NCLOB with multibyte + supplemental text reads correctly',
+        () async {
+          if (!nationalCharsetSupported(connection)) return;
+          final id = nextTestId();
+          // 'café crème 中文日本語 😀🎉' — accented + CJK + a surrogate-pair emoji.
+          const text = '$accented $cjk $emoji';
+          await connection.execute(
+            'INSERT INTO $testTable (id, ndoc) VALUES ($id, :v)',
+            {'v': text},
+          );
+          final result = await connection.execute(
+            'SELECT ndoc FROM $testTable WHERE id = $id',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+          final lob = result.rows.single['NDOC'] as OracleLob;
+          expect(lob.type, equals(OracleDbType.nClob));
+          // length is in UCS-2 code units (a supplemental char is 2 units).
+          expect(lob.length, equals(text.length));
 
-        // Full read reassembles the surrogate pair exactly (single decode).
-        expect(await lob.read(), equals(text));
+          // Full read reassembles the surrogate pair exactly (single decode).
+          expect(await lob.read(), equals(text));
 
-        // Bounded read on a clean character boundary: the leading 'café'
-        // (4 code units) at offset 1.
-        expect(await lob.read(offset: 1, amount: 4), equals('caf\u{00E9}'));
+          // Bounded read on a clean character boundary: the leading 'café'
+          // (4 code units) at offset 1.
+          expect(await lob.read(offset: 1, amount: 4), equals('caf\u{00E9}'));
 
-        // Non-1-offset bounded read (AC9 mandates this for NCLOB too, not just
-        // CLOB/BLOB): 'crème' is 5 UCS-2 code units at 1-based offset 6
-        // ('café ' = 5 units, so 'crème' starts at 6). Clean boundary — no
-        // surrogate split.
-        expect(await lob.read(offset: 6, amount: 5), equals('cr\u{00E8}me'));
+          // Non-1-offset bounded read (AC9 mandates this for NCLOB too, not just
+          // CLOB/BLOB): 'crème' is 5 UCS-2 code units at 1-based offset 6
+          // ('café ' = 5 units, so 'crème' starts at 6). Clean boundary — no
+          // surrogate split.
+          expect(await lob.read(offset: 6, amount: 5), equals('cr\u{00E8}me'));
 
-        // A non-1-offset bounded read over the multibyte CJK run:
-        // '中文日本語' is 5 code units at offset 12 ('café crème ' = 11 units).
-        expect(await lob.read(offset: 12, amount: 5), equals(cjk));
+          // A non-1-offset bounded read over the multibyte CJK run:
+          // '中文日本語' is 5 code units at offset 12 ('café crème ' = 11 units).
+          expect(await lob.read(offset: 12, amount: 5), equals(cjk));
 
-        await lob.close();
-      });
+          await lob.close();
+        },
+      );
 
-      test('a BLOB column is fetched as an OracleLob and read whole + bounded',
-          () async {
-        final id = nextTestId();
-        final bytes = Uint8List.fromList(
-          List<int>.generate(20, (i) => (i * 7 + 3) & 0xFF),
-        );
-        await connection.execute(
-          'INSERT INTO $testTable (id, bin) VALUES ($id, :v)',
-          {'v': bytes},
-        );
-        final result = await connection.execute(
-          'SELECT bin FROM $testTable WHERE id = $id',
-          null,
-          const OracleExecuteOptions(fetchLobs: true),
-        );
-        final lob = result.rows.single['BIN'] as OracleLob;
-        expect(lob.type, equals(OracleDbType.blob));
-        expect(lob.length, equals(20));
+      test(
+        'a BLOB column is fetched as an OracleLob and read whole + bounded',
+        () async {
+          final id = nextTestId();
+          final bytes = Uint8List.fromList(
+            List<int>.generate(20, (i) => (i * 7 + 3) & 0xFF),
+          );
+          await connection.execute(
+            'INSERT INTO $testTable (id, bin) VALUES ($id, :v)',
+            {'v': bytes},
+          );
+          final result = await connection.execute(
+            'SELECT bin FROM $testTable WHERE id = $id',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+          final lob = result.rows.single['BIN'] as OracleLob;
+          expect(lob.type, equals(OracleDbType.blob));
+          expect(lob.length, equals(20));
 
-        // Full read at offset 1.
-        expect(await lob.read(), equals(bytes));
-        // Bounded read at a non-1 offset: bytes 5..12 (1-based offset 5, len 8).
-        expect(
-          await lob.read(offset: 5, amount: 8),
-          equals(bytes.sublist(4, 12)),
-        );
+          // Full read at offset 1.
+          expect(await lob.read(), equals(bytes));
+          // Bounded read at a non-1 offset: bytes 5..12 (1-based offset 5, len 8).
+          expect(
+            await lob.read(offset: 5, amount: 8),
+            equals(bytes.sublist(4, 12)),
+          );
 
-        await lob.close();
-      });
+          await lob.close();
+        },
+      );
 
       test('a SQL NULL LOB is null under fetchLobs (never a handle)', () async {
         final id = nextTestId();
@@ -197,22 +203,20 @@ void main() {
       // OUT-bind handle
       // ---------------------------------------------------------------
 
-      test('a PL/SQL CLOB OUT bind is returned as an OracleLob and readable',
-          () async {
-        const text = 'out bind clob value';
-        final result = await connection.execute(
-          'BEGIN :ret := :src; END;',
-          {
+      test(
+        'a PL/SQL CLOB OUT bind is returned as an OracleLob and readable',
+        () async {
+          const text = 'out bind clob value';
+          final result = await connection.execute('BEGIN :ret := :src; END;', {
             'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 4000),
             'src': text,
-          },
-          const OracleExecuteOptions(fetchLobs: true),
-        );
-        final lob = result.outBinds['ret'] as OracleLob;
-        expect(lob.type, equals(OracleDbType.clob));
-        expect(await lob.read(), equals(text));
-        await lob.close();
-      });
+          }, const OracleExecuteOptions(fetchLobs: true));
+          final lob = result.outBinds['ret'] as OracleLob;
+          expect(lob.type, equals(OracleDbType.clob));
+          expect(await lob.read(), equals(text));
+          await lob.close();
+        },
+      );
 
       // NOTE (Story 12.1 review Decision fix, iter 3): a LOB carried by a nested
       // CURSOR() result column or a REF CURSOR OUT bind arrives through a LAZY
@@ -237,109 +241,119 @@ void main() {
       // Writing through a writable (FOR UPDATE) locator
       // ---------------------------------------------------------------
 
-      test('writes a CLOB through a FOR UPDATE locator and reads it back exact',
-          () async {
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, doc) VALUES ($id, EMPTY_CLOB())',
-        );
-        await connection.execute('COMMIT');
+      test(
+        'writes a CLOB through a FOR UPDATE locator and reads it back exact',
+        () async {
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES ($id, EMPTY_CLOB())',
+          );
+          await connection.execute('COMMIT');
 
-        final result = await connection.execute(
-          'SELECT doc FROM $testTable WHERE id = $id FOR UPDATE',
-          null,
-          const OracleExecuteOptions(fetchLobs: true),
-        );
-        final lob = result.rows.single['DOC'] as OracleLob;
-        expect(lob.length, equals(0)); // EMPTY_CLOB()
-        const written = 'written through a FOR UPDATE locator';
-        await lob.write(1, written);
-        expect(lob.length, equals(written.length)); // local length advanced
-        await lob.close();
-        await connection.execute('COMMIT');
+          final result = await connection.execute(
+            'SELECT doc FROM $testTable WHERE id = $id FOR UPDATE',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+          final lob = result.rows.single['DOC'] as OracleLob;
+          expect(lob.length, equals(0)); // EMPTY_CLOB()
+          const written = 'written through a FOR UPDATE locator';
+          await lob.write(1, written);
+          expect(lob.length, equals(written.length)); // local length advanced
+          await lob.close();
+          await connection.execute('COMMIT');
 
-        // Read the persisted value back (materialize path) — byte-exact.
-        final rr = await connection.execute(
-          'SELECT doc FROM $testTable WHERE id = $id',
-        );
-        expect(rr.rows.single['DOC'], equals(written));
-      });
+          // Read the persisted value back (materialize path) — byte-exact.
+          final rr = await connection.execute(
+            'SELECT doc FROM $testTable WHERE id = $id',
+          );
+          expect(rr.rows.single['DOC'], equals(written));
+        },
+      );
 
-      test('writes a BLOB through a FOR UPDATE locator and reads it back exact',
-          () async {
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, bin) VALUES ($id, EMPTY_BLOB())',
-        );
-        await connection.execute('COMMIT');
+      test(
+        'writes a BLOB through a FOR UPDATE locator and reads it back exact',
+        () async {
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, bin) VALUES ($id, EMPTY_BLOB())',
+          );
+          await connection.execute('COMMIT');
 
-        final result = await connection.execute(
-          'SELECT bin FROM $testTable WHERE id = $id FOR UPDATE',
-          null,
-          const OracleExecuteOptions(fetchLobs: true),
-        );
-        final lob = result.rows.single['BIN'] as OracleLob;
-        final written = Uint8List.fromList([1, 2, 3, 250, 251, 252, 0, 255]);
-        await lob.write(1, written);
-        await lob.close();
-        await connection.execute('COMMIT');
+          final result = await connection.execute(
+            'SELECT bin FROM $testTable WHERE id = $id FOR UPDATE',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+          final lob = result.rows.single['BIN'] as OracleLob;
+          final written = Uint8List.fromList([1, 2, 3, 250, 251, 252, 0, 255]);
+          await lob.write(1, written);
+          await lob.close();
+          await connection.execute('COMMIT');
 
-        final rr = await connection.execute(
-          'SELECT bin FROM $testTable WHERE id = $id',
-        );
-        expect(rr.rows.single['BIN'], equals(written));
-      });
+          final rr = await connection.execute(
+            'SELECT bin FROM $testTable WHERE id = $id',
+          );
+          expect(rr.rows.single['BIN'], equals(written));
+        },
+      );
 
       // ---------------------------------------------------------------
       // In-flight discipline / lifecycle
       // ---------------------------------------------------------------
 
-      test('an open OracleLob rejects a concurrent operation on the connection',
-          () async {
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
-          {'v': 'busy'},
-        );
-        final result = await connection.execute(
-          'SELECT doc FROM $testTable WHERE id = $id',
-          null,
-          const OracleExecuteOptions(fetchLobs: true),
-        );
-        final lob = result.rows.single['DOC'] as OracleLob;
+      test(
+        'an open OracleLob rejects a concurrent operation on the connection',
+        () async {
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
+            {'v': 'busy'},
+          );
+          final result = await connection.execute(
+            'SELECT doc FROM $testTable WHERE id = $id',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+          final lob = result.rows.single['DOC'] as OracleLob;
 
-        await expectLater(
-          connection.execute('SELECT 1 FROM dual'),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('OracleLob'))),
-        );
+          await expectLater(
+            connection.execute('SELECT 1 FROM dual'),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                  .having((e) => e.message, 'message', contains('OracleLob')),
+            ),
+          );
 
-        // Closing the handle frees the connection for the next statement.
-        await lob.close();
-        final ok = await connection.execute('SELECT 1 AS v FROM dual');
-        expect(ok.rows.single['V'], equals(1));
-      });
+          // Closing the handle frees the connection for the next statement.
+          await lob.close();
+          final ok = await connection.execute('SELECT 1 AS v FROM dual');
+          expect(ok.rows.single['V'], equals(1));
+        },
+      );
 
-      test('close() is idempotent (second close is a no-op, throws nothing)',
-          () async {
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
-          {'v': 'x'},
-        );
-        final result = await connection.execute(
-          'SELECT doc FROM $testTable WHERE id = $id',
-          null,
-          const OracleExecuteOptions(fetchLobs: true),
-        );
-        final lob = result.rows.single['DOC'] as OracleLob;
-        await lob.close();
-        expect(lob.isClosed, isTrue);
-        await lob.close(); // no throw
-        await lob.close(); // no throw
-        expect(lob.isClosed, isTrue);
-      });
+      test(
+        'close() is idempotent (second close is a no-op, throws nothing)',
+        () async {
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES ($id, :v)',
+            {'v': 'x'},
+          );
+          final result = await connection.execute(
+            'SELECT doc FROM $testTable WHERE id = $id',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+          final lob = result.rows.single['DOC'] as OracleLob;
+          await lob.close();
+          expect(lob.isClosed, isTrue);
+          await lob.close(); // no throw
+          await lob.close(); // no throw
+          expect(lob.isClosed, isTrue);
+        },
+      );
 
       test('closeLobs() bulk-closes every open handle from a multi-row SELECT '
           'and frees the connection', () async {
@@ -378,25 +392,27 @@ void main() {
       // fetchLobs OFF regression
       // ---------------------------------------------------------------
 
-      test('fetchLobs OFF still materializes CLOB to String and BLOB to bytes',
-          () async {
-        final id = nextTestId();
-        const text = 'materialized as before';
-        final bytes = Uint8List.fromList([9, 8, 7, 6, 5]);
-        await connection.execute(
-          'INSERT INTO $testTable (id, doc, bin) VALUES ($id, :d, :b)',
-          {'d': text, 'b': bytes},
-        );
-        final result = await connection.execute(
-          'SELECT doc, bin FROM $testTable WHERE id = $id',
-        );
-        final row = result.rows.single;
-        expect(row['DOC'], isA<String>());
-        expect(row['DOC'], equals(text));
-        expect(row['BIN'], isA<Uint8List>());
-        expect(row['BIN'], equals(bytes));
-        expect(connection.hasOpenLob, isFalse);
-      });
+      test(
+        'fetchLobs OFF still materializes CLOB to String and BLOB to bytes',
+        () async {
+          final id = nextTestId();
+          const text = 'materialized as before';
+          final bytes = Uint8List.fromList([9, 8, 7, 6, 5]);
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc, bin) VALUES ($id, :d, :b)',
+            {'d': text, 'b': bytes},
+          );
+          final result = await connection.execute(
+            'SELECT doc, bin FROM $testTable WHERE id = $id',
+          );
+          final row = result.rows.single;
+          expect(row['DOC'], isA<String>());
+          expect(row['DOC'], equals(text));
+          expect(row['BIN'], isA<Uint8List>());
+          expect(row['BIN'], equals(bytes));
+          expect(connection.hasOpenLob, isFalse);
+        },
+      );
     },
   );
 
@@ -440,12 +456,18 @@ void main() {
             } on OracleException catch (e) {
               caught = e;
             }
-            expect(caught, isNotNull,
-                reason: 'a reclaimed handle must fail loudly on its next read');
+            expect(
+              caught,
+              isNotNull,
+              reason: 'a reclaimed handle must fail loudly on its next read',
+            );
             expect(caught!.errorCode, equals(oraConnectionClosed));
             expect(caught.message, contains('reclaimed'));
-            expect(caught.message, isNot(contains('fetch a new one')),
-                reason: 'the generic "is closed" detail must not leak here');
+            expect(
+              caught.message,
+              isNot(contains('fetch a new one')),
+              reason: 'the generic "is closed" detail must not leak here',
+            );
 
             // No leak: the same physical session is reused and immediately
             // usable.

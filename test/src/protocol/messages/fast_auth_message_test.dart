@@ -50,8 +50,11 @@ void main() {
       fastAuthMessage.encode(buffer);
       final bytes = buffer.toBytes();
 
-      expect(bytes.length, greaterThan(4),
-          reason: 'Message should have FAST_AUTH header + Protocol content');
+      expect(
+        bytes.length,
+        greaterThan(4),
+        reason: 'Message should have FAST_AUTH header + Protocol content',
+      );
 
       // Search for Protocol header as a two-byte pattern [type=1, version=6]
       // to avoid false matches on capability or length bytes that happen to be 1.
@@ -62,11 +65,16 @@ void main() {
           break;
         }
       }
-      expect(protocolTypeIndex, greaterThan(0),
-          reason: 'Protocol header [type=1, version=6] should be embedded');
-      expect(protocolTypeIndex, lessThan(50),
-          reason:
-              'Protocol message should be near start after FAST_AUTH header');
+      expect(
+        protocolTypeIndex,
+        greaterThan(0),
+        reason: 'Protocol header [type=1, version=6] should be embedded',
+      );
+      expect(
+        protocolTypeIndex,
+        lessThan(50),
+        reason: 'Protocol message should be near start after FAST_AUTH header',
+      );
     });
 
     test('DataTypes negotiation embedded (includes message type byte)', () {
@@ -76,13 +84,19 @@ void main() {
 
       // Find DataTypes message type (0x02) after Protocol message
       final dataTypesIndex = bytes.indexOf(ttcMsgTypeDataTypes);
-      expect(dataTypesIndex, greaterThan(0),
-          reason: 'DataTypes message type (2) should be embedded');
+      expect(
+        dataTypesIndex,
+        greaterThan(0),
+        reason: 'DataTypes message type (2) should be embedded',
+      );
 
       // DataTypes should come after Protocol
       final protocolIndex = bytes.indexOf(ttcMsgTypeProtocol);
-      expect(dataTypesIndex, greaterThan(protocolIndex),
-          reason: 'DataTypes should follow Protocol');
+      expect(
+        dataTypesIndex,
+        greaterThan(protocolIndex),
+        reason: 'DataTypes should follow Protocol',
+      );
     });
 
     test('AUTH_PHASE_ONE embedded with full function header', () {
@@ -103,18 +117,27 @@ void main() {
         }
       }
 
-      expect(functionIndex, greaterThan(0),
-          reason:
-              'Function message type (3) with AUTH_PHASE_ONE (0x76) should be embedded');
+      expect(
+        functionIndex,
+        greaterThan(0),
+        reason:
+            'Function message type (3) with AUTH_PHASE_ONE (0x76) should be embedded',
+      );
 
       // Verify sequence byte follows
-      expect(bytes[functionIndex + 2], equals(1),
-          reason: 'Sequence byte should follow AUTH_PHASE_ONE code');
+      expect(
+        bytes[functionIndex + 2],
+        equals(1),
+        reason: 'Sequence byte should follow AUTH_PHASE_ONE code',
+      );
 
       // AUTH_PHASE_ONE should come after DataTypes
       final dataTypesIndex = bytes.indexOf(ttcMsgTypeDataTypes);
-      expect(functionIndex, greaterThan(dataTypesIndex),
-          reason: 'AUTH_PHASE_ONE should follow DataTypes');
+      expect(
+        functionIndex,
+        greaterThan(dataTypesIndex),
+        reason: 'AUTH_PHASE_ONE should follow DataTypes',
+      );
     });
 
     test('Sequence counter initialized to 1 for FAST_AUTH', () {
@@ -145,8 +168,11 @@ void main() {
 
       expect(functionIndex, greaterThan(0));
       final sequenceByte = bytes[functionIndex + 2]; // Sequence is 3rd byte
-      expect(sequenceByte, equals(1),
-          reason: 'FAST_AUTH should use sequence=1');
+      expect(
+        sequenceByte,
+        equals(1),
+        reason: 'FAST_AUTH should use sequence=1',
+      );
     });
 
     test('Complete message structure is reasonable size', () {
@@ -157,12 +183,17 @@ void main() {
       // FAST_AUTH message body is ~200-300 bytes (without TNS packet wrapper)
       // The ~2780 bytes for the full packet includes TNS packet headers and padding
       // This test validates just the message construction, not the full packet
-      expect(bytes.length, greaterThan(150),
-          reason:
-              'FAST_AUTH message should contain all three embedded messages');
-      expect(bytes.length, lessThan(500),
-          reason:
-              'FAST_AUTH message body should be under 500 bytes (actual: ${bytes.length})');
+      expect(
+        bytes.length,
+        greaterThan(150),
+        reason: 'FAST_AUTH message should contain all three embedded messages',
+      );
+      expect(
+        bytes.length,
+        lessThan(500),
+        reason:
+            'FAST_AUTH message body should be under 500 bytes (actual: ${bytes.length})',
+      );
     });
 
     test('Message type is ttcMsgTypeFastAuth (34)', () {
@@ -171,8 +202,11 @@ void main() {
       final bytes = buffer.toBytes();
 
       // First byte should be FAST_AUTH message type (34)
-      expect(bytes[0], equals(ttcMsgTypeFastAuth),
-          reason: 'First byte should be FAST_AUTH message type (34)');
+      expect(
+        bytes[0],
+        equals(ttcMsgTypeFastAuth),
+        reason: 'First byte should be FAST_AUTH message type (34)',
+      );
     });
 
     test('Protocol version is 6 (Oracle 8.1+)', () {
@@ -191,10 +225,16 @@ void main() {
         }
       }
 
-      expect(protocolIndex, greaterThan(0),
-          reason: 'Protocol message (type=1, version=6) should be embedded');
-      expect(bytes[protocolIndex + 1], equals(6),
-          reason: 'Protocol version should be 6 (Oracle 8.1+)');
+      expect(
+        protocolIndex,
+        greaterThan(0),
+        reason: 'Protocol message (type=1, version=6) should be embedded',
+      );
+      expect(
+        bytes[protocolIndex + 1],
+        equals(6),
+        reason: 'Protocol version should be 6 (Oracle 8.1+)',
+      );
     });
 
     test('Driver name "dart-oracledb" is embedded', () {
@@ -223,8 +263,11 @@ void main() {
     test('DataTypes message: exact charset/flags/caps field layout', () {
       // AC5: pin the negotiation contract at the field level rather than
       // searching loosely for any 873 byte pair.
-      expect(ttcCharsetUtf8, equals(873),
-          reason: 'Primary client charset constant must be AL32UTF8 (873)');
+      expect(
+        ttcCharsetUtf8,
+        equals(873),
+        reason: 'Primary client charset constant must be AL32UTF8 (873)',
+      );
 
       final buffer = WriteBuffer();
       fastAuthMessage.encode(buffer);
@@ -246,8 +289,11 @@ void main() {
           break;
         }
       }
-      expect(dtIndex, greaterThan(-1),
-          reason: 'DataTypes header [type, primary-charset LE] must be present');
+      expect(
+        dtIndex,
+        greaterThan(-1),
+        reason: 'DataTypes header [type, primary-charset LE] must be present',
+      );
 
       // Field layout (see fast_auth_message.dart _encodeDataTypesMessageContent):
       //   [+0]      message type byte
@@ -259,21 +305,42 @@ void main() {
       // Both charset slots stay UTF-8 (node-oracledb dataType.js parity);
       // national types are marked by the per-column csfrm byte, not this slot.
       expect(bytes[dtIndex], equals(ttcMsgTypeDataTypes));
-      expect(bytes[dtIndex + 1], equals(lo),
-          reason: 'Primary charset low byte must be ttcCharsetUtf8 LE');
-      expect(bytes[dtIndex + 2], equals(hi),
-          reason: 'Primary charset high byte must be ttcCharsetUtf8 LE');
-      expect(bytes[dtIndex + 3], equals(lo),
-          reason: 'National charset slot must also be UTF-8 LE');
-      expect(bytes[dtIndex + 4], equals(hi),
-          reason: 'National charset slot must also be UTF-8 LE');
-      expect(bytes[dtIndex + 5], equals(0x01 | 0x02),
-          reason: 'Encoding flags must be MULTI_BYTE | CONV_LENGTH');
+      expect(
+        bytes[dtIndex + 1],
+        equals(lo),
+        reason: 'Primary charset low byte must be ttcCharsetUtf8 LE',
+      );
+      expect(
+        bytes[dtIndex + 2],
+        equals(hi),
+        reason: 'Primary charset high byte must be ttcCharsetUtf8 LE',
+      );
+      expect(
+        bytes[dtIndex + 3],
+        equals(lo),
+        reason: 'National charset slot must also be UTF-8 LE',
+      );
+      expect(
+        bytes[dtIndex + 4],
+        equals(hi),
+        reason: 'National charset slot must also be UTF-8 LE',
+      );
+      expect(
+        bytes[dtIndex + 5],
+        equals(0x01 | 0x02),
+        reason: 'Encoding flags must be MULTI_BYTE | CONV_LENGTH',
+      );
       // The default fixture supplies all-zero caps, which trim to length 0.
-      expect(bytes[dtIndex + 6], equals(0),
-          reason: 'All-zero compile caps trim to length 0');
-      expect(bytes[dtIndex + 7], equals(0),
-          reason: 'All-zero runtime caps trim to length 0');
+      expect(
+        bytes[dtIndex + 6],
+        equals(0),
+        reason: 'All-zero compile caps trim to length 0',
+      );
+      expect(
+        bytes[dtIndex + 7],
+        equals(0),
+        reason: 'All-zero runtime caps trim to length 0',
+      );
     });
 
     test('Username is embedded in AUTH_PHASE_ONE', () {
@@ -331,17 +398,21 @@ void main() {
 
       expect(fastAuthIndex, equals(0));
       expect(protocolIndex, greaterThan(fastAuthIndex));
-      expect(dataTypesIndex, greaterThan(-1),
-          reason: 'DataTypes message type (2) must be present');
+      expect(
+        dataTypesIndex,
+        greaterThan(-1),
+        reason: 'DataTypes message type (2) must be present',
+      );
       expect(dataTypesIndex, greaterThan(protocolIndex));
-      expect(functionIndex, greaterThan(-1),
-          reason: 'AUTH_PHASE_ONE function header [3, 0x76] must be present');
+      expect(
+        functionIndex,
+        greaterThan(-1),
+        reason: 'AUTH_PHASE_ONE function header [3, 0x76] must be present',
+      );
       expect(functionIndex, greaterThan(dataTypesIndex));
     });
 
-    test(
-        'Capabilities are trimmed (trailing zeros removed) in DataTypes',
-        () {
+    test('Capabilities are trimmed (trailing zeros removed) in DataTypes', () {
       // Create caps with trailing zeros
       final capsWithZeros = Uint8List(48);
       capsWithZeros[0] = 0x01;
@@ -364,8 +435,11 @@ void main() {
       final bytes = buffer.toBytes();
 
       final dataTypesIndex = bytes.indexOf(ttcMsgTypeDataTypes);
-      expect(dataTypesIndex, greaterThan(-1),
-          reason: 'DataTypes message type (2) must be present');
+      expect(
+        dataTypesIndex,
+        greaterThan(-1),
+        reason: 'DataTypes message type (2) must be present',
+      );
 
       // DataTypes layout from fast_auth_message.dart encode():
       //   [0] type byte (ttcMsgTypeDataTypes=2)
@@ -376,8 +450,11 @@ void main() {
       final capsLengthIndex = dataTypesIndex + 1 + 2 + 2 + 1;
       final compileCapsLength = bytes[capsLengthIndex];
 
-      expect(compileCapsLength, equals(3),
-          reason: 'Trailing zeros should be trimmed from capabilities');
+      expect(
+        compileCapsLength,
+        equals(3),
+        reason: 'Trailing zeros should be trimmed from capabilities',
+      );
     });
   });
 
@@ -390,7 +467,7 @@ void main() {
         compileCaps: Uint8List(48),
         runtimeCaps: Uint8List(48),
         dataTypes: [
-          [2, 1, 0]
+          [2, 1, 0],
         ],
         ttcFieldVersion: 13,
         sequence: 1,
@@ -404,15 +481,18 @@ void main() {
         compileCaps: Uint8List(48),
         runtimeCaps: Uint8List(48),
         dataTypes: [
-          [2, 1, 0]
+          [2, 1, 0],
         ],
         ttcFieldVersion: 13,
         sequence: 1,
       );
       msg2.encode(buffer2);
 
-      expect(buffer1.toBytes(), isNot(equals(buffer2.toBytes())),
-          reason: 'Different usernames should produce different messages');
+      expect(
+        buffer1.toBytes(),
+        isNot(equals(buffer2.toBytes())),
+        reason: 'Different usernames should produce different messages',
+      );
     });
 
     test('Sequence counter is embedded correctly', () {
@@ -423,7 +503,7 @@ void main() {
         compileCaps: Uint8List(48),
         runtimeCaps: Uint8List(48),
         dataTypes: [
-          [2, 1, 0]
+          [2, 1, 0],
         ],
         ttcFieldVersion: 13,
         sequence: 5,
@@ -443,8 +523,11 @@ void main() {
       }
 
       expect(functionIndex, greaterThan(0));
-      expect(bytes[functionIndex + 2], equals(5),
-          reason: 'Sequence counter should be embedded in function header');
+      expect(
+        bytes[functionIndex + 2],
+        equals(5),
+        reason: 'Sequence counter should be embedded in function header',
+      );
     });
   });
 }

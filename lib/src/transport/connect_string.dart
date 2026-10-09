@@ -122,9 +122,5 @@ ConnectionInfo parseEZConnect(String connectString) {
     port = parsedPort;
   }
 
-  return ConnectionInfo(
-    host: host,
-    port: port,
-    serviceName: serviceName,
-  );
+  return ConnectionInfo(host: host, port: port, serviceName: serviceName);
 }

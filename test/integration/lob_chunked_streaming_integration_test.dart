@@ -105,7 +105,11 @@ void main() {
       }
 
       /// Fetches the single LOB handle of `SELECT <column> ... WHERE id = <id>`.
-      Future<OracleLob> lobFor(String column, int id, {bool forUpdate = false}) async {
+      Future<OracleLob> lobFor(
+        String column,
+        int id, {
+        bool forUpdate = false,
+      }) async {
         final result = await connection.execute(
           'SELECT $column FROM $testTable WHERE id = $id'
           '${forUpdate ? ' FOR UPDATE' : ''}',
@@ -155,8 +159,10 @@ void main() {
           final pieces = await lob.textStream(pieceSize: 7).toList();
           expect(pieces.length, greaterThan(1));
           expect(pieces.every((p) => p.length <= 7), isTrue);
-          expect(connection.debugLobReadOps - before,
-              equals(pieces.length + 1));
+          expect(
+            connection.debugLobReadOps - before,
+            equals(pieces.length + 1),
+          );
           expect(pieces.join(), equals(text));
           expect(pieces.join(), equals(await lob.read()));
         } finally {
@@ -196,7 +202,10 @@ void main() {
         // 'ab' + emoji + 'cd' + emoji + 'ef' — the emoji occupies UCS-2 units
         // 3-4 and 9-10. pieceSize 3 puts a boundary at unit 3|4: inside the
         // FIRST pair. pieceSize 5 puts one at 5|6 and 10|11: inside the second.
-        const text = 'ab$emoji' 'cd$emoji' 'ef';
+        const text =
+            'ab$emoji'
+            'cd$emoji'
+            'ef';
         expect(text.length, equals(10));
         final id = await insertValue('doc', text);
         final lob = await lobFor('doc', id);
@@ -213,8 +222,11 @@ void main() {
             for (final piece in pieces) {
               if (piece.isEmpty) continue;
               final last = piece.codeUnitAt(piece.length - 1);
-              expect(last >= 0xD800 && last <= 0xDBFF, isFalse,
-                  reason: 'piece "$piece" ends on an unpaired high surrogate');
+              expect(
+                last >= 0xD800 && last <= 0xDBFF,
+                isFalse,
+                reason: 'piece "$piece" ends on an unpaired high surrogate',
+              );
             }
           }
           expect(await lob.read(), equals(text));
@@ -232,8 +244,7 @@ void main() {
         try {
           for (final pieceSize in [1, 2, 3, 5, 6]) {
             final pieces = await lob.textStream(pieceSize: pieceSize).toList();
-            expect(pieces.join(), equals(text),
-                reason: 'pieceSize $pieceSize');
+            expect(pieces.join(), equals(text), reason: 'pieceSize $pieceSize');
           }
           expect(await lob.read(), equals(text));
         } finally {
@@ -253,15 +264,20 @@ void main() {
           // any boundary is safe — assert that, rather than assuming it. Each
           // UTF-16 code unit is emitted little-endian (low byte first), which is
           // what makes these UTF-16LE bytes rather than UTF-8.
-          '$accented$emoji$cjk$emoji'.codeUnits.expand((u) => [u & 0xFF, u >> 8]).toList(),
+          '$accented$emoji$cjk$emoji'.codeUnits
+              .expand((u) => [u & 0xFF, u >> 8])
+              .toList(),
         );
         final id = await insertValue('bin', bytes);
         final lob = await lobFor('bin', id);
         try {
           for (final pieceSize in [1, 3, 4, 7]) {
             final pieces = await lob.byteStream(pieceSize: pieceSize).toList();
-            expect(<int>[for (final p in pieces) ...p], equals(bytes),
-                reason: 'pieceSize $pieceSize');
+            expect(
+              <int>[for (final p in pieces) ...p],
+              equals(bytes),
+              reason: 'pieceSize $pieceSize',
+            );
           }
         } finally {
           await lob.close();
@@ -335,8 +351,11 @@ void main() {
           if (seen.length == 2) break;
         }
         expect(seen, hasLength(2));
-        expect(seen.join().length, lessThan(text.length),
-            reason: 'the stream was cancelled before the end');
+        expect(
+          seen.join().length,
+          lessThan(text.length),
+          reason: 'the stream was cancelled before the end',
+        );
         await lob.close();
         // The load-bearing assertion: no stuck in-flight flag.
         final ok = await connection.execute('SELECT 1 AS v FROM dual');
@@ -363,8 +382,7 @@ void main() {
       // AC3 — writeStream()
       // =================================================================
 
-      test('writeStream into a CREATED TEMPORARY LOB, read back exact',
-          () async {
+      test('writeStream into a CREATED TEMPORARY LOB, read back exact', () async {
         final lob = await connection.createTemporaryClob();
         try {
           const chunks = ['alpha ', 'bravo ', 'charlie'];
@@ -376,8 +394,10 @@ void main() {
           expect(lob.length, equals(joined.length));
           expect(await lob.read(), equals(joined));
           // ...and the read stream agrees with read().
-          expect((await lob.textStream(pieceSize: 5).toList()).join(),
-              equals(joined));
+          expect(
+            (await lob.textStream(pieceSize: 5).toList()).join(),
+            equals(joined),
+          );
         } finally {
           await lob.close();
         }
@@ -452,8 +472,7 @@ void main() {
           'SELECT doc, bin FROM $testTable WHERE id = $id',
         );
         expect(back.rows.single['DOC'], equals(textChunks.join()));
-        expect(back.rows.single['BIN'],
-            equals([1, 2, 3, 250, 251, 0, 255]));
+        expect(back.rows.single['BIN'], equals([1, 2, 3, 250, 251, 0, 255]));
       });
 
       test('writeStream chunks that SPLIT a surrogate pair are joined, not '
@@ -464,7 +483,9 @@ void main() {
         // UTF-16BE.
         const high = '\u{D83D}';
         const low = '\u{DE00}';
-        const expected = 'x$emoji' 'y';
+        const expected =
+            'x$emoji'
+            'y';
         expect(high + low, equals(emoji));
 
         final id = nextTestId();
@@ -501,27 +522,37 @@ void main() {
         }
       });
 
-      test('an empty writeStream writes nothing and returns 0; empty chunks are '
-          'skipped', () async {
-        final lob = await connection.createTemporaryClob();
-        try {
-          final before = connection.debugLobReadOps; // unrelated, just a marker
-          expect(await lob.writeStream(const Stream<Object>.empty()), equals(0));
-          expect(lob.length, equals(0));
-          expect(
-            await lob.writeStream(
-              Stream<Object>.fromIterable(const ['', 'a', '', 'b', '']),
-            ),
-            equals(2),
-          );
-          expect(lob.length, equals(2));
-          expect(await lob.read(), equals('ab'));
-          expect(connection.debugLobReadOps - before, equals(1),
-              reason: 'only the explicit read() issued a READ');
-        } finally {
-          await lob.close();
-        }
-      });
+      test(
+        'an empty writeStream writes nothing and returns 0; empty chunks are '
+        'skipped',
+        () async {
+          final lob = await connection.createTemporaryClob();
+          try {
+            final before =
+                connection.debugLobReadOps; // unrelated, just a marker
+            expect(
+              await lob.writeStream(const Stream<Object>.empty()),
+              equals(0),
+            );
+            expect(lob.length, equals(0));
+            expect(
+              await lob.writeStream(
+                Stream<Object>.fromIterable(const ['', 'a', '', 'b', '']),
+              ),
+              equals(2),
+            );
+            expect(lob.length, equals(2));
+            expect(await lob.read(), equals('ab'));
+            expect(
+              connection.debugLobReadOps - before,
+              equals(1),
+              reason: 'only the explicit read() issued a READ',
+            );
+          } finally {
+            await lob.close();
+          }
+        },
+      );
 
       // =================================================================
       // AC1 + AC10 — a larger payload end to end
@@ -540,9 +571,7 @@ void main() {
         final lob = await connection.createTemporaryBlob();
         try {
           final total = await lob.writeStream(
-            Stream<Object>.fromIterable(
-              List<Object>.filled(chunkCount, chunk),
-            ),
+            Stream<Object>.fromIterable(List<Object>.filled(chunkCount, chunk)),
           );
           expect(total, equals(chunkSize * chunkCount));
           expect(lob.length, equals(chunkSize * chunkCount));
@@ -552,10 +581,7 @@ void main() {
           final whole = await lob.read() as Uint8List;
           expect(whole, hasLength(chunkSize * chunkCount));
           expect(whole.sublist(0, chunkSize), equals(chunk));
-          expect(
-            whole.sublist(whole.length - chunkSize),
-            equals(chunk),
-          );
+          expect(whole.sublist(whole.length - chunkSize), equals(chunk));
 
           // AC2: the stream's concatenation equals it byte-for-byte.
           var streamed = 0;
@@ -585,9 +611,7 @@ void main() {
         final lob = await connection.createTemporaryClob();
         try {
           final total = await lob.writeStream(
-            Stream<Object>.fromIterable(
-              List<Object>.filled(chunkCount, chunk),
-            ),
+            Stream<Object>.fromIterable(List<Object>.filled(chunkCount, chunk)),
           );
           expect(total, equals(chunkChars * chunkCount));
           expect(lob.length, equals(chunkChars * chunkCount));
@@ -624,42 +648,48 @@ void main() {
         return base;
       }
 
-      test('a MULTI-BATCH streaming SELECT yields one handle per row, each '
-          'reading its own value, with a LOB read BETWEEN getRow() calls',
-          () async {
-        const rowCount = 7;
-        final base = await seedRows(rowCount);
-        final result = await connection.execute(
-          'SELECT id, doc FROM $testTable WHERE id >= $base ORDER BY id',
-          null,
-          const OracleExecuteOptions(
-            resultSet: true,
-            fetchLobs: true,
-            fetchSize: 2, // forces continuation FETCHes
-          ),
-        );
-        final rs = result.resultSet!;
-        final values = <String>[];
-        try {
-          for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
-            final lob = row['DOC']! as OracleLob;
-            // The LOB READ happens BETWEEN two getRow() calls, on the same open
-            // cursor. Measured on 23ai and 21c: it does not disturb the cursor.
-            values.add(await lob.read() as String);
-            await lob.close();
+      test(
+        'a MULTI-BATCH streaming SELECT yields one handle per row, each '
+        'reading its own value, with a LOB read BETWEEN getRow() calls',
+        () async {
+          const rowCount = 7;
+          final base = await seedRows(rowCount);
+          final result = await connection.execute(
+            'SELECT id, doc FROM $testTable WHERE id >= $base ORDER BY id',
+            null,
+            const OracleExecuteOptions(
+              resultSet: true,
+              fetchLobs: true,
+              fetchSize: 2, // forces continuation FETCHes
+            ),
+          );
+          final rs = result.resultSet!;
+          final values = <String>[];
+          try {
+            for (
+              var row = await rs.getRow();
+              row != null;
+              row = await rs.getRow()
+            ) {
+              final lob = row['DOC']! as OracleLob;
+              // The LOB READ happens BETWEEN two getRow() calls, on the same open
+              // cursor. Measured on 23ai and 21c: it does not disturb the cursor.
+              values.add(await lob.read() as String);
+              await lob.close();
+            }
+          } finally {
+            await rs.close();
           }
-        } finally {
-          await rs.close();
-        }
-        expect(values, hasLength(rowCount));
-        for (var i = 0; i < rowCount; i++) {
-          expect(values[i], equals('row$i-${'x' * (i + 1)}'));
-        }
-        // Iteration completed and the connection is free.
-        expect(connection.hasOpenLob, isFalse);
-        final ok = await connection.execute('SELECT 1 AS v FROM dual');
-        expect(ok.rows.single['V'], equals(1));
-      });
+          expect(values, hasLength(rowCount));
+          for (var i = 0; i < rowCount; i++) {
+            expect(values[i], equals('row$i-${'x' * (i + 1)}'));
+          }
+          // Iteration completed and the connection is free.
+          expect(connection.hasOpenLob, isFalse);
+          final ok = await connection.execute('SELECT 1 AS v FROM dual');
+          expect(ok.rows.single['V'], equals(1));
+        },
+      );
 
       test('a streamed handle can be consumed with textStream between getRow() '
           'calls too', () async {
@@ -676,7 +706,11 @@ void main() {
         final rs = result.resultSet!;
         final values = <String>[];
         try {
-          for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
+          for (
+            var row = await rs.getRow();
+            row != null;
+            row = await rs.getRow()
+          ) {
             final lob = row['DOC']! as OracleLob;
             values.add((await lob.textStream(pieceSize: 2).toList()).join());
             await lob.close();
@@ -712,25 +746,27 @@ void main() {
         expect(ok.rows.single['V'], equals(42));
       });
 
-      test('closeLobs() reaches a streaming result set\'s buffered handles',
-          () async {
-        final base = await seedRows(5);
-        final result = await connection.execute(
-          'SELECT id, doc FROM $testTable WHERE id >= $base ORDER BY id',
-          null,
-          const OracleExecuteOptions(resultSet: true, fetchLobs: true),
-        );
-        final rs = result.resultSet!;
-        final delivered = (await rs.getRow())!['DOC']! as OracleLob;
-        // Four handles are still buffered; before Story 12.3 the walker could not
-        // see them and this returned 0.
-        expect(await result.closeLobs(), equals(4));
-        await delivered.close();
-        await rs.close();
-        expect(connection.hasOpenLob, isFalse);
-        final ok = await connection.execute('SELECT 1 AS v FROM dual');
-        expect(ok.rows.single['V'], equals(1));
-      });
+      test(
+        'closeLobs() reaches a streaming result set\'s buffered handles',
+        () async {
+          final base = await seedRows(5);
+          final result = await connection.execute(
+            'SELECT id, doc FROM $testTable WHERE id >= $base ORDER BY id',
+            null,
+            const OracleExecuteOptions(resultSet: true, fetchLobs: true),
+          );
+          final rs = result.resultSet!;
+          final delivered = (await rs.getRow())!['DOC']! as OracleLob;
+          // Four handles are still buffered; before Story 12.3 the walker could not
+          // see them and this returned 0.
+          expect(await result.closeLobs(), equals(4));
+          await delivered.close();
+          await rs.close();
+          expect(connection.hasOpenLob, isFalse);
+          final ok = await connection.execute('SELECT 1 AS v FROM dual');
+          expect(ok.rows.single['V'], equals(1));
+        },
+      );
 
       test('a mid-stream FETCH failure does not orphan handles: the connection '
           'is usable after close()', () async {
@@ -768,20 +804,30 @@ void main() {
         final held = <OracleLob>[];
         Object? caught;
         try {
-          for (var row = await rs.getRow(); row != null; row = await rs.getRow()) {
+          for (
+            var row = await rs.getRow();
+            row != null;
+            row = await rs.getRow()
+          ) {
             held.add(row['DOC']! as OracleLob);
           }
         } catch (e) {
           caught = e;
         }
-        expect(caught, isA<OracleException>(),
-            reason: 'the FETCH failure must surface fail-loud');
+        expect(
+          caught,
+          isA<OracleException>(),
+          reason: 'the FETCH failure must surface fail-loud',
+        );
         await rs.close();
         for (final lob in held) {
           await lob.close();
         }
-        expect(connection.hasOpenLob, isFalse,
-            reason: 'no handle from the failed batch was orphaned');
+        expect(
+          connection.hasOpenLob,
+          isFalse,
+          reason: 'no handle from the failed batch was orphaned',
+        );
         final ok = await connection.execute('SELECT 1 AS v FROM dual');
         expect(ok.rows.single['V'], equals(1));
       });
@@ -816,16 +862,23 @@ void main() {
         final rs = result.resultSet!;
         await expectLater(
           connection.execute('SELECT 1 FROM dual'),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('Concurrent'))),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having((e) => e.message, 'message', contains('Concurrent')),
+          ),
         );
         final lob = (await rs.getRow())!['DOC']! as OracleLob;
         await rs.close();
         await expectLater(
           connection.execute('SELECT 1 FROM dual'),
-          throwsA(isA<OracleException>()
-              .having((e) => e.message, 'message', contains('OracleLob'))),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              contains('OracleLob'),
+            ),
+          ),
         );
         await lob.close();
         final ok = await connection.execute('SELECT 1 AS v FROM dual');
@@ -844,33 +897,40 @@ void main() {
             null,
             const OracleExecuteOptions(resultSet: true, fetchLobs: true),
           ),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-              .having((e) => e.message, 'message', contains('PL/SQL block'))
-              .having((e) => e.message, 'message',
-                  contains('IS supported for a top-level SELECT'))),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having((e) => e.message, 'message', contains('PL/SQL block'))
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('IS supported for a top-level SELECT'),
+                ),
+          ),
         );
         final ok = await connection.execute('SELECT 1 AS v FROM dual');
         expect(ok.rows.single['V'], equals(1));
       });
 
-      test('executeStream() / queryStream() still MATERIALIZE LOB columns',
-          () async {
-        const text = 'materialized by executeStream';
-        final id = await insertValue('doc', text);
-        final rows = await connection
-            .executeStream('SELECT doc FROM $testTable WHERE id = $id')
-            .toList();
-        expect(rows.single['DOC'], isA<String>());
-        expect(rows.single['DOC'], equals(text));
-        expect(connection.hasOpenLob, isFalse);
+      test(
+        'executeStream() / queryStream() still MATERIALIZE LOB columns',
+        () async {
+          const text = 'materialized by executeStream';
+          final id = await insertValue('doc', text);
+          final rows = await connection
+              .executeStream('SELECT doc FROM $testTable WHERE id = $id')
+              .toList();
+          expect(rows.single['DOC'], isA<String>());
+          expect(rows.single['DOC'], equals(text));
+          expect(connection.hasOpenLob, isFalse);
 
-        final rows2 = await connection
-            .queryStream('SELECT doc FROM $testTable WHERE id = $id')
-            .toList();
-        expect(rows2.single['DOC'], equals(text));
-        expect(connection.hasOpenLob, isFalse);
-      });
+          final rows2 = await connection
+              .queryStream('SELECT doc FROM $testTable WHERE id = $id')
+              .toList();
+          expect(rows2.single['DOC'], equals(text));
+          expect(connection.hasOpenLob, isFalse);
+        },
+      );
 
       test('a REF CURSOR OUT bind carrying a LOB column still fails loud AND no '
           'longer leaks its server cursor', () async {
@@ -882,14 +942,14 @@ void main() {
         try {
           final before = connection.debugPendingCloseCount;
           await expectLater(
-            connection.execute(
-              'BEGIN $proc(:c); END;',
-              {'c': OracleBind.out(type: OracleDbType.cursor)},
-              const OracleExecuteOptions(fetchLobs: true),
+            connection.execute('BEGIN $proc(:c); END;', {
+              'c': OracleBind.out(type: OracleDbType.cursor),
+            }, const OracleExecuteOptions(fetchLobs: true)),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                  .having((e) => e.message, 'message', contains('REF CURSOR')),
             ),
-            throwsA(isA<OracleException>()
-                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-                .having((e) => e.message, 'message', contains('REF CURSOR'))),
           );
           // The rejected REF cursor id is queued for the close-cursor piggyback
           // alongside the top-level statement cursor. Before Story 12.3 only the
@@ -949,8 +1009,11 @@ void main() {
         final blobBack = await blob.read() as Uint8List;
         expect(blobBack, hasLength(12));
         expect(blobBack.sublist(0, 3), equals([1, 2, 3]));
-        expect(blobBack.sublist(3, 9), equals(List<int>.filled(6, 0)),
-            reason: 'the BLOB gap is zero-filled');
+        expect(
+          blobBack.sublist(3, 9),
+          equals(List<int>.filled(6, 0)),
+          reason: 'the BLOB gap is zero-filled',
+        );
         expect(blobBack.sublist(9), equals([9, 9, 9]));
         await blob.close();
         await connection.execute('COMMIT');
@@ -965,31 +1028,37 @@ void main() {
         expect(lengths.rows.single['BL'], equals(12));
       });
 
-      test('writing through a read-only plain-SELECT locator fails loud with the '
-          'real Oracle error, and the handle + connection stay usable', () async {
-        const text = 'read only value';
-        final id = await insertValue('doc', text);
-        final lob = await lobFor('doc', id); // no FOR UPDATE
-        OracleException? caught;
-        try {
-          await lob.write(1, 'nope');
-        } on OracleException catch (e) {
-          caught = e;
-        }
-        expect(caught, isNotNull,
-            reason: 'a write through an unlocked row must fail loud');
-        // ORA-22920: row containing the LOB value is not locked. (23ai adds
-        // "prior to update"; 21c does not — assert the code and the stable stem.)
-        expect(caught!.errorCode, equals(22920));
-        expect(caught.message, contains('not locked'));
+      test(
+        'writing through a read-only plain-SELECT locator fails loud with the '
+        'real Oracle error, and the handle + connection stay usable',
+        () async {
+          const text = 'read only value';
+          final id = await insertValue('doc', text);
+          final lob = await lobFor('doc', id); // no FOR UPDATE
+          OracleException? caught;
+          try {
+            await lob.write(1, 'nope');
+          } on OracleException catch (e) {
+            caught = e;
+          }
+          expect(
+            caught,
+            isNotNull,
+            reason: 'a write through an unlocked row must fail loud',
+          );
+          // ORA-22920: row containing the LOB value is not locked. (23ai adds
+          // "prior to update"; 21c does not — assert the code and the stable stem.)
+          expect(caught!.errorCode, equals(22920));
+          expect(caught.message, contains('not locked'));
 
-        // The handle is still usable for reading...
-        expect(await lob.read(), equals(text));
-        await lob.close();
-        // ...and the connection is not corrupted.
-        final ok = await connection.execute('SELECT 7 AS v FROM dual');
-        expect(ok.rows.single['V'], equals(7));
-      });
+          // The handle is still usable for reading...
+          expect(await lob.read(), equals(text));
+          await lob.close();
+          // ...and the connection is not corrupted.
+          final ok = await connection.execute('SELECT 7 AS v FROM dual');
+          expect(ok.rows.single['V'], equals(7));
+        },
+      );
 
       test('a connection RESET leaves OracleLob.isClosed reporting true '
           '(liveness is consulted, not mirrored)', () async {
@@ -1003,8 +1072,13 @@ void main() {
         expect(lob.isClosed, isTrue);
         await expectLater(
           lob.read(),
-          throwsA(isA<OracleException>()
-              .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraConnectionClosed,
+            ),
+          ),
         );
         // close() on the abandoned handle is still a silent no-op.
         await lob.close();
@@ -1043,10 +1117,9 @@ void main() {
             await conn.execute('TRUNCATE TABLE $table');
           }
           for (var i = 0; i < 5; i++) {
-            await conn.execute(
-              'INSERT INTO $table (id, doc) VALUES ($i, :v)',
-              {'v': 'pool-row$i'},
-            );
+            await conn.execute('INSERT INTO $table (id, doc) VALUES ($i, :v)', {
+              'v': 'pool-row$i',
+            });
           }
           await conn.execute('COMMIT');
 

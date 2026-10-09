@@ -30,14 +30,13 @@ ExecuteResponse _batch(
   bool success = true,
   int? errorCode,
   String? errorMessage,
-}) =>
-    ExecuteResponse(
-      isSuccess: success,
-      rows: rows,
-      moreRowsToFetch: more,
-      errorCode: errorCode,
-      errorMessage: errorMessage,
-    );
+}) => ExecuteResponse(
+  isSuccess: success,
+  rows: rows,
+  moreRowsToFetch: more,
+  errorCode: errorCode,
+  errorMessage: errorMessage,
+);
 
 /// Transport stand-in: `sendExecute` returns [firstBatch] (a PL/SQL response
 /// with implicit-result descriptors); `fetchRows` returns each implicit
@@ -129,51 +128,67 @@ class _ImplicitTransport extends Transport {
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
     Object Function(LobLocator locator)? wrapLob,
-  }) async =>
-      response;
+  }) async => response;
 }
 
 const _plsql = 'BEGIN proc(:rc1, :rc2); END;';
 
 void main() {
   group('eager implicit results', () {
-    test('every implicit cursor is drained in order into List<OracleRow>',
-        () async {
-      final t = _ImplicitTransport(
-        firstBatch: ExecuteResponse(
-          isSuccess: true,
-          implicitResults: [
-            _cursor(101, [_col('A')]),
-            _cursor(202, [_col('B')]),
-          ],
-        ),
-        fetchesByCursor: {
-          101: [_batch([[1], [2]], more: false)],
-          202: [_batch([[9]], more: false)],
-        },
-      );
-      final conn = OracleConnection.forTesting(transport: t);
+    test(
+      'every implicit cursor is drained in order into List<OracleRow>',
+      () async {
+        final t = _ImplicitTransport(
+          firstBatch: ExecuteResponse(
+            isSuccess: true,
+            implicitResults: [
+              _cursor(101, [_col('A')]),
+              _cursor(202, [_col('B')]),
+            ],
+          ),
+          fetchesByCursor: {
+            101: [
+              _batch([
+                [1],
+                [2],
+              ], more: false),
+            ],
+            202: [
+              _batch([
+                [9],
+              ], more: false),
+            ],
+          },
+        );
+        final conn = OracleConnection.forTesting(transport: t);
 
-      final result = await conn.execute(_plsql);
+        final result = await conn.execute(_plsql);
 
-      expect(result.resultSet, isNull, reason: 'eager mode exposes no resultSet');
-      expect(result.implicitResults, hasLength(2));
-      final first = result.implicitResults[0] as List<OracleRow>;
-      final second = result.implicitResults[1] as List<OracleRow>;
-      expect(first.map((r) => r['A']), equals([1, 2]));
-      expect(second.map((r) => r['B']), equals([9]));
-      // Order preserved: cursor 101 drained before 202.
-      expect(t.fetchedCursorIds.first, equals(101));
-      // Both cursor ids queued for the close-cursor piggyback after drain.
-      expect(conn.debugPendingCloseCount, equals(2));
-      expect(conn.hasOpenResultSet, isFalse);
-    });
+        expect(
+          result.resultSet,
+          isNull,
+          reason: 'eager mode exposes no resultSet',
+        );
+        expect(result.implicitResults, hasLength(2));
+        final first = result.implicitResults[0] as List<OracleRow>;
+        final second = result.implicitResults[1] as List<OracleRow>;
+        expect(first.map((r) => r['A']), equals([1, 2]));
+        expect(second.map((r) => r['B']), equals([9]));
+        // Order preserved: cursor 101 drained before 202.
+        expect(t.fetchedCursorIds.first, equals(101));
+        // Both cursor ids queued for the close-cursor piggyback after drain.
+        expect(conn.debugPendingCloseCount, equals(2));
+        expect(conn.hasOpenResultSet, isFalse);
+      },
+    );
 
     test('an empty returned cursor becomes [] (never null)', () async {
       final t = _ImplicitTransport(
         firstBatch: ExecuteResponse(
           isSuccess: true,
-          implicitResults: [_cursor(101, [_col('A')])],
+          implicitResults: [
+            _cursor(101, [_col('A')]),
+          ],
         ),
         fetchesByCursor: {
           101: [_batch(const [], more: false)],
@@ -187,47 +202,64 @@ void main() {
       expect(rows, isEmpty);
     });
 
-    test('a multi-batch cursor drains all rows across continuation FETCHes',
-        () async {
-      final t = _ImplicitTransport(
-        firstBatch: ExecuteResponse(
-          isSuccess: true,
-          implicitResults: [_cursor(101, [_col('A')])],
-        ),
-        fetchesByCursor: {
-          101: [
-            _batch([[1], [2]], more: true),
-            _batch([[3]], more: false),
-          ],
-        },
-      );
-      final conn = OracleConnection.forTesting(transport: t);
+    test(
+      'a multi-batch cursor drains all rows across continuation FETCHes',
+      () async {
+        final t = _ImplicitTransport(
+          firstBatch: ExecuteResponse(
+            isSuccess: true,
+            implicitResults: [
+              _cursor(101, [_col('A')]),
+            ],
+          ),
+          fetchesByCursor: {
+            101: [
+              _batch([
+                [1],
+                [2],
+              ], more: true),
+              _batch([
+                [3],
+              ], more: false),
+            ],
+          },
+        );
+        final conn = OracleConnection.forTesting(transport: t);
 
-      final result = await conn.execute(_plsql);
-      final rows = result.implicitResults.single as List<OracleRow>;
-      expect(rows.map((r) => r['A']), equals([1, 2, 3]));
-    });
+        final result = await conn.execute(_plsql);
+        final rows = result.implicitResults.single as List<OracleRow>;
+        expect(rows.map((r) => r['A']), equals([1, 2, 3]));
+      },
+    );
 
-    test('scalar OUT binds and implicit results both come back (AC6)',
-        () async {
-      final t = _ImplicitTransport(
-        firstBatch: ExecuteResponse(
-          isSuccess: true,
-          outBindValues: const [5],
-          outBindIndices: const [0],
-          implicitResults: [_cursor(101, [_col('A')])],
-        ),
-        fetchesByCursor: {
-          101: [_batch([[7]], more: false)],
-        },
-      );
-      final conn = OracleConnection.forTesting(transport: t);
+    test(
+      'scalar OUT binds and implicit results both come back (AC6)',
+      () async {
+        final t = _ImplicitTransport(
+          firstBatch: ExecuteResponse(
+            isSuccess: true,
+            outBindValues: const [5],
+            outBindIndices: const [0],
+            implicitResults: [
+              _cursor(101, [_col('A')]),
+            ],
+          ),
+          fetchesByCursor: {
+            101: [
+              _batch([
+                [7],
+              ], more: false),
+            ],
+          },
+        );
+        final conn = OracleConnection.forTesting(transport: t);
 
-      final result = await conn.execute(_plsql);
-      expect(result.outBinds[0], equals(5));
-      final rows = result.implicitResults.single as List<OracleRow>;
-      expect(rows.single['A'], equals(7));
-    });
+        final result = await conn.execute(_plsql);
+        expect(result.outBinds[0], equals(5));
+        final rows = result.implicitResults.single as List<OracleRow>;
+        expect(rows.single['A'], equals(7));
+      },
+    );
 
     test('a drain failure on the second cursor queues both ids and leaves no '
         'open handle (AC7)', () async {
@@ -240,10 +272,19 @@ void main() {
           ],
         ),
         fetchesByCursor: {
-          101: [_batch([[1]], more: false)],
+          101: [
+            _batch([
+              [1],
+            ], more: false),
+          ],
           202: [
-            _batch(const [], more: false,
-                success: false, errorCode: 600, errorMessage: 'boom'),
+            _batch(
+              const [],
+              more: false,
+              success: false,
+              errorCode: 600,
+              errorMessage: 'boom',
+            ),
           ],
         },
       );
@@ -251,13 +292,17 @@ void main() {
 
       await expectLater(
         conn.execute(_plsql),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', 600)),
+        throwsA(
+          isA<OracleException>().having((e) => e.errorCode, 'errorCode', 600),
+        ),
       );
       // Both implicit cursor ids queued for close despite the mid-drain failure.
       expect(conn.debugPendingCloseCount, equals(2));
-      expect(conn.hasOpenResultSet, isFalse,
-          reason: 'no phantom open handle remains after the failure');
+      expect(
+        conn.hasOpenResultSet,
+        isFalse,
+        reason: 'no phantom open handle remains after the failure',
+      );
       expect(conn.isExecuting, isFalse);
       // The connection is still reusable for a fresh statement.
       t.firstBatch = ExecuteResponse(isSuccess: true);
@@ -283,18 +328,29 @@ void main() {
       final t = _ImplicitTransport(
         firstBatch: ExecuteResponse(
           isSuccess: true,
-          implicitResults: [_cursor(101, [_col('A')])],
+          implicitResults: [
+            _cursor(101, [_col('A')]),
+          ],
         ),
         fetchesByCursor: {
-          101: [_batch([[1]], more: true)],
+          101: [
+            _batch([
+              [1],
+            ], more: true),
+          ],
         },
       )..debugMaxFetchIterations = 1;
       final conn = OracleConnection.forTesting(transport: t);
 
       await expectLater(
         conn.execute(_plsql),
-        throwsA(isA<OracleException>().having((e) => e.message, 'message',
-            contains('exceeded the eager-drain safety limit'))),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('exceeded the eager-drain safety limit'),
+          ),
+        ),
       );
       // Fail-loud, never silent truncation; the cursor id is still queued for
       // the close-cursor piggyback despite the loud failure (AC7).
@@ -316,7 +372,8 @@ void main() {
         throwOnExecute: ImplicitResultDecodeException(
           cursorIds: [101, 202],
           errorCode: oraProtocolError,
-          message: 'Implicit result set returned an invalid server cursor '
+          message:
+              'Implicit result set returned an invalid server cursor '
               '(cursor id = 0)',
         ),
       );
@@ -324,8 +381,13 @@ void main() {
 
       await expectLater(
         conn.execute('BEGIN proc; END;'),
-        throwsA(isA<ImplicitResultDecodeException>()
-            .having((e) => e.cursorIds, 'cursorIds', equals([101, 202]))),
+        throwsA(
+          isA<ImplicitResultDecodeException>().having(
+            (e) => e.cursorIds,
+            'cursorIds',
+            equals([101, 202]),
+          ),
+        ),
       );
       // Prior-decoded cursor ids queued for close (reaped at _openCursor's
       // catch — the live decode site), not leaked.
@@ -338,39 +400,55 @@ void main() {
 
   group('lazy implicit results (resultSet: true)', () {
     _ImplicitTransport twoCursorTransport() => _ImplicitTransport(
-          firstBatch: ExecuteResponse(
-            isSuccess: true,
-            implicitResults: [
-              _cursor(101, [_col('A')]),
-              _cursor(202, [_col('B')]),
-            ],
-          ),
-          fetchesByCursor: {
-            101: [_batch([[1], [2]], more: false)],
-            202: [_batch([[9]], more: false)],
-          },
+      firstBatch: ExecuteResponse(
+        isSuccess: true,
+        implicitResults: [
+          _cursor(101, [_col('A')]),
+          _cursor(202, [_col('B')]),
+        ],
+      ),
+      fetchesByCursor: {
+        101: [
+          _batch([
+            [1],
+            [2],
+          ], more: false),
+        ],
+        202: [
+          _batch([
+            [9],
+          ], more: false),
+        ],
+      },
+    );
+
+    test(
+      'returns one OracleResultSet handle per cursor, metadata before fetch',
+      () async {
+        final conn = OracleConnection.forTesting(
+          transport: twoCursorTransport(),
+        );
+        final result = await conn.execute(
+          _plsql,
+          null,
+          const OracleExecuteOptions(resultSet: true),
         );
 
-    test('returns one OracleResultSet handle per cursor, metadata before fetch',
-        () async {
-      final conn = OracleConnection.forTesting(transport: twoCursorTransport());
-      final result = await conn.execute(
-        _plsql,
-        null,
-        const OracleExecuteOptions(resultSet: true),
-      );
-
-      expect(result.resultSet, isNull,
-          reason: 'PL/SQL implicit results never use the top-level resultSet');
-      expect(result.implicitResults, hasLength(2));
-      final rs1 = result.implicitResults[0] as OracleResultSet;
-      final rs2 = result.implicitResults[1] as OracleResultSet;
-      // Metadata available before any fetch.
-      expect(rs1.columnNames, equals(['A']));
-      expect(rs2.columnNames, equals(['B']));
-      await rs1.close();
-      await rs2.close();
-    });
+        expect(
+          result.resultSet,
+          isNull,
+          reason: 'PL/SQL implicit results never use the top-level resultSet',
+        );
+        expect(result.implicitResults, hasLength(2));
+        final rs1 = result.implicitResults[0] as OracleResultSet;
+        final rs2 = result.implicitResults[1] as OracleResultSet;
+        // Metadata available before any fetch.
+        expect(rs1.columnNames, equals(['A']));
+        expect(rs2.columnNames, equals(['B']));
+        await rs1.close();
+        await rs2.close();
+      },
+    );
 
     test('handles can be read one after another with getRows()', () async {
       final conn = OracleConnection.forTesting(transport: twoCursorTransport());
@@ -402,14 +480,18 @@ void main() {
       final rs2 = result.implicitResults[1] as OracleResultSet;
 
       expect(conn.hasOpenResultSet, isTrue);
-      await expectLater(conn.execute('BEGIN x; END;'),
-          throwsA(isA<OracleException>()));
+      await expectLater(
+        conn.execute('BEGIN x; END;'),
+        throwsA(isA<OracleException>()),
+      );
 
       // Closing one handle still leaves the connection owned by the other.
       await rs1.close();
       expect(conn.hasOpenResultSet, isTrue);
-      await expectLater(conn.execute('BEGIN x; END;'),
-          throwsA(isA<OracleException>()));
+      await expectLater(
+        conn.execute('BEGIN x; END;'),
+        throwsA(isA<OracleException>()),
+      );
 
       // Closing the last handle frees the connection.
       await rs2.close();
@@ -420,69 +502,93 @@ void main() {
       expect(after.implicitResults, isEmpty);
     });
 
-    test('closing a handle queues its cursor id for the close piggyback',
-        () async {
-      final conn = OracleConnection.forTesting(transport: twoCursorTransport());
-      final result = await conn.execute(
-        _plsql,
-        null,
-        const OracleExecuteOptions(resultSet: true),
-      );
-      final rs1 = result.implicitResults[0] as OracleResultSet;
-      final rs2 = result.implicitResults[1] as OracleResultSet;
-      expect(conn.debugPendingCloseCount, equals(0),
-          reason: 'lazy handles do not queue until closed');
-      await rs1.close();
-      await rs2.close();
-      expect(conn.debugPendingCloseCount, equals(2));
-    });
+    test(
+      'closing a handle queues its cursor id for the close piggyback',
+      () async {
+        final conn = OracleConnection.forTesting(
+          transport: twoCursorTransport(),
+        );
+        final result = await conn.execute(
+          _plsql,
+          null,
+          const OracleExecuteOptions(resultSet: true),
+        );
+        final rs1 = result.implicitResults[0] as OracleResultSet;
+        final rs2 = result.implicitResults[1] as OracleResultSet;
+        expect(
+          conn.debugPendingCloseCount,
+          equals(0),
+          reason: 'lazy handles do not queue until closed',
+        );
+        await rs1.close();
+        await rs2.close();
+        expect(conn.debugPendingCloseCount, equals(2));
+      },
+    );
 
-    test('forceClose (pool leak guard) reaps all abandoned lazy handles',
-        () async {
-      final conn = OracleConnection.forTesting(transport: twoCursorTransport());
-      await conn.execute(
-        _plsql,
-        null,
-        const OracleExecuteOptions(resultSet: true),
-      );
-      expect(conn.hasOpenResultSet, isTrue);
-      await conn.forceCloseOpenResultSet();
-      expect(conn.hasOpenResultSet, isFalse);
-      expect(conn.debugPendingCloseCount, equals(2));
-    });
+    test(
+      'forceClose (pool leak guard) reaps all abandoned lazy handles',
+      () async {
+        final conn = OracleConnection.forTesting(
+          transport: twoCursorTransport(),
+        );
+        await conn.execute(
+          _plsql,
+          null,
+          const OracleExecuteOptions(resultSet: true),
+        );
+        expect(conn.hasOpenResultSet, isTrue);
+        await conn.forceCloseOpenResultSet();
+        expect(conn.hasOpenResultSet, isFalse);
+        expect(conn.debugPendingCloseCount, equals(2));
+      },
+    );
 
-    test('DML with resultSet: true is rejected before any wire round trip',
-        () async {
-      final t = _ImplicitTransport(
-        firstBatch: ExecuteResponse(isSuccess: true, rowsAffected: 1),
-      );
-      final conn = OracleConnection.forTesting(transport: t);
-      await expectLater(
-        conn.execute('INSERT INTO t VALUES (1)', null,
-            const OracleExecuteOptions(resultSet: true)),
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraProtocolError)
-            .having((e) => e.message, 'message', contains('only supported'))),
-      );
-      expect(t.sendExecuteCalls, equals(0));
-      expect(conn.isExecuting, isFalse);
-    });
+    test(
+      'DML with resultSet: true is rejected before any wire round trip',
+      () async {
+        final t = _ImplicitTransport(
+          firstBatch: ExecuteResponse(isSuccess: true, rowsAffected: 1),
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+        await expectLater(
+          conn.execute(
+            'INSERT INTO t VALUES (1)',
+            null,
+            const OracleExecuteOptions(resultSet: true),
+          ),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('only supported'),
+                ),
+          ),
+        );
+        expect(t.sendExecuteCalls, equals(0));
+        expect(conn.isExecuting, isFalse);
+      },
+    );
 
-    test('PL/SQL with resultSet: true but no implicit results does not throw',
-        () async {
-      final t = _ImplicitTransport(
-        firstBatch: ExecuteResponse(isSuccess: true),
-      );
-      final conn = OracleConnection.forTesting(transport: t);
-      final result = await conn.execute(
-        'BEGIN do_work(); END;',
-        null,
-        const OracleExecuteOptions(resultSet: true),
-      );
-      expect(result.resultSet, isNull);
-      expect(result.implicitResults, isEmpty);
-      expect(conn.hasOpenResultSet, isFalse);
-    });
+    test(
+      'PL/SQL with resultSet: true but no implicit results does not throw',
+      () async {
+        final t = _ImplicitTransport(
+          firstBatch: ExecuteResponse(isSuccess: true),
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+        final result = await conn.execute(
+          'BEGIN do_work(); END;',
+          null,
+          const OracleExecuteOptions(resultSet: true),
+        );
+        expect(result.resultSet, isNull);
+        expect(result.implicitResults, isEmpty);
+        expect(conn.hasOpenResultSet, isFalse);
+      },
+    );
 
     test('a REF CURSOR OUT bind coexists with implicit results; both ownership '
         'slots hold the connection until each closes (AC5/AC6)', () async {
@@ -494,13 +600,25 @@ void main() {
       final t = _ImplicitTransport(
         firstBatch: ExecuteResponse(
           isSuccess: true,
-          outBindValues: [_cursor(500, [_col('RC')])],
+          outBindValues: [
+            _cursor(500, [_col('RC')]),
+          ],
           outBindIndices: const [0],
-          implicitResults: [_cursor(101, [_col('A')])],
+          implicitResults: [
+            _cursor(101, [_col('A')]),
+          ],
         ),
         fetchesByCursor: {
-          500: [_batch([[1]], more: false)],
-          101: [_batch([[7]], more: false)],
+          500: [
+            _batch([
+              [1],
+            ], more: false),
+          ],
+          101: [
+            _batch([
+              [7],
+            ], more: false),
+          ],
         },
       );
       final conn = OracleConnection.forTesting(transport: t);
@@ -519,14 +637,21 @@ void main() {
 
       // Both slots own the connection: a regular execute is rejected.
       await expectLater(
-          conn.execute('BEGIN x; END;'), throwsA(isA<OracleException>()));
+        conn.execute('BEGIN x; END;'),
+        throwsA(isA<OracleException>()),
+      );
 
       // Closing the implicit handle alone leaves the REF CURSOR slot owning it.
       await implicit.close();
-      expect(conn.hasOpenResultSet, isTrue,
-          reason: 'REF CURSOR OUT bind handle still holds the connection');
+      expect(
+        conn.hasOpenResultSet,
+        isTrue,
+        reason: 'REF CURSOR OUT bind handle still holds the connection',
+      );
       await expectLater(
-          conn.execute('BEGIN x; END;'), throwsA(isA<OracleException>()));
+        conn.execute('BEGIN x; END;'),
+        throwsA(isA<OracleException>()),
+      );
 
       // Closing the REF CURSOR handle clears the last slot → reusable.
       await refCursor.close();

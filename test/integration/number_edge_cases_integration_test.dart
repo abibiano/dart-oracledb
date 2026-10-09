@@ -56,22 +56,24 @@ void main() {
       });
 
       // int-vs-double boundary at ±2^53
-      test('SELECT 2^53 boundary returns numeric (int or double) without loss',
-          () async {
-        // 9007199254740992 is exactly representable as both an int and a
-        // double. Smaller/equal values must round-trip exactly; the decoder's
-        // int-vs-double heuristic returns int at this boundary.
-        const maxSafe = 9007199254740992; // 2^53
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, bare_num) VALUES ($id, $maxSafe)',
-        );
-        final result = await connection.execute(
-          'SELECT bare_num FROM $testTable WHERE id = $id',
-        );
-        final value = result.rows.single['BARE_NUM'];
-        expect(value, equals(maxSafe));
-      });
+      test(
+        'SELECT 2^53 boundary returns numeric (int or double) without loss',
+        () async {
+          // 9007199254740992 is exactly representable as both an int and a
+          // double. Smaller/equal values must round-trip exactly; the decoder's
+          // int-vs-double heuristic returns int at this boundary.
+          const maxSafe = 9007199254740992; // 2^53
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, bare_num) VALUES ($id, $maxSafe)',
+          );
+          final result = await connection.execute(
+            'SELECT bare_num FROM $testTable WHERE id = $id',
+          );
+          final value = result.rows.single['BARE_NUM'];
+          expect(value, equals(maxSafe));
+        },
+      );
 
       test('SELECT -2^53 boundary round-trips', () async {
         const minSafe = -9007199254740992;
@@ -155,32 +157,37 @@ void main() {
           'SELECT decimal_num FROM $testTable WHERE id = $id',
         );
         final value = result.rows.single['DECIMAL_NUM'];
-        expect(value, isA<double>(),
-            reason: 'declared fixed scale forces double');
+        expect(
+          value,
+          isA<double>(),
+          reason: 'declared fixed scale forces double',
+        );
         expect(value, equals(0));
       });
 
-      test('SELECT NUMBER(10,2) integer-valued 42 and -100 return double',
-          () async {
-        final id = nextTestId();
-        final id2 = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, decimal_num) VALUES ($id, 42)',
-        );
-        await connection.execute(
-          'INSERT INTO $testTable (id, decimal_num) VALUES ($id2, -100)',
-        );
-        final r1 = await connection.execute(
-          'SELECT decimal_num FROM $testTable WHERE id = $id',
-        );
-        expect(r1.rows.single['DECIMAL_NUM'], isA<double>());
-        expect(r1.rows.single['DECIMAL_NUM'], equals(42.0));
-        final r2 = await connection.execute(
-          'SELECT decimal_num FROM $testTable WHERE id = $id2',
-        );
-        expect(r2.rows.single['DECIMAL_NUM'], isA<double>());
-        expect(r2.rows.single['DECIMAL_NUM'], equals(-100.0));
-      });
+      test(
+        'SELECT NUMBER(10,2) integer-valued 42 and -100 return double',
+        () async {
+          final id = nextTestId();
+          final id2 = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, decimal_num) VALUES ($id, 42)',
+          );
+          await connection.execute(
+            'INSERT INTO $testTable (id, decimal_num) VALUES ($id2, -100)',
+          );
+          final r1 = await connection.execute(
+            'SELECT decimal_num FROM $testTable WHERE id = $id',
+          );
+          expect(r1.rows.single['DECIMAL_NUM'], isA<double>());
+          expect(r1.rows.single['DECIMAL_NUM'], equals(42.0));
+          final r2 = await connection.execute(
+            'SELECT decimal_num FROM $testTable WHERE id = $id2',
+          );
+          expect(r2.rows.single['DECIMAL_NUM'], isA<double>());
+          expect(r2.rows.single['DECIMAL_NUM'], equals(-100.0));
+        },
+      );
 
       // Backward-compat guard: a bare NUMBER column (no declared scale)
       // keeps the int-vs-double heuristic.
@@ -193,53 +200,65 @@ void main() {
           'SELECT bare_num FROM $testTable WHERE id = $id',
         );
         final value = result.rows.single['BARE_NUM'];
-        expect(value, isA<int>(),
-            reason: 'bare NUMBER keeps the int heuristic');
+        expect(
+          value,
+          isA<int>(),
+          reason: 'bare NUMBER keeps the int heuristic',
+        );
         expect(value, equals(42));
       });
 
       // >2^53 precision-loss boundary pinned.
-      test('SELECT 9007199254740993 (2^53+1) pins bounded precision loss',
-          () async {
-        // 2^53 + 1 is exactly halfway between the two nearest doubles
-        // (2^53 and 2^53 + 2); IEEE-754 ties-to-even rounds down to 2^53.
-        // The loss is bounded (±1) and predictable — same pin as the unit
-        // test on the crafted wire payload in data_types_test.dart.
-        final result = await connection.execute(
-          'SELECT 9007199254740993 AS v FROM dual',
-        );
-        final value = result.rows.single['V'];
-        expect(value, equals(9007199254740992),
-            reason: '2^53+1 must round to 2^53 (bounded, predictable loss)');
-      });
+      test(
+        'SELECT 9007199254740993 (2^53+1) pins bounded precision loss',
+        () async {
+          // 2^53 + 1 is exactly halfway between the two nearest doubles
+          // (2^53 and 2^53 + 2); IEEE-754 ties-to-even rounds down to 2^53.
+          // The loss is bounded (±1) and predictable — same pin as the unit
+          // test on the crafted wire payload in data_types_test.dart.
+          final result = await connection.execute(
+            'SELECT 9007199254740993 AS v FROM dual',
+          );
+          final value = result.rows.single['V'];
+          expect(
+            value,
+            equals(9007199254740992),
+            reason: '2^53+1 must round to 2^53 (bounded, predictable loss)',
+          );
+        },
+      );
 
       // negative NUMBER with base-100 digit pair of 0
-      test('SELECT -100 (negative with zero base-100 pair) round-trips',
-          () async {
-        // -100 encodes as base-100 digits [1, 0] with exponent 1. This is the
-        // exact case that previously consumed garbage bytes when the trailing
-        // 0x66 terminator was omitted.
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, bare_num) VALUES ($id, -100)',
-        );
-        final result = await connection.execute(
-          'SELECT bare_num FROM $testTable WHERE id = $id',
-        );
-        expect(result.rows.single['BARE_NUM'], equals(-100));
-      });
+      test(
+        'SELECT -100 (negative with zero base-100 pair) round-trips',
+        () async {
+          // -100 encodes as base-100 digits [1, 0] with exponent 1. This is the
+          // exact case that previously consumed garbage bytes when the trailing
+          // 0x66 terminator was omitted.
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, bare_num) VALUES ($id, -100)',
+          );
+          final result = await connection.execute(
+            'SELECT bare_num FROM $testTable WHERE id = $id',
+          );
+          expect(result.rows.single['BARE_NUM'], equals(-100));
+        },
+      );
 
-      test('SELECT -10001 (negative with internal zero pair) round-trips',
-          () async {
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, bare_num) VALUES ($id, -10001)',
-        );
-        final result = await connection.execute(
-          'SELECT bare_num FROM $testTable WHERE id = $id',
-        );
-        expect(result.rows.single['BARE_NUM'], equals(-10001));
-      });
+      test(
+        'SELECT -10001 (negative with internal zero pair) round-trips',
+        () async {
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, bare_num) VALUES ($id, -10001)',
+          );
+          final result = await connection.execute(
+            'SELECT bare_num FROM $testTable WHERE id = $id',
+          );
+          expect(result.rows.single['BARE_NUM'], equals(-10001));
+        },
+      );
 
       test('SELECT multiple negative-zero-pair NUMBERs in one row', () async {
         // Multi-column SELECT exposes the field-boundary bug: if the first

@@ -30,8 +30,10 @@ String? nativeJsonUnavailable;
 bool skipWithoutNativeJson() {
   final reason = nativeJsonUnavailable;
   if (reason == null) return false;
-  markTestSkipped('Native JSON columns unavailable on this server '
-      '(requires compatible >= 20): $reason');
+  markTestSkipped(
+    'Native JSON columns unavailable on this server '
+    '(requires compatible >= 20): $reason',
+  );
   return true;
 }
 
@@ -51,8 +53,9 @@ void main() {
         final probe = await connectForTest();
         final probeTable = uniqueTableName('json_probe');
         try {
-          await probe
-              .execute('CREATE TABLE $probeTable (doc JSON) TABLESPACE USERS');
+          await probe.execute(
+            'CREATE TABLE $probeTable (doc JSON) TABLESPACE USERS',
+          );
           await probe.execute('DROP TABLE $probeTable PURGE');
         } on OracleException catch (e) {
           // Skip only for the errors that mean "this server cannot create
@@ -80,8 +83,9 @@ void main() {
           if (nativeJsonUnavailable != null) return;
           try {
             await connection.execute(
-                'CREATE TABLE $testTable (id NUMBER PRIMARY KEY, doc JSON) '
-                'TABLESPACE USERS');
+              'CREATE TABLE $testTable (id NUMBER PRIMARY KEY, doc JSON) '
+              'TABLESPACE USERS',
+            );
           } on OracleException catch (e) {
             if (e.errorCode != 955) rethrow; // leftover table — reuse
             await connection.execute('TRUNCATE TABLE $testTable');
@@ -113,7 +117,8 @@ void main() {
           if (skipWithoutNativeJson()) return;
           final id = nextTestId();
           await connection.execute(
-              'INSERT INTO $testTable (id, doc) VALUES ($id, NULL)');
+            'INSERT INTO $testTable (id, doc) VALUES ($id, NULL)',
+          );
           final result = await connection.execute(
             'SELECT doc FROM $testTable WHERE id = $id',
           );
@@ -122,13 +127,14 @@ void main() {
 
         test('empty object and empty array decode distinctly', () async {
           if (skipWithoutNativeJson()) return;
-          expect(await roundTrip(<String, Object?>{}),
-              equals(<String, Object?>{}));
+          expect(
+            await roundTrip(<String, Object?>{}),
+            equals(<String, Object?>{}),
+          );
           expect(await roundTrip(<Object?>[]), equals(<Object?>[]));
         });
 
-        test('nested object/array preserves shape and member order',
-            () async {
+        test('nested object/array preserves shape and member order', () async {
           if (skipWithoutNativeJson()) return;
           final doc = <String, Object?>{
             'zebra': 1,
@@ -143,8 +149,10 @@ void main() {
           final decoded = await roundTrip(doc);
           expect(decoded, isA<Map<String, Object?>>());
           expect(decoded, equals(doc));
-          expect((decoded! as Map<String, Object?>).keys.toList(),
-              equals(['zebra', 'apple', 'mango']));
+          expect(
+            (decoded! as Map<String, Object?>).keys.toList(),
+            equals(['zebra', 'apple', 'mango']),
+          );
         });
 
         test('strings: empty, Unicode, supplementary plane', () async {
@@ -167,28 +175,37 @@ void main() {
         test('integers and decimals round-trip exactly', () async {
           if (skipWithoutNativeJson()) return;
           final doc = <Object?>[
-            0, 1, -1, 42, 9007199254740992, -9007199254740992,
-            2.5, -12.34, 0.001, 123456789.987654,
+            0,
+            1,
+            -1,
+            42,
+            9007199254740992,
+            -9007199254740992,
+            2.5,
+            -12.34,
+            0.001,
+            123456789.987654,
           ];
           expect(await roundTrip(doc), equals(doc));
         });
 
-        test('field name near the 255-byte OSON short-name boundary',
-            () async {
+        test('field name near the 255-byte OSON short-name boundary', () async {
           if (skipWithoutNativeJson()) return;
           final doc = <String, Object?>{'k' * 255: 'edge', 'small': 1};
           expect(await roundTrip(doc), equals(doc));
         });
 
-        test('large document (>32 KB OSON) exercises chunked encoding',
-            () async {
-          if (skipWithoutNativeJson()) return;
-          final doc = <String, Object?>{
-            'big': 'A' * 100000,
-            'tail': <Object?>[1, 2, 3],
-          };
-          expect(await roundTrip(doc), equals(doc));
-        });
+        test(
+          'large document (>32 KB OSON) exercises chunked encoding',
+          () async {
+            if (skipWithoutNativeJson()) return;
+            final doc = <String, Object?>{
+              'big': 'A' * 100000,
+              'tail': <Object?>[1, 2, 3],
+            };
+            expect(await roundTrip(doc), equals(doc));
+          },
+        );
 
         test('duplicate-shape rows decode independently', () async {
           if (skipWithoutNativeJson()) return;
@@ -212,27 +229,30 @@ void main() {
           expect(result.rows[1]['DOC'], equals(docB));
         });
 
-        test('textual JSON inserted server-side decodes through the driver',
-            () async {
-          if (skipWithoutNativeJson()) return;
-          final id = nextTestId();
-          // JSON text inserted into a JSON column is parsed implicitly by
-          // the server into OSON — the driver must decode the result like
-          // any native document.
-          await connection.execute(
-            'INSERT INTO $testTable (id, doc) '
-            "VALUES ($id, '{\"from\": \"text\", \"n\": [1, 2]}')",
-          );
-          final result = await connection.execute(
-            'SELECT doc FROM $testTable WHERE id = $id',
-          );
-          expect(
+        test(
+          'textual JSON inserted server-side decodes through the driver',
+          () async {
+            if (skipWithoutNativeJson()) return;
+            final id = nextTestId();
+            // JSON text inserted into a JSON column is parsed implicitly by
+            // the server into OSON — the driver must decode the result like
+            // any native document.
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) '
+              "VALUES ($id, '{\"from\": \"text\", \"n\": [1, 2]}')",
+            );
+            final result = await connection.execute(
+              'SELECT doc FROM $testTable WHERE id = $id',
+            );
+            expect(
               result.rows.single['DOC'],
               equals(<String, Object?>{
                 'from': 'text',
                 'n': <Object?>[1, 2],
-              }));
-        });
+              }),
+            );
+          },
+        );
       });
 
       group('DML binds', () {
@@ -246,8 +266,9 @@ void main() {
           if (nativeJsonUnavailable != null) return;
           try {
             await connection.execute(
-                'CREATE TABLE $testTable (id NUMBER PRIMARY KEY, doc JSON) '
-                'TABLESPACE USERS');
+              'CREATE TABLE $testTable (id NUMBER PRIMARY KEY, doc JSON) '
+              'TABLESPACE USERS',
+            );
           } on OracleException catch (e) {
             if (e.errorCode != 955) rethrow;
             await connection.execute('TRUNCATE TABLE $testTable');
@@ -263,62 +284,77 @@ void main() {
           );
         });
 
-        test('INSERT with named bind reports rowsAffected and round-trips',
-            () async {
-          if (skipWithoutNativeJson()) return;
-          final id = nextTestId();
-          final doc = <String, Object?>{'named': true, 'n': 7};
-          final insert = await connection.execute(
-            'INSERT INTO $testTable (id, doc) VALUES (:id, :doc)',
-            {'id': id, 'doc': doc},
-          );
-          expect(insert.rowsAffected, equals(1));
-          final result = await connection.execute(
-            'SELECT doc FROM $testTable WHERE id = $id',
-          );
-          expect(result.rows.single['DOC'], equals(doc));
-        });
+        test(
+          'INSERT with named bind reports rowsAffected and round-trips',
+          () async {
+            if (skipWithoutNativeJson()) return;
+            final id = nextTestId();
+            final doc = <String, Object?>{'named': true, 'n': 7};
+            final insert = await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:id, :doc)',
+              {'id': id, 'doc': doc},
+            );
+            expect(insert.rowsAffected, equals(1));
+            final result = await connection.execute(
+              'SELECT doc FROM $testTable WHERE id = $id',
+            );
+            expect(result.rows.single['DOC'], equals(doc));
+          },
+        );
 
-        test('INSERT with positional bind round-trips a List document',
-            () async {
-          if (skipWithoutNativeJson()) return;
-          final id = nextTestId();
-          final doc = <Object?>['positional', 2, null, true];
-          final insert = await connection.execute(
-            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
-            [id, doc],
-          );
-          expect(insert.rowsAffected, equals(1));
-          final result = await connection.execute(
-            'SELECT doc FROM $testTable WHERE id = $id',
-          );
-          final value = result.rows.single['DOC'];
-          expect(value, isA<List<Object?>>());
-          expect(value, equals(doc));
-        });
+        test(
+          'INSERT with positional bind round-trips a List document',
+          () async {
+            if (skipWithoutNativeJson()) return;
+            final id = nextTestId();
+            final doc = <Object?>['positional', 2, null, true];
+            final insert = await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [id, doc],
+            );
+            expect(insert.rowsAffected, equals(1));
+            final result = await connection.execute(
+              'SELECT doc FROM $testTable WHERE id = $id',
+            );
+            final value = result.rows.single['DOC'];
+            expect(value, isA<List<Object?>>());
+            expect(value, equals(doc));
+          },
+        );
 
         test('UPDATE replaces a document (named and positional)', () async {
           if (skipWithoutNativeJson()) return;
           final id = nextTestId();
           await connection.execute(
             'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
-            [id, <String, Object?>{'version': 1}],
+            [
+              id,
+              <String, Object?>{'version': 1},
+            ],
           );
           final updNamed = await connection.execute(
             'UPDATE $testTable SET doc = :doc WHERE id = :id',
-            {'doc': <String, Object?>{'version': 2}, 'id': id},
+            {
+              'doc': <String, Object?>{'version': 2},
+              'id': id,
+            },
           );
           expect(updNamed.rowsAffected, equals(1));
           final updPositional = await connection.execute(
             'UPDATE $testTable SET doc = :1 WHERE id = :2',
-            [<String, Object?>{'version': 3, 'final': true}, id],
+            [
+              <String, Object?>{'version': 3, 'final': true},
+              id,
+            ],
           );
           expect(updPositional.rowsAffected, equals(1));
           final result = await connection.execute(
             'SELECT doc FROM $testTable WHERE id = $id',
           );
-          expect(result.rows.single['DOC'],
-              equals(<String, Object?>{'version': 3, 'final': true}));
+          expect(
+            result.rows.single['DOC'],
+            equals(<String, Object?>{'version': 3, 'final': true}),
+          );
         });
       });
 
@@ -365,12 +401,13 @@ void main() {
             {'doc': OracleBind.out(type: OracleDbType.json, maxSize: 4000)},
           );
           expect(
-              result.outBinds['doc'],
-              equals(<String, Object?>{
-                'name': 'rocket',
-                'n': 1,
-                'tags': <Object?>['a', 'b'],
-              }));
+            result.outBinds['doc'],
+            equals(<String, Object?>{
+              'name': 'rocket',
+              'n': 1,
+              'tags': <Object?>['a', 'b'],
+            }),
+          );
         });
 
         test('JSON OUT returns an array document', () async {
@@ -379,42 +416,41 @@ void main() {
             "BEGIN :doc := JSON('[1, \"two\", null, true]'); END;",
             {'doc': OracleBind.out(type: OracleDbType.json, maxSize: 4000)},
           );
-          expect(result.outBinds['doc'],
-              equals(<Object?>[1, 'two', null, true]));
+          expect(
+            result.outBinds['doc'],
+            equals(<Object?>[1, 'two', null, true]),
+          );
         });
 
         test('JSON OUT null return decodes to null', () async {
           if (skipWithoutNativeJson()) return;
-          final result = await connection.execute(
-            'BEGIN :doc := NULL; END;',
-            {'doc': OracleBind.out(type: OracleDbType.json, maxSize: 4000)},
-          );
+          final result = await connection.execute('BEGIN :doc := NULL; END;', {
+            'doc': OracleBind.out(type: OracleDbType.json, maxSize: 4000),
+          });
           expect(result.outBinds['doc'], isNull);
         });
 
         test('JSON IN OUT mutates a nested value server-side', () async {
           if (skipWithoutNativeJson()) return;
-          final result = await connection.execute(
-            'BEGIN $ioProc(:doc); END;',
-            {
-              'doc': OracleBind.inOut(
-                value: <String, Object?>{
-                  'status': 'pending',
-                  'count': 1,
-                  'nested': <Object?>[1, 2],
-                },
-                type: OracleDbType.json,
-                maxSize: 4000,
-              ),
-            },
-          );
-          expect(
-              result.outBinds['doc'],
-              equals(<String, Object?>{
-                'status': 'done',
-                'count': 2,
+          final result = await connection.execute('BEGIN $ioProc(:doc); END;', {
+            'doc': OracleBind.inOut(
+              value: <String, Object?>{
+                'status': 'pending',
+                'count': 1,
                 'nested': <Object?>[1, 2],
-              }));
+              },
+              type: OracleDbType.json,
+              maxSize: 4000,
+            ),
+          });
+          expect(
+            result.outBinds['doc'],
+            equals(<String, Object?>{
+              'status': 'done',
+              'count': 2,
+              'nested': <Object?>[1, 2],
+            }),
+          );
         });
 
         test('undersized maxSize fails loud instead of truncating', () async {
@@ -425,8 +461,13 @@ void main() {
               '"${'x' * 200}"}\'); END;',
               {'doc': OracleBind.out(type: OracleDbType.json, maxSize: 10)},
             ),
-            throwsA(isA<OracleException>()
-                .having((e) => e.message, 'message', contains('maxSize'))),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.message,
+                'message',
+                contains('maxSize'),
+              ),
+            ),
           );
         });
       });
@@ -442,8 +483,9 @@ void main() {
           if (nativeJsonUnavailable != null) return;
           try {
             await connection.execute(
-                'CREATE TABLE $testTable (id NUMBER PRIMARY KEY, doc JSON) '
-                'TABLESPACE USERS');
+              'CREATE TABLE $testTable (id NUMBER PRIMARY KEY, doc JSON) '
+              'TABLESPACE USERS',
+            );
           } on OracleException catch (e) {
             if (e.errorCode != 955) rethrow;
             await connection.execute('TRUNCATE TABLE $testTable');
@@ -475,10 +517,16 @@ void main() {
           final reusesBefore = connection.debugReuseExecutes;
           final second = await connection.execute(sql, [id]);
           expect(second.rows.single['DOC'], equals(doc));
-          expect(connection.debugReuseExecutes, greaterThan(reusesBefore),
-              reason: 'second JSON SELECT must reuse the cached cursor');
-          expect(connection.debugFullParseExecutes, equals(parsesBefore),
-              reason: 'second JSON SELECT must not re-parse');
+          expect(
+            connection.debugReuseExecutes,
+            greaterThan(reusesBefore),
+            reason: 'second JSON SELECT must reuse the cached cursor',
+          );
+          expect(
+            connection.debugFullParseExecutes,
+            equals(parsesBefore),
+            reason: 'second JSON SELECT must not re-parse',
+          );
 
           final third = await connection.execute(sql, [id]);
           expect(third.rows.single['DOC'], equals(doc));
@@ -508,8 +556,11 @@ void main() {
           expect(result.rows, hasLength(rowCount));
           for (var i = 0; i < rowCount; i++) {
             final doc = result.rows[i]['DOC']! as Map<String, Object?>;
-            expect(doc['row'], equals(i),
-                reason: 'row $i lost or reordered across fetch rounds');
+            expect(
+              doc['row'],
+              equals(i),
+              reason: 'row $i lost or reordered across fetch rounds',
+            );
             expect(doc['shape'], equals(i.isEven ? 'even' : 'odd'));
           }
         });

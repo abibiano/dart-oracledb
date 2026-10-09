@@ -122,9 +122,9 @@ class LobOpRequest extends Message {
       // UTF-16 charset here exactly as node-oracledb lobOp.js does. Without
       // this an NCLOB temp LOB would be created as a UTF-8 CLOB and its
       // UTF-16BE data would be corrupted.
-      buffer.writeUB4(sourceOffset == ttcCsfrmNChar
-          ? ttcCharsetAl16Utf16
-          : ttcCharsetUtf8);
+      buffer.writeUB4(
+        sourceOffset == ttcCsfrmNChar ? ttcCharsetAl16Utf16 : ttcCharsetUtf8,
+      );
     }
     final writeData = data;
     if (writeData != null) {
@@ -200,7 +200,9 @@ void _walkLobOpMessage(
       // source-locator length, then CREATE_TEMP carries a UB2 charset and a
       // UB1 flag byte, while sendAmount operations carry an SB8 amount.
       if (sourceLocatorLength > 0) {
-        s.updatedLocator = Uint8List.fromList(buf.readBytes(sourceLocatorLength));
+        s.updatedLocator = Uint8List.fromList(
+          buf.readBytes(sourceLocatorLength),
+        );
       }
       if (operation == tnsLobOpCreateTemp) {
         buf.skipUB2(); // charset
@@ -239,7 +241,8 @@ void _walkLobOpMessage(
     default:
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'Unknown TTC message type in LOB operation response: '
+        message:
+            'Unknown TTC message type in LOB operation response: '
             '$msgType',
       );
   }
@@ -265,12 +268,16 @@ bool lobOpStreamIsComplete(
   try {
     while (buffer.hasRemaining && !state.endOfResponse) {
       final msgType = buffer.readUint8();
-      _walkLobOpMessage(msgType, buffer, state,
-          operation: operation,
-          sourceLocatorLength: sourceLocatorLength,
-          sendAmount: sendAmount,
-          ttcFieldVersion: ttcFieldVersion,
-          endOfRequestSupport: endOfRequestSupport);
+      _walkLobOpMessage(
+        msgType,
+        buffer,
+        state,
+        operation: operation,
+        sourceLocatorLength: sourceLocatorLength,
+        sendAmount: sendAmount,
+        ttcFieldVersion: ttcFieldVersion,
+        endOfRequestSupport: endOfRequestSupport,
+      );
     }
     return state.endOfResponse;
   } on BufferUnderflowException {
@@ -282,7 +289,8 @@ bool lobOpStreamIsComplete(
     // never repair it, so fail loud instead of spinning the receive loop.
     throw OracleException(
       errorCode: oraProtocolError,
-      message: 'Malformed TTC stream detected by the LOB completion probe: '
+      message:
+          'Malformed TTC stream detected by the LOB completion probe: '
           '${e.message}',
       cause: e,
     );
@@ -303,12 +311,16 @@ LobOpResponse decodeLobOpResponse(
   try {
     while (buffer.hasRemaining && !state.endOfResponse) {
       final msgType = buffer.readUint8();
-      _walkLobOpMessage(msgType, buffer, state,
-          operation: operation,
-          sourceLocatorLength: sourceLocatorLength,
-          sendAmount: sendAmount,
-          ttcFieldVersion: ttcFieldVersion,
-          endOfRequestSupport: endOfRequestSupport);
+      _walkLobOpMessage(
+        msgType,
+        buffer,
+        state,
+        operation: operation,
+        sourceLocatorLength: sourceLocatorLength,
+        sendAmount: sendAmount,
+        ttcFieldVersion: ttcFieldVersion,
+        endOfRequestSupport: endOfRequestSupport,
+      );
     }
   } on BufferException catch (e) {
     throw OracleException(

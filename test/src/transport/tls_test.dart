@@ -47,15 +47,21 @@ void main() {
     test('disabled by default for backward compatibility', () {
       // TLS disabled by default
       const config = TlsConfig();
-      expect(config.enabled, isFalse,
-          reason: 'TLS must be disabled by default for backward compatibility');
+      expect(
+        config.enabled,
+        isFalse,
+        reason: 'TLS must be disabled by default for backward compatibility',
+      );
     });
 
     test('verifyCertificate true by default', () {
       // Certificate validation by default
       const config = TlsConfig(enabled: true);
-      expect(config.verifyCertificate, isTrue,
-          reason: 'Certificate validation must be enabled by default');
+      expect(
+        config.verifyCertificate,
+        isTrue,
+        reason: 'Certificate validation must be enabled by default',
+      );
     });
   });
 }

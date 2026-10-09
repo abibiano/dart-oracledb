@@ -62,10 +62,12 @@ void main() {
 
     test('deriveSessionKey produces different keys for different nonces', () {
       final passwordHash = Uint8List.fromList(List.generate(64, (i) => i));
-      final clientNonce1 =
-          Uint8List.fromList(List.generate(16, (i) => i + 100));
-      final clientNonce2 =
-          Uint8List.fromList(List.generate(16, (i) => i + 150));
+      final clientNonce1 = Uint8List.fromList(
+        List.generate(16, (i) => i + 100),
+      );
+      final clientNonce2 = Uint8List.fromList(
+        List.generate(16, (i) => i + 150),
+      );
       final serverNonce = Uint8List.fromList(List.generate(16, (i) => i + 200));
 
       final key1 = deriveSessionKey(
@@ -88,8 +90,24 @@ void main() {
     test('aes256CbcEncrypt produces encrypted output', () {
       final key = Uint8List(32); // 256-bit key
       final iv = Uint8List(16); // 128-bit IV
-      final data = Uint8List.fromList(
-          [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+      final data = Uint8List.fromList([
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+      ]);
 
       final encrypted = aes256CbcEncrypt(key: key, iv: iv, data: data);
 
@@ -137,8 +155,9 @@ void main() {
   group('Partial key combination', () {
     test('combinePartialKeys produces combined key', () {
       final clientPartial = Uint8List.fromList(List.generate(32, (i) => i));
-      final serverPartial =
-          Uint8List.fromList(List.generate(32, (i) => 255 - i));
+      final serverPartial = Uint8List.fromList(
+        List.generate(32, (i) => 255 - i),
+      );
 
       final combined = combinePartialKeys(
         clientPartial: clientPartial,
@@ -150,8 +169,9 @@ void main() {
 
     test('combinePartialKeys is deterministic', () {
       final clientPartial = Uint8List.fromList(List.generate(32, (i) => i));
-      final serverPartial =
-          Uint8List.fromList(List.generate(32, (i) => 255 - i));
+      final serverPartial = Uint8List.fromList(
+        List.generate(32, (i) => 255 - i),
+      );
 
       final combined1 = combinePartialKeys(
         clientPartial: clientPartial,

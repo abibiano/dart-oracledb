@@ -83,7 +83,9 @@ void main() {
 
     test('leading line comment before DECLARE', () {
       expect(
-          isPlSqlSql('-- comment\nDECLARE x NUMBER; BEGIN NULL; END;'), isTrue);
+        isPlSqlSql('-- comment\nDECLARE x NUMBER; BEGIN NULL; END;'),
+        isTrue,
+      );
     });
 
     test('SELECT is not PL/SQL', () {
@@ -128,8 +130,10 @@ void main() {
     });
 
     test('WITH is eligible', () {
-      expect(isCacheEligibleSql('WITH cte AS (SELECT 1) SELECT * FROM cte'),
-          isTrue);
+      expect(
+        isCacheEligibleSql('WITH cte AS (SELECT 1) SELECT * FROM cte'),
+        isTrue,
+      );
     });
 
     test('INSERT is eligible', () {
@@ -193,30 +197,38 @@ void main() {
     });
 
     test('WITH ... INSERT is DML, not a query', () {
-      const sql = 'WITH src AS (SELECT 1 AS id FROM dual) '
+      const sql =
+          'WITH src AS (SELECT 1 AS id FROM dual) '
           'INSERT INTO t (id) SELECT id FROM src';
-      expect(isQuerySql(sql), isFalse,
-          reason: 'CTE-backed INSERT must classify as DML so rowsAffected is '
-              'populated');
+      expect(
+        isQuerySql(sql),
+        isFalse,
+        reason:
+            'CTE-backed INSERT must classify as DML so rowsAffected is '
+            'populated',
+      );
       expect(isCacheEligibleSql(sql), isTrue);
     });
 
     test('WITH ... UPDATE is DML, not a query', () {
-      const sql = 'WITH src AS (SELECT 1 AS id FROM dual) '
+      const sql =
+          'WITH src AS (SELECT 1 AS id FROM dual) '
           'UPDATE t SET val = val + 1 WHERE id IN (SELECT id FROM src)';
       expect(isQuerySql(sql), isFalse);
       expect(isCacheEligibleSql(sql), isTrue);
     });
 
     test('WITH ... DELETE is DML, not a query', () {
-      const sql = 'WITH src AS (SELECT 1 AS id FROM dual) '
+      const sql =
+          'WITH src AS (SELECT 1 AS id FROM dual) '
           'DELETE FROM t WHERE id IN (SELECT id FROM src)';
       expect(isQuerySql(sql), isFalse);
       expect(isCacheEligibleSql(sql), isTrue);
     });
 
     test('WITH ... MERGE is DML, not a query', () {
-      const sql = 'WITH src AS (SELECT 1 AS id, 2 AS val FROM dual) '
+      const sql =
+          'WITH src AS (SELECT 1 AS id, 2 AS val FROM dual) '
           'MERGE INTO t USING src ON (t.id = src.id) '
           'WHEN MATCHED THEN UPDATE SET t.val = src.val';
       expect(isQuerySql(sql), isFalse);
@@ -224,7 +236,8 @@ void main() {
     });
 
     test('multiple CTEs followed by SELECT still classify as query', () {
-      const sql = 'WITH a AS (SELECT 1 AS x FROM dual), '
+      const sql =
+          'WITH a AS (SELECT 1 AS x FROM dual), '
           'b AS (SELECT 2 AS y FROM dual) '
           'SELECT a.x, b.y FROM a, b';
       expect(isQuerySql(sql), isTrue);
@@ -232,7 +245,8 @@ void main() {
     });
 
     test('multiple CTEs followed by INSERT classify as DML', () {
-      const sql = 'WITH a AS (SELECT 1 AS id FROM dual), '
+      const sql =
+          'WITH a AS (SELECT 1 AS id FROM dual), '
           'b AS (SELECT 2 AS id FROM dual) '
           'INSERT INTO t (id) SELECT id FROM a UNION ALL SELECT id FROM b';
       expect(isQuerySql(sql), isFalse);
@@ -242,23 +256,27 @@ void main() {
     test('CTE inner SELECT keywords do not steal terminal-verb match', () {
       // The inner SELECT lives inside parens; the scanner must keep paren
       // depth >0 throughout and only match the terminal INSERT at depth 0.
-      const sql = 'WITH src AS (SELECT id FROM (SELECT 1 AS id FROM dual)) '
+      const sql =
+          'WITH src AS (SELECT id FROM (SELECT 1 AS id FROM dual)) '
           'INSERT INTO t (id) SELECT id FROM src';
       expect(isQuerySql(sql), isFalse);
       expect(isCacheEligibleSql(sql), isTrue);
     });
 
-    test('CTE with string literal containing parens does not corrupt depth',
-        () {
-      // A literal `'('` or `')'` inside the CTE expression must not be
-      // interpreted as a real paren — otherwise the depth tracker would
-      // never return to zero (or would return early) and the terminal verb
-      // would not be found.
-      const sql = "WITH src AS (SELECT '(' || ')' AS s FROM dual) "
-          'INSERT INTO t (s) SELECT s FROM src';
-      expect(isCacheEligibleSql(sql), isTrue);
-      expect(isQuerySql(sql), isFalse);
-    });
+    test(
+      'CTE with string literal containing parens does not corrupt depth',
+      () {
+        // A literal `'('` or `')'` inside the CTE expression must not be
+        // interpreted as a real paren — otherwise the depth tracker would
+        // never return to zero (or would return early) and the terminal verb
+        // would not be found.
+        const sql =
+            "WITH src AS (SELECT '(' || ')' AS s FROM dual) "
+            'INSERT INTO t (s) SELECT s FROM src';
+        expect(isCacheEligibleSql(sql), isTrue);
+        expect(isQuerySql(sql), isFalse);
+      },
+    );
 
     test('malformed WITH with no terminal verb is not classified', () {
       const sql = 'WITH cte AS (SELECT 1 FROM dual)';
@@ -278,7 +296,8 @@ void main() {
       );
       expect(
         isCacheEligibleSql(
-            'with cte as (select 1 from dual) insert into t select * from cte'),
+          'with cte as (select 1 from dual) insert into t select * from cte',
+        ),
         isTrue,
       );
     });
@@ -333,13 +352,15 @@ void main() {
       expect(isPlSqlSql('-- comment\rBEGIN NULL; END;'), isTrue);
     });
 
-    test('CR-terminated -- comment lets INSERT through (isCacheEligibleSql)',
-        () {
-      expect(
-        isCacheEligibleSql('-- comment\rINSERT INTO t VALUES (1)'),
-        isTrue,
-      );
-    });
+    test(
+      'CR-terminated -- comment lets INSERT through (isCacheEligibleSql)',
+      () {
+        expect(
+          isCacheEligibleSql('-- comment\rINSERT INTO t VALUES (1)'),
+          isTrue,
+        );
+      },
+    );
 
     test('CRLF-terminated -- comment still works', () {
       // \r\n: scanner stops on \r, then the loop in skipSqlPrefixes treats
@@ -384,19 +405,25 @@ void main() {
       // statement is an ordinary cacheable SELECT.
       expect(
         isCacheEligibleSql(
-            'SELECT * FROM (SELECT id FROM t FOR UPDATE) WHERE id > 0'),
+          'SELECT * FROM (SELECT id FROM t FOR UPDATE) WHERE id > 0',
+        ),
         isTrue,
       );
     });
 
-    test("the literal 'FOR UPDATE' in a string does not exclude the SELECT",
-        () {
-      expect(
-          isCacheEligibleSql("SELECT 'FOR UPDATE' AS note FROM dual"), isTrue);
-    });
+    test(
+      "the literal 'FOR UPDATE' in a string does not exclude the SELECT",
+      () {
+        expect(
+          isCacheEligibleSql("SELECT 'FOR UPDATE' AS note FROM dual"),
+          isTrue,
+        );
+      },
+    );
 
     test('WITH ... SELECT ... FOR UPDATE is excluded but stays a query', () {
-      const sql = 'WITH c AS (SELECT 1 AS x FROM dual) '
+      const sql =
+          'WITH c AS (SELECT 1 AS x FROM dual) '
           'SELECT x FROM c FOR UPDATE';
       expect(isQuerySql(sql), isTrue);
       expect(isCacheEligibleSql(sql), isFalse);
@@ -414,7 +441,8 @@ void main() {
     const withInsert =
         'WITH c AS (SELECT 1 AS x FROM dual) INSERT INTO t SELECT x FROM c';
     const withUpdate = 'WITH c AS (SELECT 1 FROM dual) UPDATE t SET x = 1';
-    const withMerge = 'WITH c AS (SELECT 1 FROM dual) '
+    const withMerge =
+        'WITH c AS (SELECT 1 FROM dual) '
         'MERGE INTO t USING c ON (1=1) WHEN MATCHED THEN UPDATE SET x = 1';
 
     test('WITH ... SELECT: query AND cache-eligible (aligned)', () {
@@ -444,19 +472,24 @@ void main() {
       expect(isCacheEligibleSql(sql), isFalse);
     });
 
-    test('isQuerySql implies isCacheEligibleSql for any non-FOR-UPDATE query',
-        () {
-      // Property check: for the WITH ... SELECT shape the two helpers must agree
-      // — the whole point of sharing _leadingVerb (no independent CTE scans).
-      for (final sql in const [
-        'SELECT 1 FROM dual',
-        withSelect,
-        '  /* c */ WITH c AS (SELECT 1 FROM dual) SELECT x FROM c',
-      ]) {
-        expect(isQuerySql(sql) && !isCacheEligibleSql(sql), isFalse,
-            reason: 'drift detected for: $sql');
-      }
-    });
+    test(
+      'isQuerySql implies isCacheEligibleSql for any non-FOR-UPDATE query',
+      () {
+        // Property check: for the WITH ... SELECT shape the two helpers must agree
+        // — the whole point of sharing _leadingVerb (no independent CTE scans).
+        for (final sql in const [
+          'SELECT 1 FROM dual',
+          withSelect,
+          '  /* c */ WITH c AS (SELECT 1 FROM dual) SELECT x FROM c',
+        ]) {
+          expect(
+            isQuerySql(sql) && !isCacheEligibleSql(sql),
+            isFalse,
+            reason: 'drift detected for: $sql',
+          );
+        }
+      },
+    );
   });
 
   // Oracle q-quote (alternative quoting) literals inside a CTE header must not
@@ -465,39 +498,48 @@ void main() {
   // swallows the terminal verb.
   group('q-quote literals in CTE headers', () {
     test("q'[…]' with embedded apostrophe: CTE DML classified by verb", () {
-      const sql = "WITH c AS (SELECT q'[it's fine]' AS v FROM dual) "
+      const sql =
+          "WITH c AS (SELECT q'[it's fine]' AS v FROM dual) "
           'INSERT INTO t SELECT v FROM c';
       expect(isQuerySql(sql), isFalse);
-      expect(isCacheEligibleSql(sql), isTrue,
-          reason: 'terminal INSERT must be found past the q-quote literal');
+      expect(
+        isCacheEligibleSql(sql),
+        isTrue,
+        reason: 'terminal INSERT must be found past the q-quote literal',
+      );
     });
 
     test("q'{…}' brace delimiter pair", () {
-      const sql = "WITH c AS (SELECT q'{it's fine}' AS v FROM dual) "
+      const sql =
+          "WITH c AS (SELECT q'{it's fine}' AS v FROM dual) "
           'SELECT v FROM c';
       expect(isQuerySql(sql), isTrue);
     });
 
     test("q'(…)' paren delimiter pair does not corrupt depth tracking", () {
-      const sql = "WITH c AS (SELECT q'(it's (fine))' AS v FROM dual) "
+      const sql =
+          "WITH c AS (SELECT q'(it's (fine))' AS v FROM dual) "
           'SELECT v FROM c';
       expect(isQuerySql(sql), isTrue);
     });
 
     test("q'!…!' arbitrary same-char delimiter", () {
-      const sql = "WITH c AS (SELECT q'!it's fine!' AS v FROM dual) "
+      const sql =
+          "WITH c AS (SELECT q'!it's fine!' AS v FROM dual) "
           'SELECT v FROM c';
       expect(isQuerySql(sql), isTrue);
     });
 
     test("uppercase Q'[…]' is recognized too", () {
-      const sql = "WITH c AS (SELECT Q'[it's fine]' AS v FROM dual) "
+      const sql =
+          "WITH c AS (SELECT Q'[it's fine]' AS v FROM dual) "
           'SELECT v FROM c';
       expect(isQuerySql(sql), isTrue);
     });
 
     test('identifier merely starting with q is not treated as a q-quote', () {
-      const sql = 'WITH qcte AS (SELECT 1 AS q FROM dual) '
+      const sql =
+          'WITH qcte AS (SELECT 1 AS q FROM dual) '
           'SELECT q FROM qcte';
       expect(isQuerySql(sql), isTrue);
     });
@@ -513,7 +555,8 @@ void main() {
   // comment inside the header must not swallow code.
   group('CTE scanner whitespace handling', () {
     test('CR-terminated line comment inside CTE header', () {
-      const sql = 'WITH c AS ( -- comment\r SELECT 1 AS v FROM dual) '
+      const sql =
+          'WITH c AS ( -- comment\r SELECT 1 AS v FROM dual) '
           'SELECT v FROM c';
       expect(isQuerySql(sql), isTrue);
     });
@@ -545,15 +588,19 @@ void main() {
 
     test('is case-insensitive', () {
       expect(
-        hasReturningIntoClause('delete from t where id=:1 returning id into :2'),
+        hasReturningIntoClause(
+          'delete from t where id=:1 returning id into :2',
+        ),
         isTrue,
       );
     });
 
     test('plain DML without a RETURNING clause is not flagged', () {
       expect(hasReturningIntoClause('INSERT INTO t (id) VALUES (:1)'), isFalse);
-      expect(hasReturningIntoClause('UPDATE t SET a = :1 WHERE id = :2'),
-          isFalse);
+      expect(
+        hasReturningIntoClause('UPDATE t SET a = :1 WHERE id = :2'),
+        isFalse,
+      );
       // An INTO with no preceding RETURNING (e.g. PL/SQL SELECT INTO) must
       // not match — the clause requires RETURNING first.
       expect(hasReturningIntoClause('SELECT id INTO x FROM t'), isFalse);

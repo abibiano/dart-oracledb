@@ -23,69 +23,77 @@ void main() {
     print('${record.level.name}: ${record.loggerName}: ${record.message}');
   });
 
-  test('auth with WRONG password',
-      skip: !integrationEnabled ? 'Integration tests disabled' : null,
-      () async {
-    final transport = Transport();
-    const password = 'WRONG_PASSWORD_123'; // Intentionally wrong
+  test(
+    'auth with WRONG password',
+    skip: !integrationEnabled ? 'Integration tests disabled' : null,
+    () async {
+      final transport = Transport();
+      const password = 'WRONG_PASSWORD_123'; // Intentionally wrong
 
-    Uint8List buildConnectData() {
-      final tnsDescriptor = '(DESCRIPTION='
-          '(ADDRESS=(PROTOCOL=TCP)(HOST=$testHost)(PORT=$testPort))'
-          '(CONNECT_DATA=(SERVICE_NAME=$testService)))';
-      final descriptorBytes = Uint8List.fromList(utf8.encode(tnsDescriptor));
-      return buildConnectPacketBody(descriptorBytes);
-    }
+      Uint8List buildConnectData() {
+        final tnsDescriptor =
+            '(DESCRIPTION='
+            '(ADDRESS=(PROTOCOL=TCP)(HOST=$testHost)(PORT=$testPort))'
+            '(CONNECT_DATA=(SERVICE_NAME=$testService)))';
+        final descriptorBytes = Uint8List.fromList(utf8.encode(tnsDescriptor));
+        return buildConnectPacketBody(descriptorBytes);
+      }
 
-    final stopwatch = Stopwatch()..start();
+      final stopwatch = Stopwatch()..start();
 
-    try {
-      await transport.connect(testHost, testPort);
-      final connectData = buildConnectData();
-      await transport.sendConnectReceiveAccept(connectData);
+      try {
+        await transport.connect(testHost, testPort);
+        final connectData = buildConnectData();
+        await transport.sendConnectReceiveAccept(connectData);
 
-      print('\n=== Testing with WRONG Password ===');
+        print('\n=== Testing with WRONG Password ===');
 
-      final authFlow = AuthFlow();
-      await authFlow.authenticate(
-        transport: transport,
-        username: testUser,
-        password: password, // WRONG!
-      );
+        final authFlow = AuthFlow();
+        await authFlow.authenticate(
+          transport: transport,
+          username: testUser,
+          password: password, // WRONG!
+        );
 
-      print('ERROR: Authentication should have failed!');
-      fail('Should have thrown ORA-01017');
-    } catch (e) {
-      stopwatch.stop();
-      final elapsedMs = stopwatch.elapsedMilliseconds;
+        print('ERROR: Authentication should have failed!');
+        fail('Should have thrown ORA-01017');
+      } catch (e) {
+        stopwatch.stop();
+        final elapsedMs = stopwatch.elapsedMilliseconds;
 
-      print('\nCaught error: $e');
-      print(
-          'Time elapsed: ${elapsedMs}ms (${(elapsedMs / 1000).toStringAsFixed(1)}s)');
+        print('\nCaught error: $e');
+        print(
+          'Time elapsed: ${elapsedMs}ms (${(elapsedMs / 1000).toStringAsFixed(1)}s)',
+        );
 
-      // Verify fast failure (< 6 seconds with margin for network/system overhead)
-      expect(elapsedMs, lessThan(6000),
-          reason: 'Expected error within 6s, got ${elapsedMs}ms');
+        // Verify fast failure (< 6 seconds with margin for network/system overhead)
+        expect(
+          elapsedMs,
+          lessThan(6000),
+          reason: 'Expected error within 6s, got ${elapsedMs}ms',
+        );
 
-      // Verify error code or message
-      expect(e, isA<OracleException>());
-      final oraErr = e as OracleException;
-      expect(
-        oraErr.errorCode == 1017 ||
-            oraErr.message.toLowerCase().contains('invalid') ||
-            oraErr.message.toLowerCase().contains('authentication failed'),
-        isTrue,
-        reason: 'Expected ORA-01017 or authentication failed message',
-      );
+        // Verify error code or message
+        expect(e, isA<OracleException>());
+        final oraErr = e as OracleException;
+        expect(
+          oraErr.errorCode == 1017 ||
+              oraErr.message.toLowerCase().contains('invalid') ||
+              oraErr.message.toLowerCase().contains('authentication failed'),
+          isTrue,
+          reason: 'Expected ORA-01017 or authentication failed message',
+        );
 
-      // Verify password not in error
-      expect(oraErr.message, isNot(contains(password)));
+        // Verify password not in error
+        expect(oraErr.message, isNot(contains(password)));
 
-      print(
-          '✓ PASS: Fast failure in ${(elapsedMs / 1000).toStringAsFixed(1)}s with ORA-${oraErr.errorCode}');
-      print('✓ PASS: Password not exposed in error message');
-    } finally {
-      await transport.disconnect();
-    }
-  });
+        print(
+          '✓ PASS: Fast failure in ${(elapsedMs / 1000).toStringAsFixed(1)}s with ORA-${oraErr.errorCode}',
+        );
+        print('✓ PASS: Password not exposed in error message');
+      } finally {
+        await transport.disconnect();
+      }
+    },
+  );
 }

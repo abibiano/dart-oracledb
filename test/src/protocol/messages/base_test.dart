@@ -7,11 +7,7 @@ import 'package:test/test.dart';
 
 // Test implementation of Message for testing purposes
 class TestMessage extends Message {
-  TestMessage({
-    required super.messageType,
-    required this.data,
-    super.sequence,
-  });
+  TestMessage({required super.messageType, required this.data, super.sequence});
 
   final String data;
 
@@ -42,19 +38,13 @@ void main() {
   group('Message', () {
     group('constructor', () {
       test('stores message type', () {
-        final msg = TestMessage(
-          messageType: ttcExecute,
-          data: 'test',
-        );
+        final msg = TestMessage(messageType: ttcExecute, data: 'test');
 
         expect(msg.messageType, equals(ttcExecute));
       });
 
       test('defaults sequence to 0', () {
-        final msg = TestMessage(
-          messageType: ttcFetch,
-          data: 'hello',
-        );
+        final msg = TestMessage(messageType: ttcFetch, data: 'hello');
 
         expect(msg.sequence, equals(0));
       });
@@ -129,10 +119,7 @@ void main() {
     group('MessageException', () {
       test('stores message and cause', () {
         final cause = Exception('original error');
-        final ex = MessageException(
-          'Test error message',
-          cause: cause,
-        );
+        final ex = MessageException('Test error message', cause: cause);
 
         expect(ex.message, equals('Test error message'));
         expect(ex.cause, equals(cause));
@@ -170,10 +157,7 @@ void main() {
       ];
 
       for (final type in types) {
-        final msg = TestMessage(
-          messageType: type,
-          data: '',
-        );
+        final msg = TestMessage(messageType: type, data: '');
         expect(msg.messageType, equals(type));
       }
     });

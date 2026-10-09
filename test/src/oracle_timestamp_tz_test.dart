@@ -14,16 +14,17 @@ void main() {
       expect(tz.offsetMinutes, equals(330));
       expect(tz.tzHourOffset, equals(5));
       expect(tz.tzMinuteOffset, equals(30));
-      expect(
-          tz.timeZoneOffset, equals(const Duration(hours: 5, minutes: 30)));
+      expect(tz.timeZoneOffset, equals(const Duration(hours: 5, minutes: 30)));
     });
 
     test('negative offsets split hour/minute parts with a shared sign', () {
       final tz = OracleTimestampTz(instant, offsetMinutes: -330);
       expect(tz.tzHourOffset, equals(-5));
       expect(tz.tzMinuteOffset, equals(-30));
-      expect(tz.timeZoneOffset,
-          equals(const Duration(hours: -5, minutes: -30)));
+      expect(
+        tz.timeZoneOffset,
+        equals(const Duration(hours: -5, minutes: -30)),
+      );
     });
 
     test('normalizes a non-UTC instant with toUtc()', () {
@@ -40,16 +41,24 @@ void main() {
 
     test('rejects offsets outside the [-12:59, +14:00] band', () {
       // -13:00 = -780 minutes (below the -779 floor).
-      expect(() => OracleTimestampTz(instant, offsetMinutes: -780),
-          throwsArgumentError);
+      expect(
+        () => OracleTimestampTz(instant, offsetMinutes: -780),
+        throwsArgumentError,
+      );
       // +14:01 = 841 minutes (above the +840 ceiling).
-      expect(() => OracleTimestampTz(instant, offsetMinutes: 841),
-          throwsArgumentError);
+      expect(
+        () => OracleTimestampTz(instant, offsetMinutes: 841),
+        throwsArgumentError,
+      );
       // Band edges are accepted.
-      expect(OracleTimestampTz(instant, offsetMinutes: -779).offsetMinutes,
-          equals(-779));
-      expect(OracleTimestampTz(instant, offsetMinutes: 840).offsetMinutes,
-          equals(840));
+      expect(
+        OracleTimestampTz(instant, offsetMinutes: -779).offsetMinutes,
+        equals(-779),
+      );
+      expect(
+        OracleTimestampTz(instant, offsetMinutes: 840).offsetMinutes,
+        equals(840),
+      );
     });
 
     group('fromHourMinute', () {
@@ -61,34 +70,52 @@ void main() {
       });
 
       test('rejects hour offsets outside -12..14 via the combined band', () {
-        expect(() => OracleTimestampTz.fromHourMinute(instant, -13, 0),
-            throwsArgumentError);
-        expect(() => OracleTimestampTz.fromHourMinute(instant, 15, 0),
-            throwsArgumentError);
+        expect(
+          () => OracleTimestampTz.fromHourMinute(instant, -13, 0),
+          throwsArgumentError,
+        );
+        expect(
+          () => OracleTimestampTz.fromHourMinute(instant, 15, 0),
+          throwsArgumentError,
+        );
       });
 
       test('rejects minute offsets outside -59..59', () {
-        expect(() => OracleTimestampTz.fromHourMinute(instant, 0, 60),
-            throwsArgumentError);
-        expect(() => OracleTimestampTz.fromHourMinute(instant, 0, -60),
-            throwsArgumentError);
+        expect(
+          () => OracleTimestampTz.fromHourMinute(instant, 0, 60),
+          throwsArgumentError,
+        );
+        expect(
+          () => OracleTimestampTz.fromHourMinute(instant, 0, -60),
+          throwsArgumentError,
+        );
       });
 
       test('enforces the +14:00 ceiling (combined upper band)', () {
         // +14:00 is the maximum legal offset; +14 hours admits no minutes.
-        expect(OracleTimestampTz.fromHourMinute(instant, 14, 0).tzHourOffset,
-            equals(14));
-        expect(() => OracleTimestampTz.fromHourMinute(instant, 14, 30),
-            throwsArgumentError);
-        expect(() => OracleTimestampTz.fromHourMinute(instant, 14, 59),
-            throwsArgumentError);
+        expect(
+          OracleTimestampTz.fromHourMinute(instant, 14, 0).tzHourOffset,
+          equals(14),
+        );
+        expect(
+          () => OracleTimestampTz.fromHourMinute(instant, 14, 30),
+          throwsArgumentError,
+        );
+        expect(
+          () => OracleTimestampTz.fromHourMinute(instant, 14, 59),
+          throwsArgumentError,
+        );
       });
 
       test('rejects conflicting hour/minute signs', () {
-        expect(() => OracleTimestampTz.fromHourMinute(instant, 5, -30),
-            throwsArgumentError);
-        expect(() => OracleTimestampTz.fromHourMinute(instant, -5, 30),
-            throwsArgumentError);
+        expect(
+          () => OracleTimestampTz.fromHourMinute(instant, 5, -30),
+          throwsArgumentError,
+        );
+        expect(
+          () => OracleTimestampTz.fromHourMinute(instant, -5, 30),
+          throwsArgumentError,
+        );
       });
 
       test('rejects absurd hour values before any arithmetic (no 64-bit '
@@ -97,45 +124,64 @@ void main() {
         // which sits INSIDE the valid offset band — the hour check must
         // reject it before the multiplication ever happens.
         const absurdHour = 9223372036854775807;
-        expect(() => OracleTimestampTz.fromHourMinute(instant, absurdHour, 0),
-            throwsArgumentError);
-        expect(() => OracleTimestampTz.fromHourMinute(instant, -absurdHour, 0),
-            throwsArgumentError);
+        expect(
+          () => OracleTimestampTz.fromHourMinute(instant, absurdHour, 0),
+          throwsArgumentError,
+        );
+        expect(
+          () => OracleTimestampTz.fromHourMinute(instant, -absurdHour, 0),
+          throwsArgumentError,
+        );
       });
     });
 
     test('fromOffset splits positive and negative durations correctly', () {
       final plus = OracleTimestampTz.fromOffset(
-          instant, const Duration(hours: 5, minutes: 30));
+        instant,
+        const Duration(hours: 5, minutes: 30),
+      );
       expect(plus.tzHourOffset, equals(5));
       expect(plus.tzMinuteOffset, equals(30));
 
       final minus = OracleTimestampTz.fromOffset(
-          instant, const Duration(hours: -5, minutes: -30));
+        instant,
+        const Duration(hours: -5, minutes: -30),
+      );
       expect(minus.tzHourOffset, equals(-5));
       expect(minus.tzMinuteOffset, equals(-30));
 
-      final subHour =
-          OracleTimestampTz.fromOffset(instant, const Duration(minutes: -30));
+      final subHour = OracleTimestampTz.fromOffset(
+        instant,
+        const Duration(minutes: -30),
+      );
       expect(subHour.tzHourOffset, equals(0));
       expect(subHour.tzMinuteOffset, equals(-30));
     });
 
     test('fromOffset rejects sub-minute offsets', () {
       expect(
-          () => OracleTimestampTz.fromOffset(
-              instant, const Duration(minutes: 5, seconds: 30)),
-          throwsArgumentError);
+        () => OracleTimestampTz.fromOffset(
+          instant,
+          const Duration(minutes: 5, seconds: 30),
+        ),
+        throwsArgumentError,
+      );
       // Regression: a sub-second component (whole-second count divisible
       // by 60) used to slip past the old `inSeconds % 60` check.
       expect(
-          () => OracleTimestampTz.fromOffset(
-              instant, const Duration(minutes: 5, milliseconds: 500)),
-          throwsArgumentError);
+        () => OracleTimestampTz.fromOffset(
+          instant,
+          const Duration(minutes: 5, milliseconds: 500),
+        ),
+        throwsArgumentError,
+      );
       expect(
-          () => OracleTimestampTz.fromOffset(
-              instant, const Duration(minutes: 5, microseconds: 1)),
-          throwsArgumentError);
+        () => OracleTimestampTz.fromOffset(
+          instant,
+          const Duration(minutes: 5, microseconds: 1),
+        ),
+        throwsArgumentError,
+      );
     });
 
     test('equality and hashCode cover instant and offset', () {
@@ -144,18 +190,23 @@ void main() {
       final differentOffset = OracleTimestampTz(instant, offsetMinutes: 120);
       expect(a, equals(b));
       expect(a.hashCode, equals(b.hashCode));
-      expect(a, isNot(equals(differentOffset)),
-          reason: 'same instant at a different zone is a different value');
+      expect(
+        a,
+        isNot(equals(differentOffset)),
+        reason: 'same instant at a different zone is a different value',
+      );
     });
 
     group('compareTo (Comparable, consistent with ==)', () {
       test('orders by the absolute instant first', () {
         final earlier = OracleTimestampTz(
-            DateTime.utc(2024, 3, 15, 5, 0, 0),
-            offsetMinutes: 0);
+          DateTime.utc(2024, 3, 15, 5, 0, 0),
+          offsetMinutes: 0,
+        );
         final later = OracleTimestampTz(
-            DateTime.utc(2024, 3, 15, 6, 0, 0),
-            offsetMinutes: 0);
+          DateTime.utc(2024, 3, 15, 6, 0, 0),
+          offsetMinutes: 0,
+        );
         expect(earlier.compareTo(later), lessThan(0));
         expect(later.compareTo(earlier), greaterThan(0));
         expect(earlier.compareTo(earlier), equals(0));
@@ -165,11 +216,17 @@ void main() {
           'ordered by offsetMinutes', () {
         final atUtc = OracleTimestampTz(instant, offsetMinutes: 0);
         final atIst = OracleTimestampTz(instant, offsetMinutes: 330);
-        expect(atUtc.compareTo(atIst), lessThan(0),
-            reason: 'same instant tie-breaks on offsetMinutes');
+        expect(
+          atUtc.compareTo(atIst),
+          lessThan(0),
+          reason: 'same instant tie-breaks on offsetMinutes',
+        );
         expect(atIst.compareTo(atUtc), greaterThan(0));
-        expect(atUtc, isNot(equals(atIst)),
-            reason: 'representation equality includes the offset');
+        expect(
+          atUtc,
+          isNot(equals(atIst)),
+          reason: 'representation equality includes the offset',
+        );
       });
 
       test('compareTo == 0 iff == (consistent with equality)', () {
@@ -188,20 +245,29 @@ void main() {
         expect(values.map((v) => v.utc.day), equals([1, 2, 3]));
       });
 
-      test('same-instant different-offset values coexist in a SplayTreeSet',
-          () {
-        final set = SplayTreeSet<OracleTimestampTz>()
-          ..add(OracleTimestampTz(instant, offsetMinutes: 0))
-          ..add(OracleTimestampTz(instant, offsetMinutes: 330))
-          ..add(OracleTimestampTz(instant, offsetMinutes: -480))
-          // Duplicate of an existing element — must NOT grow the set.
-          ..add(OracleTimestampTz(instant, offsetMinutes: 330));
-        expect(set.length, equals(3),
-            reason: 'distinct offsets are distinct values; an equal value '
-                'is deduplicated');
-        expect(set.map((v) => v.offsetMinutes), equals([-480, 0, 330]),
-            reason: 'same instant orders by offsetMinutes');
-      });
+      test(
+        'same-instant different-offset values coexist in a SplayTreeSet',
+        () {
+          final set = SplayTreeSet<OracleTimestampTz>()
+            ..add(OracleTimestampTz(instant, offsetMinutes: 0))
+            ..add(OracleTimestampTz(instant, offsetMinutes: 330))
+            ..add(OracleTimestampTz(instant, offsetMinutes: -480))
+            // Duplicate of an existing element — must NOT grow the set.
+            ..add(OracleTimestampTz(instant, offsetMinutes: 330));
+          expect(
+            set.length,
+            equals(3),
+            reason:
+                'distinct offsets are distinct values; an equal value '
+                'is deduplicated',
+          );
+          expect(
+            set.map((v) => v.offsetMinutes),
+            equals([-480, 0, 330]),
+            reason: 'same instant orders by offsetMinutes',
+          );
+        },
+      );
     });
 
     test('toString renders the signed offset', () {

@@ -152,26 +152,43 @@ void main() {
       // cursor rows: parent 1 -> [10,20,30], parent 2 -> [] (empty nested
       // cursor), parent 3 -> [1..bigChildCount] (multi-round nested drain).
       void expectNestedShape(List<OracleRow> rows) {
-        expect(rows.map((r) => r['ID']), equals([1, 2, 3]),
-            reason: 'parent rows arrive in id order');
+        expect(
+          rows.map((r) => r['ID']),
+          equals([1, 2, 3]),
+          reason: 'parent rows arrive in id order',
+        );
 
         final nc1 = rows[0]['NC'];
-        expect(nc1, isA<List<OracleRow>>(),
-            reason: 'a nested cursor column materializes to List<OracleRow>');
-        expect((nc1! as List<OracleRow>).map((r) => r['VAL']),
-            equals([10, 20, 30]));
+        expect(
+          nc1,
+          isA<List<OracleRow>>(),
+          reason: 'a nested cursor column materializes to List<OracleRow>',
+        );
+        expect(
+          (nc1! as List<OracleRow>).map((r) => r['VAL']),
+          equals([10, 20, 30]),
+        );
 
         final nc2 = rows[1]['NC'];
         expect(nc2, isA<List<OracleRow>>());
-        expect((nc2! as List<OracleRow>), isEmpty,
-            reason: 'an empty nested cursor materializes to []');
+        expect(
+          (nc2! as List<OracleRow>),
+          isEmpty,
+          reason: 'an empty nested cursor materializes to []',
+        );
 
         final nc3 = rows[2]['NC']! as List<OracleRow>;
-        expect(nc3, hasLength(bigChildCount),
-            reason: 'a nested cursor larger than the prefetch size is fully '
-                'drained across multiple FETCH rounds');
-        expect(nc3.map((r) => r['VAL']),
-            equals([for (var i = 1; i <= bigChildCount; i++) i]));
+        expect(
+          nc3,
+          hasLength(bigChildCount),
+          reason:
+              'a nested cursor larger than the prefetch size is fully '
+              'drained across multiple FETCH rounds',
+        );
+        expect(
+          nc3.map((r) => r['VAL']),
+          equals([for (var i = 1; i <= bigChildCount; i++) i]),
+        );
       }
 
       test('lazy mode: a REF CURSOR OUT bind and an implicit result coexist; '
@@ -340,57 +357,49 @@ void main() {
       // version on both servers (node-oracledb parity — verified against the
       // reference client), so the existing materialization machinery drains it
       // with no server-version branching.
-      test(
-        'eager mode: a nested CURSOR() column inside an implicit result '
-        'materializes to List<OracleRow> — both envs',
-        () async {
-          final result = await connection.execute(nestedImplicitBlock);
-          expect(result.implicitResults, hasLength(1));
-          final rows = result.implicitResults.single as List<OracleRow>;
-          expectNestedShape(rows);
+      test('eager mode: a nested CURSOR() column inside an implicit result '
+          'materializes to List<OracleRow> — both envs', () async {
+        final result = await connection.execute(nestedImplicitBlock);
+        expect(result.implicitResults, hasLength(1));
+        final rows = result.implicitResults.single as List<OracleRow>;
+        expectNestedShape(rows);
 
-          // Connection is fully usable afterwards (nested cursor ids reaped).
-          final after = await connection.execute(
-            'SELECT COUNT(*) AS C FROM $parentTab',
-          );
-          expect(after.rows.single['C'], equals(3));
-        },
-      );
+        // Connection is fully usable afterwards (nested cursor ids reaped).
+        final after = await connection.execute(
+          'SELECT COUNT(*) AS C FROM $parentTab',
+        );
+        expect(after.rows.single['C'], equals(3));
+      });
 
-      test(
-        'lazy mode: a nested CURSOR() column inside an implicit result '
-        'materializes when the handle is drained — both envs',
-        () async {
-          final result = await connection.execute(
-            nestedImplicitBlock,
-            null,
-            const OracleExecuteOptions(resultSet: true),
-          );
-          expect(result.implicitResults, hasLength(1));
-          final rs = result.implicitResults.single as OracleResultSet;
-          try {
-            expectNestedShape(await rs.getRows());
-          } finally {
-            await rs.close();
-          }
+      test('lazy mode: a nested CURSOR() column inside an implicit result '
+          'materializes when the handle is drained — both envs', () async {
+        final result = await connection.execute(
+          nestedImplicitBlock,
+          null,
+          const OracleExecuteOptions(resultSet: true),
+        );
+        expect(result.implicitResults, hasLength(1));
+        final rs = result.implicitResults.single as OracleResultSet;
+        try {
+          expectNestedShape(await rs.getRows());
+        } finally {
+          await rs.close();
+        }
 
-          final after = await connection.execute(
-            'SELECT COUNT(*) AS C FROM $parentTab',
-          );
-          expect(after.rows.single['C'], equals(3));
-        },
-      );
+        final after = await connection.execute(
+          'SELECT COUNT(*) AS C FROM $parentTab',
+        );
+        expect(after.rows.single['C'], equals(3));
+      });
 
-      test(
-        'a nested CURSOR() column inside a REF CURSOR OUT bind materializes '
-        'through the OUT-bind handle — both envs',
-        () async {
-          // A procedure whose OUT SYS_REFCURSOR opens a SELECT carrying a nested
-          // CURSOR() column. The OUT bind is wrapped as a lazy OracleResultSet;
-          // draining it materializes the nested cursor per fetched batch via the
-          // _wrapRefCursorOutBinds onBatchDecoded wiring.
-          final nestedRcProc = uniqueTableName('cox_nrc');
-          await connection.execute('''
+      test('a nested CURSOR() column inside a REF CURSOR OUT bind materializes '
+          'through the OUT-bind handle — both envs', () async {
+        // A procedure whose OUT SYS_REFCURSOR opens a SELECT carrying a nested
+        // CURSOR() column. The OUT bind is wrapped as a lazy OracleResultSet;
+        // draining it materializes the nested cursor per fetched batch via the
+        // _wrapRefCursorOutBinds onBatchDecoded wiring.
+        final nestedRcProc = uniqueTableName('cox_nrc');
+        await connection.execute('''
             CREATE OR REPLACE PROCEDURE $nestedRcProc (p_rc OUT SYS_REFCURSOR) IS
             BEGIN
               OPEN p_rc FOR
@@ -404,31 +413,30 @@ void main() {
                 ORDER BY p.id;
             END;
           ''');
-          addTearDown(() async {
-            try {
-              await connection.execute('DROP PROCEDURE $nestedRcProc');
-            } on OracleException {
-              // best-effort cleanup
-            }
-          });
-
-          final result = await connection.execute(
-            'BEGIN $nestedRcProc(:rc); END;',
-            {'rc': OracleBind.out(type: OracleDbType.cursor)},
-          );
-          final rs = result.outBinds['rc']! as OracleResultSet;
+        addTearDown(() async {
           try {
-            expectNestedShape(await rs.getRows());
-          } finally {
-            await rs.close();
+            await connection.execute('DROP PROCEDURE $nestedRcProc');
+          } on OracleException {
+            // best-effort cleanup
           }
+        });
 
-          final after = await connection.execute(
-            'SELECT COUNT(*) AS C FROM $parentTab',
-          );
-          expect(after.rows.single['C'], equals(3));
-        },
-      );
+        final result = await connection.execute(
+          'BEGIN $nestedRcProc(:rc); END;',
+          {'rc': OracleBind.out(type: OracleDbType.cursor)},
+        );
+        final rs = result.outBinds['rc']! as OracleResultSet;
+        try {
+          expectNestedShape(await rs.getRows());
+        } finally {
+          await rs.close();
+        }
+
+        final after = await connection.execute(
+          'SELECT COUNT(*) AS C FROM $parentTab',
+        );
+        expect(after.rows.single['C'], equals(3));
+      });
 
       // The guard is NOT blanket-lifted: a GENUINELY unsupported column type in
       // an embedded describe still fails loud (and reaps its cursor id),
@@ -441,7 +449,8 @@ void main() {
           // INTERVAL DAY TO SECOND is not a supported embedded-describe column
           // type. An implicit result projecting it fails loud at decode time
           // (before any FETCH), reaping the implicit cursor id (B2).
-          final unsupportedBlock = '''
+          final unsupportedBlock =
+              '''
             DECLARE
               c_impl SYS_REFCURSOR;
             BEGIN

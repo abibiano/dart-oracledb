@@ -561,8 +561,7 @@ class Transport {
   /// matter at all) is the robust form and a tracked follow-up; if the two echoes
   /// ever diverge, the stale key degrades to the same double-queue this backstop
   /// already documents as its residual risk, not to something new.
-  static String _tempLobKey(Uint8List locator) =>
-      String.fromCharCodes(locator);
+  static String _tempLobKey(Uint8List locator) => String.fromCharCodes(locator);
 
   /// Number of temp-LOB locators queued for the free piggyback. Exposed for
   /// integration tests (temp-LOB lifecycle) via
@@ -707,7 +706,8 @@ class Transport {
     if (locator == null) {
       throw OracleException(
         errorCode: oraProtocolError,
-        message: 'Temporary '
+        message:
+            'Temporary '
             '${oraType == oraTypeBlob ? 'BLOB' : 'CLOB'} creation returned no '
             'locator',
       );
@@ -847,7 +847,8 @@ class Transport {
     // both the completion probe and the real decode pass know which slots the
     // per-iteration ROW_DATA carries. Computed here (not in the connection
     // layer) so the transport owns the wire-order contract end to end.
-    final List<int>? returningOutBindIndices = dmlReturning && bindMetadata != null
+    final List<int>? returningOutBindIndices =
+        dmlReturning && bindMetadata != null
         ? <int>[
             for (var i = 0; i < bindMetadata.length; i++)
               if (bindMetadata[i].dir != BindDir.input) i,
@@ -1868,8 +1869,8 @@ class Transport {
       final outstanding = amount - unitsRead;
       final request =
           effectivePieceUnits != null && effectivePieceUnits < outstanding
-              ? effectivePieceUnits
-              : outstanding;
+          ? effectivePieceUnits
+          : outstanding;
       final response = await sendLobOp(
         operation: tnsLobOpRead,
         sourceLocator: locator,
@@ -1908,12 +1909,12 @@ class Transport {
           errorCode: oraProtocolError,
           message: totalBytes > 0 && unitsRead == 0
               ? 'LOB read reply is internally inconsistent: the server '
-                  'delivered $totalBytes payload bytes at offset $offset but '
-                  'reported 0 units read (requested $request of $amount)'
+                    'delivered $totalBytes payload bytes at offset $offset but '
+                    'reported 0 units read (requested $request of $amount)'
               : 'LOB read made no progress: the server delivered 0 units at '
-                  'offset ${offset + unitsRead} with ${amount - unitsRead} of '
-                  '$amount units still outstanding (read started at offset '
-                  '$offset)',
+                    'offset ${offset + unitsRead} with ${amount - unitsRead} of '
+                    '$amount units still outstanding (read started at offset '
+                    '$offset)',
         );
       }
       // Compared against what THIS piece actually requested, not against the
@@ -2194,7 +2195,9 @@ class Transport {
             for (var k = 0; k < newCell.length; k++) {
               final value = newCell[k];
               if (value is! LobLocator) continue;
-              if (wrapLob == null && maxSize != null && value.length > maxSize) {
+              if (wrapLob == null &&
+                  maxSize != null &&
+                  value.length > maxSize) {
                 throw tooLarge(value, maxSize);
               }
               newCell[k] = await readLocator(value);

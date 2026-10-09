@@ -513,19 +513,29 @@ void main() {
       // Close while the second open is in flight: close() drains the parked c0
       // and marks the pool closed.
       await pool.close();
-      expect(c0.closeCalls, equals(1),
-          reason: 'the already-parked prewarm connection is drained by close');
+      expect(
+        c0.closeCalls,
+        equals(1),
+        reason: 'the already-parked prewarm connection is drained by close',
+      );
 
       // The second open lands AFTER close().
       final c1 = _FakeConnection();
       gates[1].complete(c1);
       await prewarm;
 
-      expect(c1.closeCalls, equals(1),
-          reason: 'a prewarm connection opened after close() must be '
-              'destroyed, not parked into the drained idle set');
-      expect(pool.connectionsIdle, equals(0),
-          reason: 'no post-close connection may survive in the idle set');
+      expect(
+        c1.closeCalls,
+        equals(1),
+        reason:
+            'a prewarm connection opened after close() must be '
+            'destroyed, not parked into the drained idle set',
+      );
+      expect(
+        pool.connectionsIdle,
+        equals(0),
+        reason: 'no post-close connection may survive in the idle set',
+      );
       expect(pool.connectionsOpen, equals(0));
     });
   });
@@ -868,16 +878,29 @@ void main() {
 
           await pool.release(conn);
 
-          expect(conn.forceCloseResultSetCalls, equals(1),
-              reason: 'the pool must close the leaked result set on release');
-          expect(conn.rollbackCalls, equals(1),
-              reason: 'the session is rolled back and recycled, not destroyed');
-          expect(conn.closeCalls, equals(0),
-              reason: 'a closeable leaked result set must not destroy the '
-                  'physical session');
+          expect(
+            conn.forceCloseResultSetCalls,
+            equals(1),
+            reason: 'the pool must close the leaked result set on release',
+          );
+          expect(
+            conn.rollbackCalls,
+            equals(1),
+            reason: 'the session is rolled back and recycled, not destroyed',
+          );
+          expect(
+            conn.closeCalls,
+            equals(0),
+            reason:
+                'a closeable leaked result set must not destroy the '
+                'physical session',
+          );
           expect(pool.connectionsIdle, equals(1));
-          expect(identical(pool.debugIdleConnections.single, conn), isTrue,
-              reason: 'the reclaimed session stays reusable');
+          expect(
+            identical(pool.debugIdleConnections.single, conn),
+            isTrue,
+            reason: 'the reclaimed session stays reusable',
+          );
         } finally {
           await pool.close();
         }
@@ -896,13 +919,23 @@ void main() {
           conn.executing = true; // a fetch/execute round trip is in flight
           conn.leakedResultSet = true;
 
-          await expectLater(pool.release(conn), throwsA(isA<OracleException>()));
+          await expectLater(
+            pool.release(conn),
+            throwsA(isA<OracleException>()),
+          );
 
-          expect(conn.forceCloseResultSetCalls, equals(0),
-              reason: 'a mid-RPC race is never treated as a closeable result '
-                  'set');
-          expect(conn.closeCalls, equals(1),
-              reason: 'the racing session is destroyed');
+          expect(
+            conn.forceCloseResultSetCalls,
+            equals(0),
+            reason:
+                'a mid-RPC race is never treated as a closeable result '
+                'set',
+          );
+          expect(
+            conn.closeCalls,
+            equals(1),
+            reason: 'the racing session is destroyed',
+          );
           expect(pool.connectionsInUse, equals(0));
         } finally {
           await pool.close();
@@ -1948,8 +1981,11 @@ void main() {
       var closeDone = false;
       unawaited(closing.then((_) => closeDone = true));
       await Future<void>.delayed(const Duration(milliseconds: 30));
-      expect(closeDone, isFalse,
-          reason: 'close(drainTimeout:) must wait for the in-flight open');
+      expect(
+        closeDone,
+        isFalse,
+        reason: 'close(drainTimeout:) must wait for the in-flight open',
+      );
 
       // The open lands after close(): the acquire is rejected pool-closed and
       // the orphan connection self-disposes, which wakes the drain.
@@ -1957,20 +1993,30 @@ void main() {
       gates[0].complete(c);
       await expectLater(
         pending,
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraConnectionClosed,
+          ),
+        ),
       );
       await closing;
-      expect(closeDone, isTrue,
-          reason: 'the drain resolves once _pendingOpens reaches 0');
-      expect(c.closeCalls, equals(1),
-          reason: 'the orphaned in-flight open is destroyed');
+      expect(
+        closeDone,
+        isTrue,
+        reason: 'the drain resolves once _pendingOpens reaches 0',
+      );
+      expect(
+        c.closeCalls,
+        equals(1),
+        reason: 'the orphaned in-flight open is destroyed',
+      );
       expect(pool.connectionsOpen, equals(0));
     });
 
     test('close(drainTimeout:) waits for ALL concurrent in-flight opens to '
-        'finish tearing down, not just the first (Release 1.0 closeout)',
-        () async {
+        'finish tearing down, not just the first (Release 1.0 closeout)', () async {
       // Two grow-on-demand opens are in flight at close time. _pendingOpens is
       // decremented only AFTER each orphan's teardown completes, so the first
       // teardown finishing must NOT resolve the drain while the second is still
@@ -2003,26 +2049,38 @@ void main() {
       final cB = _FakeConnection()..closeGate = Completer<void>();
       final rejA = expectLater(
         pendingA,
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraConnectionClosed,
+          ),
+        ),
       );
       final rejB = expectLater(
         pendingB,
-        throwsA(isA<OracleException>()
-            .having((e) => e.errorCode, 'errorCode', oraConnectionClosed)),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraConnectionClosed,
+          ),
+        ),
       );
       gates[0].complete(cA);
       gates[1].complete(cB);
       await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(closeDone, isFalse,
-          reason: 'both teardowns are still gated');
+      expect(closeDone, isFalse, reason: 'both teardowns are still gated');
 
       // Finish only the FIRST teardown: the drain must still be pending,
       // because _pendingOpens is decremented after the teardown (not before).
       cA.closeGate!.complete();
       await Future<void>.delayed(const Duration(milliseconds: 30));
-      expect(closeDone, isFalse,
-          reason: 'the drain must wait for the second teardown too');
+      expect(
+        closeDone,
+        isFalse,
+        reason: 'the drain must wait for the second teardown too',
+      );
 
       // Finish the second teardown: now the drain resolves.
       cB.closeGate!.complete();

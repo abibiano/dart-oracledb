@@ -91,7 +91,8 @@ class BindParser {
       if (sorted[i] != i + 1) {
         throw OracleException(
           errorCode: oraBindMismatch,
-          message: 'Positional bind parameters must be sequential starting '
+          message:
+              'Positional bind parameters must be sequential starting '
               'from :1. Found: ${sorted.join(', ')}',
         );
       }
@@ -152,7 +153,8 @@ class BindParser {
     if (uniqueNames.length != providedValueCount) {
       throw OracleException(
         errorCode: oraBindMismatch,
-        message: 'Bind parameter count mismatch: SQL has '
+        message:
+            'Bind parameter count mismatch: SQL has '
             '${uniqueNames.length} unique placeholders but '
             '$providedValueCount values provided',
       );

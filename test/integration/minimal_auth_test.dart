@@ -26,90 +26,99 @@ void main() {
     print('${record.level.name}: ${record.loggerName}: ${record.message}');
   });
 
-  group('Minimal Auth Protocol Test',
-      skip: !integrationEnabled ? 'Integration tests disabled' : null, () {
-    late Transport transport;
+  group(
+    'Minimal Auth Protocol Test',
+    skip: !integrationEnabled ? 'Integration tests disabled' : null,
+    () {
+      late Transport transport;
 
-    /// Builds the TNS CONNECT packet body.
-    Uint8List buildConnectData() {
-      final tnsDescriptor = '(DESCRIPTION='
-          '(ADDRESS=(PROTOCOL=TCP)(HOST=$testHost)(PORT=$testPort))'
-          '(CONNECT_DATA=(SERVICE_NAME=$testService)))';
-      final descriptorBytes = Uint8List.fromList(utf8.encode(tnsDescriptor));
-      return buildConnectPacketBody(descriptorBytes);
-    }
-
-    setUp(() async {
-      transport = Transport();
-      await transport.connect(testHost, testPort);
-
-      // Perform TNS CONNECT/ACCEPT handshake only
-      // Protocol negotiation will be batched with AUTH_PHASE_ONE
-      final connectData = buildConnectData();
-      await transport.sendConnectReceiveAccept(connectData);
-    });
-
-    tearDown(() async {
-      await transport.disconnect();
-    });
-
-    test('fast auth protocol (FAST_AUTH message type 15)', () async {
-      print('\n=== Testing FAST_AUTH Protocol (Oracle 23ai) ===');
-
-      if (!transport.supportsFastAuth) {
-        markTestSkipped(
-            'Server does not advertise FAST_AUTH (e.g. Oracle 19c / 21c).');
-        return;
+      /// Builds the TNS CONNECT packet body.
+      Uint8List buildConnectData() {
+        final tnsDescriptor =
+            '(DESCRIPTION='
+            '(ADDRESS=(PROTOCOL=TCP)(HOST=$testHost)(PORT=$testPort))'
+            '(CONNECT_DATA=(SERVICE_NAME=$testService)))';
+        final descriptorBytes = Uint8List.fromList(utf8.encode(tnsDescriptor));
+        return buildConnectPacketBody(descriptorBytes);
       }
 
-      // Generate client nonce for authentication
-      final clientNonce = Uint8List(16); // Zeros for deterministic test
+      setUp(() async {
+        transport = Transport();
+        await transport.connect(testHost, testPort);
 
-      try {
-        // Send FAST_AUTH message: combines Protocol + DataTypes + AUTH_PHASE_ONE
-        // This is Oracle 23ai's official Fast Authentication protocol
-        await transport.sendFastAuth(
-          username: testUser,
-          clientNonce: clientNonce,
-        );
+        // Perform TNS CONNECT/ACCEPT handshake only
+        // Protocol negotiation will be batched with AUTH_PHASE_ONE
+        final connectData = buildConnectData();
+        await transport.sendConnectReceiveAccept(connectData);
+      });
 
-        // Try to receive AUTH_PHASE_ONE response
-        final response = await transport.receiveData();
-        print(
-            'SUCCESS! Received AUTH_PHASE_ONE response: ${response.length} bytes');
-        print(
-            'Response hex: ${response.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
+      tearDown(() async {
+        await transport.disconnect();
+      });
 
-        // Verify it's an AUTH_PHASE_ONE response (should contain verifier data)
-        expect(response.length, greaterThan(0));
-      } catch (e) {
-        print('FAILED: $e');
-        rethrow;
-      }
-    });
+      test('fast auth protocol (FAST_AUTH message type 15)', () async {
+        print('\n=== Testing FAST_AUTH Protocol (Oracle 23ai) ===');
 
-    test('complete authentication flow (AUTH_PHASE_ONE + AUTH_PHASE_TWO)',
+        if (!transport.supportsFastAuth) {
+          markTestSkipped(
+            'Server does not advertise FAST_AUTH (e.g. Oracle 19c / 21c).',
+          );
+          return;
+        }
+
+        // Generate client nonce for authentication
+        final clientNonce = Uint8List(16); // Zeros for deterministic test
+
+        try {
+          // Send FAST_AUTH message: combines Protocol + DataTypes + AUTH_PHASE_ONE
+          // This is Oracle 23ai's official Fast Authentication protocol
+          await transport.sendFastAuth(
+            username: testUser,
+            clientNonce: clientNonce,
+          );
+
+          // Try to receive AUTH_PHASE_ONE response
+          final response = await transport.receiveData();
+          print(
+            'SUCCESS! Received AUTH_PHASE_ONE response: ${response.length} bytes',
+          );
+          print(
+            'Response hex: ${response.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}',
+          );
+
+          // Verify it's an AUTH_PHASE_ONE response (should contain verifier data)
+          expect(response.length, greaterThan(0));
+        } catch (e) {
+          print('FAILED: $e');
+          rethrow;
+        }
+      });
+
+      test(
+        'complete authentication flow (AUTH_PHASE_ONE + AUTH_PHASE_TWO)',
         () async {
-      print('\n=== Testing Complete Authentication Flow ===');
+          print('\n=== Testing Complete Authentication Flow ===');
 
-      try {
-        // Use AuthFlow to perform complete authentication
-        final authFlow = AuthFlow();
+          try {
+            // Use AuthFlow to perform complete authentication
+            final authFlow = AuthFlow();
 
-        await authFlow.authenticate(
-          transport: transport,
-          username: testUser,
-          password: testPassword,
-        );
+            await authFlow.authenticate(
+              transport: transport,
+              username: testUser,
+              password: testPassword,
+            );
 
-        print('SUCCESS! Authentication completed');
-        expect(authFlow.state, equals(AuthState.authenticated));
-        expect(authFlow.sessionKey, isNotNull);
-        expect(authFlow.sessionKey!.length, greaterThan(0));
-      } catch (e) {
-        print('FAILED: $e');
-        rethrow;
-      }
-    });
-  });
+            print('SUCCESS! Authentication completed');
+            expect(authFlow.state, equals(AuthState.authenticated));
+            expect(authFlow.sessionKey, isNotNull);
+            expect(authFlow.sessionKey!.length, greaterThan(0));
+          } catch (e) {
+            print('FAILED: $e');
+            rethrow;
+          }
+        },
+      );
+    },
+  );
 }

@@ -466,16 +466,26 @@ void main() {
           final locator = lobLocatorOf(lob);
           // The load-bearing guard: without this, every assertion below could
           // pass on the UTF-16 path and prove nothing about the UTF-8 branch.
-          expect(locator.isNChar, isFalse,
-              reason: 'a plain CLOB is not national-charset');
-          expect(locator.usesVarLengthCharset, isFalse,
-              reason: 'MEASURED: on WE8MSWIN1252 a fetched CLOB locator does '
-                  'NOT carry the variable-length-charset flag, so _isUtf16 is '
-                  'false and the UTF-8 branch is taken - the one thing no '
-                  'AL32UTF8 fixture can show');
+          expect(
+            locator.isNChar,
+            isFalse,
+            reason: 'a plain CLOB is not national-charset',
+          );
+          expect(
+            locator.usesVarLengthCharset,
+            isFalse,
+            reason:
+                'MEASURED: on WE8MSWIN1252 a fetched CLOB locator does '
+                'NOT carry the variable-length-charset flag, so _isUtf16 is '
+                'false and the UTF-8 branch is taken - the one thing no '
+                'AL32UTF8 fixture can show',
+          );
           expect(lob.type, equals(OracleDbType.clob));
-          expect(lob.length, equals(utf8FormText.length),
-              reason: 'length is in characters, not UTF-8 bytes');
+          expect(
+            lob.length,
+            equals(utf8FormText.length),
+            reason: 'length is in characters, not UTF-8 bytes',
+          );
         } finally {
           await lob.close();
         }
@@ -498,14 +508,19 @@ void main() {
           // character: the concatenation must always equal read().
           for (final pieceSize in [1, 2, 3, 4, 7, 100]) {
             final pieces = await lob.textStream(pieceSize: pieceSize).toList();
-            expect(pieces.join(), equals(whole),
-                reason: 'pieceSize $pieceSize must reassemble exactly');
+            expect(
+              pieces.join(),
+              equals(whole),
+              reason: 'pieceSize $pieceSize must reassemble exactly',
+            );
             expect(pieces.join(), equals(utf8FormText));
           }
           // And a bounded read landing exactly on an accented character.
           final acuteIndex = utf8FormText.indexOf('\u{00E9}');
-          expect(await lob.read(offset: acuteIndex + 1, amount: 1),
-              equals('\u{00E9}'));
+          expect(
+            await lob.read(offset: acuteIndex + 1, amount: 1),
+            equals('\u{00E9}'),
+          );
         } finally {
           await lob.close();
         }
@@ -526,7 +541,8 @@ void main() {
         // boundary would split a sequence if the server billed bytes.
         // Eight accented characters, each 2 bytes in UTF-8 and 1 byte in
         // WE8MSWIN1252: é è ü ñ ç à ö â.
-        const allMultibyte = '\u{00E9}\u{00E8}\u{00FC}\u{00F1}'
+        const allMultibyte =
+            '\u{00E9}\u{00E8}\u{00FC}\u{00F1}'
             '\u{00E7}\u{00E0}\u{00F6}\u{00E2}';
         await connection.execute(
           'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
@@ -543,9 +559,13 @@ void main() {
               for (var left = 8; left > 0; left -= pieceSize)
                 left < pieceSize ? left : pieceSize,
             ];
-            expect(pieces.map((p) => p.length).toList(), equals(expected),
-                reason: 'pieceSize $pieceSize: whole characters per piece - the '
-                    'server never hands back a partial UTF-8 sequence');
+            expect(
+              pieces.map((p) => p.length).toList(),
+              equals(expected),
+              reason:
+                  'pieceSize $pieceSize: whole characters per piece - the '
+                  'server never hands back a partial UTF-8 sequence',
+            );
           }
         } finally {
           await lob.close();
@@ -570,12 +590,19 @@ void main() {
             final capped = await lob.read();
             final ops = connection.debugLobReadOps - before;
             connection.debugLobReadPieceUnits = null;
-            expect(ops, equals((utf8FormText.length + cap - 1) ~/ cap),
-                reason: 'cap $cap: ceil(chars/cap) READs on the UTF-8 form too');
+            expect(
+              ops,
+              equals((utf8FormText.length + cap - 1) ~/ cap),
+              reason: 'cap $cap: ceil(chars/cap) READs on the UTF-8 form too',
+            );
             expect(ops, greaterThan(1));
-            expect(capped, equals(reference),
-                reason: 'cap $cap: assembling BYTES and decoding once keeps a '
-                    'multibyte character whole across a piece boundary');
+            expect(
+              capped,
+              equals(reference),
+              reason:
+                  'cap $cap: assembling BYTES and decoding once keeps a '
+                  'multibyte character whole across a piece boundary',
+            );
           }
         } finally {
           connection.debugLobReadPieceUnits = null;

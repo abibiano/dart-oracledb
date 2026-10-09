@@ -147,8 +147,10 @@ class OracleSocket {
   /// or the socket is closed.
   ///
   /// Throws [OracleException] if the socket is closed before enough data arrives.
-  Future<Uint8List> read(int length,
-      {Duration timeout = const Duration(seconds: 30)}) async {
+  Future<Uint8List> read(
+    int length, {
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
     final deadline = DateTime.now().add(timeout);
 
     while (_pendingData.length < length) {
@@ -156,7 +158,8 @@ class OracleSocket {
       if (!isConnected) {
         throw OracleException(
           errorCode: oraNetworkError,
-          message: 'Connection closed by server while waiting for data: '
+          message:
+              'Connection closed by server while waiting for data: '
               'need $length bytes, have ${_pendingData.length}',
         );
       }
@@ -235,7 +238,8 @@ class OracleSocket {
             ? null
             : (X509Certificate cert) {
                 _log.warning(
-                    'Accepting unverified certificate: ${cert.subject}');
+                  'Accepting unverified certificate: ${cert.subject}',
+                );
                 return true;
               },
       );

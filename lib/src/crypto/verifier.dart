@@ -49,8 +49,10 @@ Uint8List pbkdf2Sha512({
 /// Throws [ArgumentError] if arrays have different lengths.
 Uint8List xorBytes(Uint8List a, Uint8List b) {
   if (a.length != b.length) {
-    throw ArgumentError('Byte arrays must have equal length for XOR: '
-        '${a.length} != ${b.length}');
+    throw ArgumentError(
+      'Byte arrays must have equal length for XOR: '
+      '${a.length} != ${b.length}',
+    );
   }
 
   final result = Uint8List(a.length);

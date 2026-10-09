@@ -135,8 +135,7 @@ void main() {
     // ORA-000-1 and never throws; negative codes render as the
     // ORA-invalid(<code>) sentinel, >=100000 keeps full digits.
     group('range-safe ORA code formatting', () {
-      test('code renders negative errorCode as ORA-invalid(...), no throw',
-          () {
+      test('code renders negative errorCode as ORA-invalid(...), no throw', () {
         const exception = OracleException(
           errorCode: -1,
           message: 'bogus negative code',
@@ -168,14 +167,16 @@ void main() {
         expect(exception.code, equals('ORA-99999'));
       });
 
-      test('code emits full digits for errorCode >= 100000 (floor, not cap)',
-          () {
-        const exception = OracleException(
-          errorCode: 100000,
-          message: 'six-digit code passes through unpadded',
-        );
-        expect(exception.code, equals('ORA-100000'));
-      });
+      test(
+        'code emits full digits for errorCode >= 100000 (floor, not cap)',
+        () {
+          const exception = OracleException(
+            errorCode: 100000,
+            message: 'six-digit code passes through unpadded',
+          );
+          expect(exception.code, equals('ORA-100000'));
+        },
+      );
 
       test('toString never throws for negative errorCode and delegates to '
           'code', () {
@@ -184,8 +185,11 @@ void main() {
           message: 'bogus negative code',
         );
         final str = exception.toString();
-        expect(str, contains('ORA-invalid(-1)'),
-            reason: 'toString delegates to the total code getter');
+        expect(
+          str,
+          contains('ORA-invalid(-1)'),
+          reason: 'toString delegates to the total code getter',
+        );
         expect(str, contains('bogus negative code'));
         expect(str, isNot(contains('ORA-000-1')));
       });
@@ -238,8 +242,11 @@ void main() {
           sql: 'SELECT * FROM missing WHERE x = :1',
           offset: 14,
         );
-        expect(exception.toString(), isNot(contains(sentinel)),
-            reason: 'OracleException must not store or render bind values');
+        expect(
+          exception.toString(),
+          isNot(contains(sentinel)),
+          reason: 'OracleException must not store or render bind values',
+        );
         expect(exception.message, isNot(contains(sentinel)));
       });
     });
@@ -290,13 +297,15 @@ void main() {
       );
     });
 
-    test('a negative code renders as the ORA-invalid sentinel, never throws',
-        () {
-      expect(
-        const OracleBatchError(errorCode: -1, offset: 0, message: 'x').code,
-        'ORA-invalid(-1)',
-      );
-    });
+    test(
+      'a negative code renders as the ORA-invalid sentinel, never throws',
+      () {
+        expect(
+          const OracleBatchError(errorCode: -1, offset: 0, message: 'x').code,
+          'ORA-invalid(-1)',
+        );
+      },
+    );
 
     test('toString names the failed input row and the Oracle code', () {
       const e = OracleBatchError(
@@ -313,11 +322,7 @@ void main() {
       // is a 0-based input-row index. They must not be conflated: the same
       // numeric value carries different meaning on each type.
       const batch = OracleBatchError(errorCode: 1, offset: 5, message: 'm');
-      const exc = OracleException(
-        errorCode: 1,
-        message: 'm',
-        offset: 5,
-      );
+      const exc = OracleException(errorCode: 1, message: 'm', offset: 5);
       // Both hold 5, but they answer different questions (row vs SQL char).
       expect(batch.offset, 5);
       expect(exc.offset, 5);

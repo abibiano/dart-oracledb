@@ -56,18 +56,18 @@ void main() {
       );
     });
 
-    test(
-        '300+ sequential executes cross the sequence wrap without protocol '
+    test('300+ sequential executes cross the sequence wrap without protocol '
         'corruption', () async {
       final samples = <int>[];
       for (var i = 1; i <= 300; i++) {
-        final result = await conn.execute(
-          'SELECT :v AS v FROM dual',
-          {'v': i},
+        final result = await conn.execute('SELECT :v AS v FROM dual', {'v': i});
+        expect(
+          result.rows.single['V'],
+          equals(i),
+          reason:
+              'bind round-trip corrupted at iteration $i '
+              '(sequence counter now at ${conn.debugSequence})',
         );
-        expect(result.rows.single['V'], equals(i),
-            reason: 'bind round-trip corrupted at iteration $i '
-                '(sequence counter now at ${conn.debugSequence})');
         samples.add(conn.debugSequence);
       }
 
@@ -76,15 +76,23 @@ void main() {
         everyElement(allOf(greaterThanOrEqualTo(0), lessThanOrEqualTo(0xFF))),
         reason: 'sequence samples must stay within the one-byte 0..255 range',
       );
-      expect(_hasDescent(samples), isTrue,
-          reason: '300 executes advance the one-byte counter by more than '
-              '256, so a descent (e.g. 255 -> 0) must appear in the samples; '
-              'none did (first=${samples.first}, last=${samples.last}) — '
-              'the counter never passed through the wrap');
-      expect(_cumulativeModularAdvance(samples), greaterThanOrEqualTo(256),
-          reason: 'the total forward (mod-256) advance across the sampled '
-              'window must cover at least one full cycle — independent of '
-              'how many sequence numbers a single execute consumes');
+      expect(
+        _hasDescent(samples),
+        isTrue,
+        reason:
+            '300 executes advance the one-byte counter by more than '
+            '256, so a descent (e.g. 255 -> 0) must appear in the samples; '
+            'none did (first=${samples.first}, last=${samples.last}) — '
+            'the counter never passed through the wrap',
+      );
+      expect(
+        _cumulativeModularAdvance(samples),
+        greaterThanOrEqualTo(256),
+        reason:
+            'the total forward (mod-256) advance across the sampled '
+            'window must cover at least one full cycle — independent of '
+            'how many sequence numbers a single execute consumes',
+      );
     });
 
     test('post-wrap mixed RPCs still work', () async {
@@ -94,38 +102,46 @@ void main() {
       var previous = conn.debugSequence;
       var wrapped = false;
       for (var i = 1; i <= 300 && !wrapped; i++) {
-        final result = await conn.execute(
-          'SELECT :v AS v FROM dual',
-          {'v': i},
+        final result = await conn.execute('SELECT :v AS v FROM dual', {'v': i});
+        expect(
+          result.rows.single['V'],
+          equals(i),
+          reason:
+              'bind round-trip corrupted at iteration $i while driving '
+              'the counter to the wrap '
+              '(sequence counter now at ${conn.debugSequence})',
         );
-        expect(result.rows.single['V'], equals(i),
-            reason: 'bind round-trip corrupted at iteration $i while driving '
-                'the counter to the wrap '
-                '(sequence counter now at ${conn.debugSequence})');
         final current = conn.debugSequence;
         wrapped = current < previous;
         previous = current;
       }
-      expect(wrapped, isTrue,
-          reason: 'the counter must wrap within 300 executes before the '
-              'post-wrap DML phase can prove anything');
+      expect(
+        wrapped,
+        isTrue,
+        reason:
+            'the counter must wrap within 300 executes before the '
+            'post-wrap DML phase can prove anything',
+      );
 
       // Post-wrap mixed RPC types on the same connection: INSERT with binds,
       // COMMIT, then SELECT the committed row back.
       final id = nextTestId();
       const value = 'post-wrap survivor';
-      await conn.execute(
-        'INSERT INTO $testTable (id, v) VALUES (:id, :v)',
-        {'id': id, 'v': value},
-      );
+      await conn.execute('INSERT INTO $testTable (id, v) VALUES (:id, :v)', {
+        'id': id,
+        'v': value,
+      });
       await conn.commit();
 
       final readBack = await conn.execute(
         'SELECT v FROM $testTable WHERE id = :id',
         {'id': id},
       );
-      expect(readBack.rows.single['V'], equals(value),
-          reason: 'committed row must read back correctly after the wrap');
+      expect(
+        readBack.rows.single['V'],
+        equals(value),
+        reason: 'committed row must read back correctly after the wrap',
+      );
     });
   });
 }

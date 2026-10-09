@@ -119,7 +119,8 @@ void main() {
     group('round-trip', () {
       test('encode-decode preserves all fields', () {
         final original = Capabilities(
-          flags: capabilityEndOfCallStatus |
+          flags:
+              capabilityEndOfCallStatus |
               capabilityOci8Lob |
               capabilitySessionState,
           protocolVersion: 320,
@@ -151,7 +152,8 @@ void main() {
     group('negotiate', () {
       test('returns intersection of client and server capabilities', () {
         final client = Capabilities(
-          flags: capabilityEndOfCallStatus |
+          flags:
+              capabilityEndOfCallStatus |
               capabilityOci8Lob |
               capabilitySessionState,
         );

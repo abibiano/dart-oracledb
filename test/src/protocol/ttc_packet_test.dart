@@ -10,10 +10,7 @@ void main() {
     group('constructor', () {
       test('creates packet with function code and payload', () {
         final payload = Uint8List.fromList([0x01, 0x02, 0x03]);
-        final packet = TtcPacket(
-          functionCode: ttcProtocol,
-          payload: payload,
-        );
+        final packet = TtcPacket(functionCode: ttcProtocol, payload: payload);
 
         expect(packet.functionCode, equals(ttcProtocol));
         expect(packet.payload, equals(payload));
@@ -163,12 +160,21 @@ void main() {
           final encoded = original.encode();
           final decoded = TtcPacket.decode(encoded);
 
-          expect(decoded.functionCode, equals(original.functionCode),
-              reason: 'Function code mismatch for $funcCode');
-          expect(decoded.sequence, equals(original.sequence),
-              reason: 'Sequence mismatch for $funcCode');
-          expect(decoded.payload, equals(original.payload),
-              reason: 'Payload mismatch for $funcCode');
+          expect(
+            decoded.functionCode,
+            equals(original.functionCode),
+            reason: 'Function code mismatch for $funcCode',
+          );
+          expect(
+            decoded.sequence,
+            equals(original.sequence),
+            reason: 'Sequence mismatch for $funcCode',
+          );
+          expect(
+            decoded.payload,
+            equals(original.payload),
+            reason: 'Payload mismatch for $funcCode',
+          );
         }
       });
 

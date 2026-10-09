@@ -48,8 +48,10 @@ class ProtocolRequest extends Message {
     buffer.writeBytes(Uint8List.fromList(driverBytes));
     buffer.writeUint8(0);
 
-    _log.fine('Encoded protocol request: version=$ttcProtocolVersion, '
-        'driver=$driverName');
+    _log.fine(
+      'Encoded protocol request: version=$ttcProtocolVersion, '
+      'driver=$driverName',
+    );
   }
 }
 
@@ -160,8 +162,10 @@ class ProtocolResponse {
       }
     }
 
-    _log.fine('Decoded protocol response: serverVersion=$serverVersion, '
-        'charset=$charsetId, nCharset=$nCharsetId, flags=$serverFlags');
+    _log.fine(
+      'Decoded protocol response: serverVersion=$serverVersion, '
+      'charset=$charsetId, nCharset=$nCharsetId, flags=$serverFlags',
+    );
 
     return ProtocolResponse(
       serverVersion: serverVersion,
@@ -205,8 +209,10 @@ class DataTypesRequest extends Message {
     buffer.writeUint8(runtimeCaps.length);
     buffer.writeBytes(runtimeCaps);
 
-    _log.fine('Encoded data types request: compileCaps=${compileCaps.length}b, '
-        'runtimeCaps=${runtimeCaps.length}b');
+    _log.fine(
+      'Encoded data types request: compileCaps=${compileCaps.length}b, '
+      'runtimeCaps=${runtimeCaps.length}b',
+    );
   }
 }
 
@@ -238,17 +244,21 @@ class DataTypesResponse {
 
     // Server compile capabilities (length-prefixed)
     final compileLen = buffer.readUint8();
-    final serverCompileCaps =
-        compileLen > 0 ? buffer.readBytes(compileLen) : Uint8List(0);
+    final serverCompileCaps = compileLen > 0
+        ? buffer.readBytes(compileLen)
+        : Uint8List(0);
 
     // Server runtime capabilities (length-prefixed)
     final runtimeLen = buffer.readUint8();
-    final serverRuntimeCaps =
-        runtimeLen > 0 ? buffer.readBytes(runtimeLen) : Uint8List(0);
+    final serverRuntimeCaps = runtimeLen > 0
+        ? buffer.readBytes(runtimeLen)
+        : Uint8List(0);
 
-    _log.fine('Decoded data types response: '
-        'compileCaps=${serverCompileCaps.length}b, '
-        'runtimeCaps=${serverRuntimeCaps.length}b');
+    _log.fine(
+      'Decoded data types response: '
+      'compileCaps=${serverCompileCaps.length}b, '
+      'runtimeCaps=${serverRuntimeCaps.length}b',
+    );
 
     return DataTypesResponse(
       serverCompileCaps: serverCompileCaps,
