@@ -24,7 +24,9 @@ location: lib/src/transport/transport.dart sendExecute -> _sendLobDefines
 source_spec: `13-2-oracle-12c-json-as-blob.md`
 severity: medium
 reason: Found while reading the code and confirmed live on 23ai and 21c. With preserveTimestampTimeZone: true, SELECT TIMESTAMP '... +05:30' returns OracleTimestampTz, but SELECT TO_CLOB('x'), TIMESTAMP '... +05:30' returns DateTime. Transport.sendExecute calls _sendLobDefines, which decodes without the flag; later FETCH rounds pass it. This existed before this story and is unrelated to JSON. The new Transport.defineCursor used for implicit results does pass the flag.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-define-round-predicate-tz
+resolution-undo: e96d7a5b57fbfe62d1719cb0628c2c888b7c7050722c9ae365e972ada00fc038 2026-10-09 7374617475733a206f70656e
 
 ### DW-4: An implicit result combining LOB and nested CURSOR() columns may fail on Oracle 21c after its first prefetch batch.
 origin: spec-deferred dd52ebc1455b
@@ -77,7 +79,9 @@ origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-
 location: lib/src/connection.dart:704, 1079-1081, 3715; lib/src/transport/transport.dart:1086-1091
 severity: medium
 reason: Retro action 3 (F5). Add one ColumnMetadata getter and use it at all four sites; decide deliberately where JSON is excluded. Consequence today: the fetchLobs reject guard and cached-cursor re-parse ignore a native JSON column.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-define-round-predicate-tz
+resolution-undo: e96d7a5b57fbfe62d1719cb0628c2c888b7c7050722c9ae365e972ada00fc038 2026-10-09 7374617475733a206f70656e
 
 ### DW-10: preserveTimestampTimeZone is not forwarded on the top-level DEFINE round, so the first batch yields DateTime and later batches OracleTimestampTz; the real Transport.defineCursor is untested.
 
@@ -85,7 +89,9 @@ origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-
 location: lib/src/transport/transport.dart:1093-1099, 2518-2539, 2557-2572
 severity: medium
 reason: Retro action 4 (F6). Closes DW-3: forward the flag through _sendLobDefines and add a live test over the real defineCursor with preserveTimestampTimeZone true plus a failing-DEFINE unit test of the non-throwing contract.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-define-round-predicate-tz
+resolution-undo: e96d7a5b57fbfe62d1719cb0628c2c888b7c7050722c9ae365e972ada00fc038 2026-10-09 7374617475733a206f70656e
 
 ### DW-11: Text-JSON BLOB decoding returns double for 1.0 / 1e2 where OSON NUMBER returns int, and a text 1e999 becomes Infinity that now re-binds as BINARY_DOUBLE.
 

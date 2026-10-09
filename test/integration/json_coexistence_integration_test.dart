@@ -373,15 +373,18 @@ void main() {
             ])).rows.single['DOC'],
             nativeList,
           );
+          // Native JSON needs column defines (ColumnMetadata.requiresDefine),
+          // so like a CLOB / BLOB SELECT its cached cursor is re-parsed — in
+          // the same cache slot — rather than blind re-executed.
           expect(
             connection.debugFullParseExecutes - parses,
-            equals(0),
-            reason: 'a repeated native-JSON SELECT is never re-parsed',
+            equals(1),
+            reason: 'a repeated native-JSON SELECT re-parses (fresh defines)',
           );
           expect(
             connection.debugReuseExecutes - reuses,
-            equals(1),
-            reason: 'a repeated native-JSON SELECT reuses its cached cursor',
+            equals(0),
+            reason: 'a repeated native-JSON SELECT is never blind re-executed',
           );
           expectQuiescent('step 1 (native JSON)');
           // Three new statements: the named INSERT, the positional INSERT and
@@ -1143,23 +1146,32 @@ void main() {
               await expectCommittedState(conn, 'cycle $cycle start');
 
               // The session's statement cache survives release: the native
-              // JSON SELECT is parsed once (cycle 1) and its cursor reused by
-              // every later borrower, whatever the previous one abandoned.
+              // JSON SELECT keeps its one cache slot across every borrower,
+              // whatever the previous one abandoned. Native JSON needs column
+              // defines (ColumnMetadata.requiresDefine), so each run re-parses
+              // the cached cursor rather than blind re-executing it — never a
+              // reuse, and never a second slot.
               final parses = conn.debugFullParseExecutes;
               final reuses = conn.debugReuseExecutes;
+              final slots = conn.debugCacheSize;
               _expectJsonValue(
                 (await conn.execute(probeSql, [seedId])).rows.single['DOC'],
                 _richDoc(),
               );
               expect(
                 conn.debugFullParseExecutes - parses,
-                equals(cycle == 1 ? 1 : 0),
+                equals(1),
                 reason: 'cycle $cycle native-JSON SELECT parse count',
               );
               expect(
                 conn.debugReuseExecutes - reuses,
-                equals(cycle == 1 ? 0 : 1),
-                reason: 'cycle $cycle native-JSON SELECT cursor reuse',
+                equals(0),
+                reason: 'cycle $cycle native-JSON SELECT is never blind reused',
+              );
+              expect(
+                conn.debugCacheSize - slots,
+                equals(cycle == 1 ? 1 : 0),
+                reason: 'cycle $cycle native-JSON SELECT cache slot',
               );
 
               // This cycle's committed JSON row (both storage forms).

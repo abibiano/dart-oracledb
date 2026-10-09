@@ -698,9 +698,15 @@ class OracleConnection {
   /// Used to fail loud when `fetchLobs: true` reaches a nested `CURSOR(...)`
   /// result column or a REF CURSOR OUT bind carrying a LOB: such a LOB is
   /// rejected rather than wrapped — see [_rejectCursorEmbeddedLob].
-  static bool _cursorCarriesLob(List<ColumnMetadata> columns) => columns.any(
-    (c) => c.oracleType == oc.oraTypeClob || c.oracleType == oc.oraTypeBlob,
-  );
+  ///
+  /// Derived from [ColumnMetadata.requiresDefine] (the one "LOB-like column"
+  /// predicate) with native JSON DELIBERATELY excluded: the reject exists
+  /// because a cursor-embedded LOB would need a tracked [OracleLob] handle,
+  /// while a native JSON value decodes inline to a `Map` / `List` / scalar
+  /// with no handle lifecycle at all — rejecting it would regress a shape
+  /// that works under `fetchLobs: true`.
+  static bool _cursorCarriesLob(List<ColumnMetadata> columns) =>
+      columns.any((c) => c.requiresDefine && c.oracleType != oc.oraTypeJson);
 
   /// Fails loud when `fetchLobs: true` would have to hand back a LOB carried by
   /// a nested `CURSOR(...)` result column or a REF CURSOR OUT bind's rows.
@@ -1049,14 +1055,11 @@ class OracleConnection {
   /// transport. Story 13.2 needs this shape to read JSON stored in a BLOB.
   /// The same rule applies to every describe-created cursor: implicit results,
   /// REF CURSOR OUT binds ([_wrapRefCursorOutBinds]) and nested `CURSOR()`
-  /// columns ([_drainNestedCursor]).
+  /// columns ([_drainNestedCursor]). The per-column rule is
+  /// [ColumnMetadata.requiresDefine], shared with the top-level DEFINE round
+  /// and the statement cache's re-parse decision.
   static bool _cursorRequiresDefine(List<ColumnMetadata> columns) =>
-      columns.any(
-        (c) =>
-            c.oracleType == oc.oraTypeClob ||
-            c.oracleType == oc.oraTypeBlob ||
-            c.oracleType == oc.oraTypeJson,
-      );
+      columns.any((c) => c.requiresDefine);
 
   /// Eagerly drains every implicit result cursor ([descriptors]) returned by a
   /// PL/SQL `DBMS_SQL.RETURN_RESULT` block, in server-returned order, into one
@@ -3682,16 +3685,18 @@ class OracleConnection {
     if (stmt.eligible) {
       cacheEntry = _cache.acquire(stmt.cacheKey);
       if (cacheEntry != null) {
-        // A cursor whose result shape contains a locator LOB column (CLOB or
-        // BLOB) is never blind-re-executed: without fresh defines the server
-        // stops sending the LOB-prefetch metadata and the row stream misaligns.
-        // Close the old cursor (via the piggyback on this same execute) and
-        // re-parse to re-establish the prefetch shape.
-        final hasLobColumn = cacheEntry.columnMetadata.any(
-          (c) =>
-              c.oracleType == oc.oraTypeClob || c.oracleType == oc.oraTypeBlob,
+        // A cursor whose result shape needs column defines — a locator LOB
+        // (CLOB / NCLOB / BLOB) or a native JSON column
+        // ([ColumnMetadata.requiresDefine]) — is never blind-re-executed.
+        // For a locator LOB a blind re-execute misaligns the row stream (the
+        // server stops sending the LOB-prefetch metadata); native JSON follows
+        // the same rule so every define decision shares one predicate. Close
+        // the old cursor (via the piggyback on this same execute) and re-parse
+        // to re-establish the prefetch shape.
+        final needsFreshDefines = _cursorRequiresDefine(
+          cacheEntry.columnMetadata,
         );
-        if (hasLobColumn && cacheEntry.cursorId != 0) {
+        if (needsFreshDefines && cacheEntry.cursorId != 0) {
           _cache.requeueCursorsToClose([cacheEntry.cursorId]);
           cacheEntry.cursorId = 0;
         }

@@ -2252,6 +2252,76 @@ void main() {
     });
   });
 
+  // ColumnMetadata.requiresDefine is the ONE "needs a DEFINE call" predicate,
+  // shared by the top-level DEFINE round (Transport.sendExecute), the
+  // describe-created cursor DEFINE (implicit results, REF CURSOR OUT binds,
+  // nested CURSOR() columns) and the statement cache's re-parse decision.
+  // node-oracledb parity: requiresDefine for CLOB / NCLOB / BLOB / JSON.
+  group('ColumnMetadata.requiresDefine', () {
+    ColumnMetadata col(int type, {int csfrm = 0, int udsFlags = 0}) =>
+        ColumnMetadata(
+          name: 'C',
+          oracleType: type,
+          maxLength: 0,
+          csfrm: csfrm,
+          udsFlags: udsFlags,
+        );
+
+    test('is true for CLOB, NCLOB, BLOB and native JSON', () {
+      expect(col(oraTypeClob, csfrm: 1).requiresDefine, isTrue);
+      // NCLOB shares the CLOB type code; only the charset form differs.
+      expect(col(oraTypeClob, csfrm: ttcCsfrmNChar).requiresDefine, isTrue);
+      expect(col(oraTypeBlob).requiresDefine, isTrue);
+      expect(col(oraTypeJson).requiresDefine, isTrue);
+    });
+
+    test('keys on the column type alone, not the IS JSON flags', () {
+      // A BLOB IS JSON / IS OSON column is still a BLOB.
+      expect(
+        col(oraTypeBlob, udsFlags: tnsUdsFlagsIsJson).requiresDefine,
+        isTrue,
+      );
+      expect(
+        col(oraTypeBlob, udsFlags: tnsUdsFlagsIsOson).requiresDefine,
+        isTrue,
+      );
+      // VARCHAR2 / RAW IS JSON columns are inline values: no define.
+      expect(
+        col(oraTypeVarchar, udsFlags: tnsUdsFlagsIsJson).requiresDefine,
+        isFalse,
+      );
+      expect(
+        col(oraTypeRaw, udsFlags: tnsUdsFlagsIsJson).requiresDefine,
+        isFalse,
+      );
+    });
+
+    test('is false for every non-LOB, non-JSON type', () {
+      for (final type in [
+        oraTypeVarchar,
+        oraTypeNumber,
+        oraTypeLong,
+        oraTypeRowid,
+        oraTypeDate,
+        oraTypeRaw,
+        oraTypeLongRaw,
+        oraTypeChar,
+        oraTypeCursor,
+        oraTypeBfile,
+        oraTypeTimestamp,
+        oraTypeTimestampTz,
+        oraTypeTimestampLtz,
+      ]) {
+        expect(col(type).requiresDefine, isFalse, reason: 'type $type');
+        expect(
+          col(type, csfrm: ttcCsfrmNChar).requiresDefine,
+          isFalse,
+          reason: 'NCHAR-form type $type',
+        );
+      }
+    });
+  });
+
   // JSON (type 119) decode: the wire shape is the LOB-prefetch form with the
   // OSON document inline (node-oracledb packet.js readOson): UB4 locator-ish
   // length (0 ⇒ SQL NULL, nothing follows), UB8 size and UB4 chunk size (both

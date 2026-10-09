@@ -9,6 +9,8 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:meta/meta.dart';
+
 import '../../errors.dart';
 import '../../oracle_timestamp_tz.dart';
 import '../buffer.dart';
@@ -1105,6 +1107,26 @@ class ColumnMetadata {
   /// reports this bit WITHOUT [isJson] on such a column, so callers testing
   /// "is this a JSON column" must check both.
   bool get isOson => (udsFlags & tnsUdsFlagsIsOson) != 0;
+
+  /// Whether a query cursor carrying this column must announce column defines
+  /// (a DEFINE call with the LOB-prefetch cont-flag) before rows can be
+  /// decoded: a locator LOB — CLOB, NCLOB (which shares the CLOB type code),
+  /// BLOB — or a native `JSON` column. node-oracledb sets `requiresDefine` for
+  /// exactly these types (`withData.js` `postProcess`, `connection.js`
+  /// `_handleDefines`). Without the defines the server ships bare locators /
+  /// bare JSON values that the decoder cannot read.
+  ///
+  /// The single source of truth for every "needs a DEFINE" decision: the
+  /// top-level DEFINE round in `Transport.sendExecute`, the describe-created
+  /// cursor DEFINE (implicit results, REF CURSOR OUT binds, nested `CURSOR()`
+  /// columns) and the statement cache's re-parse of such a cursor. Keyed on
+  /// the column type alone: a `BLOB ... IS JSON` column is a BLOB and already
+  /// qualifies, while a `VARCHAR2` / `RAW` `IS JSON` column does not.
+  @internal
+  bool get requiresDefine =>
+      oracleType == oraTypeClob ||
+      oracleType == oraTypeBlob ||
+      oracleType == oraTypeJson;
 }
 
 /// Decoder-side bind metadata used to interpret OUT bind values returned in

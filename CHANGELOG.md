@@ -96,6 +96,17 @@
   driver now sends the cursor's LOB-prefetch defines before its first fetch.
   REF CURSOR OUT binds and nested `CURSOR()` columns are unchanged. Validated
   against Oracle 23ai and Oracle 21c.
+- **`preserveTimestampTimeZone: true` now applies to the first row batch of a
+  query that selects a CLOB / NCLOB / BLOB or native JSON column.** That
+  batch arrives in the driver's DEFINE round trip, which decoded `TIMESTAMP
+  WITH TIME ZONE` values as a UTC `DateTime` while later batches returned
+  `OracleTimestampTz` — for example `SELECT TO_CLOB('x'), ts FROM ...`. Eager
+  `execute()` and `resultSet: true` are both fixed. Validated against Oracle
+  23ai and Oracle 21c.
+- **Behavior change:** a repeated SELECT of a native JSON column now re-parses
+  its cached cursor, as CLOB / BLOB queries already did, instead of reusing it
+  without fresh defines. The statement-cache slot is kept, and results are
+  unchanged.
 
 ## 1.4.0
 

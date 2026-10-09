@@ -590,7 +590,12 @@ void main() {
           );
         });
 
-        test('repeated JSON SELECT reuses the cached cursor', () async {
+        // A native JSON column needs column defines (ColumnMetadata
+        // .requiresDefine), so — like a CLOB / BLOB SELECT — its cached
+        // cursor is re-parsed with fresh defines rather than blind
+        // re-executed; the cache slot is kept and the old cursor closes on
+        // the re-parse piggyback.
+        test('repeated JSON SELECT re-parses its cached cursor', () async {
           if (skipWithoutNativeJson()) return;
           final id = nextTestId();
           final doc = <String, Object?>{'cached': true, 'id': id};
@@ -604,17 +609,28 @@ void main() {
 
           final parsesBefore = connection.debugFullParseExecutes;
           final reusesBefore = connection.debugReuseExecutes;
+          final cacheBefore = connection.debugCacheSize;
           final second = await connection.execute(sql, [id]);
           expect(second.rows.single['DOC'], equals(doc));
           expect(
-            connection.debugReuseExecutes,
-            greaterThan(reusesBefore),
-            reason: 'second JSON SELECT must reuse the cached cursor',
+            connection.debugFullParseExecutes - parsesBefore,
+            equals(1),
+            reason: 'second JSON SELECT re-parses (fresh defines)',
           );
           expect(
-            connection.debugFullParseExecutes,
-            equals(parsesBefore),
-            reason: 'second JSON SELECT must not re-parse',
+            connection.debugReuseExecutes,
+            equals(reusesBefore),
+            reason: 'second JSON SELECT is never blind re-executed',
+          );
+          expect(
+            connection.debugCacheSize,
+            equals(cacheBefore),
+            reason: 'the re-parse keeps the one cache slot',
+          );
+          expect(
+            connection.debugPendingCloseCount,
+            equals(0),
+            reason: 'the replaced cursor closed on the re-parse piggyback',
           );
 
           final third = await connection.execute(sql, [id]);

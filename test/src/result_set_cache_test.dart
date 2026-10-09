@@ -1,4 +1,6 @@
 import 'package:oracledb/oracledb.dart';
+import 'package:oracledb/src/protocol/constants.dart'
+    show oraTypeBlob, oraTypeClob, oraTypeJson, oraTypeVarchar;
 import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/transport/transport.dart';
@@ -580,5 +582,78 @@ void main() {
         expect(conn.debugCacheSize, equals(1));
       },
     );
+  });
+
+  // A cached cursor whose describe carries a column that
+  // ColumnMetadata.requiresDefine (CLOB / NCLOB / BLOB / native JSON) is never
+  // blind re-executed: its old server cursor rides the close piggyback of the
+  // same execute and the SQL is re-parsed (cursorId 0), re-establishing the
+  // LOB-prefetch defines. Native JSON used to be missing from this check.
+  group('statement cache re-parses a cursor that requires defines', () {
+    for (final (label, type) in [
+      ('native JSON', oraTypeJson),
+      ('CLOB', oraTypeClob),
+      ('BLOB', oraTypeBlob),
+    ]) {
+      test('$label: a repeated eager SELECT re-parses and closes the old '
+          'cursor', () async {
+        final t = _FakeCacheTransport(
+          firstBatch: _batch(
+            [
+              [1, null],
+            ],
+            more: false,
+            cursorId: 7,
+            columns: [
+              _col('ID'),
+              ColumnMetadata(name: 'D', oracleType: type, maxLength: 0),
+            ],
+          ),
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+
+        await conn.execute('SELECT id, d FROM t');
+        expect(conn.debugCacheSize, equals(1), reason: 'the cursor is cached');
+        await conn.execute('SELECT id, d FROM t');
+        expect(
+          t.sendExecuteCursorIds,
+          equals([0, 0]),
+          reason: 'the second execute re-parses instead of reusing cursor 7',
+        );
+        expect(
+          t.lastCursorsToClose,
+          equals([7]),
+          reason: 'the replaced cursor closes on the re-parse piggyback',
+        );
+        expect(conn.debugCacheSize, equals(1), reason: 'one slot, re-cached');
+        expect(conn.debugPendingCloseCount, equals(0));
+      });
+    }
+
+    test('a scalar-only SELECT still reuses its cached cursor', () async {
+      final t = _FakeCacheTransport(
+        firstBatch: _batch(
+          [
+            [1, 'x'],
+          ],
+          more: false,
+          cursorId: 7,
+          columns: [
+            _col('ID'),
+            const ColumnMetadata(
+              name: 'V',
+              oracleType: oraTypeVarchar,
+              maxLength: 10,
+            ),
+          ],
+        ),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      await conn.execute('SELECT id, v FROM t');
+      await conn.execute('SELECT id, v FROM t');
+      expect(t.sendExecuteCursorIds, equals([0, 7]));
+      expect(t.lastCursorsToClose, isEmpty);
+    });
   });
 }

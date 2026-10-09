@@ -615,10 +615,10 @@ CLOB values round-trip as Dart `String`s by default (opt into an incremental
   truncating. The empty string binds as SQL NULL, consistent with Oracle's
   `'' IS NULL` semantics.
 
-Statement-cache note: result cursors for queries that select CLOB (or BLOB)
-columns are always re-parsed, never blind-reused from the statement cache —
-fresh defines keep the LOB-prefetch row shape intact — while RAW queries keep
-normal cursor reuse.
+Statement-cache note: result cursors for queries that select CLOB (or BLOB,
+or native JSON) columns are always re-parsed, never blind-reused from the
+statement cache — fresh defines keep the LOB-prefetch row shape intact — while
+RAW queries keep normal cursor reuse.
 
 ### BLOB support
 
@@ -989,8 +989,9 @@ Client, no LOB read round trips:
 
 - **Queries** — selecting a `JSON` column returns a `Map`, `List`, or scalar
   (`null` for SQL NULL or a JSON null root). Document shape and member order
-  are preserved; statement-cache
-  cursor reuse and multi-batch fetches work normally.
+  are preserved and multi-batch fetches work normally. As with CLOB / BLOB
+  queries, a repeated JSON SELECT keeps its statement-cache slot but its
+  cursor is re-parsed with fresh defines rather than blind-reused.
 - **Oracle-specific scalars** — a JSON value may also hold Oracle scalars
   the server keeps in their native form (e.g. from `JSON_SCALAR(SYSDATE)` or
   `JSON_OBJECT(... RETURNING JSON)` over typed columns). They map as follows,
@@ -1272,7 +1273,7 @@ RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
 
 - **Character sets** — primary character data (`VARCHAR2`/`CHAR`/`CLOB`) is handled via Oracle's server-side conversion while the client always negotiates UTF-8, so both `AL32UTF8` and non-`AL32UTF8` database character sets are supported (validated against `WE8MSWIN1252`). National types (`NCHAR`/`NVARCHAR2`/`NCLOB`) require the `AL16UTF16` national charset and otherwise fail loud — there is no client-side codec and `NLS_LANG` is ignored. See [Character Set Support](#character-set-support) for the full matrix.
 - **Statement cache and external DDL** — top-level DDL executed on the same connection clears the statement cache, but DDL issued from another session (or inside a PL/SQL block) can leave stale cached SELECT metadata. This matches node-oracledb thin-mode behavior.
-- **CLOB/BLOB cursor re-parse** — result cursors for queries selecting CLOB or BLOB columns are always re-parsed, never blind-reused from the statement cache (fresh defines are required to keep the LOB-prefetch metadata); RAW queries keep normal cursor reuse.
+- **CLOB/BLOB/JSON cursor re-parse** — result cursors for queries selecting CLOB, BLOB or native JSON columns are always re-parsed, never blind-reused from the statement cache (fresh defines are required to keep the LOB-prefetch metadata); RAW queries keep normal cursor reuse.
 - **NUMBER beyond 2⁵³** — integer-valued NUMBERs larger than 2⁵³ decode to `double` and lose precision (Dart `double` limit; matches node-oracledb).
 - **Nested `CURSOR()` / REF CURSOR rows carrying a LOB with `fetchLobs: true`** — a `CLOB`/`NCLOB`/`BLOB` column projected by a nested `CURSOR(...)` column or a `SYS_REFCURSOR` OUT bind is **not** wrapped as an `OracleLob` handle: with `fetchLobs: true` the call fails loud with an `OracleException` (the cursor-embedded handle lifecycle is not built), after the execute round trip and leaving the connection usable. Without `fetchLobs` these rows decode normally on Oracle 23ai and 21c — LOBs materialize as `String` / `Uint8List`, and native `JSON` columns decode to their Dart values (the driver sends a DEFINE call before the cursor's first FETCH, as node-oracledb does). **Workaround for a handle:** project the LOB column outside the cursor (join it into the outer SELECT, or return its key from the cursor and read the LOB in a second statement). `DBMS_SQL.RETURN_RESULT` implicit result sets behave the same way: their LOB / JSON columns decode normally.
 - **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work. As of 1.4 an **open fetched `OracleLob`** (from `fetchLobs: true`) also holds that slot — for the handle's whole lifetime, not just during a round trip, and including handles a streaming result set prefetched but you never asked for — so an unclosed LOB handle is the most likely cause of a concurrent-operation error; a **created-temporary** handle (`createTemporaryClob()` and friends) is deliberately exempt and can be read, written, and bound while open. See [Incremental LOB access with `fetchLobs`](#incremental-lob-access-with-fetchlobs).

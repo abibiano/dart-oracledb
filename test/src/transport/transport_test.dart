@@ -615,6 +615,79 @@ void main() {
       });
     });
 
+    // Transport.defineCursor (the describe-created cursor DEFINE used by
+    // implicit results, REF CURSOR OUT binds and nested CURSOR() columns) must
+    // RETURN a server error as an unsuccessful response, never throw: the
+    // cursor engine's FETCH-failure handling owns it (fail loud on read,
+    // cursor invalidated) exactly as for a failed FETCH round. A fake server
+    // answers every request with one DATA packet carrying a terminal TTC
+    // ERROR (ORA-00932) — terminal on its own for a pre-23.4 server, which a
+    // freshly connected transport assumes.
+    group('defineCursor server-error contract', () {
+      test('a failing DEFINE returns an unsuccessful response, does not throw '
+          'and leaves the transport usable', () async {
+        const message = 'ORA-00932: inconsistent datatypes';
+        final payload = <int>[
+          0x00, 0x00, // data flags
+          ..._ttcErrorMessage(errorNum: 932, message: message),
+        ];
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        var requestsSeen = 0;
+        server.listen((s) {
+          unawaited(s.done.catchError((_) {}));
+          s.listen((_) {
+            requestsSeen++;
+            final packetLen = tnsHeaderSize + payload.length;
+            s.add(<int>[
+              (packetLen >> 8) & 0xFF, packetLen & 0xFF, // length (BE)
+              0x00, 0x00, // checksum
+              tnsPacketData, // type = 6
+              0x00, // marker
+              0x00, 0x00, // header checksum
+              ...payload,
+            ]);
+          }, onError: (_) {});
+        });
+
+        final transport = Transport();
+        await transport.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
+        const columns = [
+          ColumnMetadata(name: 'C', oracleType: oraTypeClob, maxLength: 0),
+          ColumnMetadata(
+            name: 'TS',
+            oracleType: oraTypeTimestampTz,
+            maxLength: 0,
+          ),
+        ];
+
+        for (final preserve in [false, true]) {
+          final response = await transport.defineCursor(
+            7,
+            50,
+            columns: columns,
+            timeout: const Duration(seconds: 5),
+            preserveTimestampTimeZone: preserve,
+          );
+          expect(response.isSuccess, isFalse, reason: 'preserve: $preserve');
+          expect(response.errorCode, equals(932));
+          expect(response.errorMessage, contains('ORA-00932'));
+          expect(response.rows, isEmpty);
+          // The ERROR ended the response cleanly: no framing hazard, so the
+          // transport is NOT poisoned and the next RPC reads its own reply.
+          expect(transport.isCorrupted, isFalse);
+          expect(transport.isConnected, isTrue);
+        }
+        expect(requestsSeen, equals(2), reason: 'one DEFINE per call');
+
+        await transport.disconnect();
+        await server.close();
+      });
+    });
+
     // sendConnectReceiveAccept must honor a poisoned transport and fail fast
     // before reading stale bytes off the wire.
     group('poisoned-state guard on CONNECT/ACCEPT', () {
@@ -1606,4 +1679,47 @@ void main() {
       expect(() => wrongParserWithPreambleSkip(resp), throwsA(anything));
     });
   });
+}
+
+/// Oracle's variable-length UB4 / UB2: a size byte, then that many big-endian
+/// payload bytes (0 is the single byte 0).
+List<int> _ubN(int v) {
+  if (v == 0) return [0];
+  if (v <= 0xff) return [1, v];
+  if (v <= 0xffff) return [2, (v >> 8) & 0xff, v & 0xff];
+  return [4, (v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
+}
+
+/// A complete TTC ERROR (type 4) message for a 20.1+ field version (the
+/// transport's pre-negotiation default, 24), mirroring the layout
+/// `decodeTtcErrorBody` reads (and the `_errorMessage` fixture in
+/// execute_message_test.dart).
+List<int> _ttcErrorMessage({required int errorNum, required String message}) {
+  final codes = message.codeUnits;
+  return <int>[
+    ttcMsgTypeError,
+    ..._ubN(0), // end of call status
+    ..._ubN(0), // end-to-end seq num
+    ..._ubN(0), // current row
+    ..._ubN(0), // err num short
+    ..._ubN(0), // array elem
+    ..._ubN(0), // array elem
+    ..._ubN(0), // cursor id
+    ..._ubN(0), // error position
+    0, 0, 0, 0, 0, 0, // sql type, fatal, flags, cursor opts, UPI, warning
+    ..._ubN(0), ..._ubN(0), 0, ..._ubN(0), ..._ubN(0), // rowid (all zero)
+    ..._ubN(0), // OS error
+    0, 0, // statement error, call number
+    ..._ubN(0), // padding
+    ..._ubN(0), // success iters
+    ..._ubN(0), // oerrdd length
+    ..._ubN(0), // batch error codes count
+    ..._ubN(0), // batch error offsets count
+    ..._ubN(0), // batch error messages count
+    ..._ubN(errorNum), // extended error number
+    0, // extended row count (UB8 0)
+    ..._ubN(0), // 20.1 sql type
+    ..._ubN(0), // 20.1 checksum
+    codes.length, ...codes, // error message
+  ];
 }

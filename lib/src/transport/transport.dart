@@ -1081,21 +1081,23 @@ class Transport {
       // bare locators / bare JSON values (no length/chunk prefix) that cannot
       // be decoded — validated live on 23ai: a JSON FETCH round without defines
       // misaligns the stream. Mirrors node-oracledb `_handleDefines` and its
-      // `requiresDefine = true` for CLOB/BLOB/JSON query columns.
+      // `requiresDefine = true` for CLOB/BLOB/JSON query columns
+      // ([ColumnMetadata.requiresDefine]).
+      //
+      // The DEFINE response IS the first row batch, so it decodes with the
+      // caller's [preserveTimestampTimeZone] exactly like every later FETCH
+      // round; dropping it made the first batch of a LOB/JSON query yield
+      // `DateTime` while later batches yielded `OracleTimestampTz`.
       if (fetchColumns != null &&
           response.rows.isEmpty &&
-          fetchColumns.any(
-            (c) =>
-                c.oracleType == oraTypeClob ||
-                c.oracleType == oraTypeBlob ||
-                c.oracleType == oraTypeJson,
-          )) {
+          fetchColumns.any((c) => c.requiresDefine)) {
         final defineResponse = await _sendLobDefines(
           sql,
           effectiveCursorId,
           fetchColumns,
           prefetchRows,
           timeout,
+          preserveTimestampTimeZone: preserveTimestampTimeZone,
         );
         return ExecuteResponse(
           isSuccess: true,
@@ -2507,42 +2509,51 @@ class Transport {
     );
   }
 
-  /// Sends a DEFINE call for an open query cursor whose result shape
-  /// contains a CLOB column and returns its decoded response.
+  /// Sends a DEFINE call for an open top-level query cursor whose result shape
+  /// contains a column that [ColumnMetadata.requiresDefine] (CLOB / NCLOB /
+  /// BLOB / native JSON) and returns its decoded response.
   ///
   /// The call establishes column defines with the LOB prefetch cont-flag
   /// AND re-executes the cursor: its response carries the first row batch
   /// (up to [prefetchRows] rows) in the prefetch shape, so the caller must
-  /// treat it as the authoritative first batch. Mirrors node-oracledb
-  /// `connection._handleDefines`.
+  /// treat it as the authoritative first batch — decoded with the same
+  /// [preserveTimestampTimeZone] as the FETCH rounds that follow it. Mirrors
+  /// node-oracledb `connection._handleDefines`.
+  ///
+  /// Unlike [defineCursor], a server error here THROWS: this define runs inside
+  /// `sendExecute`, whose callers treat a returned response as a successful
+  /// first batch.
   Future<ExecuteResponse> _sendLobDefines(
     String sql,
     int cursorId,
     List<ColumnMetadata> columns,
     int prefetchRows,
-    Duration? timeout,
-  ) async {
+    Duration? timeout, {
+    required bool preserveTimestampTimeZone,
+  }) async {
     final response = await _sendDefine(
       sql,
       cursorId,
       columns,
       prefetchRows,
       timeout,
+      preserveTimestampTimeZone: preserveTimestampTimeZone,
     );
     if (!response.isSuccess) {
       throw OracleException(
         errorCode: response.errorCode ?? oraProtocolError,
-        message: response.errorMessage ?? 'LOB define call failed',
+        message: response.errorMessage ?? 'DEFINE call failed',
       );
     }
     return response;
   }
 
   /// Sends the DEFINE call for an open, **describe-created** query cursor —
-  /// an implicit result set (`DBMS_SQL.RETURN_RESULT`) whose columns include a
-  /// CLOB / NCLOB / BLOB / JSON — and returns its decoded response WITHOUT
-  /// throwing on a server error, so the caller's FETCH-failure handling owns
-  /// it exactly as for a FETCH round.
+  /// an implicit result set (`DBMS_SQL.RETURN_RESULT`), a REF CURSOR OUT bind
+  /// or a nested `CURSOR()` column whose columns include one that
+  /// [ColumnMetadata.requiresDefine] (CLOB / NCLOB / BLOB / JSON) — and returns
+  /// its decoded response WITHOUT throwing on a server error, so the caller's
+  /// FETCH-failure handling owns it exactly as for a FETCH round.
   ///
   /// node-oracledb parity (`withData.js` `postProcess`: a describe-created
   /// cursor with a LOB / JSON column gets `requiresDefine` + `noPrefetch`, so
@@ -2573,13 +2584,19 @@ class Transport {
 
   /// Sends one DEFINE-mode [ExecuteRequest] for the open cursor [cursorId] and
   /// returns the decoded response as-is (successful or not).
+  ///
+  /// [preserveTimestampTimeZone] is `required` deliberately: the response
+  /// carries the cursor's first row batch, and a defaulted `false` once
+  /// silently decoded that batch's `TIMESTAMP WITH TIME ZONE` values as
+  /// `DateTime` on the top-level path while later FETCH rounds honored the
+  /// flag.
   Future<ExecuteResponse> _sendDefine(
     String sql,
     int cursorId,
     List<ColumnMetadata> columns,
     int prefetchRows,
     Duration? timeout, {
-    bool preserveTimestampTimeZone = false,
+    required bool preserveTimestampTimeZone,
   }) async {
     final request = ExecuteRequest(
       sql: sql,
