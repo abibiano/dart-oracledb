@@ -210,7 +210,7 @@ development_status:
   13-1-oracle-21c-native-json-oson: done
   13-2-oracle-12c-json-as-blob: done
   13-3-bind-fetch-json-mapping: done
-  13-4-dual-env-integration-tests: backlog
+  13-4-dual-env-integration-tests: done
   epic-13-retrospective: optional
 
   # Epic 14: Temporal Compatibility & Fetch Type Handlers [extends Epic 4 / Story 7.9]

@@ -1139,7 +1139,8 @@ final doc = result.rows.first['DOC'] as Map<String, Object?>; // not bytes
   zero-length `EMPTY_BLOB()`. Use `IS JSON STRICT` to keep such values out.
 - **Raw-bytes opt-out** — `OracleExecuteOptions(fetchLobs: true)` still
   returns an `OracleLob` handle whose `read()` yields the stored bytes
-  untouched. For PL/SQL implicit results, use eager `execute()` with this
+  untouched. It affects only the LOB columns: a native `JSON` column in the
+  same row is not a LOB and still decodes to its Dart value. For PL/SQL implicit results, use eager `execute()` with this
   option; the combination of `resultSet: true` and `fetchLobs: true` is
   unsupported for a PL/SQL block.
 - **Behavior change:** before this release such a column returned a
