@@ -31,14 +31,18 @@ origin: spec-deferred dd52ebc1455b
 location: lib/src/protocol/result_set_cursor.dart:480-505
 source_spec: `13-2-oracle-12c-json-as-blob.md`
 reason: The cursor's 21c nested-column workaround uses full EXECUTE only for the first fetch; continuation uses OFETCH. Existing live mixed-shape tests do not go past the prefetch window. A dual-database test with more outer rows than prefetch would settle whether the nested describe is omitted on continuation.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-implicit-result-define-continue
+resolution-undo: b3d32bddbe08845119e740eacf8b5ac465978977d794a8680e70eece3db3cd6d 2026-10-09 7374617475733a206f70656e
 
 ### DW-5: A DEFINE response and its defensive follow-up FETCH could both be empty while reporting more rows, ending lazy row delivery early.
 origin: spec-deferred ee3b9da22438
 location: lib/src/protocol/result_set_cursor.dart:508-522
 source_spec: `13-2-oracle-12c-json-as-blob.md`
 reason: nextRowData returns null after one empty _fetchNextBatch even if moreRowsToFetch remains true. The measured Oracle 21c and 23ai DEFINE responses carried their first rows, and no real two-empty-response case has been observed. A transport fixture or live server trace showing that response sequence would settle reachability.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-implicit-result-define-continue
+resolution-undo: b3d32bddbe08845119e740eacf8b5ac465978977d794a8680e70eece3db3cd6d 2026-10-09 7374617475733a206f70656e
 
 ### DW-6: NUMBER decode returns 0 for values in [1E-130, 1E-128) and is one floating-point step off for some large magnitudes, so a fetched BINARY_DOUBLE in those ranges re-binds as NUMBER and refetches
 origin: spec-deferred 4426c1a1cf8b
