@@ -216,6 +216,7 @@ origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-e
 location: lib/src/oracle_lob.dart
 reason: ⏳ **CARRIED — the node-oracledb LOB parity surface Epic 12 deliberately did NOT implement.** Consolidated here from story-AC and README prose (previously trackable nowhere), verified against the local `reference/node-oracledb` 7.0.1 submodule: **`trim(newSize)`** (`lib/lob.js`, `lib/thin/lob.js`); the **BFILE family** (`getDirFileName` / `setDirFileName` / `fileExists` / `openFile` / `closeFile` / `isFileOpen`, plus `DB_TYPE_BFILE` fetch support); a **mutable `pieceSize` property** (node exposes a get AND set; this driver takes `pieceSize` per stream call only, and `read()` has no caller-facing piece size at all — the 12.4 cap is test-only and must stay so); an **`autoCloseLob`-style auto-close** (node closes a `Lob` when its stream finishes or is destroyed; here every handle is closed explicitly, which is what `OracleResult.closeLobs()` and the pool-reclaim force-close exist for); and a **server `length`/`chunkSize` refresh API** (node has none either — `getLength()` returns the cached value — so this one is a genuine gap in BOTH drivers and pairs with the cached-length item below). None is a correctness gap in what 1.4.0 ships; each is additive surface. **Epic-exit disposition:** these are API-surface features, not protocol work, and are independent of one another — take them as one small "LOB API parity" story (or drop the ones with no demand) rather than as Epic 12 leftovers. target: post-1.4 LOB API parity story. [lib/src/oracle_lob.dart; reference/node-oracledb lib/lob.js, lib/thin/lob.js]
 status: open
+decision: 2026-10-09 Build a LOB API parity story — Add OracleLob.trim(newSize) and a length/chunkSize refresh API in lib/src/oracle_lob.dart, with dual-env tests; leave BFILE and autoClose out.
 
 ### DW-28: CARRIED — `read()`'s cached-`length` BEHAVIOR (the length-refresh decision). The evidence half is closed above; what remains is the actual behavior…
 
@@ -223,13 +224,16 @@ origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-e
 location: lib/src/oracle_lob.dart
 reason: ⏳ **CARRIED — `read()`'s cached-`length` BEHAVIOR (the length-refresh decision).** The evidence half is closed above; what remains is the actual behavior change. Now decidable on evidence rather than speculation: a locator is read-consistent, so a stale length never yields corrupt data — only a `read()` that stops at the stale end, and a silent empty return for `read(offset: staleLength + 1)`. So the options are (a) leave it (node-oracledb parity — node's `getLength()` is cached too), (b) drop the no-round-trip short-circuit so a past-end read asks the server like the streams do, or (c) add an explicit refresh API (which node lacks). **Epic-exit disposition:** (b) is the cheap half-step that removes the footgun without new API and would cost one round trip on a genuinely-empty read; pair the decision with the parity entry above, since (c) is the same work as the `length`/`chunkSize` refresh gap. target: post-1.4 LOB API parity story. [lib/src/oracle_lob.dart `read`]
 status: open
+decision: 2026-10-09 Drop the short-circuit — Remove the no-round-trip short-circuit in OracleLob.read so a past-end read asks the server like the streams do; update tests and docs.
 
 ### DW-29: CARRIED (unchanged, explicitly) — binding a live FETCHED handle is unreachable while it holds the connection's single in-flight slot. Story 12.4 does…
 
 origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-env-integration-tests, 2026-07-26)"), 2026-10-09
 location: lib/src/connection.dart
 reason: ⏳ **CARRIED (unchanged, explicitly) — binding a live FETCHED handle is unreachable while it holds the connection's single in-flight slot.** Story 12.4 does **not** relax the slot rule — this entry must not be read as silently satisfied. AC2/AC3's live sequences in fact depend on the rule and made its consequences concrete: because an open fetched handle holds the slot, the pooled workflow's order is FORCED (fetched handle first, closed before a `createTemporaryClob()` or a result-set open can run), which the AC3 test documents inline. The bind unwrap stays category-agnostic, so no bind-code change is expected whenever the slot decision is taken. **Epic-exit disposition:** this is a concurrency-model change with its own lifecycle questions (what happens to an in-flight read when the handle is bound?), not a bind-surface tweak; it needs its own story and should be decided together with whether a connection ever allows two overlapping LOB round trips. target: post-1.4 concurrency-model story. [lib/src/connection.dart `_prepareStatement`/`_rejectConcurrentOperation`]
-status: open
+status: done 2026-10-09
+resolution: closed by human decision: Documented design; created-temporary handles remain bindable
+decision: 2026-10-09 Keep single-slot rule permanently — Documented design; created-temporary handles remain bindable
 
 ### DW-30: A cursor row carrying a LOB cannot be DECODED at all — and on 21c it POISONS the transport. Re-measured by 12.4 AC8 on both fixtures with no…
 
@@ -250,7 +254,9 @@ status: open
 origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-env-integration-tests, 2026-07-26)"), 2026-10-09
 location: lib/src/result.dart
 reason: ⏳ **`OracleResult.closeLobs()` also closes not-yet-delivered handles / an aliased delivered handle.** Carried unchanged — documented on both ends in 12.3, unit-pinned, and an API change is out of 12.4's scope. **Epic-exit disposition:** API polish (skip buffered handles unless the result set is closed, or report them as a distinct count); belongs with the parity entry's API work. target: post-1.4 LOB API parity story. [lib/src/result.dart `closeLobs`/`_collectLobs`; lib/src/result_set.dart `bufferedLobHandles`]
-status: open
+status: done 2026-10-09
+resolution: closed by human decision: Documented sharp edge; resultSet.close() is the right tool
+decision: 2026-10-09 Leave documented behaviour — Documented sharp edge; resultSet.close() is the right tool
 
 ### DW-33: An `IN OUT` `OracleLob` bind CONSUMES the handle (ORA-22922) with no driver-authored error. Carried unchanged — 12.2 documents it, the README states…
 
@@ -258,6 +264,7 @@ origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-e
 location: lib/src/oracle_lob.dart
 reason: ⏳ **An `IN OUT` `OracleLob` bind CONSUMES the handle (ORA-22922) with no driver-authored error.** Carried unchanged — 12.2 documents it, the README states it, dual-env tests pin it, and 12.4 deliberately did NOT add a "consumed" state. 12.4 did make this shape safer in passing: the replacement LOB Oracle puts behind the bind is TEMP-flagged and is now freed (the AC4 fix), so the shape no longer leaks a session temporary LOB per call. **Epic-exit disposition:** a UX improvement needing its own lifecycle decision (does a consumed handle still need `close()`? — today yes, and that is what the tests assert). target: post-1.4 LOB API parity story. [lib/src/oracle_lob.dart; lib/src/connection.dart `_validateLobBindValue`]
 status: open
+decision: 2026-10-09 Add a consumed state — Mark an OracleLob consumed when bound IN OUT so read()/write() fail with a driver-authored message; keep close() working; update tests and docs.
 
 ### DW-34: A full-length single LOB READ scales super-linearly with value size (~141 s for a 32 M-unit CLOB on 23ai). Carried unchanged — no buffer-accumulation…
 
@@ -271,7 +278,9 @@ status: open
 origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-env-integration-tests, 2026-07-26)"), 2026-10-09
 location: lib/src/connection.dart
 reason: ⏳ **Bare DML `RETURNING ... INTO` cannot take an `OracleBind` spec; it needs a `BEGIN/END` wrapper.** Carried unchanged — the wrapped form is dual-env tested and documented. **Epic-exit disposition:** wider than LOBs (it applies to every OUT bind on a single-`execute()` DML RETURNING statement, which `executeMany` already supports via `bindDefs`), so it is a bind-surface decision, not LOB work. target: bind-surface story. [lib/src/connection.dart `_prepareStatement`]
-status: open
+status: done 2026-10-09
+resolution: closed by human decision: Documented wrapper form is dual-env tested
+decision: 2026-10-09 PL/SQL wrapper is the answer — Documented wrapper form is dual-env tested
 
 ### DW-36: RESOLVED 2026-06-25 (spec-datatypes-length-prefix-guard) — `encodeDataTypesMessage` single-byte cap length prefix unguarded against overflow + no…
 
@@ -868,6 +877,7 @@ origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 (202
 location: lib/oracledb.dart
 reason: **`defaultLobStreamPieceSize` is exported into the public namespace as a bare, un-prefixed top-level constant.** It is the only such name among `lib/oracledb.dart`'s exports, which are otherwise uniformly `Oracle*`-prefixed types — a plausible collision in downstream code, and a second naming convention introduced for a need ("a caller reasoning about round-trip counts needs to be able to name it") that a static getter on `OracleLob` would satisfy without touching the global namespace. Note the window to change this without a breaking change closes when 1.4.0 ships. Fix: expose it as `OracleLob.defaultStreamPieceSize` (static getter) and drop the top-level export. target: Epic 12 follow-up (public API surface, ideally before 1.4.0 release). [lib/oracledb.dart; lib/src/oracle_lob.dart]
 status: open
+decision: 2026-10-09 Move to OracleLob static getter — Expose OracleLob.defaultStreamPieceSize, keep the top-level export as @Deprecated alias, update docs and tests.
 
 ### DW-116: `writeStream()`'s unit accounting may diverge from the server's CHARACTER billing for supplemental characters on a UTF-8-form (single-byte-charset)…
 
