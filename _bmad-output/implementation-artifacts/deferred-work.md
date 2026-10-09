@@ -126,7 +126,8 @@ origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-
 location: _bmad-output/implementation-artifacts/sprint-status.yaml:209
 severity: low
 reason: Retro action 10. Already set to done on 2026-10-09 during the retro follow-up; close this entry on the next sweep after confirming the file.
-status: open
+status: done 2026-10-09
+resolution: already resolved: _bmad-output/implementation-artifacts/sprint-status.yaml:209 now reads `epic-13: done`
 
 ### DW-17: The Compose 23ai service uses the unpinned image database/free:latest, which now reports Oracle 26ai (23.26.1); the 23ai evidence came from a temporary pinned 23.9 container.
 
@@ -344,7 +345,8 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: dev-story of 9-4-dual-env-integration-tests (2026-06-21)"), 2026-10-09
 location: lib/src/protocol/messages/execute_message.dart
 reason: **(HISTORICAL — original deferral, superseded by the RESOLVED sub-bullet below) Feature (node-oracledb parity, Medium): support nested `CURSOR(SELECT ...)` columns INSIDE a PL/SQL implicit result (`DBMS_SQL.RETURN_RESULT`).** Story 9.4's new dual-env integration test exposed that this combination is unsupported: the embedded-cursor describe path (`_isSupportedRefCursorColumn` in lib/src/protocol/messages/execute_message.dart) fails loud on a type-102 (cursor) column for both REF CURSOR OUT binds and implicit results. A 3-line patch to allow it works on **Oracle 23ai** (the per-row implicit cursor value inlines the nested cursor's describe, so the existing `_drainOneImplicitResult` / `_wrapImplicitResultsLazy` materialization wiring decodes it) but **cannot work on Oracle pre-23 / 21c**: the 21c server does NOT transmit the nested cursor's column structure anywhere in the implicit-result response — each row's cursor value ships only `numBytes(1) + cursorId(UB2)` (raw 21c bytes verified: ids 12/13/14 for three parents, no inline describe), and node-oracledb marks such cursors `requiresFullExecute = true` (reference/node-oracledb/lib/thin/protocol/messages/withData.js `createCursorFromDescribe`), i.e. each nested cursor needs a SEPARATE describe/execute round-trip per cursor id to be readable. Implementing that pre-23 per-cursor describe round-trip is a sizeable new protocol capability, out of scope for the 9.4 test-hardening story (which must remain "primarily test work" and must not select behaviour by server version). **Decision (dev-story 9.4, user-approved):** keep nested cursors inside implicit results failing loud *consistently on both 23ai and 21c* (the fail-loud fires at decode time before any FETCH, so the connection stays reusable — pinned by `test/integration/ref_cursor_implicit_coexistence_integration_test.dart` and two unit tests in `test/src/protocol/messages/execute_message_test.dart`). A dedicated feature story should add the pre-23 per-nested-cursor describe round-trip (and the 23ai inline-describe path) before lifting the guard. Note: REF CURSOR OUT binds with a nested cursor column must ALSO stay fail-loud unless `_wrapRefCursorOutBinds` gains the same materialization wiring. [lib/src/protocol/messages/execute_message.dart `_isSupportedRefCursorColumn`, `_readEmbeddedCursorDescribe`, `_processImplicitResultSet`] || Sub-notes: **Feasibility re-evaluated 2026-06-21 — STILL DEFERRED (NO-GO), see [spec-nested-cursor-materialization.md](spec-nested-cursor-materialization.md) (`status: draft` — a PLAN, not implemented).** Verified against node-oracledb: `processColumnData` decodes a nested cursor value by calling `createCursorFromDescribe` **unconditionally** (it always expects the inline describe) and sets `requiresFullExecute` — which is NOT a describe round-trip, only a "first fetch uses EXECUTE not FETCH" flag. So node-oracledb itself has no path for the 21c id-only stream and this combination appears to be effectively a 23ai-and-later capability even in the reference client. The 21c gap (inline nested describe absent; only `numBytes + cursorId`) is therefore a genuinely NEW, unproven protocol capability (re-EXECUTE the bare nested cursor id to coax a server DESCRIBE_INFO), gated behind a feasibility spike (spec story S0). All existing materialization machinery (`_materializeNestedCursorsInBatch`/`_drainNestedCursor`/`_drainOneImplicitResult`/`_wrapImplicitResultsLazy`) is already in place and reused by the plan; the only blocker beyond S0 is the 21c describe round-trip plus the `_wrapRefCursorOutBinds` `onBatchDecoded` wiring (spec story S3). Fail-loud + B1/B2 reaping unchanged. Item A remains OPEN. | **⚠️ S0 spike (2026-06-22) — its NO-GO is RETRACTED (it was wrong). Superseded by the reconciliation below.** The spike claimed the 21c per-row value is id-only (`02 01 04`, no inline describe) and the feature undeliverable. That rested on a mis-instrumented measurement: the spike *patched its own decoder to assume id-only*, then read a mis-offset `02 01 04` that "confirmed" the assumption, and its "EXECUTE on the bare cursorId" probe was malformed (didn't match node-oracledb's `writeExecuteMessage`) so it timed out. Retained only for the post-mortem; do NOT treat as fact. | **✅ RESOLVED 2026-06-22 (IMPLEMENTED, dual-env green) — nested CURSOR() columns inside PL/SQL implicit results AND REF CURSOR OUT binds now MATERIALIZE on both 23ai and 21c.** Fix (content-driven, never version-branched): (1) `_isSupportedRefCursorColumn` allows `oraTypeCursor`; (2) the per-row value decodes to a `DecodedCursorResult` and drains via the existing `_materializeNestedCursorsInBatch`/`_drainNestedCursor` (now recursive for deeper nesting); (3) `_wrapRefCursorOutBinds` threads `onBatchDecoded`; (4) NEW `requiresFullExecute` first-fetch — when a describe-created cursor carries nested cursor columns, its first fetch is a full EXECUTE (OAL8) on the open cursor id instead of a plain OFETCH (pre-23/21c ships the per-row nested describe inline only in a full-EXECUTE response; `ExecuteRequest.encode` gates the EXECUTE option on `hasSql` like node-oracledb's `writeExecuteMessage`). Validated: full integration green on 23ai (391/8-skip) AND 21c (392/7-skip); unit 1293; `dart analyze` clean. Fail-loud + B1/B2 reaping preserved for genuinely unsupported inner column types. Known pre-23 limitation documented (outer cursor with nested columns AND > prefetchRows rows → continuation OFETCH; not exercised by fixtures). See [spec-nested-cursor-materialization.md](spec-nested-cursor-materialization.md) "## Implementation (2026-06-22)". The S0 NO-GO is fully retracted; this item is closed by implementation. [lib/src/protocol/messages/execute_message.dart, lib/src/connection.dart, lib/src/protocol/result_set_cursor.dart] | **(superseded) RECONCILED 2026-06-22 — GO: deliverable on BOTH 23ai and 21c, no new protocol capability beyond requiresFullExecute. Item A reopened then implemented (see RESOLVED above).** Per the project rule *consult node-oracledb before assuming*, the reference client (node-oracledb 7.0.0, thin) was run against the SAME two live servers with the EXACT Story-9.4 fixture. It MATERIALIZES nested `CURSOR()` columns inside both PL/SQL implicit results AND REF CURSOR OUT binds on 21c AND 23ai — cleanly, all 123 nested rows, connection survives. Hard evidence (live 21c): (1) node-oracledb negotiates **field version 16 — identical to the dart driver's 16** (not a capability gap; the dart driver gets the same bytes); (2) the per-row nested-cursor value carries a **FULL INLINE describe** at field version 16 — raw hex begins `4c …` (`0x4c`=76 describe-length), contains `03 56 41 4c` = "VAL", cursorId only as trailing UB2 (`01 0d`=13); the spike's `02 01 04` is **absent** from the real stream; (3) nested rows are fetched via the ordinary `requiresFullExecute` first-fetch (full `ExecuteMessage` on the nested cursorId, then plain `FetchMessage`) — which the driver's Story 9.2 top-level path already does. Details + citations in [spec-nested-cursor-materialization.md](spec-nested-cursor-materialization.md) "## S0 RECONCILIATION (2026-06-22)" (`status: active`). **Fix scope (bounded):** allow `oraTypeCursor` in `_isSupportedRefCursorColumn`; decode the inline embedded describe (already done for the 23ai path — same byte shape on 21c); drain via existing `_materializeNestedCursorsInBatch`/`_drainNestedCursor`; thread `onBatchDecoded` through `_wrapRefCursorOutBinds`. Preserve fail-loud + B1/B2 reaping for GENUINELY unsupported inner columns (driven by describe content, NOT server version). No S2 21c describe round-trip needed. Item A is now OPEN as a buildable dual-env feature, NOT deferred.
-status: open
+status: done 2026-10-09
+resolution: already resolved: nested CURSOR() materialization implemented 2026-06-22: requiresFullExecute path in lib/src/connection.dart:1042 and lib/src/protocol/result_set_cursor.dart; see spec-nested-cursor-materialization.md
 
 ### DW-46: Diff-hygiene: 8.3 review range co-mingles prior-story and unrelated changes
 
@@ -412,7 +414,8 @@ resolution: **CLOSED — Story 5.4 AC11 dual-env re-run reminder** (from: code r
 origin: migrated from legacy ledger ("Resolved: Release 1.0 closeout — Epic 5 follow-ups (2026-06-12)"), 2026-10-09
 location: lib/src/pool.dart
 reason: **PATCHED — drain teardown-tail under concurrent post-close opens.** Review found that with ≥2 grow/provision opens in flight at close time, decrementing `_pendingOpens` *before* the orphan teardown `await` let the first teardown resolve `close(drainTimeout:)` while a sibling teardown was still pending. Fixed: in both post-close orphan branches the `_pendingOpens--` now happens *after* `await _destroyBestEffort`, so the drain waits for every teardown. New regression test ("waits for ALL concurrent in-flight opens", proven to fail without the fix via a gated `_FakeConnection.close`). [lib/src/pool.dart acquire grow path + `_provisionForWaiters`; test/src/pool_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: lib/src/pool.dart:587-608 and 1056-1074 decrement _pendingOpens only after the orphan teardown await
 
 ### DW-55: Dismissed — prewarm opens not counted in the drain.
 
@@ -440,105 +443,120 @@ status: open
 origin: migrated from legacy ledger ("Resolved: tolerant TIMESTAMP payload-length decode (2026-06-12)"), 2026-10-09
 location: lib/src/protocol/data_types.dart
 reason: `_readTimestampWire` rejected TIMESTAMP payload lengths 8-10/12 (`BufferException` unless exactly 7/11/13 bytes total) while node-oracledb tolerates them — resolved by aligning to node-oracledb `parseOracleDate` parity (product decision, 2026-06-12): the exact-length gate is removed; fractional seconds are read only when total length ≥ 11 (`remaining >= 4`) and TZ bytes only when total ≥ 13 (`remaining >= 6`), with trailing bytes ignored. This cannot desync the stream — the decoder runs on a column-scoped slice from `readBytesWithLength` whose length prefix governs stream position, and the decoders execute only on the strict path (the completion probe consumes via the length prefix and returns before decoding). Sub-7-byte payloads still underflow on the base-byte reads (`BufferUnderflowException`), preserving the probe's "need more packets" signal. `decodeTimestampTz` keeps its separate null-TZ guard, so a sub-13-byte payload reaching the TSTZ decoder still throws `oraProtocolError`. Unit-validated (tolerant 8/9/10/12-byte decode, TSTZ 12-byte rejection, sub-7-byte underflow) and dual-env regression-checked on 23ai + 21c (no live server emits these lengths, so the path is unit-only by design). See [spec-timestamp-tolerant-length.md](spec-timestamp-tolerant-length.md). [lib/src/protocol/data_types.dart `_readTimestampWire`; test/src/protocol/data_types_test.dart] (from: code review of spec-probe-malformation-distinction, 2026-06-12)
-status: open
+status: done 2026-10-09
+resolution: already resolved: lib/src/protocol/data_types.dart:659-660 reads fractional seconds when remaining >= 4 and TZ when remaining >= 6 (tolerant length decode)
 
 ### DW-59: `ttcStreamIsComplete` treated EVERY `BufferException` as "need more packets", including non-underflow malformations (`Integer too large`, sign-bit…
 
 origin: migrated from legacy ledger ("Resolved: probe underflow/malformation distinction (2026-06-12)"), 2026-10-09
 location: lib/src/protocol/buffer.dart
 reason: `ttcStreamIsComplete` treated EVERY `BufferException` as "need more packets", including non-underflow malformations (`Integer too large`, sign-bit rejection in `_readInteger`) — resolved: a new `BufferUnderflowException extends BufferException` is thrown only by `ReadBuffer._checkAvailable` (the one true out-of-bytes signal); both completion probes (`ttcStreamIsComplete`, `lobOpStreamIsComplete`) return false only on the underflow subtype and rethrow any other `BufferException` as `OracleException(oraProtocolError)` with the malformation as `cause`; the transport's `isComplete` closure poisons the connection before propagating a probe throw (framing-desync hazard — same pattern as the AC10 cap and mid-query REFUSE). Every other `BufferException` site (sign-bit, integer-too-large, `seek`, TIMESTAMP payload-length drift, OSON offsets/ids) was audited and confirmed a malformation, staying the parent type; real-decoder catches (parent type) are unaffected. Documented limitation (by design, per spec "Never"): a garbage *length* field driving an oversized `skip`/`readBytes` produces the same `_checkAvailable` underflow as a genuine partial stream and intentionally stays "need more packets" under the receive-loop packet cap/timeout backstop — node-oracledb has the identical ambiguity. The exhaustive truncation sweep stays green unchanged. See [spec-probe-malformation-distinction.md](spec-probe-malformation-distinction.md). [lib/src/protocol/buffer.dart; lib/src/protocol/messages/execute_message.dart; lib/src/protocol/messages/lob_op_message.dart; lib/src/transport/transport.dart; test/src/protocol/buffer_test.dart; test/src/protocol/messages/execute_message_test.dart; test/src/transport/transport_test.dart] (from: code review of spec-return-parameter-robust-parse, 2026-06-11)
-status: open
+status: done 2026-10-09
+resolution: already resolved: lib/src/protocol/buffer.dart:32 BufferUnderflowException subtype distinguishes underflow from malformation
 
 ### DW-60: Routing edge untested at exactly 32,767/32,768 bytes — resolved: six dual-env integration tests pin both sides of the `> 32767` UTF-8/raw-byte…
 
 origin: migrated from legacy ledger ("Resolved: inline-bind→temp-LOB routing edge pinned (2026-06-12)"), 2026-10-09
 location: test/integration/clob_integration_test.dart
 reason: Routing edge untested at exactly 32,767/32,768 bytes — resolved: six dual-env integration tests pin both sides of the `> 32767` UTF-8/raw-byte threshold for CLOB and BLOB, including the full {inline, convert} × {ASCII, multibyte} CLOB matrix (16,383 two-byte chars + 1 ASCII = 32,767 bytes stays inline; 16,384 two-byte chars = 32,768 bytes converts) proving the check measures UTF-8 bytes, not characters. Convert-side counts pinned to exactly one temp LOB per converted bind; inline RAW test isolated from implicit RAW→BLOB conversion via `TO_BLOB(:src)`. Both LOB suites 66/66 on Oracle 23ai AND 21c. See [spec-inline-temp-lob-threshold-edge.md](spec-inline-temp-lob-threshold-edge.md). [test/integration/clob_integration_test.dart; test/integration/blob_integration_test.dart] (from: code review of spec-temp-lob-large-write-validation, 2026-06-11)
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/integration/clob_integration_test.dart pins the 32767/32768 byte routing edge (lines ~6, 237)
 
 ### DW-61: Large temp-CLOB WRITE is a single un-chunked LOB_DATA — "validated only to 40K bytes; node-oracledb chunks writes" — resolved with the premise…
 
 origin: migrated from legacy ledger ("Resolved: large temp-LOB write validation (2026-06-11)"), 2026-10-09
 location: buffer.dart
 reason: Large temp-CLOB WRITE is a single un-chunked LOB_DATA — "validated only to 40K bytes; node-oracledb chunks writes" — resolved with the premise corrected: node-oracledb's temp-LOB bind path ALSO performs a single WRITE operation (lob.js `write(1, val)` → one `LOB_OP_WRITE` round trip); the only chunking it has is the wire-level `writeBytesWithLength` long-form encoding (`0xFE` + ≤65,535-byte UB4-length chunks + terminator), which the Dart driver already shares byte-identically (buffer.dart `writeBytesWithLength`). No architecture gap existed — only a validation gap above one wire chunk. Large writes are now validated live at the wire-chunk boundaries (BLOB: exactly 65,535 / 65,536 / 65,537 payload bytes; CLOB: 65,534 / 65,536 / 65,538 — UTF-16BE payloads are even-only, so 65,535/65,537 are unreachable with whole chars) and at ~1 MB scale (1,000,000-byte BLOB; 500,000-char CLOB → 1,000,000-byte UTF-16BE payload, ASCII and mixed 2/3-byte-UTF-8 + supplementary-plane-emoji multibyte; IN and IN OUT shapes) on BOTH Oracle 23ai and 21c — zero failures, full suites green. See [spec-temp-lob-large-write-validation.md](spec-temp-lob-large-write-validation.md) Design Notes for the charset/boundary derivation. [lib/src/transport/transport.dart `_createTempClob`/`_createTempBlob`; test/integration/clob_integration_test.dart; test/integration/blob_integration_test.dart] (from: code review of 4-1-clob-support, 2026-06-11)
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/integration/blob_integration_test.dart:469 covers 65535/65536/65537 wire-chunk boundaries; clob_integration_test.dart large-write cases
 
 ### DW-62: RETURN_PARAMETER section heuristic (`peekUint8() > 2`) — resolved: live wire capture (2026-06-11) at `_processReturnParameter` across 7 scenarios…
 
 origin: migrated from legacy ledger ("Resolved: RETURN_PARAMETER unconditional section parse (2026-06-11)"), 2026-10-09
 location: lib/src/protocol/messages/execute_message.dart
 reason: RETURN_PARAMETER section heuristic (`peekUint8() > 2`) — resolved: live wire capture (2026-06-11) at `_processReturnParameter` across 7 scenarios (DDL CREATE/DROP TABLE, DDL CREATE/DROP PROCEDURE, DML INSERT with/without binds, PL/SQL CLOB OUT bind) on BOTH Oracle 23ai and 21c proved the key/value-pairs and registration sections are ALWAYS on the wire — zero-length sections are encoded as single `0x00` UB2 size bytes — and the heuristic's "absent" branch never fired (dead code). The original Story 4.1 capture that motivated the heuristic was a manual-decode offset error: the param-list UB4 skips are variable-width (1-4 bytes), and mis-sizing them by 2 bytes lands directly on the `0x04` ERROR byte; there was NO upstream production misparse. Heuristic removed for node-oracledb parity (withData.js `processReturnParameter` reads both sections unconditionally); truncation mid-PARAMETER still surfaces `BufferException` so the completion probe keeps its "need more packets" semantics. Fixtures reworked to the evidence-based shape (empty sections directly followed by ERROR) and a numKv>0 kv-triple + registration-blob drain test added; dual-env validated. Evidence recorded in [spec-return-parameter-robust-parse.md](spec-return-parameter-robust-parse.md) Design Notes. [lib/src/protocol/messages/execute_message.dart `_processReturnParameter`; test/src/protocol/messages/execute_message_test.dart] (from: code review of 4-1-clob-support, 2026-06-11)
-status: open
+status: done 2026-10-09
+resolution: already resolved: RETURN_PARAMETER heuristic removed; unconditional section parse in lib/src/protocol/messages/execute_message.dart _processReturnParameter (spec-return-parameter-robust-parse.md)
 
 ### DW-63: AC6 failure-path integration tests — resolved: added "CLOB SELECT on a closed connection fails fast" (ORA-03113) and "failed large-IN/tiny-OUT…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: test/integration/clob_integration_test.dart
 reason: AC6 failure-path integration tests — resolved: added "CLOB SELECT on a closed connection fails fast" (ORA-03113) and "failed large-IN/tiny-OUT execute leaves the connection usable" tests, dual-env validated. [test/integration/clob_integration_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/integration/clob_integration_test.dart:830 'CLOB SELECT on a closed connection fails fast'
 
 ### DW-64: Temp-LOB free list lost when bind prep throws — already implemented, verified: `sendExecute` restores the drained free list in its bind-prep catch…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: transport.dart
 reason: Temp-LOB free list lost when bind prep throws — already implemented, verified: `sendExecute` restores the drained free list in its bind-prep catch (transport.dart:495-507); no code change needed. [lib/src/transport/transport.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: lib/src/transport/transport.dart sendExecute restores the drained free list in its bind-prep catch (still present)
 
 ### DW-65: CLOB OUT-bind maxSize guard silently skipped on index misalignment — resolved: resolution extracted into `Transport.resolveOutBindMaxSize`, which…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: CLOB OUT-bind maxSize guard silently skipped on index misalignment — resolved: resolution extracted into `Transport.resolveOutBindMaxSize`, which throws `oraProtocolError` on a short `outBindIndices` list or an out-of-range bind index; unit-tested (aligned / short / out-of-range). [lib/src/transport/transport.dart; test/src/transport/transport_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: lib/src/transport/transport.dart:1745 Transport.resolveOutBindMaxSize, used at :2194
 
 ### DW-66: `readSB8` signed/multi-byte path untested — resolved: dedicated `readSB8` test group (widths 1-8, sign bit, negative zero, >4-byte magnitudes, size >…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: test/src/protocol/buffer_test.dart
 reason: `readSB8` signed/multi-byte path untested — resolved: dedicated `readSB8` test group (widths 1-8, sign bit, negative zero, >4-byte magnitudes, size > 8 rejected); `_sb8` fixture helper now encodes real sign-magnitude SB8 bytes and a GET_LENGTH fixture decodes a multi-byte amount. [test/src/protocol/buffer_test.dart; test/src/protocol/messages/lob_op_message_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/src/protocol/buffer_test.dart:280 readSB8 test group
 
 ### DW-67: "CLOB result cursors are never reused" not surfaced in README — resolved: one-sentence note added to the CLOB section and Known Limitations (covers…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: n/a
 reason: "CLOB result cursors are never reused" not surfaced in README — resolved: one-sentence note added to the CLOB section and Known Limitations (covers CLOB and BLOB; RAW keeps normal reuse). [README.md]
-status: open
+status: done 2026-10-09
+resolution: already resolved: README.md:618 statement-cache note that CLOB/BLOB result cursors are not reused
 
 ### DW-68: No multibyte temp-CLOB PL/SQL test — resolved: 40,000-UTF-16-unit IN OUT round-trip mixing 2/3-byte UTF-8 characters and supplementary-plane emoji.
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: test/integration/clob_integration_test.dart
 reason: No multibyte temp-CLOB PL/SQL test — resolved: 40,000-UTF-16-unit IN OUT round-trip mixing 2/3-byte UTF-8 characters and supplementary-plane emoji. [test/integration/clob_integration_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/integration/clob_integration_test.dart:319-321 40,000-unit IN OUT multibyte round-trip
 
 ### DW-69: `debugPendingTempLobCount` unused — resolved: forwarded through `OracleConnection` and asserted to drain to 0 after the execute following a failed…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: lib/src/connection.dart
 reason: `debugPendingTempLobCount` unused — resolved: forwarded through `OracleConnection` and asserted to drain to 0 after the execute following a failed temp-CLOB bind. [lib/src/connection.dart; test/integration/clob_integration_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: lib/src/connection.dart:498 debugPendingTempLobCount forwarded; asserted in clob_integration_test.dart
 
 ### DW-70: AC4 drain not asserted via READ round-trip count — resolved: `debugLobReadOps` counter added (one increment per `tnsLobOpRead` sent) and asserted in…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: AC4 drain not asserted via READ round-trip count — resolved: `debugLobReadOps` counter added (one increment per `tnsLobOpRead` sent) and asserted in the >64 KiB drain test, proving the value is materialized via the LOB READ path. Note: the current design issues ONE full-length READ per locator (node-oracledb `getData` parity) and the server streams multiple LOB_DATA chunks inside that response, so the asserted delta is ≥ 1, not ≥ 2. [lib/src/transport/transport.dart; test/integration/clob_integration_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: lib/src/transport/transport.dart:764 debugLobReadOps counter
 
 ### DW-71: Oversized single-round-trip BLOB READ fails with misleading "length mismatch" — resolved: short reads now report that the value may exceed the single…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: Oversized single-round-trip BLOB READ fails with misleading "length mismatch" — resolved: short reads now report that the value may exceed the single round-trip read limit (still `oraProtocolError`). [lib/src/transport/transport.dart `_readBlobAsBytes`]
-status: open
+status: done 2026-10-09
+resolution: already resolved: short-read diagnostic in lib/src/transport/transport.dart readLobRange/_readBlobAsBytes (commit history Epic 12)
 
 ### DW-72: RAW byte threshold uses VARCHAR-named constant — resolved: dedicated `ttcMaxRawBindBytes` (32767) added, documented as tuned independently of the…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: lib/src/protocol/constants.dart
 reason: RAW byte threshold uses VARCHAR-named constant — resolved: dedicated `ttcMaxRawBindBytes` (32767) added, documented as tuned independently of the VARCHAR limit, and used at the PL/SQL byte-bind site. [lib/src/protocol/constants.dart; lib/src/transport/transport.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: lib/src/protocol/constants.dart:499 ttcMaxRawBindBytes = 32767
 
 ### DW-73: BLOB temp-LOB WRITE acknowledged-length / short-write guard — closed as wontfix (human decision, 2026-06-11): the original claim was wrong…
 
@@ -552,63 +570,72 @@ status: open
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: test/src/protocol/messages/execute_message_test.dart
 reason: Weak `_indexOfSub >= 0` / `greaterThan` assertions — resolved: the RAW define test now also asserts the locator-style define (UB4 buffer size 112) is absent (`== -1`), and the cursor-reuse test asserts `equals(reuseBefore + 1)` / `equals(parseBefore)`. [test/src/protocol/messages/execute_message_test.dart; test/integration/raw_edge_cases_integration_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/src/protocol/messages/execute_message_test.dart tightened assertions (RAW define test)
 
 ### DW-75: RAW(2000) over-length boundary untested — resolved: 2001-byte insert asserts ORA-12899, dual-env validated.
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: test/integration/raw_edge_cases_integration_test.dart
 reason: RAW(2000) over-length boundary untested — resolved: 2001-byte insert asserts ORA-12899, dual-env validated. [test/integration/raw_edge_cases_integration_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/integration/raw_edge_cases_integration_test.dart:158-170 asserts ORA-12899 on over-length RAW
 
 ### DW-76: Zero-length integer node `0x40` throws instead of decoding to 0 — resolved: length-nibble 0 now returns integer 0 (reference oson.js parity), with a…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: lib/src/protocol/oson.dart
 reason: Zero-length integer node `0x40` throws instead of decoding to 0 — resolved: length-nibble 0 now returns integer 0 (reference oson.js parity), with a hand-crafted fixture for `0x40` and `0x50`. [lib/src/protocol/oson.dart; test/src/protocol/oson_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/src/protocol/oson_test.dart:448 zero-length integer node 0x40/0x50 decodes to 0
 
 ### DW-77: OSON version-3 long-field-name decode untested — resolved: hand-crafted v3 fixture with a 260-byte field name decodes correctly.
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: test/src/protocol/oson_test.dart
 reason: OSON version-3 long-field-name decode untested — resolved: hand-crafted v3 fixture with a 260-byte field name decodes correctly. [test/src/protocol/oson_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/src/protocol/oson_test.dart:468-478 hand-crafted v3 fixture with 260-byte field name
 
 ### DW-78: Field-names segment ≥ 64 KB wide-offset boundary untested — resolved: 300 × 250-byte field names (~75 KB segment) round-trip through the uint32…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: test/src/protocol/oson_test.dart
 reason: Field-names segment ≥ 64 KB wide-offset boundary untested — resolved: 300 × 250-byte field names (~75 KB segment) round-trip through the uint32 segment-size/offset path. [test/src/protocol/oson_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/src/protocol/oson_test.dart:425 300 x 250-byte field names (~75 KB segment) round-trip
 
 ### DW-79: JSON feature-probe blanket skip — resolved: probe now skips only on ORA-00902 / ORA-00406 / ORA-43853 and rethrows everything else; verified to still…
 
 origin: migrated from legacy ledger ("Resolved: deferred-work hardening sweep (2026-06-11)"), 2026-10-09
 location: test/integration/json_data_type_integration_test.dart
 reason: JSON feature-probe blanket skip — resolved: probe now skips only on ORA-00902 / ORA-00406 / ORA-43853 and rethrows everything else; verified to still skip/pass correctly on both servers. [test/integration/json_data_type_integration_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/integration/json_data_type_integration_test.dart:140-151 probe skips only on ORA-00902/00406/43853
 
 ### DW-80: Production wrap landed in Story 7.5 AC3: `Transport.nextSequence()` advances `(seq + 1) % 256`, cycling `1…255, 0, 1…` — byte-identical to…
 
 origin: migrated from legacy ledger ("Resolved: sequence counter wrap-around at 256 (2026-06-11)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: Production wrap landed in Story 7.5 AC3: `Transport.nextSequence()` advances `(seq + 1) % 256`, cycling `1…255, 0, 1…` — byte-identical to node-oracledb `packet.js` `writeSeqNum()`. [lib/src/transport/transport.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: lib/src/transport/transport.dart:142 _sequence = (_sequence + 1) % 256
 
 ### DW-81: Unit test pins the full 257-call cycle.
 
 origin: migrated from legacy ledger ("Resolved: sequence counter wrap-around at 256 (2026-06-11)"), 2026-10-09
 location: test/src/transport/transport_test.dart
 reason: Unit test pins the full 257-call cycle. [test/src/transport/transport_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/src/transport/transport_test.dart:204-205 pins 257-call cycle
 
 ### DW-82: Live-server smoke validation added per spec-sequence-wrap-256-validation.md: 300+ sequential executes on one connection, wrap observed via the…
 
 origin: migrated from legacy ledger ("Resolved: sequence counter wrap-around at 256 (2026-06-11)"), 2026-10-09
 location: test/integration/sequence_wrap_integration_test.dart
 reason: Live-server smoke validation added per spec-sequence-wrap-256-validation.md: 300+ sequential executes on one connection, wrap observed via the `debugSequence` seam, post-wrap INSERT + COMMIT + SELECT-back on the same connection — dual-env (23ai + 21c). [test/integration/sequence_wrap_integration_test.dart]
-status: open
+status: done 2026-10-09
+resolution: already resolved: test/integration/sequence_wrap_integration_test.dart exists (300+ executes, wrap observed)
 
 ### DW-83: Carried from Epic 2 → 3 → 4 retros, now closed — Epic 5 (pooling, long-lived connections) unblocked.
 
