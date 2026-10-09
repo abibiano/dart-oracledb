@@ -558,7 +558,7 @@ final isAlive = await connection.ping();
 | CLOB                      | `String` (see [CLOB support](#clob-support), [Character Set Support](#character-set-support)) |
 | BLOB                      | `Uint8List` (see [BLOB support](#blob-support)); a BLOB `IS JSON` column decodes like JSON (see [JSON stored in a BLOB](#json-stored-in-a-blob-is-json)) |
 | JSON (21c+)               | `Map<String, Object?>` / `List<Object?>` (see [JSON support](#json-support))     |
-| CURSOR / REF CURSOR       | `OracleResultSet` (OUT bind) / `List<OracleRow>` (nested `CURSOR()` column) — REF CURSOR and nested-cursor rows carrying a CLOB/NCLOB/BLOB column are not decodable; implicit result sets are (see [Result Sets & Streaming](#result-sets--streaming), [Known Limitations](#known-limitations)) |
+| CURSOR / REF CURSOR       | `OracleResultSet` (OUT bind) / `List<OracleRow>` (nested `CURSOR()` column) — cursor-embedded CLOB/NCLOB/BLOB columns decode as materialized values; `fetchLobs: true` cannot wrap them as handles (see [Result Sets & Streaming](#result-sets--streaming), [Known Limitations](#known-limitations)) |
 | NULL                      | `null`                                                                           |
 
 ### RAW support
@@ -749,16 +749,10 @@ try {
 eager PL/SQL implicit-result rows, and a **streaming** `resultSet: true` cursor
 (see below). It does **not** reach a CLOB/NCLOB/BLOB carried by a nested
 `CURSOR(...)` column or a REF CURSOR OUT bind: those **fail loud** under
-`fetchLobs` (rather than silently materializing), because a cursor row carrying a
-LOB cannot be decoded by this driver at all yet — such statements fail with a
-protocol error even *without* `fetchLobs`, and on Oracle **21c** that failure
-also leaves the connection unusable. Note that `fetchLobs: true` only reaches
-this rejection for the **REF CURSOR OUT bind** half, and only *after* the
-statement has executed and its describe decoded (what it saves you is the row
-FETCH that poisons the session). For a **nested `CURSOR(...)` column** the
-EXECUTE response itself fails to decode, so the check never runs and
-`fetchLobs` makes no difference — the only remedy is to project the LOB outside
-the cursor. See
+`fetchLobs` (rather than silently materializing or wrapping an untracked handle).
+Without `fetchLobs`, such cursor rows decode normally — LOB columns arrive
+materialized as `String` / `Uint8List` and native JSON columns as decoded values.
+To get an `OracleLob` handle, project the LOB outside the cursor. See
 [Known Limitations](#known-limitations) for the shape and the workaround.
 `resultSet: true` + `fetchLobs: true`
 on a **PL/SQL block** (whose implicit results come back as a group of lazy result
@@ -1146,8 +1140,9 @@ final doc = result.rows.first['DOC'] as Map<String, Object?>; // not bytes
 - **Behavior change:** before this release such a column returned a
   `Uint8List`; code that decoded those bytes itself must now accept the
   decoded value (or opt out with `fetchLobs: true`).
-- **Not covered:** a `REF CURSOR` OUT bind or nested `CURSOR()` column
-  carrying the BLOB — such cursor rows are not decodable yet (see
+- **Not covered:** `fetchLobs: true` for a `REF CURSOR` OUT bind or nested
+  `CURSOR()` column carrying the BLOB — those rows decode without the option,
+  but embedded LOB handles are not supported (see
   [Known Limitations](#known-limitations)); and `CLOB` / `VARCHAR2` / `RAW`
   `IS JSON` columns, which stay `String` / `Uint8List`; and a BLOB returned
   through a PL/SQL OUT bind or `RETURNING ... INTO`, which carries no column
@@ -1279,7 +1274,7 @@ RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
 - **Statement cache and external DDL** — top-level DDL executed on the same connection clears the statement cache, but DDL issued from another session (or inside a PL/SQL block) can leave stale cached SELECT metadata. This matches node-oracledb thin-mode behavior.
 - **CLOB/BLOB cursor re-parse** — result cursors for queries selecting CLOB or BLOB columns are always re-parsed, never blind-reused from the statement cache (fresh defines are required to keep the LOB-prefetch metadata); RAW queries keep normal cursor reuse.
 - **NUMBER beyond 2⁵³** — integer-valued NUMBERs larger than 2⁵³ decode to `double` and lose precision (Dart `double` limit; matches node-oracledb).
-- **Nested `CURSOR()` / REF CURSOR rows carrying a LOB** — a row returned by a nested `CURSOR(...)` column or a `SYS_REFCURSOR` OUT bind that projects a `CLOB`/`NCLOB`/`BLOB` column **cannot be decoded by this driver**, with or without `fetchLobs`. Measured on both Oracle 23ai and 21c, such a statement fails with a protocol error (ORA-12547 / buffer underrun) as the cursor's rows are decoded; **on Oracle 21c the malformed stream also leaves the connection unusable**, so the session is lost and must be replaced (via `OraclePool` this happens on reclaim). This is the one fail-loud boundary in this driver that does not leave the connection usable. `fetchLobs: true` does **not** rescue the two shapes equally, because every LOB pre-check runs on already-decoded rows: for a **nested `CURSOR(...)` column** the decode fails first (inside the EXECUTE response), so `fetchLobs` changes nothing and the 21c session is lost either way; for a **`SYS_REFCURSOR` OUT bind** the describe decodes fine, so with `fetchLobs: true` you get the driver's clear rejection — after the execute round trip, but before the row FETCH that would poison the connection — and the session stays healthy. **Workaround (the only remedy for the nested-`CURSOR()` shape):** project the LOB column outside the cursor (join it into the outer SELECT, or return its key from the cursor and read the LOB in a second statement). `DBMS_SQL.RETURN_RESULT` implicit result sets are not affected: their LOB / JSON columns decode normally.
+- **Nested `CURSOR()` / REF CURSOR rows carrying a LOB with `fetchLobs: true`** — a `CLOB`/`NCLOB`/`BLOB` column projected by a nested `CURSOR(...)` column or a `SYS_REFCURSOR` OUT bind is **not** wrapped as an `OracleLob` handle: with `fetchLobs: true` the call fails loud with an `OracleException` (the cursor-embedded handle lifecycle is not built), after the execute round trip and leaving the connection usable. Without `fetchLobs` these rows decode normally on Oracle 23ai and 21c — LOBs materialize as `String` / `Uint8List`, and native `JSON` columns decode to their Dart values (the driver sends a DEFINE call before the cursor's first FETCH, as node-oracledb does). **Workaround for a handle:** project the LOB column outside the cursor (join it into the outer SELECT, or return its key from the cursor and read the LOB in a second statement). `DBMS_SQL.RETURN_RESULT` implicit result sets behave the same way: their LOB / JSON columns decode normally.
 - **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work. As of 1.4 an **open fetched `OracleLob`** (from `fetchLobs: true`) also holds that slot — for the handle's whole lifetime, not just during a round trip, and including handles a streaming result set prefetched but you never asked for — so an unclosed LOB handle is the most likely cause of a concurrent-operation error; a **created-temporary** handle (`createTemporaryClob()` and friends) is deliberately exempt and can be read, written, and bound while open. See [Incremental LOB access with `fetchLobs`](#incremental-lob-access-with-fetchlobs).
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
 - **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) are rejected on decode; offset-based zones (e.g. `+02:00`) are supported. Region-name compatibility is planned as a post-1.0 temporal enhancement.

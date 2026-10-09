@@ -68,8 +68,8 @@ class ResultSetCursor {
   /// shape, without which the server ships those values as bare locators the
   /// decoder cannot read. It takes precedence over [requiresFullExecute]
   /// exactly as in node-oracledb, whose `ExecuteMessage` writes DEFINE in
-  /// place of EXECUTE/FETCH when both are set. Only implicit result sets set
-  /// it today (Story 13.2).
+  /// place of EXECUTE/FETCH when both are set. Implicit result sets, REF CURSOR
+  /// OUT binds and nested `CURSOR()` drains all set it.
   ///
   /// ## Lazy LOB handles ([wrapLob] / [isLobHandle] / [closeLobHandles])
   ///

@@ -14,7 +14,9 @@ location: lib/src/connection.dart _wrapRefCursorOutBinds / _drainNestedCursor; l
 source_spec: `13-2-oracle-12c-json-as-blob.md`
 severity: medium
 reason: Measured on 23ai and 21c during this story: implicit-result cursors with a CLOB/NCLOB/BLOB/JSON column failed their first FETCH with ORA-12547 "Integer too large: size=114" (21c transport poisoned) until a node-oracledb-style DEFINE call (withData.js postProcess requiresDefine/noPrefetch) was sent first. After that they decode on both servers, including a LOB plus nested CURSOR() row. REF CURSOR OUT binds are also describe-created cursors and fail at the same first FETCH. They were left unchanged because dual-env tests pin their fail-loud behavior (lob_chunked_streaming / lob_coexistence suites) and the deferred-work.md entry "A cursor row carrying a LOB cannot be DECODED at all" tracks them. A nested CURSOR() at top level fails earlier, inside the EXECUTE response, so it may need a different fix.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-refcursor-lob-json-define
+resolution-undo: e26df1180e5807c7d6d4de1e42680287ab500b536db90210df50700e4f8987a6 2026-10-09 7374617475733a206f70656e
 
 ### DW-3: Top-level queries with a LOB/JSON column ignore preserveTimestampTimeZone for the first row batch, which the DEFINE call delivers.
 origin: spec-deferred f3ad072d95c0
@@ -52,7 +54,9 @@ origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-
 location: lib/src/connection.dart:829-843, 1026-1043, 1076
 severity: high
 reason: Retro action 1 (F3). Reviewer live probe: 23ai passes, 21c fails, implicit-result control passes on 21c. Apply requiresDefine to _wrapRefCursorOutBinds and _drainNestedCursor and add dual-env tests for both shapes; DW-2 covers only the LOB variant.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-refcursor-lob-json-define
+resolution-undo: e26df1180e5807c7d6d4de1e42680287ab500b536db90210df50700e4f8987a6 2026-10-09 7374617475733a206f70656e
 
 ### DW-8: Decide the BLOB IS JSON / IS OSON decode default: it is on by default with no opt-out, unlike node-oracledb where oldJsonColumnAsObj defaults to false.
 
@@ -240,7 +244,9 @@ decision: 2026-10-09 Keep single-slot rule permanently — Documented design; cr
 origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-env-integration-tests, 2026-07-26)"), 2026-10-09
 location: lib/src/protocol/messages/execute_message.dart
 reason: ⏳ **A cursor row carrying a LOB cannot be DECODED at all — and on 21c it POISONS the transport.** Re-measured by 12.4 AC8 on both fixtures with no `fetchLobs` anywhere, and now pinned by a permanent dual-env integration case on a dedicated, expendable connection: the call fails loud with `OracleException(oraProtocolError)` / ORA-12547 caused by `BufferException: Integer too large: size=114 exceeds maxSize=8` from `decodeExecuteResponse`, the failure is contained (no server-side damage — a FRESH connection reads the same tables, including the inner LOB itself, normally), and the poisoned session's fate is version-agnostic in the test: **23ai runs the next statement fine (`isConnected` stays true), 21c reports ORA-03113 and `isConnected` is false**, and the test accepts EITHER without asserting which. NO decode fix was attempted (explicitly out of scope). **Epic-exit disposition — the severity split matters:** on 23ai this costs one statement; on 21c one such query costs the caller their whole connection (and, in a pool, a session the borrower must discard). It BLOCKS wrapping cursor-embedded LOB columns as `OracleLob` handles (the re-targeted 12-1 iter-3 entry), so it gates that feature entirely. It is protocol/decode work — the misaligned walk looks like an unthreaded `ttcFieldVersion` in embedded-cursor describe parsing (the Story 9.2 precedent) or the LOB-prefetch metadata Oracle adds to a LOB column's describe — and should become **its own protocol/decode story**, not an Epic 12 leftover carried into an unrelated epic. target: protocol/decode story (own story, recommended next). [lib/src/protocol/messages/execute_message.dart `decodeExecuteResponse`; lib/src/protocol/buffer.dart]
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-refcursor-lob-json-define
+resolution-undo: e26df1180e5807c7d6d4de1e42680287ab500b536db90210df50700e4f8987a6 2026-10-09 7374617475733a206f70656e
 
 ### DW-31: `_copyBackLocator` silently drops a differently-sized server-echoed locator (+ the 12.3 note that the shared `copyBackLocator` now couples an…
 
@@ -799,7 +805,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: dev-story of 12-3-chunked-streaming-transfer (2026-07-26)"), 2026-10-09
 location: lib/src/protocol/buffer.dart
 reason: **A cursor row carrying a LOB cannot be DECODED at all — a pre-existing, `fetchLobs`-independent protocol defect, now diagnosed but not fixed (and it POISONS the 21c transport).** Story 12.3 AC8 measured it deliberately, because AC6's decision to keep `_rejectCursorEmbeddedLob()` rests on it. Reproduced live on Oracle 23ai (23.26.1) and 21c XE with **no** `fetchLobs` anywhere: (a) `SELECT id, CURSOR(SELECT clob_col FROM t2 ...) FROM t1` throws `ORA-12547: Protocol error: buffer underrun in execute response`, caused by `BufferException: Integer too large: size=114 exceeds maxSize=8` (`lib/src/protocol/buffer.dart` UB-integer read) raised inside `decodeExecuteResponse` while parsing the EXECUTE response; (b) a REF CURSOR OUT bind over a LOB column opens fine — its describe decodes cleanly, metadata is available — and throws the SAME error on its first row FETCH. A control cursor over a NUMBER column works on both versions, so the trigger is specifically a LOB column inside an embedded/REF cursor describe+row payload (`size=114` is a data byte read where a length prefix was expected, i.e. the walk is misaligned — the Story 9.2 precedent, an unthreaded `ttcFieldVersion` in embedded-cursor describe parsing, is the first hypothesis worth checking; the LOB-prefetch metadata Oracle adds to a LOB column's describe is the second). **Severity differs by version:** 23ai recovers (the error is decoded from a well-formed error packet, cursor ids are requeued, `hasOpenLob`/`hasOpenResultSet` stay false, and the connection runs the next statement), whereas 21c's completion probe rejects the stream as malformed and POISONS the transport — `ORA-12547: Malformed TTC stream detected by the completion probe ... Transport poisoned — close this connection and open a new one`, after which every later call on that connection fails with ORA-03113. So on 21c one such query costs the caller their connection. Not fixed here: this is protocol-decode work well outside a LOB-transfer story, and AC8 explicitly scoped the deliverable to the diagnosis. Wrapping cursor-embedded LOB columns as `OracleLob` handles is blocked behind it (see the re-targeted iter-3 entry). target: Epic 12 follow-up (protocol/decode story). [lib/src/protocol/messages/execute_message.dart `decodeExecuteResponse`; lib/src/protocol/buffer.dart]
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-refcursor-lob-json-define
+resolution-undo: e26df1180e5807c7d6d4de1e42680287ab500b536db90210df50700e4f8987a6 2026-10-09 7374617475733a206f70656e
 
 ### DW-105: A full-length single LOB READ scales super-linearly with value size — ~141 s for a 32 M-unit CLOB on 23ai.
 
@@ -933,4 +941,19 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 iteration 2 (2026-07-26)"), 2026-10-09
 location: lib/src/connection.dart
 reason: **`_openLobs` grows unbounded across a long `fetchLobs` result-set iteration when the caller never closes each delivered handle.** Under `resultSet: true + fetchLobs: true` every delivered row contributes one registered handle, and `OracleResultSet.close()` reaps only the UNdelivered ones — deliberately, so the "collect the rows, close the result set, then read the LOBs" pattern works. A caller that iterates a million rows and closes nothing therefore accumulates a million registered handles plus the O(n) `_openLobs` sweeps every concurrency guard performs, with no warning threshold and no diagnostic pointing at the close obligation. Blast radius is bounded (an open fetched handle already blocks `execute()`, so the growth is confined to the iteration) and it is entirely caller-driven, hence a follow-up. Fix: a one-shot `_log.warning` once `_openLobs` passes a threshold, naming the per-handle close obligation. target: Epic 12 follow-up (API ergonomics / diagnostics). [lib/src/connection.dart:4681 `_registerLob`, `_openLobs`]
+status: open
+
+### DW-124: Nested cursor columns in outer cursor rows beyond the first prefetch batch may lack inline describes on Oracle 21c.
+origin: spec-deferred 3bf1ee72b11c
+location: lib/src/protocol/result_set_cursor.dart:466
+source_spec: `spec-refcursor-lob-json-define.md`
+severity: medium
+reason: ResultSetCursor uses full EXECUTE or DEFINE only on the first fetch and OFETCH for continuation. The existing comment at lib/src/protocol/result_set_cursor.dart describes id-only nested cursor values on 21c continuation. The new tests verify multi-batch inner LOB rows, but the outer cursor has one row; this limitation predates this change and needs an independent protocol fix.
+status: open
+
+### DW-125: A no-row DEFINE response for a cursor with both LOB and nested cursor columns may fall back to OFETCH without the nested describe on Oracle 21c.
+origin: spec-deferred dcbbadeeba7c
+location: lib/src/protocol/result_set_cursor.dart:507
+source_spec: `spec-refcursor-lob-json-define.md`
+reason: ResultSetCursor._fetchNextBatch falls back to fetchRows when DEFINE returns zero rows with moreRowsToFetch, after clearing requiresFullExecute. A test transport that produces this response, or a reproducible Oracle server response, is needed to determine whether the nested cursor value then lacks its describe. The live combined-shape cases returned rows in the DEFINE response and passed.
 status: open

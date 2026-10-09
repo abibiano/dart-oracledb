@@ -1171,7 +1171,7 @@ void main() {
                 .having(
                   (e) => e.message,
                   'message',
-                  contains('cannot be decoded by this driver yet'),
+                  contains('cannot be wrapped as OracleLob handles yet'),
                 ),
           ),
         );

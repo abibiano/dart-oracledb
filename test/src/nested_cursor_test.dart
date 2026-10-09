@@ -118,6 +118,17 @@ class _NestedCursorTransport extends Transport {
     List<Object?>? previousRoundLastRow,
   }) async => _nextBatchFor(cursorId);
 
+  /// DEFINE-before-first-FETCH (node-oracledb `requiresDefine`) for a nested
+  /// cursor carrying a LOB / JSON column: serves the same per-cursor queue.
+  @override
+  Future<ExecuteResponse> defineCursor(
+    int cursorId,
+    int numRows, {
+    required List<ColumnMetadata> columns,
+    Duration? timeout = const Duration(minutes: 2),
+    bool preserveTimestampTimeZone = false,
+  }) async => _nextBatchFor(cursorId);
+
   /// The next canned batch for [cursorId], consuming its queue in order.
   ExecuteResponse _nextBatchFor(int cursorId) {
     fetchedCursorIds.add(cursorId);
@@ -710,7 +721,7 @@ void main() {
                 .having(
                   (e) => e.message,
                   'message',
-                  contains('cannot be decoded by this driver yet'),
+                  contains('cannot be wrapped as OracleLob handles yet'),
                 ),
           ),
         );
@@ -751,14 +762,9 @@ void main() {
         expect(message, contains('separate scalar OUT bind'));
         // The supported shapes stay named (the half that was always correct).
         expect(message, contains('resultSet: true'));
-        // The false remedy is gone, and the reason is stated.
-        expect(message, contains('WITHOUT fetchLobs does NOT help'));
-        expect(message, contains('session unusable'));
-        expect(
-          message,
-          isNot(contains('or run this statement without fetchLobs')),
-          reason: 'the one action that costs a 21c caller their session',
-        );
+        // Rows decode now, so dropping fetchLobs IS a valid remedy.
+        expect(message, contains('Omit fetchLobs'));
+        expect(message, contains('cannot be wrapped as OracleLob handles yet'));
       },
     );
 
@@ -847,7 +853,7 @@ void main() {
               .having(
                 (e) => e.message,
                 'message',
-                contains('cannot be decoded by this driver yet'),
+                contains('cannot be wrapped as OracleLob handles yet'),
               ),
         ),
       );
@@ -919,7 +925,7 @@ void main() {
           isA<OracleException>().having(
             (e) => e.message,
             'message',
-            contains('cannot be decoded by this driver yet'),
+            contains('cannot be wrapped as OracleLob handles yet'),
           ),
         ),
       );
@@ -1103,7 +1109,7 @@ void main() {
             isA<OracleException>().having(
               (e) => e.message,
               'message',
-              contains('cannot be decoded by this driver yet'),
+              contains('cannot be wrapped as OracleLob handles yet'),
             ),
           ),
         );

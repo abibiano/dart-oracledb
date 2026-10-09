@@ -229,13 +229,11 @@ void main() {
       // proven by the fake-transport unit tests test/src/result_set_test.dart
       // "a CLOB column in a REF CURSOR OUT bind fails loud under fetchLobs" and
       // test/src/nested_cursor_test.dart "nested-CURSOR() LOB columns fail loud
-      // under fetchLobs". It is NOT exercised live here: a REF CURSOR / nested
-      // CURSOR() whose rows carry a LOB trips a PRE-EXISTING,
-      // fetchLobs-independent FETCH-decode limitation ("ORA-12547 buffer
-      // underrun in execute response / Integer too large" inside
-      // decodeExecuteResponse, which runs BEFORE any reject/wrap/materialize
-      // step), so the shape cannot be driven end-to-end against a real server
-      // yet regardless of fetchLobs.
+      // under fetchLobs". The live reject is pinned in
+      // lob_chunked_streaming_integration_test.dart (REF CURSOR OUT bind) and
+      // lob_coexistence_integration_test.dart (nested CURSOR()); without
+      // fetchLobs these rows decode — see
+      // cursor_lob_json_define_integration_test.dart.
 
       // ---------------------------------------------------------------
       // Writing through a writable (FOR UPDATE) locator

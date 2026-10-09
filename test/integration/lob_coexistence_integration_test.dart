@@ -32,8 +32,7 @@
 ///     genuinely concurrent direction MEASURED (never force-asserted) with only
 ///     the "correct data or fail-loud, never silently wrong data" invariant
 ///     asserted;
-///   * **AC8** — the cursor-embedded-LOB decode boundary pinned
-///     version-agnostically on a dedicated expendable connection.
+///   * **AC8** — the cursor-embedded-LOB boundary: rows decode, `fetchLobs` rejects.
 ///
 /// Must pass on Oracle 23ai (FREEPDB1) and Oracle 21c (XEPDB1). Nothing here is
 /// auth-path-specific, so there is no `Transport.supportsFastAuth` probe and no
@@ -1998,7 +1997,7 @@ void main() {
   );
 
   // =========================================================================
-  // AC8 — the cursor-embedded-LOB decode boundary, pinned version-agnostically.
+  // AC8 — the cursor-embedded-LOB boundary (decode works; fetchLobs rejects).
   // =========================================================================
   group(
     'the cursor-embedded LOB decode boundary (12.4 AC8)',
@@ -2044,113 +2043,43 @@ void main() {
       });
 
       test(
-        'a cursor row carrying a LOB fails LOUD without fetchLobs, the damage is '
-        'contained to that one session, and a FRESH connection is unaffected',
+        'a nested CURSOR() row carrying a LOB decodes without fetchLobs and the '
+        'session stays healthy; fetchLobs: true fails loud, also healthy',
         () async {
-          // A DEDICATED, EXPENDABLE connection: on Oracle 21c the malformed
-          // stream poisons the transport, so one such query costs the caller
-          // their connection. Never run this on a shared setUp connection.
-          //
-          // MEASURED on both fixtures (no fetchLobs anywhere): ORA-12547 with
-          // `BufferException: Integer too large: size=114 exceeds maxSize=8`
-          // from decodeExecuteResponse. The FATE of the session then DIFFERS by
-          // version — 23ai runs the next statement fine, 21c reports ORA-03113
-          // — so this test accepts EITHER and asserts neither, which is what
-          // keeps it version-agnostic instead of version-branched.
-          final expendable = await connectForTest();
-          try {
-            OracleException? failure;
-            try {
-              await expendable.execute(
-                'SELECT id, CURSOR(SELECT doc FROM $innerTable WHERE id = 1) '
-                'AS C FROM $outerTable WHERE id = 1',
-              );
-            } on OracleException catch (e) {
-              failure = e;
-            }
-            expect(
-              failure,
-              isNotNull,
-              reason:
-                  'a cursor row carrying a LOB column cannot be decoded '
-                  'today; it must fail LOUD, never return wrong rows',
-            );
-            expect(
-              failure!.errorCode,
-              equals(oraProtocolError),
-              reason: 'ORA-12547, the protocol-error family',
-            );
-            expect(failure.message, isNotEmpty);
-            expect(
-              failure.cause,
-              isNotNull,
-              reason: 'the wrapping exception always carries its cause',
-            );
+          // History: before the DEFINE-before-first-FETCH fix (node-oracledb
+          // `requiresDefine`) this shape failed with ORA-12547 and, on 21c,
+          // poisoned the transport. It now decodes on 23ai and 21c alike.
+          final conn = setupHandle!;
+          const sql =
+              'SELECT id, CURSOR(SELECT doc FROM {i} WHERE id = 1) AS C '
+              'FROM {o} WHERE id = 1';
+          final query = sql
+              .replaceAll('{i}', innerTable)
+              .replaceAll('{o}', outerTable);
+          final result = await conn.execute(query);
+          final nested = result.rows.single['C'] as List<OracleRow>;
+          expect(nested.single['DOC'], equals('inner clob value'));
+          expect(conn.hasOpenLob, isFalse);
+          expect(conn.hasOpenResultSet, isFalse);
 
-            // No half-open state was left behind on the failing connection.
-            expect(expendable.hasOpenLob, isFalse);
-            expect(expendable.hasOpenResultSet, isFalse);
-            expect(expendable.isExecuting, isFalse);
-
-            // The post-failure fate of the POISONED session is deliberately
-            // version-agnostic: assert only that it does not lie — either the
-            // next statement works, or it fails loud with an OracleException.
-            try {
-              final next = await expendable.execute('SELECT 1 AS V FROM dual');
-              expect(
-                next.rows.single['V'],
-                equals(1),
-                reason: 'if the session survived, it must be CORRECT',
-              );
-            } on OracleException catch (e) {
-              expect(
-                e.message,
-                isNotEmpty,
-                reason:
-                    'if the session did not survive, it must say so '
-                    'clearly rather than returning wrong data',
-              );
-            }
-          } finally {
-            // A poisoned transport may legitimately refuse a clean close — but
-            // it must fail the way this driver always fails. Anything that is
-            // not an OracleException escapes here and fails the test (a raw
-            // SocketException or a StateError leaking out of close() would be a
-            // real defect, not a version difference).
-            try {
-              await expendable.close();
-            } on OracleException catch (e) {
-              expect(
-                e.message,
-                isNotEmpty,
-                reason:
-                    'close() on a poisoned session may throw, but only an '
-                    'OracleException carrying a real diagnostic',
-              );
-            }
-          }
-
-          // The load-bearing containment assertion: NO server-side damage — a
-          // FRESH connection executes normally, including the same tables.
-          final fresh = await connectForTest();
-          try {
-            final ok = await fresh.execute(
-              'SELECT label FROM $outerTable WHERE id = 1',
-            );
-            expect(ok.rows.single['LABEL'], equals('outer'));
-            final innerOk = await fresh.execute(
-              'SELECT doc FROM $innerTable WHERE id = 1',
-            );
-            expect(
-              innerOk.rows.single['DOC'],
-              equals('inner clob value'),
-              reason:
-                  'the inner LOB itself is perfectly readable — the '
-                  'defect is purely in decoding a LOB inside a CURSOR row',
-            );
-          } finally {
-            await fresh.close();
-          }
+          // fetchLobs: true cannot wrap a cursor-embedded LOB: fail loud, and
+          // the connection (21c included) remains usable.
+          await expectLater(
+            conn.execute(
+              query,
+              null,
+              const OracleExecuteOptions(fetchLobs: true),
+            ),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'errorCode',
+                oraProtocolError,
+              ),
+            ),
+          );
+          final next = await conn.execute('SELECT 1 AS V FROM dual');
+          expect(next.rows.single['V'], equals(1));
         },
         timeout: const Timeout(Duration(minutes: 2)),
       );

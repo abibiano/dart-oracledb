@@ -932,8 +932,8 @@ void main() {
         },
       );
 
-      test('a REF CURSOR OUT bind carrying a LOB column still fails loud AND no '
-          'longer leaks its server cursor', () async {
+      test('a REF CURSOR OUT bind carrying a LOB column still fails loud under '
+          'fetchLobs AND no longer leaks its server cursor', () async {
         final proc = uniqueObjectName('p123rc');
         await connection.execute('''
           CREATE OR REPLACE PROCEDURE $proc (rc OUT SYS_REFCURSOR) IS

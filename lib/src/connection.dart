@@ -138,8 +138,8 @@ class OracleExecuteOptions {
   ///
   /// * a CLOB/NCLOB/BLOB carried by a **nested `CURSOR(...)` result column or a
   ///   REF CURSOR OUT bind** fails loud rather than wrapping or silently
-  ///   materializing — such rows cannot be decoded by this driver at all yet,
-  ///   `fetchLobs` or not;
+  ///   materializing — such rows decode (without `fetchLobs` the LOB is
+  ///   materialized), but their handle lifecycle is not built;
   /// * `resultSet: true` on a **PL/SQL block** (whose implicit results come back
   ///   as a group of lazy result sets) throws before any wire round trip: use the
   ///   eager `execute()` path, which does wrap implicit-result rows;
@@ -696,10 +696,8 @@ class OracleConnection {
   /// Whether [columns] includes a locator LOB column (CLOB / NCLOB / BLOB) —
   /// NCLOB shares [oc.oraTypeClob] with CLOB, so both LOB type codes cover it.
   /// Used to fail loud when `fetchLobs: true` reaches a nested `CURSOR(...)`
-  /// result column or a REF CURSOR OUT bind carrying a LOB: such a row cannot be
-  /// decoded at all today (measured, `fetchLobs`-independent, and on 21c it
-  /// poisons the transport), so it is rejected rather than wrapped — see
-  /// [_rejectCursorEmbeddedLob] for the rationale and the owning follow-up.
+  /// result column or a REF CURSOR OUT bind carrying a LOB: such a LOB is
+  /// rejected rather than wrapped — see [_rejectCursorEmbeddedLob].
   static bool _cursorCarriesLob(List<ColumnMetadata> columns) => columns.any(
     (c) => c.oracleType == oc.oraTypeClob || c.oracleType == oc.oraTypeBlob,
   );
@@ -708,46 +706,31 @@ class OracleConnection {
   /// a nested `CURSOR(...)` result column or a REF CURSOR OUT bind's rows.
   ///
   /// Story 12.3 lifted the equivalent rejection for a **top-level**
-  /// `resultSet: true` cursor — that shape now wraps each batch's LOB columns as
-  /// [OracleLob] handles and reaps the undelivered ones — but deliberately kept
-  /// this one, for a reason that is about provability rather than plumbing: **a
-  /// cursor row carrying a LOB cannot be decoded at all today.** Measured on
-  /// Oracle 23ai and 21c, WITHOUT `fetchLobs`, both shapes fail inside
-  /// `decodeExecuteResponse` with `ORA-12547 Protocol error: buffer underrun in
-  /// execute response` / `BufferException: Integer too large: size=114 exceeds
-  /// maxSize=8` — a nested `CURSOR()` at the EXECUTE response, a REF CURSOR OUT
-  /// bind at its first row FETCH (its describe decodes fine, which is why THIS
-  /// reject is reachable at all). On 21c the malformed stream additionally
-  /// poisons the transport. So a wrap here could only ever be exercised by fake
-  /// transports, which cannot satisfy the project's 23ai-AND-21c mandate nor the
-  /// epic's rule that a wrap decision ships with a *proven* lifecycle.
+  /// `resultSet: true` cursor — that shape wraps each batch's LOB columns as
+  /// [OracleLob] handles and reaps the undelivered ones — but the cursor-embedded
+  /// shapes keep the reject: their handle lifecycle (force-close on result-set
+  /// close / pool reclaim, `closeLobs()` reaching a result-set OUT bind) is not
+  /// built, so a wrap here would hand out untrackable handles. Rows carrying a
+  /// LOB or native JSON column DO decode now — these cursors open with a DEFINE
+  /// call before the first FETCH ([_cursorRequiresDefine]) — and without
+  /// `fetchLobs` the LOB is materialized as a `String` / `Uint8List`.
   ///
   /// Rejecting also beats silently materializing, which would break the
-  /// "LOB column → handle" contract on this one shape. The reject path itself
-  /// requeues the embedded cursor id for the close-cursor piggyback (both call
-  /// sites), so a rejected call no longer leaks a server cursor.
-  ///
-  /// The message names the ONE remedy that is measured to work — project the LOB
-  /// column outside the cursor — and explicitly says that dropping `fetchLobs`
-  /// does not help. Re-running the same statement without the flag is the one
-  /// action that costs the caller their session on 21c, so offering it as a
-  /// remedy (as this message once did) actively harms; the four user-facing docs
-  /// were corrected for the same claim.
+  /// "LOB column → handle" contract on this one shape. The reject path requeues
+  /// the embedded cursor id for the close-cursor piggyback (both call sites), so
+  /// a rejected call does not leak a server cursor.
   Never _rejectCursorEmbeddedLob() {
     throw const OracleException(
       errorCode: oraProtocolError,
       message:
           'OracleExecuteOptions(fetchLobs: true) does not support a '
           'CLOB/NCLOB/BLOB carried by a nested CURSOR(...) result column or a '
-          'REF CURSOR OUT bind: such cursor-embedded LOB rows cannot be decoded '
-          'by this driver yet (they fail with a protocol error even without '
-          'fetchLobs), so they are never wrapped as OracleLob handles. Project '
-          'the CLOB/NCLOB/BLOB OUTSIDE the cursor — as a top-level column or as '
-          'a separate scalar OUT bind — which fetchLobs fully supports, '
-          'including with resultSet: true. Re-running this statement WITHOUT '
-          'fetchLobs does NOT help: the same shape still fails while decoding '
-          'the execute response or the first row FETCH, and on Oracle 21c and '
-          'older the malformed stream leaves the session unusable.',
+          'REF CURSOR OUT bind: cursor-embedded LOB columns cannot be wrapped '
+          'as OracleLob handles yet. Omit fetchLobs to receive the LOB '
+          'materialized as a String / Uint8List, or project the '
+          'CLOB/NCLOB/BLOB OUTSIDE the cursor — as a top-level column or as a '
+          'separate scalar OUT bind — which fetchLobs fully supports, '
+          'including with resultSet: true.',
     );
   }
 
@@ -797,11 +780,9 @@ class OracleConnection {
       final decoded = newValues[i];
       if (decoded is! DecodedCursorResult) continue;
       // fetchLobs does NOT reach into a REF CURSOR OUT bind's rows: a LOB column
-      // carried by the cursor arrives through the lazy per-batch drain, and that
-      // shape is not live-reachable at all (its FETCH trips a pre-existing,
-      // fetchLobs-independent decode limitation — see [_rejectCursorEmbeddedLob]),
-      // so a wrap could never be proven against a real server. Fail loud rather
-      // than silently materializing it or wrapping an unproven handle. Deeper
+      // carried by the cursor arrives through the lazy per-batch drain, whose
+      // handle lifecycle is not built (see [_rejectCursorEmbeddedLob]). Fail loud
+      // rather than silently materializing it or wrapping an untrackable handle. Deeper
       // nested-CURSOR() LOB columns inside the cursor are caught by
       // _materializeNestedCursorsInBatch on the per-batch drain (onBatchDecoded
       // below still threads fetchLobs).
@@ -841,6 +822,10 @@ class OracleConnection {
         // plain OFETCH would shear). Scalar/LOB REF CURSORs (no cursor columns)
         // stay on plain OFETCH.
         requiresFullExecute: nestedCursorIndices.isNotEmpty,
+        // node-oracledb requiresDefine: a describe-created REF CURSOR carrying a
+        // LOB / JSON column announces its LOB-prefetch defines before the first
+        // FETCH (see _cursorRequiresDefine).
+        requiresDefine: _cursorRequiresDefine(decoded.columns),
         // fetchLobs threads only so a DEEPER nested-CURSOR() LOB column inside
         // this REF cursor is rejected (fail loud) on its per-batch drain; the
         // REF cursor's own direct LOB columns were already rejected above.
@@ -887,10 +872,9 @@ class OracleConnection {
   /// `CURSOR(...)` carries a CLOB/NCLOB/BLOB, the drain fails loud
   /// ([_rejectCursorEmbeddedLob]) rather than silently materializing it (the
   /// wrap-vs-materialize split the flag-threading mandate exists to prevent —
-  /// Epic 11 retro action item 2). The reason is NOT a lifecycle gap: such a row
-  /// cannot be decoded at all today, `fetchLobs` or not, and on 21c the
-  /// malformed stream poisons the transport — see [_rejectCursorEmbeddedLob] for
-  /// the measurements and for which follow-up owns it. The flag propagates to
+  /// Epic 11 retro action item 2). The reason is the missing handle lifecycle:
+  /// such rows decode (the cursor opens with a DEFINE — [_cursorRequiresDefine]),
+  /// but a wrapped handle could not be tracked. The flag propagates to
   /// arbitrary nesting depth so a LOB at any level is rejected.
   ///
   /// [fetchLobs] is `required` deliberately: every caller must state its answer.
@@ -898,20 +882,11 @@ class OracleConnection {
   /// `resultSet: true` + `fetchLobs: true`), which left this one entry point
   /// without the reject every other one enforces.
   ///
-  /// Reachability, stated precisely so no caller mistakes this reject for a
-  /// remedy: it runs on ALREADY-DECODED rows, i.e. strictly after `sendExecute`
-  /// returned. For a nested `CURSOR(...)` column a real server's EXECUTE response
-  /// does not decode at all (measured — see [_rejectCursorEmbeddedLob]), so on
-  /// 23ai and 21c the decode failure happens FIRST and no `fetchLobs` value can
-  /// pre-empt it; the 21c session is lost either way, and projecting the LOB
-  /// outside the cursor is the only remedy. This reject is therefore pinned by
-  /// fake-transport tests (which can hand over such a decoded row) and exists to
-  /// keep the flag-threading contract total: `fetchLobs` never silently
-  /// materializes a cursor-embedded LOB at any entry point or nesting depth. The
-  /// reject that IS live-reachable is the REF CURSOR OUT-bind one in
-  /// [_wrapRefCursorOutBinds] — that cursor's describe decodes fine, so the
-  /// reject lands after the execute round trip but before the row FETCH that
-  /// would poison the session.
+  /// Reachability: this reject runs on ALREADY-DECODED rows, i.e. strictly after
+  /// `sendExecute` returned, and it is live-reachable for a nested `CURSOR(...)`
+  /// column as well as the REF CURSOR OUT-bind one in [_wrapRefCursorOutBinds].
+  /// It keeps the flag-threading contract total: `fetchLobs` never silently
+  /// materializes a cursor-embedded LOB at any entry point or nesting depth.
   Future<void> _materializeNestedCursorsInBatch(
     List<List<Object?>> rows,
     List<int> cursorColumnIndices, {
@@ -1010,8 +985,8 @@ class OracleConnection {
   /// [fetchLobs] is forwarded to the deeper-cursor pass only (this cursor's own
   /// LOB columns were already rejected by the caller before draining); a LOB in
   /// a deeper `CURSOR(...)` is rejected there, because a cursor row carrying a
-  /// LOB is undecodable today regardless of `fetchLobs` — not because a handle
-  /// lifecycle is missing (see [_rejectCursorEmbeddedLob]). `required` for the
+  /// LOB cannot be wrapped as a tracked handle (see [_rejectCursorEmbeddedLob]).
+  /// `required` for the
   /// same reason as on [_materializeNestedCursorsInBatch]: a defaulted `false`
   /// silently disables a reject that protects the session.
   Future<List<OracleRow>> _drainNestedCursor(
@@ -1037,6 +1012,8 @@ class OracleConnection {
       // so pre-23 (21c) ships the deeper describe inline (a plain OFETCH would
       // shear). A scalar/LOB nested cursor stays on plain OFETCH.
       requiresFullExecute: deeperCursorIndices.isNotEmpty,
+      // node-oracledb requiresDefine — same reason as a REF CURSOR OUT bind.
+      requiresDefine: _cursorRequiresDefine(decoded.columns),
       // Deliberately NOT wrapping (AC6): a nested cursor's LOB columns are
       // rejected by the caller before this drain, and its batches materialize.
       wrapLob: null,
@@ -1060,7 +1037,7 @@ class OracleConnection {
     }
   }
 
-  /// Whether an implicit result cursor described by [columns] needs a DEFINE
+  /// Whether a describe-created cursor described by [columns] needs a DEFINE
   /// call before its first FETCH (node-oracledb `requiresDefine`, set in
   /// `withData.js` `postProcess` for every describe-created cursor with a CLOB /
   /// NCLOB / BLOB / JSON column).
@@ -1070,10 +1047,10 @@ class OracleConnection {
   /// whose rows carry a LOB failed its first FETCH with ORA-12547 ("Integer too
   /// large: size=114"), and on 21c the malformed stream poisoned the
   /// transport. Story 13.2 needs this shape to read JSON stored in a BLOB.
-  /// REF CURSOR OUT binds and nested `CURSOR()` columns are deliberately NOT
-  /// changed here: they keep their documented, separately tracked fail-loud
-  /// behavior (see [_rejectCursorEmbeddedLob]).
-  static bool _implicitResultRequiresDefine(List<ColumnMetadata> columns) =>
+  /// The same rule applies to every describe-created cursor: implicit results,
+  /// REF CURSOR OUT binds ([_wrapRefCursorOutBinds]) and nested `CURSOR()`
+  /// columns ([_drainNestedCursor]).
+  static bool _cursorRequiresDefine(List<ColumnMetadata> columns) =>
       columns.any(
         (c) =>
             c.oracleType == oc.oraTypeClob ||
@@ -1142,8 +1119,8 @@ class OracleConnection {
       requiresFullExecute: cursorColumnIndicesOf(descriptor.columns).isNotEmpty,
       // node-oracledb requiresDefine: an implicit result carrying a LOB / JSON
       // column must announce its LOB-prefetch defines before the first FETCH
-      // (see _implicitResultRequiresDefine).
-      requiresDefine: _implicitResultRequiresDefine(descriptor.columns),
+      // (see _cursorRequiresDefine).
+      requiresDefine: _cursorRequiresDefine(descriptor.columns),
       // Deliberately NOT wrapping here: this is the EAGER drain, which
       // materializes (or wraps, under fetchLobs) ONCE over the fully-drained
       // result below so a locator aliased across rows yields one handle.
@@ -1244,7 +1221,7 @@ class OracleConnection {
         // ones open with a DEFINE instead (requiresDefine below).
         requiresFullExecute: nestedCursorIndices.isNotEmpty,
         // node-oracledb requiresDefine — same reason as the eager drain.
-        requiresDefine: _implicitResultRequiresDefine(descriptor.columns),
+        requiresDefine: _cursorRequiresDefine(descriptor.columns),
         // Materialize cursor-valued columns in each fetched batch, mirroring the
         // streaming SELECT path. Null (no per-batch work) for the common
         // scalar/LOB implicit result.
@@ -4359,11 +4336,7 @@ class OracleConnection {
         // (both halves are supported), and the reject in
         // `_materializeNestedCursorsInBatch` — not any wrap decision here — is
         // what keeps this entry point's answer identical to every other one.
-        // Defaulting it to false here silently disabled that reject. Note the
-        // reject is NOT a remedy for the 21c session loss: it runs on decoded
-        // rows, and a real server's EXECUTE response for a LOB-carrying nested
-        // CURSOR() does not decode at all (see `_materializeNestedCursorsInBatch`
-        // for the reachability note).
+        // Defaulting it to false here silently disabled that reject.
         await _materializeNestedCursorsInBatch(
           firstResponse.rows,
           cursorColumnIndices,
@@ -4449,7 +4422,7 @@ class OracleConnection {
         // has no cursor columns, so the common path adds no per-batch work.
         // fetchLobs threaded for the same reason as the first-batch pass above:
         // a nested-CURSOR() LOB column arriving on a CONTINUATION batch must hit
-        // the same fail-loud reject, not the undecodable drain.
+        // the same fail-loud reject, not a silent materialization.
         onBatchDecoded: cursorColumnIndices.isEmpty
             ? null
             : (batch) => _materializeNestedCursorsInBatch(
