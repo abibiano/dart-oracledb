@@ -1,4 +1,13 @@
 {
+  "DW-115": {
+    "answered_at": "2026-10-09",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Expose OracleLob.defaultStreamPieceSize, keep the top-level export as @Deprecated alias, update docs and tests.",
+    "key": "1",
+    "label": "Move to OracleLob static getter",
+    "resolution": ""
+  },
   "DW-27": {
     "answered_at": "2026-10-09",
     "bundle_name": "",
