@@ -230,6 +230,7 @@ location: lib/src/oracle_lob.dart
 reason: ⏳ **CARRIED — `read()`'s cached-`length` BEHAVIOR (the length-refresh decision).** The evidence half is closed above; what remains is the actual behavior change. Now decidable on evidence rather than speculation: a locator is read-consistent, so a stale length never yields corrupt data — only a `read()` that stops at the stale end, and a silent empty return for `read(offset: staleLength + 1)`. So the options are (a) leave it (node-oracledb parity — node's `getLength()` is cached too), (b) drop the no-round-trip short-circuit so a past-end read asks the server like the streams do, or (c) add an explicit refresh API (which node lacks). **Epic-exit disposition:** (b) is the cheap half-step that removes the footgun without new API and would cost one round trip on a genuinely-empty read; pair the decision with the parity entry above, since (c) is the same work as the `length`/`chunkSize` refresh gap. target: post-1.4 LOB API parity story. [lib/src/oracle_lob.dart `read`]
 status: open
 decision: 2026-10-09 Drop the short-circuit — Remove the no-round-trip short-circuit in OracleLob.read so a past-end read asks the server like the streams do; update tests and docs.
+decision: 2026-10-09 Drop the short-circuit — Remove the no-round-trip short-circuit in OracleLob.read so a past-end read asks the server like the streams do; update tests and docs.
 
 ### DW-29: CARRIED (unchanged, explicitly) — binding a live FETCHED handle is unreachable while it holds the connection's single in-flight slot. Story 12.4 does…
 
