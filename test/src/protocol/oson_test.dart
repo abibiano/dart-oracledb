@@ -61,7 +61,8 @@ Uint8List _scalarDoc(String nodeHex) {
 }
 
 /// Builds an OSON document that embeds hand-built Oracle-specific scalar
-/// nodes, which the encoder (standard JSON only) refuses to produce.
+/// nodes verbatim — including kinds the encoder never emits (DATE,
+/// BINARY_FLOAT, intervals, JsonId, VECTOR) and server-captured byte forms.
 ///
 /// [build] receives one placeholder string per entry of [nodesHex] and
 /// returns a standard-JSON document using them. The document is encoded,
@@ -261,26 +262,53 @@ void main() {
   });
 
   group('OSON encode — input validation', () {
-    test('rejects non-finite doubles', () {
-      expect(
-        () => encodeOson(<Object?>[double.nan]),
-        throwsA(isA<OracleException>()),
-      );
-      expect(
-        () => encodeOson(<Object?>[double.infinity]),
-        throwsA(isA<OracleException>()),
-      );
+    test('rejects unsupported member types', () {
+      for (final bad in <Object>[
+        <int>{1, 2}, // Set
+        #symbol,
+        Duration.zero, // arbitrary object
+        Object(),
+      ]) {
+        expect(
+          () => encodeOson(<Object?>[bad]),
+          _throwsOracle(oraUnsupportedType, 'Unsupported JSON member type'),
+          reason: '${bad.runtimeType}',
+        );
+        expect(
+          () => encodeOson(bad),
+          _throwsOracle(oraUnsupportedType),
+          reason: 'scalar root ${bad.runtimeType}',
+        );
+      }
     });
 
-    test('rejects unsupported member types', () {
-      expect(
-        () => encodeOson(<Object?>[DateTime.utc(2026)]),
-        throwsA(isA<OracleException>()),
-      );
-      expect(
-        () => encodeOson(<String, Object?>{'b': Uint8List(2)}),
-        throwsA(isA<OracleException>()),
-      );
+    test('rejects dates outside years 1..9999 without echoing the year', () {
+      for (final bad in <Object>[
+        DateTime(-44, 3, 15),
+        DateTime(0),
+        DateTime(10000),
+        DateTime(25600), // would wrap the century byte silently
+        OracleTimestampTz(DateTime.utc(-1), offsetMinutes: 0),
+        OracleTimestampTz(DateTime.utc(10000), offsetMinutes: 60),
+      ]) {
+        expect(
+          () => encodeOson(<String, Object?>{'when': bad}),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+                .having((e) => e.message, 'message', contains('year'))
+                .having(
+                  (e) => e.message,
+                  'message',
+                  isNot(anyOf(contains('-44'), contains('10000'))),
+                ),
+          ),
+          reason: '$bad',
+        );
+      }
+      // The boundaries themselves encode.
+      expect(encodeOson(DateTime(1)), isA<Uint8List>());
+      expect(encodeOson(DateTime(9999, 12, 31, 23, 59, 59)), isA<Uint8List>());
     });
 
     test('rejects non-String map keys', () {
@@ -1027,27 +1055,560 @@ void main() {
         );
       });
     });
+  });
 
-    test('encode/bind still reject the decoded Oracle scalar types '
-        '(bind support is Story 13.3)', () {
-      final decodedOnly = <Object>[
-        DateTime(2024, 3, 15),
-        OracleTimestampTz(DateTime.utc(2024), offsetMinutes: 0),
-        Uint8List.fromList([1, 2]),
+  // ==========================================================================
+  // Story 13.3 — bind/fetch symmetry: every Oracle-specific scalar the decoder
+  // produces encodes back (node-oracledb oson.js `encodeNode`), as a member or
+  // as a scalar root.
+  // ==========================================================================
+  group('OSON encode — Oracle-specific scalars', () {
+    /// The tree-segment node bytes of an encoded scalar document (everything
+    /// after the 8-byte scalar header: magic, version, flags, uint16 size).
+    String scalarNode(Object? value) {
+      final bytes = encodeOson(value);
+      // INLINE_LEAF | IS_SCALAR with a uint16 tree segment size.
+      expect(_toHex(bytes.sublist(0, 6)), equals('ff4a5a010012'));
+      final size = (bytes[6] << 8) | bytes[7];
+      expect(bytes.length, equals(8 + size));
+      return _toHex(bytes.sublist(8));
+    }
+
+    String hex(String spaced) => spaced.replaceAll(' ', '');
+
+    group('reference-backed fixtures (node-oracledb parity)', () {
+      // Generated with the bundled node-oracledb encoder (see the library
+      // comment) under TZ=UTC so a JS Date's local fields equal the Dart
+      // DateTime constructor arguments used here.
+      test('Date without milliseconds → TIMESTAMP7 scalar document', () {
+        expect(
+          _toHex(encodeOson(DateTime(2024, 3, 15, 10, 20, 30))),
+          equals('ff4a5a01001200087d787c030f0b151f'),
+        );
+      });
+
+      test('Date with milliseconds → TIMESTAMP scalar document', () {
+        expect(
+          _toHex(encodeOson(DateTime(2024, 3, 15, 10, 20, 30, 123))),
+          equals('ff4a5a010012000c39787c030f0b151f0754d4c0'),
+        );
+      });
+
+      test('Buffer → binary (uint16 length) scalar document, empty too', () {
+        expect(
+          _toHex(encodeOson(Uint8List.fromList([0x00, 0xff, 0x10]))),
+          equals('ff4a5a01001200063a000300ff10'),
+        );
+        expect(
+          _toHex(encodeOson(Uint8List(0))),
+          equals('ff4a5a01001200033a0000'),
+        );
+      });
+
+      test('NaN → BINARY_DOUBLE scalar document', () {
+        expect(
+          _toHex(encodeOson(double.nan)),
+          equals('ff4a5a010012000936fff8000000000000'),
+        );
+      });
+
+      test('document mixing dates, buffers, NaN and a NUMBER', () {
+        expect(
+          _toHex(
+            encodeOson(<String, Object?>{
+              'd': DateTime(2024, 3, 15, 10, 20, 30),
+              'ts': DateTime(2024, 3, 15, 10, 20, 30, 500),
+              'b': Uint8List.fromList([1, 2]),
+              'n': double.nan,
+              'list': <Object?>[
+                Uint8List.fromList([0xca, 0xfe]),
+                DateTime(2000),
+                7,
+              ],
+            }),
+          ),
+          equals(
+            'ff4a5a01210205000e005c000031707381e5000700020000000900050164'
+            '0274730162016e046c697374a40503020501040000001b000000230000002f'
+            '000000340000003d7d787c030f0b151f39787c030f0b151f1dcd65003a0002'
+            '010236fff8000000000000e0030000004b00000050000000583a0002cafe7d'
+            '786401010101013402c108',
+          ),
+        );
+      });
+
+      test('65535-byte buffer keeps the uint16 length node; 65536 bytes '
+          'switches to uint32 (and a uint32 tree segment)', () {
+        final b65535 = encodeOson(Uint8List(65535)..fillRange(0, 65535, 0xab));
+        expect(
+          _toHex(b65535.sublist(0, 13)),
+          equals('ff4a5a011012000100023affff'),
+        );
+        final b65536 = encodeOson(Uint8List(65536)..fillRange(0, 65536, 0xab));
+        expect(
+          _toHex(b65536.sublist(0, 15)),
+          equals('ff4a5a011012000100053b00010000'),
+        );
+        expect(b65536.length, equals(15 + 65536));
+      });
+    });
+
+    group('DateTime', () {
+      test('no sub-second part → TIMESTAMP7 carrying encodeDate bytes', () {
+        final value = DateTime(2024, 3, 15, 10, 20, 30);
+        expect(scalarNode(value), equals(hex('7d 787c030f0b151f')));
+        expect(scalarNode(value), equals('7d${_toHex(dt.encodeDate(value))}'));
+        // Midnight and the AD/9999 boundaries.
+        expect(
+          scalarNode(DateTime(2024, 3, 15)),
+          equals(hex('7d 787c030f010101')),
+        );
+        expect(scalarNode(DateTime(1)), equals(hex('7d 6465010101 0101')));
+        expect(
+          scalarNode(DateTime(9999, 12, 31, 23, 59, 59)),
+          equals(hex('7d c7c70c1f18 3c3c')),
+        );
+      });
+
+      test('a sub-second part → 11-byte TIMESTAMP carrying encodeTimestamp '
+          'bytes (milliseconds and microseconds alike)', () {
+        final millis = DateTime(2024, 3, 15, 10, 20, 30, 123, 456);
+        expect(scalarNode(millis), equals(hex('39 787c030f0b151f 075bca00')));
+        expect(
+          scalarNode(millis),
+          equals('39${_toHex(dt.encodeTimestamp(millis))}'),
+        );
+        // One microsecond alone is enough to need the fractional form.
+        expect(
+          scalarNode(DateTime(2024, 3, 15, 10, 20, 30, 0, 1)),
+          equals(hex('39 787c030f0b151f 000003e8')),
+        );
+      });
+
+      test('local and UTC DateTimes both write their own wall-clock fields, '
+          'exactly like a DATE / TIMESTAMP column bind', () {
+        expect(
+          scalarNode(DateTime.utc(2024, 3, 15, 10, 20, 30)),
+          equals(scalarNode(DateTime(2024, 3, 15, 10, 20, 30))),
+        );
+      });
+    });
+
+    group('OracleTimestampTz', () {
+      test('→ 13-byte TIMESTAMP_TZ, byte-identical to the server-captured '
+          'nodes the decoder reads', () {
+        // TIMESTAMP '2024-03-15 10:20:30.5 +05:30' (server capture).
+        expect(
+          scalarNode(
+            OracleTimestampTz(
+              DateTime.utc(2024, 3, 15, 4, 50, 30, 500),
+              offsetMinutes: 330,
+            ),
+          ),
+          equals(hex(_timestampTzNode)),
+        );
+        // TIMESTAMP '2024-03-15 10:20:30 -08:00' (server capture): the
+        // zero fraction still travels — TSTZ is always 13 bytes.
+        expect(
+          scalarNode(
+            OracleTimestampTz(
+              DateTime.utc(2024, 3, 15, 18, 20, 30),
+              offsetMinutes: -480,
+            ),
+          ),
+          equals(hex('7c 787c030f13151f 00000000 0c3c')),
+        );
+        // -09:30: hour and minute parts share the sign (11 / 30).
+        final minusHalf = OracleTimestampTz(
+          DateTime.utc(2024, 3, 15, 19, 50, 30),
+          offsetMinutes: -570,
+        );
+        expect(
+          scalarNode(minusHalf),
+          equals('7c${_toHex(dt.encodeTimestampTz(minusHalf))}'),
+        );
+        expect(scalarNode(minusHalf), endsWith('0b1e'));
+      });
+    });
+
+    group('BINARY_DOUBLE', () {
+      test('NaN and ±Infinity match the server-captured nodes', () {
+        expect(scalarNode(double.nan), equals(hex('36 fff8000000000000')));
+        expect(scalarNode(double.infinity), equals(hex('36 fff0000000000000')));
+        expect(
+          scalarNode(double.negativeInfinity),
+          equals(hex('36 000fffffffffffff')),
+        );
+      });
+
+      test('any NaN bit pattern is canonicalized (x64 computes 0.0 / 0.0 as '
+          'a negative NaN)', () {
+        for (final bits in [
+          (0xfff80000, 0x00000000), // negative quiet NaN
+          (0x7ff00000, 0x00000001), // signaling NaN payload
+          (0xffffffff, 0xffffffff),
+        ]) {
+          final data = ByteData(8)
+            ..setUint32(0, bits.$1)
+            ..setUint32(4, bits.$2);
+          final nan = data.getFloat64(0);
+          expect(nan.isNaN, isTrue);
+          expect(scalarNode(nan), equals(hex('36 fff8000000000000')));
+        }
+      });
+
+      test('finite doubles NUMBER cannot hold travel as BINARY_DOUBLE; '
+          'everything NUMBER can hold stays NUMBER', () {
+        expect(
+          scalarNode(double.maxFinite),
+          equals(hex('36 ffefffffffffffff')),
+        );
+        expect(
+          scalarNode(-double.maxFinite),
+          equals(hex('36 0010000000000000')),
+        );
+        expect(
+          scalarNode(double.minPositive),
+          equals(hex('36 8000000000000001')),
+        );
+        for (final value in [1e126, -1e126, 1e-131, 5e-200]) {
+          expect(scalarNode(value), startsWith('36'), reason: '$value');
+          expect(
+            decodeOson(encodeOson(value)),
+            equals(value),
+            reason: '$value',
+          );
+        }
+        // In range (and zero, and every int): the NUMBER node, unchanged.
+        for (final value in <num>[
+          0,
+          0.0,
+          -0.0,
+          1.5,
+          9.99e125,
+          -9.99e125,
+          1e-130,
+          9223372036854775807,
+        ]) {
+          expect(scalarNode(value), startsWith('34'), reason: '$value');
+        }
+      });
+    });
+
+    group('binary (RAW)', () {
+      test('uint16 length up to 65535 bytes, uint32 from 65536', () {
+        expect(
+          scalarNode(Uint8List.fromList([0x00, 0xff, 0x10])),
+          equals(hex(_binary16Node)),
+        );
+        expect(scalarNode(Uint8List(0)), equals('3a0000'));
+        final at65535 = encodeOson(<Object?>[Uint8List(65535)]);
+        final at65536 = encodeOson(<Object?>[Uint8List(65536)]);
+        // Tree segment after the 13-byte container header + 4-byte offset.
+        expect(_toHex(at65535).contains('3affff'), isTrue);
+        expect(_toHex(at65536).contains('3b00010000'), isTrue);
+        expect(decodeOson(at65536), equals(<Object?>[Uint8List(65536)]));
+      });
+
+      test('a Uint8List view encodes only its own bytes', () {
+        final backing = Uint8List.fromList([9, 9, 1, 2, 3, 9]);
+        final view = Uint8List.sublistView(backing, 2, 5);
+        expect(scalarNode(view), equals(hex('3a 0003 010203')));
+      });
+    });
+
+    group('round-trip (encode → decode) as the same Dart type and value', () {
+      Object? roundTrip(Object? value) => decodeOson(encodeOson(value));
+
+      test('every Oracle scalar as a scalar root', () {
+        final local = DateTime(2024, 3, 15, 10, 20, 30);
+        final fractional = DateTime(2024, 3, 15, 10, 20, 30, 123, 456);
+        final tz = OracleTimestampTz(
+          DateTime.utc(2024, 3, 15, 4, 50, 30, 500),
+          offsetMinutes: 330,
+        );
+        final bytes = Uint8List.fromList([0xde, 0xad, 0xbe, 0xef]);
+        expect(roundTrip(local), equals(local));
+        expect(roundTrip(local), isA<DateTime>());
+        expect((roundTrip(local)! as DateTime).isUtc, isFalse);
+        expect(roundTrip(fractional), equals(fractional));
+        expect(roundTrip(tz), equals(tz));
+        expect(roundTrip(tz), isA<OracleTimestampTz>());
+        expect(roundTrip(bytes), equals(bytes));
+        expect(roundTrip(bytes), isA<Uint8List>());
+        expect(roundTrip(Uint8List(0)), isA<Uint8List>());
+        expect(roundTrip(Uint8List(0)), isEmpty);
+        expect(roundTrip(double.nan), isNaN);
+        expect(roundTrip(double.infinity), equals(double.infinity));
+        expect(
+          roundTrip(double.negativeInfinity),
+          equals(double.negativeInfinity),
+        );
+        // Standard scalar roots.
+        expect(roundTrip('s'), equals('s'));
+        expect(roundTrip(''), equals(''));
+        expect(roundTrip(3), equals(3));
+        expect(roundTrip(3), isA<int>());
+        expect(roundTrip(2.5), equals(2.5));
+        expect(roundTrip(true), isTrue);
+      });
+
+      test('every Oracle scalar nested in objects and arrays, in order', () {
+        final doc = <String, Object?>{
+          'd': DateTime(2024, 3, 15, 10, 20, 30),
+          'ts': DateTime(2024, 3, 15, 10, 20, 30, 123, 456),
+          'tz': OracleTimestampTz(
+            DateTime.utc(2024, 3, 15, 18, 20, 30),
+            offsetMinutes: -480,
+          ),
+          'b': Uint8List.fromList([1, 2, 3]),
+          'inf': double.infinity,
+          'ninf': double.negativeInfinity,
+          'n': 42,
+          'list': <Object?>[
+            Uint8List(0),
+            DateTime(2000),
+            <String, Object?>{
+              'deep': Uint8List.fromList([0xff]),
+              'x': null,
+            },
+            'tail',
+          ],
+        };
+        final decoded =
+            roundTrip(<String, Object?>{...doc, 'nan': double.nan})!
+                as Map<String, Object?>;
+        expect(decoded['nan'], isNaN);
+        decoded.remove('nan');
+        expect(decoded, equals(doc));
+        expect(decoded.keys.toList(), equals(doc.keys.toList()));
+        expect(decoded['b'], isA<Uint8List>());
+        expect(decoded['tz'], isA<OracleTimestampTz>());
+        final list = decoded['list']! as List<Object?>;
+        expect(list[0], isA<Uint8List>());
+        expect(list[1], isA<DateTime>());
+      });
+
+      test('a decoded server document re-encodes and decodes to an equal '
+          'value (fetched-document re-bind)', () {
+        // The server-captured mixed object from the decode group: DATE,
+        // TIMESTAMP, TSTZ, BINARY_DOUBLE, BINARY_FLOAT and RAW members.
+        const body =
+            '0000131531397073829b000c00120002000f00060004000000090173016e0164'
+            '02747302747a026264026266017284080703060508010402001a001c001f0027'
+            '00330041004a004f017821c12b3c787c030f01010139787c030f0b151f0754d4'
+            'c07c787c030f13151f000000000c3c36bff80000000000007fbf0000003a0003'
+            '00ff10';
+        final fetched = decodeOson(_hex('ff4a5a01 2106 08 0014 0055 $body'));
+        final again = roundTrip(fetched)! as Map<String, Object?>;
+        expect(again, equals(fetched));
+        expect(
+          again.keys.toList(),
+          equals((fetched! as Map<String, Object?>).keys.toList()),
+        );
+        expect(again['tz'], isA<OracleTimestampTz>());
+        expect(again['r'], isA<Uint8List>());
+        expect(again['d'], isA<DateTime>());
+      });
+    });
+  });
+
+  group('assertValidJsonBindValue', () {
+    Matcher throwsArgument(Object? message) => throwsA(
+      isA<ArgumentError>().having((e) => e.message, 'message', message),
+    );
+
+    test('accepts every kind the decoder produces, as members', () {
+      final doc = <String, Object?>{
+        'd': DateTime(2024, 3, 15),
+        'utc': DateTime.utc(2024, 3, 15, 1, 2, 3, 4, 5),
+        'tz': OracleTimestampTz(DateTime.utc(2024), offsetMinutes: -570),
+        'b': Uint8List.fromList([1, 2]),
+        'nan': double.nan,
+        'inf': double.infinity,
+        'ninf': double.negativeInfinity,
+        'huge': 1e300,
+        'list': <Object?>[
+          Uint8List(0),
+          'x',
+          1,
+          true,
+          null,
+          <String, Object?>{},
+        ],
+      };
+      expect(() => assertValidJsonBindValue(doc, 'v'), returnsNormally);
+      expect(
+        () => assertValidJsonBindValue(doc.values.toList(), 'v'),
+        returnsNormally,
+      );
+    });
+
+    test('scalar roots need allowScalarRoot (an explicitly JSON-typed '
+        'bind); null and containers never do', () {
+      final scalars = <Object>[
+        'x',
+        '',
+        3,
+        2.5,
         double.nan,
-        double.infinity,
+        true,
+        false,
+        DateTime(2024),
+        OracleTimestampTz(DateTime.utc(2024), offsetMinutes: 0),
+        Uint8List.fromList([1]),
       ];
-      for (final value in decodedOnly) {
+      for (final value in scalars) {
         expect(
-          () => encodeOson(<String, Object?>{'v': value}),
-          throwsA(isA<OracleException>()),
-          reason: 'encodeOson must reject ${value.runtimeType}',
+          () => assertValidJsonBindValue(value, 'v'),
+          throwsArgument(contains('OracleDbType.json')),
+          reason: '${value.runtimeType} without allowScalarRoot',
         );
         expect(
-          () => assertValidJsonBindValue(<Object?>[value], 'doc'),
+          () => assertValidJsonBindValue(value, 'v', allowScalarRoot: true),
+          returnsNormally,
+          reason: '${value.runtimeType} with allowScalarRoot',
+        );
+      }
+      for (final value in <Object?>[null, <String, Object?>{}, <Object?>[]]) {
+        expect(() => assertValidJsonBindValue(value, 'v'), returnsNormally);
+      }
+    });
+
+    test('still rejects Set, Symbol, arbitrary objects, non-String keys, '
+        'out-of-range dates and over-long field names — members and '
+        'scalar roots alike', () {
+      final cases = <Object, String>{
+        <String, Object?>{
+          'a': 1,
+          's': <int>{1},
+        }: 'v[member #2]',
+        <Object?>[#sym]: 'Symbol',
+        <Object?>[Duration.zero]: 'Duration',
+        <String, Object?>{
+          'deep': <Object?>[
+            <String, Object?>{'o': Object()},
+          ],
+        }: 'v[member #1][0][member #1]',
+        <Object, Object?>{1: 'x'}: 'keys must be String',
+        <String, Object?>{'d': DateTime(-44)}: 'BCE',
+        <Object?>[DateTime(0)]: 'BCE',
+        <Object?>[DateTime(10000)]: '9999',
+        <Object?>[OracleTimestampTz(DateTime.utc(-1), offsetMinutes: 0)]: 'BCE',
+        <String, Object?>{'k' * 256: 1}: '256 bytes',
+        // 128 two-byte characters: 128 code units but 256 UTF-8 bytes.
+        <String, Object?>{'é' * 128: 1}: '256 bytes',
+        <String, Object?>{
+          'outer': <String, Object?>{'🚀' * 64: 1},
+        }: 'at v[member #1])',
+      };
+      for (final MapEntry(key: value, value: message) in cases.entries) {
+        for (final allowScalarRoot in [false, true]) {
+          expect(
+            () => assertValidJsonBindValue(
+              value,
+              'v',
+              allowScalarRoot: allowScalarRoot,
+            ),
+            throwsArgument(contains(message)),
+            reason: '$message (allowScalarRoot: $allowScalarRoot)',
+          );
+        }
+      }
+      for (final root in <Object>[
+        <int>{1},
+        #sym,
+        Object(),
+        DateTime(-44),
+        DateTime(10000),
+      ]) {
+        expect(
+          () => assertValidJsonBindValue(root, 'v', allowScalarRoot: true),
           throwsA(isA<ArgumentError>()),
-          reason: 'bind validation must reject ${value.runtimeType}',
+          reason: '${root.runtimeType} scalar root',
         );
+      }
+      // The 255-byte boundary itself is accepted, multi-byte included.
+      expect(
+        () => assertValidJsonBindValue(<String, Object?>{
+          'k' * 255: 1,
+          '${'é' * 127}k': 2,
+        }, 'v'),
+        returnsNormally,
+      );
+    });
+
+    test('errors never carry the bind value (OracleBind redaction policy)', () {
+      const secret = 'hunter2-top-secret';
+      for (final doc in <Object>[
+        <String, Object?>{
+          'password': secret,
+          'bad': <int>{1},
+        },
+        <String, Object?>{'password': secret, 'd': DateTime(-44)},
+        <String, Object?>{'password': secret, 'k' * 300: 1},
+        <Object, Object?>{'password': secret, 1: 2},
+        secret, // scalar root without allowScalarRoot
+      ]) {
+        try {
+          assertValidJsonBindValue(doc, 'v');
+          fail('expected an ArgumentError for $doc');
+        } on ArgumentError catch (e) {
+          expect(e.invalidValue, isNull);
+          expect(e.toString(), isNot(contains(secret)));
+          expect('${e.message}', isNot(contains(secret)));
+          expect(e.toString(), isNot(contains('-44')));
+        }
+      }
+    });
+
+    test('paths name object members by position, never by key — keys are '
+        'document content too', () {
+      const secretKey = 'alice@example.com';
+      for (final (doc, path) in <(Object, String)>[
+        (
+          <String, Object?>{
+            'ok': 1,
+            secretKey: <int>{1},
+          },
+          'v[member #2]',
+        ),
+        (
+          <String, Object?>{
+            secretKey: <Object?>[
+              0,
+              <String, Object?>{secretKey: DateTime(-1)},
+            ],
+          },
+          'v[member #1][1][member #1]',
+        ),
+        (
+          <String, Object?>{
+            secretKey: <String, Object?>{'k' * 256: 1},
+          },
+          'at v[member #1])',
+        ),
+        (
+          <String, Object?>{
+            secretKey: <Object, Object?>{1: 'x'},
+          },
+          'at v[member #1])',
+        ),
+      ]) {
+        for (final allowScalarRoot in [false, true]) {
+          try {
+            assertValidJsonBindValue(
+              doc,
+              'v',
+              allowScalarRoot: allowScalarRoot,
+            );
+            fail('expected an ArgumentError for $path');
+          } on ArgumentError catch (e) {
+            expect(e.toString(), contains(path));
+            expect(e.toString(), isNot(contains(secretKey)));
+            expect(e.toString(), isNot(contains('alice')));
+          }
+        }
       }
     });
   });

@@ -40,6 +40,92 @@ bool skipWithoutNativeJson() {
   return true;
 }
 
+/// A document holding every Oracle-specific scalar kind the driver binds
+/// (Story 13.3), nested at several depths alongside standard members.
+Map<String, Object?> _oracleScalarDoc() => <String, Object?>{
+  's': 'text',
+  'date': DateTime(2024, 3, 15, 10, 20, 30), // TIMESTAMP7 node
+  'midnight': DateTime(2024, 3, 15),
+  'ts': DateTime(2024, 3, 15, 10, 20, 30, 123, 456), // TIMESTAMP node
+  'micro': DateTime(2024, 3, 15, 10, 20, 30, 0, 1),
+  'tz': OracleTimestampTz(
+    DateTime.utc(2024, 3, 15, 4, 50, 30, 500),
+    offsetMinutes: 330,
+  ),
+  'tzMinus': OracleTimestampTz(
+    DateTime.utc(2024, 3, 15, 19, 50, 30),
+    offsetMinutes: -570,
+  ),
+  'bytes': Uint8List.fromList([0xde, 0xad, 0xbe, 0xef]),
+  'empty': Uint8List(0),
+  'nan': double.nan,
+  'inf': double.infinity,
+  'ninf': double.negativeInfinity,
+  'huge': 1e200, // beyond NUMBER: travels as BINARY_DOUBLE
+  'n': 42,
+  'd': 2.5,
+  'nested': <String, Object?>{
+    'list': <Object?>[
+      DateTime(2000),
+      Uint8List.fromList([1]),
+      null,
+      true,
+      -0.5,
+    ],
+  },
+};
+
+/// Deep JSON equality that treats NaN as equal to NaN and pins the Dart type
+/// of every Oracle-specific scalar (a `DateTime` must not come back as a
+/// `String`, a `Uint8List` must not come back as a `List<int>`), plus the key
+/// order of every object unless [keyOrder] is false (a server-side
+/// `JSON_OBJECT_T` rebuilds larger objects in its own member order).
+void _expectJsonValue(
+  Object? actual,
+  Object? expected, [
+  String path = r'$',
+  bool keyOrder = true,
+]) {
+  if (expected is double && expected.isNaN) {
+    expect(actual, isA<double>(), reason: path);
+    expect((actual! as double).isNaN, isTrue, reason: path);
+  } else if (expected is Map) {
+    expect(actual, isA<Map<String, Object?>>(), reason: path);
+    final map = actual! as Map<String, Object?>;
+    if (keyOrder) {
+      expect(map.keys.toList(), equals(expected.keys.toList()), reason: path);
+    } else {
+      expect(map.keys.toSet(), equals(expected.keys.toSet()), reason: path);
+    }
+    for (final entry in expected.entries) {
+      _expectJsonValue(
+        map[entry.key],
+        entry.value,
+        '$path.${entry.key}',
+        keyOrder,
+      );
+    }
+  } else if (expected is Uint8List) {
+    expect(actual, isA<Uint8List>(), reason: path);
+    expect(actual, equals(expected), reason: path);
+  } else if (expected is List) {
+    expect(actual, isA<List<Object?>>(), reason: path);
+    final list = actual! as List<Object?>;
+    expect(list, hasLength(expected.length), reason: path);
+    for (var i = 0; i < expected.length; i++) {
+      _expectJsonValue(list[i], expected[i], '$path[$i]', keyOrder);
+    }
+  } else if (expected is DateTime) {
+    expect(actual, isA<DateTime>(), reason: path);
+    expect(actual, equals(expected), reason: path);
+  } else if (expected is OracleTimestampTz) {
+    expect(actual, isA<OracleTimestampTz>(), reason: path);
+    expect(actual, equals(expected), reason: path);
+  } else {
+    expect(actual, equals(expected), reason: path);
+  }
+}
+
 void main() {
   group(
     'Native JSON data type',
@@ -924,6 +1010,385 @@ void main() {
       });
 
       // ======================================================================
+      // Story 13.3 — bind/fetch symmetry: every Oracle scalar the decoder
+      // produces binds back as the same Dart type, inside documents (DML,
+      // executeMany, IN OUT) and as an explicitly JSON-typed scalar root.
+      // Every node was measured accepted by both Oracle 23ai and 21c.
+      // ======================================================================
+      group('Oracle-specific JSON scalars (bind)', () {
+        OracleConnection? connectionHandle;
+        late OracleConnection connection;
+        final testTable = uniqueTableName('json_bsc');
+        final insertProc = uniqueTableName('json_bsc_ins');
+        final mutateProc = uniqueTableName('json_bsc_mut');
+
+        setUp(() async {
+          connectionHandle = await connectForTest();
+          connection = connectionHandle!;
+          if (nativeJsonUnavailable != null) return;
+          try {
+            await connection.execute(
+              'CREATE TABLE $testTable (id NUMBER PRIMARY KEY, doc JSON) '
+              'TABLESPACE USERS',
+            );
+          } on OracleException catch (e) {
+            if (e.errorCode != 955) rethrow;
+            await connection.execute('TRUNCATE TABLE $testTable');
+          }
+          // An IN OUT JSON parameter makes the server report the bind as
+          // IN OUT (a bare `:doc` read inside an anonymous block is IN only,
+          // which an OracleBind.inOut rejects as a direction mismatch).
+          await connection.execute('''
+            CREATE OR REPLACE PROCEDURE $insertProc
+              (p_id NUMBER, p IN OUT JSON) AS
+            BEGIN
+              INSERT INTO $testTable (id, doc) VALUES (p_id, p);
+            END;
+          ''');
+          await connection.execute('''
+            CREATE OR REPLACE PROCEDURE $mutateProc (p IN OUT JSON) AS
+              o JSON_OBJECT_T;
+            BEGIN
+              o := JSON_OBJECT_T(p);
+              o.put('status', 'done');
+              p := o.to_json;
+            END;
+          ''');
+        });
+
+        tearDown(() async {
+          final c = connectionHandle;
+          connectionHandle = null;
+          await cleanUpConnection(
+            c,
+            dropStatements: [
+              'DROP PROCEDURE $insertProc',
+              'DROP PROCEDURE $mutateProc',
+              'DROP TABLE $testTable PURGE',
+            ],
+          );
+        });
+
+        Future<Object?> selectDoc(int id) async {
+          final result = await connection.execute(
+            'SELECT doc FROM $testTable WHERE id = :1',
+            [id],
+          );
+          return result.rows.single['DOC'];
+        }
+
+        Future<int> countRows() async {
+          final result = await connection.execute(
+            'SELECT COUNT(*) AS n FROM $testTable',
+          );
+          return result.rows.single['N']! as int;
+        }
+
+        test('INSERT (named and positional) and UPDATE round-trip DateTime, '
+            'OracleTimestampTz, Uint8List, NaN and ±Infinity members as the '
+            'same Dart types', () async {
+          if (skipWithoutNativeJson()) return;
+          final named = nextTestId();
+          final positional = nextTestId();
+          final doc = _oracleScalarDoc();
+          final insert = await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:id, :doc)',
+            {'id': named, 'doc': doc},
+          );
+          expect(insert.rowsAffected, equals(1));
+          final list = <Object?>[
+            DateTime(1999, 12, 31, 23, 59, 59),
+            Uint8List.fromList([0xca, 0xfe]),
+            double.nan,
+            OracleTimestampTz(DateTime.utc(2000), offsetMinutes: 840),
+          ];
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [positional, list],
+          );
+          _expectJsonValue(await selectDoc(named), doc);
+          _expectJsonValue(await selectDoc(positional), list);
+
+          final updated = <String, Object?>{
+            'when': DateTime(2025, 6, 1, 8, 0, 0, 1),
+            'raw': Uint8List(70000)..fillRange(0, 70000, 0x5a),
+            'neg': double.negativeInfinity,
+          };
+          final update = await connection.execute(
+            'UPDATE $testTable SET doc = :doc WHERE id = :id',
+            {'doc': updated, 'id': named},
+          );
+          expect(update.rowsAffected, equals(1));
+          _expectJsonValue(await selectDoc(named), updated);
+        });
+
+        test('executeMany array DML binds documents with Oracle scalar '
+            'members', () async {
+          if (skipWithoutNativeJson()) return;
+          final ids = [nextTestId(), nextTestId(), nextTestId()];
+          final docs = <Object?>[
+            _oracleScalarDoc(),
+            <Object?>[
+              DateTime(2024),
+              double.infinity,
+              Uint8List.fromList([7]),
+            ],
+            null,
+          ];
+          final result = await connection.executeMany(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [
+              for (var i = 0; i < ids.length; i++) [ids[i], docs[i]],
+            ],
+          );
+          expect(result.rowsAffected, equals(3));
+          for (var i = 0; i < ids.length; i++) {
+            _expectJsonValue(await selectDoc(ids[i]), docs[i]);
+          }
+        });
+
+        test('PL/SQL IN OUT carries Oracle scalar members both ways '
+            '(server-side JSON_OBJECT_T keeps their types)', () async {
+          if (skipWithoutNativeJson()) return;
+          final doc = _oracleScalarDoc();
+          final result = await connection.execute(
+            'BEGIN $mutateProc(:doc); END;',
+            {
+              'doc': OracleBind.inOut(
+                value: doc,
+                type: OracleDbType.json,
+                maxSize: 4000,
+              ),
+            },
+          );
+          // JSON_OBJECT_T rebuilds the object in its own member order.
+          _expectJsonValue(
+            result.outBinds['doc'],
+            <String, Object?>{...doc, 'status': 'done'},
+            r'$',
+            false,
+          );
+        });
+
+        test('scalar JSON roots bind with an explicit OracleDbType.json — IN '
+            'OUT and executeMany bindDefs — and fetch as the same '
+            'scalar', () async {
+          if (skipWithoutNativeJson()) return;
+          final scalars = <Object>[
+            'x',
+            '',
+            '{"looks":"like an object"}', // stays a string, not parsed
+            3,
+            -12.5,
+            true,
+            false,
+            DateTime(2024, 3, 15, 10, 20, 30),
+            DateTime(2024, 3, 15, 10, 20, 30, 0, 1),
+            OracleTimestampTz(DateTime.utc(2024), offsetMinutes: -480),
+            Uint8List.fromList([1, 2, 3]),
+            double.nan,
+            double.infinity,
+          ];
+          for (final value in scalars) {
+            final id = nextTestId();
+            final result = await connection
+                .execute('BEGIN $insertProc(:id, :doc); END;', {
+                  'id': id,
+                  'doc': OracleBind.inOut(
+                    value: value,
+                    type: OracleDbType.json,
+                    maxSize: 4000,
+                  ),
+                });
+            _expectJsonValue(result.outBinds['doc'], value, 'out $value');
+            _expectJsonValue(await selectDoc(id), value, 'column $value');
+          }
+
+          final base = nextTestId() * 100;
+          await connection.executeMany(
+            'BEGIN INSERT INTO $testTable (id, doc) VALUES (:1, :2); END;',
+            [
+              for (var i = 0; i < scalars.length; i++) [base + i, scalars[i]],
+            ],
+            OracleExecuteManyOptions(
+              bindDefs: [
+                OracleBindDef.input(type: OracleDbType.number),
+                OracleBindDef.input(type: OracleDbType.json),
+              ],
+            ),
+          );
+          for (var i = 0; i < scalars.length; i++) {
+            _expectJsonValue(
+              await selectDoc(base + i),
+              scalars[i],
+              'executeMany ${scalars[i]}',
+            );
+          }
+        });
+
+        test('without an explicit JSON type, scalar binds keep their '
+            'inferred column types', () async {
+          if (skipWithoutNativeJson()) return;
+          // A bare String is VARCHAR2 JSON *text* the server parses — were it
+          // bound as a JSON string scalar, the quotes/braces would survive.
+          final textId = nextTestId();
+          final quotedId = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [textId, '{"a":1}'],
+          );
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [quotedId, '"x"'],
+          );
+          expect(await selectDoc(textId), equals(<String, Object?>{'a': 1}));
+          expect(await selectDoc(quotedId), equals('x'));
+        });
+
+        test('a fetched document holding every server-side Oracle scalar '
+            're-binds unchanged', () async {
+          if (skipWithoutNativeJson()) return;
+          final fetched = await connection.execute(
+            "SELECT JSON_OBJECT('d' VALUE DATE '2024-03-15', "
+            "'dt' VALUE TO_DATE('2024-03-15 10:20:30', "
+            "'YYYY-MM-DD HH24:MI:SS'), "
+            "'ts' VALUE TIMESTAMP '2024-03-15 10:20:30.123456', "
+            "'tz' VALUE TIMESTAMP '2024-03-15 10:20:30.5 +05:30', "
+            "'tzm' VALUE TIMESTAMP '2024-03-15 10:20:30 -09:30', "
+            "'bd' VALUE TO_BINARY_DOUBLE(-2.25), "
+            "'bf' VALUE TO_BINARY_FLOAT(3.14), "
+            "'nan' VALUE BINARY_DOUBLE_NAN, "
+            "'inf' VALUE BINARY_DOUBLE_INFINITY, "
+            "'ninf' VALUE -BINARY_FLOAT_INFINITY, "
+            "'big' VALUE TO_BINARY_DOUBLE('1E+200'), "
+            "'r' VALUE HEXTORAW('00FF10'), "
+            "'arr' VALUE JSON_ARRAY(DATE '2024-03-16', HEXTORAW('ABCD') "
+            'RETURNING JSON) RETURNING JSON) AS v FROM dual',
+          );
+          final doc = fetched.rows.single['V']! as Map<String, Object?>;
+          expect(doc['tz'], isA<OracleTimestampTz>());
+          expect(doc['r'], isA<Uint8List>());
+
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [id, doc],
+          );
+          _expectJsonValue(await selectDoc(id), doc);
+
+          // ...and through executeMany and IN OUT, still without conversion.
+          final manyId = nextTestId();
+          await connection.executeMany(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [
+              [manyId, doc],
+            ],
+          );
+          _expectJsonValue(await selectDoc(manyId), doc);
+          final inOut = await connection.execute(
+            'BEGIN $mutateProc(:doc); END;',
+            {
+              'doc': OracleBind.inOut(
+                value: doc,
+                type: OracleDbType.json,
+                maxSize: 4000,
+              ),
+            },
+          );
+          _expectJsonValue(
+            inOut.outBinds['doc'],
+            <String, Object?>{...doc, 'status': 'done'},
+            r'$',
+            false,
+          );
+        });
+
+        test('still-unsupported values fail before any wire work and insert '
+            'nothing; the connection stays usable', () async {
+          if (skipWithoutNativeJson()) return;
+          final invalid = <Object>[
+            <String, Object?>{
+              'set': <int>{1},
+            },
+            <String, Object?>{'sym': #symbol},
+            <Object, Object?>{1: 'non-string key'},
+            <String, Object?>{'bce': DateTime(-44, 3, 15)},
+            <String, Object?>{'far': DateTime(10000)},
+            <String, Object?>{'k' * 256: 'field name over 255 UTF-8 bytes'},
+          ];
+          final parsesBefore = connection.debugFullParseExecutes;
+          final reusesBefore = connection.debugReuseExecutes;
+          for (final doc in invalid) {
+            await expectLater(
+              connection.execute(
+                'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+                [nextTestId(), doc],
+              ),
+              throwsA(isA<ArgumentError>()),
+              reason: '$doc',
+            );
+            await expectLater(
+              connection.executeMany(
+                'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+                [
+                  [nextTestId(), doc],
+                ],
+              ),
+              throwsA(
+                isA<OracleException>().having(
+                  (e) => e.errorCode,
+                  'errorCode',
+                  oraBindTypeError,
+                ),
+              ),
+              reason: '$doc',
+            );
+            expect(
+              () => OracleBind.inOut(
+                value: doc,
+                type: OracleDbType.json,
+                maxSize: 4000,
+              ),
+              throwsA(isA<ArgumentError>()),
+              reason: '$doc',
+            );
+          }
+          // Scalar roots outside the supported kinds fail the same way.
+          for (final root in <Object>[
+            <int>{1},
+            DateTime(-1),
+          ]) {
+            expect(
+              () => OracleBind.inOut(
+                value: root,
+                type: OracleDbType.json,
+                maxSize: 4000,
+              ),
+              throwsA(isA<ArgumentError>()),
+            );
+          }
+          expect(
+            connection.debugFullParseExecutes,
+            equals(parsesBefore),
+            reason: 'no rejected bind may reach the server',
+          );
+          expect(connection.debugReuseExecutes, equals(reusesBefore));
+          expect(await countRows(), equals(0));
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [
+              id,
+              <String, Object?>{'ok': DateTime(2024)},
+            ],
+          );
+          _expectJsonValue(await selectDoc(id), <String, Object?>{
+            'ok': DateTime(2024),
+          });
+        });
+      });
+
+      // ======================================================================
       // Story 13.2 — JSON stored the Oracle 12c way: a BLOB column with an
       // `IS JSON` check constraint. Plain BLOB / IS JSON works on every server,
       // so only the tests that need native JSON support (a Map/List bind, an
@@ -1147,6 +1612,71 @@ void main() {
             expect(await selectDoc(listId), equals(list));
           },
         );
+
+        // Story 13.3: a document with Oracle-specific scalars binds into a
+        // BLOB IS JSON column too. The server converts the bound native JSON
+        // value into the column's storage form, so — measured identically on
+        // Oracle 23ai and 21c — a text `IS JSON` column stores Oracle's JSON
+        // *text* serialization (dates as ISO-8601 strings, binary as a hex
+        // string, NaN / ±Infinity as the strings "Nan" / "Inf" / "-Inf"),
+        // while an `IS JSON FORMAT OSON` column keeps the OSON scalars and
+        // round-trips every Dart type.
+        test('a document with Oracle scalars binds into BLOB IS JSON (stored '
+            "as Oracle's JSON text) and IS JSON FORMAT OSON (types "
+            'preserved)', () async {
+          if (skipWithoutNativeJson()) return;
+          final doc = <String, Object?>{
+            'd': DateTime(2024, 3, 15, 10, 20, 30),
+            'ts': DateTime(2024, 3, 15, 10, 20, 30, 500),
+            'tz': OracleTimestampTz(
+              DateTime.utc(2024, 3, 15, 4, 50, 30, 500),
+              offsetMinutes: 330,
+            ),
+            'r': Uint8List.fromList([0xde, 0xad]),
+            'nan': double.nan,
+            'inf': double.infinity,
+            'ninf': double.negativeInfinity,
+            'huge': 1e200,
+            'n': 7,
+          };
+          final textId = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [textId, doc],
+          );
+          expect(
+            await selectDoc(textId),
+            equals(<String, Object?>{
+              'd': '2024-03-15T10:20:30',
+              'ts': '2024-03-15T10:20:30.500000',
+              'tz': '2024-03-15T10:20:30.500000+05:30',
+              'r': 'DEAD',
+              'nan': 'Nan',
+              'inf': 'Inf',
+              'ninf': '-Inf',
+              'huge': 1e200,
+              'n': 7,
+            }),
+          );
+
+          final osonTable = uniqueTableName('json_blob_bsc');
+          await connection.execute(
+            'CREATE TABLE $osonTable (id NUMBER PRIMARY KEY, '
+            'odoc BLOB CHECK (odoc IS JSON FORMAT OSON)) TABLESPACE USERS',
+          );
+          try {
+            await connection.execute(
+              'INSERT INTO $osonTable (id, odoc) VALUES (1, :1)',
+              [doc],
+            );
+            final result = await connection.execute(
+              'SELECT odoc FROM $osonTable WHERE id = 1',
+            );
+            _expectJsonValue(result.rows.single['ODOC'], doc);
+          } finally {
+            await connection.execute('DROP TABLE $osonTable PURGE');
+          }
+        });
 
         test('resultSet: true decodes every row in the first batch and across '
             'continuation FETCH rounds', () async {

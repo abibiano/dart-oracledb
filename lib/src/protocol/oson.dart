@@ -4,13 +4,27 @@
 /// Ported from the bundled node-oracledb reference implementation:
 /// `reference/node-oracledb/lib/impl/datahandlers/oson.js` (encoder/decoder)
 /// and `reference/node-oracledb/lib/impl/datahandlers/constants.js` (format
-/// constants). The encoder covers standard JSON documents: objects, arrays,
-/// strings, numbers, booleans, and null. The decoder additionally maps the
-/// Oracle-specific OSON scalar kinds the driver already has a Dart type for
-/// (DATE / TIMESTAMP → `DateTime`, TIMESTAMP WITH TIME ZONE →
-/// `OracleTimestampTz`, BINARY_FLOAT / BINARY_DOUBLE → `double`, binary
-/// (RAW) → `Uint8List`); the remaining Oracle-specific kinds (intervals,
-/// JsonId, extended/VECTOR, unknown) fail loud.
+/// constants). Both directions cover standard JSON (objects, arrays, strings,
+/// numbers, booleans, null) plus the Oracle-specific OSON scalar kinds the
+/// driver has a Dart type for, so every value the decoder produces binds back
+/// as the same Dart type:
+///
+/// | Dart value                       | encoded node        | decoded as        |
+/// | -------------------------------- | ------------------- | ----------------- |
+/// | `DateTime` (no sub-second part)  | TIMESTAMP7 (7 B)    | `DateTime`        |
+/// | `DateTime` (sub-second part)     | TIMESTAMP (11 B)    | `DateTime`        |
+/// | `OracleTimestampTz`              | TIMESTAMP_TZ (13 B) | `OracleTimestampTz` |
+/// | `Uint8List`                      | binary (RAW)        | `Uint8List`       |
+/// | NaN / ±Infinity / out-of-NUMBER-range `double` | BINARY_DOUBLE | `double` |
+///
+/// The node choices follow node-oracledb, except that node-oracledb sends only
+/// NaN as BINARY_DOUBLE: ±Infinity and non-zero doubles outside NUMBER's range
+/// are a Dart-driver extension (node-oracledb cannot bind them).
+///
+/// The decoder also maps DATE (→ `DateTime`) and BINARY_FLOAT (→ `double`)
+/// nodes, which the encoder never emits (node-oracledb parity); the remaining
+/// Oracle-specific kinds (intervals, JsonId, extended/VECTOR, unknown) fail
+/// loud in both directions.
 ///
 /// The encoder always emits OSON **version 1** (field names ≤ 255 UTF-8
 /// bytes), which both Oracle 21c and 23ai accept; version-3 long field names
@@ -25,6 +39,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import '../errors.dart';
+import '../oracle_timestamp_tz.dart';
 import 'buffer.dart';
 import 'constants.dart';
 import 'data_types.dart' as dt;
@@ -89,52 +104,80 @@ const int _maxFieldNameBytes = 255;
 // Bind-value validation (shared with the public OracleBind API)
 // ============================================================================
 
-/// Validates that [value] is a supported JSON bind structure: a
-/// `Map` with `String` keys, a `List`, or `null` at the top level, with every
-/// nested member being `null`, `bool`, a finite `num`, `String`, `Map` with
-/// `String` keys, or `List`.
+/// The Dart value kinds a JSON bind accepts, named in validation and encoder
+/// errors.
+const String _supportedJsonKinds =
+    'Map<String, Object?>, List<Object?>, String, num, bool, null, DateTime, '
+    'OracleTimestampTz, Uint8List';
+
+/// Validates that [value] is a supported JSON bind value, before any wire
+/// work.
 ///
-/// Throws [ArgumentError] naming the offending member so the failure surfaces
-/// at the call site, not deep inside wire encoding. [name] is the parameter
-/// name reported in the error.
+/// The root must be a `Map` with `String` keys, a `List`, or `null` — or,
+/// when [allowScalarRoot] is set (the bind type was declared explicitly as
+/// JSON: `OracleDbType.json`), any supported scalar. Every nested member must
+/// be `null`, `bool`, `num` (NaN and ±Infinity included), `String`,
+/// `DateTime`, `OracleTimestampTz`, `Uint8List`, a `Map` with `String` keys,
+/// or a `List` — exactly the kinds [decodeOson] produces, so a fetched
+/// document always re-binds. Dates and timestamps must fall in Oracle's AD
+/// range (years 1..9999) and field names must fit in 255 UTF-8 bytes (the
+/// OSON version-1 limit every supported server accepts).
 ///
-/// `Uint8List` is deliberately rejected even though it is a `List<int>`:
-/// plain bytes must remain RAW/BLOB behavior, and
-/// the OSON binary scalar is not part of the supported standard-JSON scope.
-void assertValidJsonBindValue(Object? value, String name) {
+/// A `Uint8List` root is a scalar (the OSON binary node), not an array: it is
+/// accepted only under [allowScalarRoot]. Type inference never routes bytes
+/// here — a bare `Uint8List` bind stays RAW.
+///
+/// Throws [ArgumentError] naming the offending member's path and runtime type
+/// so the failure surfaces at the call site, not deep inside wire encoding.
+/// [name] is the parameter name reported in the error and the root of the
+/// path; below it, list elements appear by index (`[2]`) and object members
+/// by 1-based position (`[member #3]`). The error never carries the bind
+/// value — no member values and no object keys (the `OracleBind` redaction
+/// policy): JSON documents routinely hold credentials and personal data.
+void assertValidJsonBindValue(
+  Object? value,
+  String name, {
+  bool allowScalarRoot = false,
+}) {
   if (value == null) return;
-  if (value is! Map && value is! List || value is Uint8List) {
-    throw ArgumentError.value(
-      value,
-      name,
+  final isContainer = (value is Map || value is List) && value is! Uint8List;
+  if (!isContainer && !allowScalarRoot) {
+    throw ArgumentError(
       'JSON bind values must be Map<String, Object?>, List<Object?>, or '
-      'null (got ${value.runtimeType})',
+      'null (got ${value.runtimeType}); declare the bind type as '
+      'OracleDbType.json to bind a scalar JSON value',
+      name,
     );
   }
   _assertValidJsonMember(value, name, name);
 }
 
 void _assertValidJsonMember(Object? value, String name, String path) {
-  if (value == null || value is bool || value is String) return;
-  if (value is num) {
-    if (value is double && !value.isFinite) {
-      throw ArgumentError.value(
-        value,
+  // Every num is valid: finite values in NUMBER's range encode as NUMBER,
+  // the rest (NaN, ±Infinity, out-of-range magnitudes) as BINARY_DOUBLE.
+  if (value == null || value is bool || value is String || value is num) {
+    return;
+  }
+  if (value is DateTime) {
+    final reason = _unsupportedYearReason(value.year);
+    if (reason != null) {
+      throw ArgumentError('JSON DateTime member $reason (at $path)', name);
+    }
+    return;
+  }
+  if (value is OracleTimestampTz) {
+    final reason = _unsupportedYearReason(value.utc.year);
+    if (reason != null) {
+      throw ArgumentError(
+        'JSON OracleTimestampTz member $reason (at $path)',
         name,
-        'JSON numbers cannot be NaN or Infinity (at $path)',
       );
     }
     return;
   }
-  // Uint8List is a List<int>; check it before the generic List branch.
-  if (value is Uint8List) {
-    throw ArgumentError.value(
-      value,
-      name,
-      'Uint8List is not a supported JSON member — bytes stay RAW/BLOB '
-      '(at $path)',
-    );
-  }
+  // Uint8List is a List<int>; check it before the generic List branch so it
+  // stays one binary scalar instead of an array of numbers.
+  if (value is Uint8List) return;
   if (value is List) {
     for (var i = 0; i < value.length; i++) {
       _assertValidJsonMember(value[i], name, '$path[$i]');
@@ -142,38 +185,78 @@ void _assertValidJsonMember(Object? value, String name, String path) {
     return;
   }
   if (value is Map) {
+    // Object members are named in paths by their 1-based position
+    // (`[member #2]`), never by key: keys are document content too (an
+    // e-mail address, an account id) and must not reach error messages.
+    var ordinal = 0;
     for (final entry in value.entries) {
+      ordinal++;
       final key = entry.key;
       if (key is! String) {
-        throw ArgumentError.value(
-          value,
-          name,
+        throw ArgumentError(
           'JSON object keys must be String '
           '(got ${key.runtimeType} at $path)',
+          name,
         );
       }
-      _assertValidJsonMember(entry.value, name, "$path['$key']");
+      // Cheap pre-check: a UTF-16 code unit is at most 3 UTF-8 bytes.
+      if (key.length * 3 > _maxFieldNameBytes) {
+        final byteLength = utf8.encode(key).length;
+        if (byteLength > _maxFieldNameBytes) {
+          throw ArgumentError(
+            'JSON field names longer than $_maxFieldNameBytes UTF-8 bytes '
+            'are not supported (got $byteLength bytes at $path)',
+            name,
+          );
+        }
+      }
+      _assertValidJsonMember(entry.value, name, '$path[member #$ordinal]');
     }
     return;
   }
-  throw ArgumentError.value(
-    value,
-    name,
+  throw ArgumentError(
     'Unsupported JSON member type ${value.runtimeType} (at $path). '
-    'Supported: Map<String, Object?>, List<Object?>, String, finite num, '
-    'bool, null',
+    'Supported: $_supportedJsonKinds',
+    name,
   );
+}
+
+/// Why a date/time member with this [year] cannot be encoded, or `null`
+/// when it can. Oracle dates span years -4712..9999; BCE years are rejected
+/// like the column codecs reject them, and years past 9999 have no valid
+/// Oracle encoding (from year 25600 the century byte would not even fit in a
+/// byte and would silently wrap). The year itself is deliberately left out
+/// of the reason — it is part of the bind value.
+String? _unsupportedYearReason(int year) {
+  if (year < 1) return 'has a BCE year, which is not supported';
+  if (year > 9999) return 'has a year beyond the Oracle maximum of 9999';
+  return null;
 }
 
 // ============================================================================
 // Encoder
 // ============================================================================
 
-/// Encodes a Dart JSON structure (`Map<String, Object?>`, `List<Object?>`,
-/// `String`, finite `num`, `bool`, or `null`) into OSON bytes.
+/// Encodes a Dart JSON value into OSON bytes (modeled on node-oracledb
+/// `oson.js` `encodeNode`). [value] may be a `Map<String, Object?>` or
+/// `List<Object?>` document, or a scalar root, which travels as an OSON
+/// scalar document.
 ///
-/// Throws [OracleException] for unsupported member types, non-finite doubles,
-/// non-`String` map keys, and field names longer than 255 UTF-8 bytes.
+/// Members encode as: `null` / `bool` / `String` as their JSON nodes; a `num`
+/// as an Oracle NUMBER node when NUMBER can hold it (`0.0` / `-0.0`
+/// included), otherwise as a BINARY_DOUBLE node — NaN like node-oracledb, and
+/// ±Infinity or a non-zero magnitude outside `[1E-130, 1E126)` as a
+/// Dart-driver extension (node-oracledb cannot bind those);
+/// `DateTime` as TIMESTAMP7 (7 bytes) when it has no sub-second part, else
+/// TIMESTAMP (11 bytes) — its local wall-clock fields, exactly like a
+/// DATE / TIMESTAMP column bind; `OracleTimestampTz` as TIMESTAMP WITH TIME
+/// ZONE (13 bytes: UTC instant plus the original offset); `Uint8List` as a
+/// binary node (uint16 length, uint32 from 65536 bytes).
+///
+/// Throws [OracleException] (`oraUnsupportedType`) for unsupported member
+/// types, non-`String` map keys, field names longer than 255 UTF-8 bytes, and
+/// dates outside years 1..9999. Bind paths call [assertValidJsonBindValue]
+/// first, so these surface as call-site errors there.
 Uint8List encodeOson(Object? value) => _OsonEncoder().encode(value);
 
 /// Growable byte buffer with explicit big-endian writes and random-access
@@ -394,9 +477,8 @@ class _OsonEncoder {
   /// examining its value (reference `_examineNode` order — segment offsets
   /// depend on it).
   void _examine(Object? value) {
-    if (value is Uint8List) {
-      throw _unsupportedValue(value);
-    }
+    // A Uint8List is one binary scalar, never an array to walk.
+    if (value is Uint8List) return;
     if (value is List) {
       for (final element in value) {
         _examine(element);
@@ -431,12 +513,19 @@ class _OsonEncoder {
     } else if (value is bool) {
       _treeSeg.writeUint8(value ? _nodeTrue : _nodeFalse);
     } else if (value is num) {
-      // encodeNumber rejects NaN/±Infinity and out-of-range doubles with a
-      // clear OracleException, so no pre-check is needed here.
-      final numberBytes = dt.encodeNumber(value);
-      _treeSeg.writeUint8(_nodeNumberLenUint8);
-      _treeSeg.writeUint8(numberBytes.length);
-      _treeSeg.writeBytes(numberBytes);
+      if (dt.isOracleNumberRepresentable(value)) {
+        final numberBytes = dt.encodeNumber(value);
+        _treeSeg.writeUint8(_nodeNumberLenUint8);
+        _treeSeg.writeUint8(numberBytes.length);
+        _treeSeg.writeBytes(numberBytes);
+      } else {
+        // NaN (as node-oracledb sends it), plus ±Infinity and non-zero
+        // doubles beyond NUMBER's range (a Dart-driver extension —
+        // node-oracledb cannot bind those): BINARY_DOUBLE holds every IEEE
+        // double exactly.
+        _treeSeg.writeUint8(_nodeBinaryDouble);
+        _treeSeg.writeBytes(_encodeBinaryDouble(value as double));
+      }
     } else if (value is String) {
       final bytes = utf8.encode(value);
       if (bytes.length < 256) {
@@ -452,14 +541,80 @@ class _OsonEncoder {
       if (bytes.isNotEmpty) {
         _treeSeg.writeBytes(bytes);
       }
+    } else if (value is DateTime) {
+      _checkYear(value.year);
+      // node-oracledb writes a Date with zero milliseconds as the DATE-shaped
+      // TIMESTAMP7 node, anything finer as an 11-byte TIMESTAMP. Both reuse
+      // the column codecs (local wall-clock fields, like a DATE / TIMESTAMP
+      // column bind) so a fetched value re-binds unshifted.
+      if (value.millisecond == 0 && value.microsecond == 0) {
+        _treeSeg.writeUint8(_nodeTimestamp7);
+        _treeSeg.writeBytes(dt.encodeDate(value));
+      } else {
+        _treeSeg.writeUint8(_nodeTimestamp);
+        _treeSeg.writeBytes(dt.encodeTimestamp(value));
+      }
+    } else if (value is OracleTimestampTz) {
+      _checkYear(value.utc.year);
+      // 13 bytes: the UTC instant plus the original offset, as the TSTZ
+      // column bind writes it and the decoder reads it back.
+      _treeSeg.writeUint8(_nodeTimestampTz);
+      _treeSeg.writeBytes(dt.encodeTimestampTz(value));
     } else if (value is Uint8List) {
-      throw _unsupportedValue(value);
+      // Checked before List: bytes are one binary scalar, not an array.
+      if (value.length < 65536) {
+        _treeSeg.writeUint8(_nodeBinaryLenUint16);
+        _treeSeg.writeUint16BE(value.length);
+      } else {
+        _treeSeg.writeUint8(_nodeBinaryLenUint32);
+        _treeSeg.writeUint32BE(value.length);
+      }
+      _treeSeg.writeBytes(value);
     } else if (value is List) {
       _encodeArray(value);
     } else if (value is Map) {
       _encodeObject(value);
     } else {
       throw _unsupportedValue(value);
+    }
+  }
+
+  /// The 8-byte Oracle BINARY_DOUBLE form of [value] (node-oracledb
+  /// `buffer.js` `writeBinaryDouble`): IEEE 754 big-endian bits made
+  /// byte-comparable — a non-negative value gets its sign bit set, a negative
+  /// one has every bit inverted. NaN is canonicalized to the quiet NaN
+  /// `0x7FF8000000000000` first: a NaN's sign and payload bits vary by
+  /// platform (x64 computes `0.0 / 0.0` as a negative NaN), and the server
+  /// stores BINARY_DOUBLE_NAN as exactly that canonical pattern.
+  static Uint8List _encodeBinaryDouble(double value) {
+    final bytes = Uint8List(8);
+    final data = ByteData.sublistView(bytes);
+    if (value.isNaN) {
+      data.setUint32(0, 0x7ff80000, Endian.big);
+    } else {
+      data.setFloat64(0, value, Endian.big);
+    }
+    if ((bytes[0] & 0x80) == 0) {
+      bytes[0] |= 0x80;
+    } else {
+      for (var i = 0; i < bytes.length; i++) {
+        bytes[i] ^= 0xff;
+      }
+    }
+    return bytes;
+  }
+
+  /// Fails loud on a date/time year outside 1..9999 instead of letting the
+  /// column codecs reject it (BCE) or, past 9999, write an invalid (and from
+  /// year 25600 silently wrapped) century byte. The year is deliberately not
+  /// echoed: it is part of the bind value.
+  static void _checkYear(int year) {
+    final reason = _unsupportedYearReason(year);
+    if (reason != null) {
+      throw OracleException(
+        errorCode: oraUnsupportedType,
+        message: 'JSON date/time member $reason',
+      );
     }
   }
 
@@ -518,8 +673,7 @@ class _OsonEncoder {
     errorCode: oraUnsupportedType,
     message:
         'Unsupported JSON member type ${value.runtimeType}. '
-        'Supported: Map<String, Object?>, List<Object?>, String, '
-        'finite num, bool, null',
+        'Supported: $_supportedJsonKinds',
   );
 }
 

@@ -293,3 +293,11 @@ location: lib/src/protocol/result_set_cursor.dart:508-522
 source_spec: `13-2-oracle-12c-json-as-blob.md`
 reason: nextRowData returns null after one empty _fetchNextBatch even if moreRowsToFetch remains true. The measured Oracle 21c and 23ai DEFINE responses carried their first rows, and no real two-empty-response case has been observed. A transport fixture or live server trace showing that response sequence would settle reachability.
 status: open
+
+### DW-6: NUMBER decode returns 0 for values in [1E-130, 1E-128) and is one floating-point step off for some large magnitudes, so a fetched BINARY_DOUBLE in those ranges re-binds as NUMBER and refetches
+origin: spec-deferred 4426c1a1cf8b
+location: lib/src/protocol/data_types.dart decodeNumber
+source_spec: `13-3-bind-fetch-json-mapping.md`
+severity: medium
+reason: Probed during review: decodeOson(encodeOson(1e-129)) returns 0, and 9.99e125 returns 9.989999999999999e+125. The defect is in decodeNumber and affects NUMBER columns as well, so it predates this story.
+status: open

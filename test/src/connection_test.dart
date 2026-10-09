@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:oracledb/oracledb.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
@@ -305,6 +306,68 @@ void main() {
           expect(transport.executeCalls, equals(0));
         },
       );
+
+      test('invalid JSON Map / List binds fail at the call site with an '
+          'ArgumentError before any transport work, without echoing the '
+          'value (Story 13.3)', () async {
+        final transport = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: transport);
+        const secret = 'hunter2-top-secret';
+        final cases = <(Object, String)>[
+          (
+            [
+              1,
+              <String, Object?>{
+                'pw': secret,
+                's': <int>{1},
+              },
+            ],
+            'bindValues[1][member #2]',
+          ),
+          (
+            <String, Object?>{
+              'doc': <Object?>[secret, DateTime(-44)],
+            },
+            "bindValues['doc'][1]",
+          ),
+          (
+            <String, Object?>{
+              'doc': <String, Object?>{'pw': secret, 'k' * 256: 1},
+            },
+            '255 UTF-8 bytes',
+          ),
+        ];
+        for (final (binds, fragment) in cases) {
+          final sql = binds is Map
+              ? 'INSERT INTO t (doc) VALUES (:doc)'
+              : 'INSERT INTO t (id, doc) VALUES (:1, :2)';
+          await expectLater(
+            conn.execute(sql, binds),
+            throwsA(
+              isA<ArgumentError>()
+                  .having((e) => '$e', 'toString', contains(fragment))
+                  .having((e) => '$e', 'toString', isNot(contains(secret))),
+            ),
+            reason: fragment,
+          );
+        }
+        expect(transport.executeCalls, equals(0));
+      });
+
+      test('Map / List binds with Oracle scalar members reach the transport '
+          '(Story 13.3)', () async {
+        final transport = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: transport);
+        await conn.execute('INSERT INTO t (doc) VALUES (:1)', [
+          <String, Object?>{
+            'd': DateTime(2026),
+            'tz': OracleTimestampTz(DateTime.utc(2026), offsetMinutes: 60),
+            'b': Uint8List(2),
+            'n': double.nan,
+          },
+        ]);
+        expect(transport.executeCalls, equals(1));
+      });
     });
 
     group('OracleException properties', () {

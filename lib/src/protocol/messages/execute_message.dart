@@ -53,11 +53,17 @@ class BindVariable {
     this.isNChar = false,
   }) : oraType = oraType ?? _inferType(value) {
     // JSON binds (inferred from a Map/List value or declared explicitly)
-    // must hold a valid JSON structure. Validating at construction surfaces
-    // bad nested members (DateTime, Uint8List, NaN, non-String keys, ...) at
-    // the call site instead of mid-encode.
+    // must hold a valid JSON value. Validating at construction surfaces bad
+    // members (Set, non-String keys, BCE dates, over-long field names, ...)
+    // at the call site instead of mid-encode. A scalar JSON root is allowed
+    // only when the JSON type was passed explicitly: inference maps scalars
+    // to their own column types (String → VARCHAR2, Uint8List → RAW, ...).
     if (this.oraType == oraTypeJson) {
-      assertValidJsonBindValue(value, 'value');
+      assertValidJsonBindValue(
+        value,
+        'value',
+        allowScalarRoot: oraType != null,
+      );
     }
   }
 

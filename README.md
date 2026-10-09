@@ -985,9 +985,10 @@ An `IN OUT` bind's returned locator likewise reports `true` and frees itself on
 Oracle's **native `JSON` data type** (introduced in Oracle Database 21c;
 requires database `compatible >= 20`) round-trips as ordinary Dart values —
 `Map<String, Object?>` for objects, `List<Object?>` for arrays, or a Dart
-scalar for a scalar JSON root. Members decode
-decoding as `null` / `bool` / `num` / `String` and nested maps/lists (plus
-the Oracle-specific scalars listed below). On the
+scalar for a scalar JSON root. Members are `null` / `bool` / `num` /
+`String` and nested maps/lists, plus the Oracle-specific scalars listed
+below — in **both directions**: values within the bind limits can be bound
+back, subject to the date and number narrowings listed below. On the
 wire, values travel in Oracle's binary JSON format (OSON) under the native
 type — no `jsonEncode()`/`jsonDecode()` round-trip through text, no Oracle
 Client, no LOB read round trips:
@@ -996,41 +997,61 @@ Client, no LOB read round trips:
   (`null` for SQL NULL or a JSON null root). Document shape and member order
   are preserved; statement-cache
   cursor reuse and multi-batch fetches work normally.
-- **Oracle-specific scalars (decode)** — a JSON value may also hold Oracle
-  scalars the server keeps in their native form (e.g. from
-  `JSON_SCALAR(SYSDATE)` or `JSON_OBJECT(... RETURNING JSON)` over typed
-  columns). They decode as follows, wherever they appear in the document:
+- **Oracle-specific scalars** — a JSON value may also hold Oracle scalars
+  the server keeps in their native form (e.g. from `JSON_SCALAR(SYSDATE)` or
+  `JSON_OBJECT(... RETURNING JSON)` over typed columns). They map as follows,
+  wherever they appear in the document, when fetching **and** when binding:
 
-  | Scalar inside the JSON value          | Dart type            |
-  | ------------------------------------- | -------------------- |
-  | `DATE`, `TIMESTAMP`                   | `DateTime` — same as a `DATE` / `TIMESTAMP` column (local wall clock, fractional seconds truncated to microseconds) |
-  | `TIMESTAMP WITH TIME ZONE`            | Always `OracleTimestampTz` (UTC instant + original offset), regardless of `preserveTimestampTimeZone` — unlike a column, which returns a UTC `DateTime` by default |
-  | `BINARY_FLOAT`, `BINARY_DOUBLE`       | `double` (NaN and ±Infinity included; `BINARY_FLOAT` widened from single precision) |
-  | `RAW` / binary                        | `Uint8List` — an empty binary JSON scalar is an empty list of bytes; an empty `RAW` column decodes to `null` |
+  | Scalar inside the JSON value          | Dart type (fetch)    | Bound from Dart as |
+  | ------------------------------------- | -------------------- | ------------------ |
+  | `DATE`, `TIMESTAMP`                   | `DateTime` — same as a `DATE` / `TIMESTAMP` column (local wall clock, fractional seconds truncated to microseconds) | `DateTime` → a `TIMESTAMP` (7 bytes with no sub-second part, else 11), written from its wall-clock fields exactly like a `DATE` / `TIMESTAMP` column bind (a UTC `DateTime` therefore comes back as a local one with the same fields) |
+  | `TIMESTAMP WITH TIME ZONE`            | Always `OracleTimestampTz` (UTC instant + original offset), regardless of `preserveTimestampTimeZone` — unlike a column, which returns a UTC `DateTime` by default | `OracleTimestampTz` → `TIMESTAMP WITH TIME ZONE`, offset preserved |
+  | `BINARY_FLOAT`, `BINARY_DOUBLE`       | `double` (NaN and ±Infinity included; `BINARY_FLOAT` widened from single precision) | NaN, ±Infinity, and doubles outside Oracle `NUMBER`'s range (magnitude ≥ 1E126, or a non-zero magnitude below 1E-130) → `BINARY_DOUBLE`; every other `num`, including `0.0` / `-0.0`, stays `NUMBER`. node-oracledb sends only NaN as `BINARY_DOUBLE`; ±Infinity and out-of-range doubles are a Dart-driver extension (node-oracledb cannot bind them) |
+  | `RAW` / binary                        | `Uint8List` — an empty binary JSON scalar is an empty list of bytes; an empty `RAW` column decodes to `null` | `Uint8List` → binary (bytes, never an array of numbers) |
 
-  BCE dates and region-name time zones (e.g. `US/Pacific`) fail loudly with
-  `OracleException`, as they do for columns.
+  Any fetched document therefore binds back without conversion and fetches
+  back equal, with these narrowings of the stored form:
+  - a `DATE` node re-binds as a 7-byte `TIMESTAMP` (same `DateTime`);
+  - a finite `BINARY_FLOAT` / `BINARY_DOUBLE` within `NUMBER`'s range
+    re-binds as `NUMBER` (equal value; an integral value then decodes as
+    `int`, and a `BINARY_FLOAT` keeps its widened single-precision value,
+    e.g. `3.140000104904175`);
+  - `-0.0` re-binds as `NUMBER` zero and comes back as `0`;
+  - nanoseconds were already truncated to microseconds on fetch;
+  - a fetched `DateTime` is a local wall-clock value (as from a `DATE`
+    column), and re-binds from those same fields.
 
-  **Behavior change:** documents that previously failed with
-  `oraUnsupportedType` now return maps/lists containing `DateTime`,
-  `OracleTimestampTz`, `Uint8List`, or NaN/±Infinity `double` members, so
-  `jsonEncode()` on such a fetched document can throw
-  `JsonUnsupportedObjectError`. Decoding is also one-way for now: binding a
-  document that contains `DateTime`, `OracleTimestampTz`, `Uint8List`, or a
-  non-finite `double` is rejected at the call site, and a finite fetched
-  `BINARY_FLOAT` / `BINARY_DOUBLE` member re-binds as an OSON `NUMBER` (the
-  scalar type changes, and a `BINARY_FLOAT` keeps its widened single-precision
-  value, e.g. `3.140000104904175`). Convert those members before writing a
-  fetched document back.
+  BCE dates and
+  region-name time zones (e.g. `US/Pacific`) fail loudly with
+  `OracleException` on fetch, as they do for columns; binding a `DateTime` /
+  `OracleTimestampTz` outside years 1–9999 fails loudly at the call site.
+  Fetched documents holding these Dart types are not plain JSON, so
+  `jsonEncode()` on one can throw `JsonUnsupportedObjectError`.
 - **DML** — bind an ordinary `Map<String, Object?>` or `List<Object?>` into a
-  `JSON` column with named or positional binds; the driver encodes it as
-  OSON. Members may be `null`, `bool`, finite `num`, `String`, and nested
-  maps/lists; anything else (e.g. `DateTime`, `Uint8List`, `Set`, NaN)
-  fails loudly at the call site. Field names are limited to 255 UTF-8 bytes
-  (the limit shared by all supported server versions). Numeric members
-  follow the same NUMBER contract as scalar columns: integers beyond 2⁵³
-  decode to `double` and lose precision (see
+  `JSON` column with named or positional binds (`execute()` or
+  `executeMany()`); the driver encodes it as OSON. Members may be `null`,
+  `bool`, `num`, `String`, `DateTime`, `OracleTimestampTz`, `Uint8List`, and
+  nested maps/lists; anything else (e.g. `Set`, a non-`String` key, an
+  arbitrary object) fails loudly at the call site with `ArgumentError`
+  (`OracleException` with `oraBindTypeError` from `executeMany()`) before any
+  round trip, and the error never echoes the document. Field names are
+  limited to 255 UTF-8 bytes (the limit shared by all supported server
+  versions). Numeric members follow the same NUMBER contract as scalar
+  columns: integers beyond 2⁵³ decode to `double` and lose precision (see
   [Known limitations](#known-limitations)).
+- **Scalar JSON values** — a bare `String`, `num`, `DateTime`, `Uint8List`,
+  … bind keeps its usual column type (`VARCHAR2`, `NUMBER`, `DATE`, `RAW`),
+  so a `String` bound into a `JSON` column is parsed by the server as JSON
+  *text*. A scalar JSON value binds only through **PL/SQL**, where the JSON
+  type can be declared explicitly: an `OracleBind.inOut(value: 'x', type:
+  OracleDbType.json, maxSize: ...)` bound to an `IN OUT JSON` parameter, or
+  `executeMany()` of a PL/SQL block with
+  `OracleBindDef.input(type: OracleDbType.json)` in `bindDefs` (e.g.
+  `BEGIN INSERT INTO t (doc) VALUES (:1); END;`). Plain SQL DML cannot bind
+  one: its binds always take their type from the value, and `executeMany()`
+  rejects `bindDefs` for plain array DML. The root may be any supported
+  scalar (`String`, `num`, `bool`, `DateTime`, `OracleTimestampTz`,
+  `Uint8List`).
 - **PL/SQL OUT / IN OUT** — declare
   `OracleBind.out(type: OracleDbType.json, maxSize: ...)` or
   `OracleBind.inOut(value: ..., type: OracleDbType.json, maxSize: ...)`;
@@ -1062,7 +1083,7 @@ JSON scalars beyond date/time, binary and float/double — `INTERVAL YEAR TO
 MONTH`, `INTERVAL DAY TO SECOND`, `JsonId`, and VECTOR inside JSON
 documents. Documents containing such scalars fail loudly with
 `OracleException` (`oraUnsupportedType`, naming the scalar kind) rather than
-decoding silently or partially.
+decoding silently or partially, and no Dart value binds as one.
 
 #### JSON stored in a BLOB (`IS JSON`)
 
@@ -1101,7 +1122,14 @@ final doc = result.rows.first['DOC'] as Map<String, Object?>; // not bytes
   JSON, so the server needs native JSON support — 21c+ with
   `compatible >= 20`; it is stored as JSON text, or as OSON in a
   `FORMAT OSON` column), or bind the JSON text bytes as a `Uint8List`
-  (`utf8.encode(jsonEncode(doc))`) on any server.
+  (`utf8.encode(jsonEncode(doc))`) on any server. Oracle-specific scalar
+  members (`DateTime`, `OracleTimestampTz`, `Uint8List`, NaN/±Infinity) are
+  converted by the server: a text `IS JSON` column stores Oracle's JSON text
+  serialization — dates as ISO-8601 strings (`"2024-03-15T10:20:30"`),
+  binary as a hex string (`"DEAD"`), NaN/±Infinity as `"Nan"` / `"Inf"` /
+  `"-Inf"` — so they read back as `String`s, while an `IS JSON FORMAT OSON`
+  column keeps them and reads back the same Dart types (measured on 21c and
+  23ai).
 - **Fails loud** — a value the driver cannot decode throws `OracleException`
   (`oraUnsupportedType`, naming the column) for the whole call; it never
   returns raw bytes, `null`, or a partial result. The default `IS JSON`
@@ -1202,7 +1230,7 @@ After the 1.0 release, the project roadmap includes larger API and compatibility
 
 | Priority | Planned enhancement                                                                       |
 | -------- | ----------------------------------------------------------------------------------------- |
-| 1        | Extended JSON / OSON parity (binding Oracle-specific JSON scalars, interval/VECTOR/`JsonId` JSON scalars, OSON-in-BLOB helpers) |
+| 1        | Extended JSON / OSON parity (interval/VECTOR/`JsonId` JSON scalars, OSON-in-BLOB helpers) |
 | 2        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
 | 3        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
 

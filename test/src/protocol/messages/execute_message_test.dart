@@ -13,6 +13,7 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 
 import 'package:oracledb/src/errors.dart';
+import 'package:oracledb/src/oracle_timestamp_tz.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/data_types.dart' show encodeNumber;
@@ -2671,16 +2672,99 @@ void main() {
 
     test('invalid nested JSON values fail at BindVariable construction', () {
       expect(
-        () => BindVariable(value: <String, Object?>{'t': DateTime.utc(2026)}),
+        () => BindVariable(
+          value: <String, Object?>{
+            's': <int>{1},
+          },
+        ),
         throwsA(isA<ArgumentError>()),
       );
       expect(
-        () => BindVariable(value: <Object?>[double.nan]),
+        () => BindVariable(value: <Object?>[DateTime(-44)]),
         throwsA(isA<ArgumentError>()),
       );
       expect(
         () => BindVariable(value: <Object, Object?>{1: 'bad key'}),
         throwsA(isA<ArgumentError>()),
+      );
+      expect(
+        () => BindVariable(value: <String, Object?>{'k' * 256: 1}),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('Oracle scalar members are accepted on inferred Map/List binds '
+        '(Story 13.3)', () {
+      final doc = <String, Object?>{
+        't': DateTime.utc(2026),
+        'tz': OracleTimestampTz(DateTime.utc(2026), offsetMinutes: 60),
+        'b': Uint8List(2),
+        'nan': double.nan,
+        'inf': <Object?>[double.infinity],
+      };
+      final bind = BindVariable(value: doc);
+      expect(bind.oraType, equals(oraTypeJson));
+    });
+
+    test('a scalar JSON root needs the explicit JSON type; inference keeps '
+        'scalars on their own column types', () {
+      final tz = OracleTimestampTz(DateTime.utc(2026), offsetMinutes: 0);
+      final inferred = <Object, int>{
+        'x': oraTypeVarchar,
+        3: oraTypeNumber,
+        2.5: oraTypeNumber,
+        DateTime(2026): oraTypeDate,
+        tz: oraTypeTimestampTz,
+        Uint8List(1): oraTypeRaw,
+      };
+      for (final MapEntry(key: value, value: type) in inferred.entries) {
+        expect(BindVariable(value: value).oraType, equals(type));
+        final explicit = BindVariable(value: value, oraType: oraTypeJson);
+        expect(explicit.oraType, equals(oraTypeJson));
+      }
+      expect(
+        BindVariable(value: true, oraType: oraTypeJson).oraType,
+        equals(oraTypeJson),
+      );
+      // Still fail loud for non-JSON scalar roots under the explicit type.
+      expect(
+        () => BindVariable(value: <int>{1}, oraType: oraTypeJson),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(
+        () => BindVariable(value: DateTime(10000), oraType: oraTypeJson),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('a scalar-root JSON bind ships an OSON scalar document', () {
+      final value = DateTime(2024, 3, 15, 10, 20, 30);
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: value,
+            oraType: oraTypeJson,
+            maxSize: 4000,
+            dir: BindDir.inputOutput,
+          ),
+        ],
+      );
+      final oson = encodeOson(value);
+      // magic, v1, INLINE_LEAF | IS_SCALAR, tree size 8, TIMESTAMP7 node.
+      expect(
+        oson,
+        equals([
+          0xff, 0x4a, 0x5a, 0x01, 0x00, 0x12, 0x00, 0x08, //
+          0x7d, 0x78, 0x7c, 0x03, 0x0f, 0x0b, 0x15, 0x1f,
+        ]),
+      );
+      expect(
+        _indexOfSub(req.toBytes(), _bytesWithLength(oson)),
+        greaterThanOrEqualTo(0),
+        reason: 'scalar OSON document not found in the encoded request',
       );
     });
 

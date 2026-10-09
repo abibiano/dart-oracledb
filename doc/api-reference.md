@@ -134,7 +134,7 @@ type-checked at construction (fails at the call site, not deep in wire encoding)
 | `raw` | `Uint8List` | bytes | requires `maxSize` |
 | `clob` | `String` | **characters** (UTF-16 units) | wire = LOB locator; `'' → NULL` |
 | `blob` | `Uint8List` | bytes | wire = LOB locator; empty `Uint8List` → empty BLOB (≠ NULL) |
-| `json` | `Map<String,Object?>` / `List<Object?>` | **OSON bytes** | Oracle 21c+; members: null/bool/finite num/String/nested map+list |
+| `json` | `Map<String,Object?>` / `List<Object?>` / scalar | **OSON bytes** | Oracle 21c+; members (and, with this declared type, a scalar root): null/bool/num/String/`DateTime`/`OracleTimestampTz`/`Uint8List`/nested map+list — everything a JSON fetch returns |
 
 **Reading OUT binds:**
 

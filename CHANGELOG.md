@@ -18,13 +18,42 @@
   `oraUnsupportedType` now return maps/lists containing `DateTime`,
   `OracleTimestampTz`, `Uint8List`, or NaN/±Infinity `double` members, so
   `jsonEncode()` on such a fetched document can throw
-  `JsonUnsupportedObjectError`. Decoding is one-way for now: binding
-  `DateTime`, `OracleTimestampTz`, `Uint8List`, or non-finite `double`
-  members inside a JSON document is still rejected at the call site, and a
-  finite fetched `BINARY_FLOAT` / `BINARY_DOUBLE` member re-binds as an OSON
-  `NUMBER` (scalar type changes; a `BINARY_FLOAT` keeps its widened
-  single-precision value). Convert those members before writing a fetched
-  document back.
+  `JsonUnsupportedObjectError`.
+- **JSON binds now accept every value a JSON fetch returns**, so a fetched
+  document binds back unchanged (DML, `executeMany()`, PL/SQL IN OUT) and
+  round-trips as the same Dart types. Inside a `Map` / `List` bind (or as an
+  explicitly JSON-typed scalar root), a `DateTime` travels as an OSON
+  `TIMESTAMP` (7 bytes with no sub-second part, else 11; written from its
+  wall-clock fields like a `DATE` / `TIMESTAMP` column bind), an
+  `OracleTimestampTz` as `TIMESTAMP WITH TIME ZONE` (offset preserved), a
+  `Uint8List` as binary (node-oracledb `oson.js` parity), and NaN as
+  `BINARY_DOUBLE` (parity) — as are ±Infinity and doubles outside Oracle
+  `NUMBER`'s range (a non-zero magnitude below 1E-130, or 1E126 and up), a
+  Dart-driver extension: node-oracledb cannot bind those. Every other `num`,
+  `0.0` / `-0.0` included, stays `NUMBER`, as before. A finite fetched
+  `BINARY_FLOAT` /
+  `BINARY_DOUBLE` within `NUMBER`'s range still re-binds as `NUMBER` (equal
+  value). Validated against Oracle 23ai and Oracle 21c, which accept every
+  node; a text `BLOB IS JSON` column stores such members as Oracle's JSON text
+  (ISO-8601 / hex / `"Nan"` strings), an `IS JSON FORMAT OSON` column keeps
+  them.
+- **Scalar JSON roots can be bound through PL/SQL**, where the JSON type is
+  declared explicitly — `OracleBind.inOut(value: 'x', type:
+  OracleDbType.json, ...)` on an `IN OUT JSON` parameter, or `executeMany()`
+  of a PL/SQL block with `OracleBindDef.input(type: OracleDbType.json)` in
+  `bindDefs`: `String`, `num`, `bool`, `DateTime`, `OracleTimestampTz`, or
+  `Uint8List`. Plain SQL DML cannot bind one — its binds take their type
+  from the value, and type inference is unchanged: a bare `String` still
+  binds as `VARCHAR2`, `Uint8List` as `RAW`, `DateTime` as `DATE`.
+- **Behavior change:** invalid JSON bind values still fail loudly at the call
+  site — `Set`, non-`String` keys, arbitrary objects, field names over 255
+  UTF-8 bytes (previously caught only while encoding), and dates outside
+  years 1–9999 — and an `execute()` `Map` / `List` bind is now validated
+  while its binds are prepared, before any transport work. The
+  `ArgumentError` no longer carries the bind value — no member values and
+  no object keys; it names the offending member's path (list indices and
+  1-based object member positions, e.g. `[member #2]`) and type — matching
+  the other typed-bind errors.
 - JSON values holding the remaining Oracle-specific scalars — `INTERVAL YEAR
   TO MONTH`, `INTERVAL DAY TO SECOND`, `JsonId`, VECTOR — still fail loudly
   with `OracleException` (`oraUnsupportedType`), whose message now names the

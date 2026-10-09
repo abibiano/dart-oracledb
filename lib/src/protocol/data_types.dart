@@ -59,16 +59,13 @@ Uint8List encodeNumber(num value) {
   // [1E-130, 9.99...E125]. Smaller (`double.minPositive` ≈ 5E-324) or larger
   // values cannot round-trip and would otherwise drive `_decimalString` to
   // allocate massive intermediate strings or produce a garbage exponent.
-  if (value is double && value != 0) {
-    final magnitude = value.abs();
-    if (magnitude < 1e-130 || magnitude >= 1e126) {
-      throw OracleException(
-        errorCode: oraDataTypeNotSupported,
-        message:
-            'Oracle NUMBER cannot represent $value '
-            '(magnitude outside [1E-130, 1E126))',
-      );
-    }
+  if (!isOracleNumberRepresentable(value)) {
+    throw OracleException(
+      errorCode: oraDataTypeNotSupported,
+      message:
+          'Oracle NUMBER cannot represent $value '
+          '(magnitude outside [1E-130, 1E126))',
+    );
   }
 
   if (value == 0) {
@@ -175,6 +172,21 @@ Uint8List encodeNumber(num value) {
   }
 
   return Uint8List.fromList(result);
+}
+
+/// Whether [encodeNumber] can represent [value] as an Oracle NUMBER: every
+/// `int`, zero, and every finite `double` whose magnitude lies in Oracle
+/// NUMBER's documented range `[1E-130, 1E126)`. NaN, ±Infinity, and doubles
+/// outside that range return `false`.
+///
+/// Shared with the OSON encoder, which sends the doubles NUMBER cannot hold
+/// as `BINARY_DOUBLE` nodes instead, so the two range checks cannot drift.
+bool isOracleNumberRepresentable(num value) {
+  if (value is! double) return true;
+  if (!value.isFinite) return false;
+  if (value == 0) return true;
+  final magnitude = value.abs();
+  return magnitude >= 1e-130 && magnitude < 1e126;
 }
 
 /// Decodes an Oracle NUMBER to a Dart number.

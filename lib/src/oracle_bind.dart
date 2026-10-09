@@ -99,17 +99,19 @@ enum OracleDbType {
   /// value (length 0), which is distinct from SQL NULL.
   blob,
 
-  /// Oracle native `JSON` (Oracle 21c+; decoded as Dart `Map<String, Object?>`
-  /// or `List<Object?>`). Requires `maxSize`.
+  /// Oracle native `JSON` (Oracle 21c+; decoded as Dart `Map<String, Object?>`,
+  /// `List<Object?>`, or a scalar). Requires `maxSize`.
   ///
   /// `maxSize` is expressed in **OSON bytes** (the size of the binary JSON
   /// payload on the wire) and bounds the value the driver will accept for an
   /// OUT / IN OUT bind. A returned document whose OSON encoding exceeds
   /// `maxSize` bytes fails loud with [OracleException] instead of being
-  /// truncated. IN OUT values must be `Map<String, Object?>`,
-  /// `List<Object?>`, or `null`; members may be `null`, `bool`, finite `num`,
-  /// `String`, and nested maps/lists. Values travel as OSON (Oracle's binary
-  /// JSON) under wire type 119.
+  /// truncated. IN OUT values may be `Map<String, Object?>`, `List<Object?>`,
+  /// `null`, or — because the type is declared — a scalar JSON root; members
+  /// (and scalar roots) may be `null`, `bool`, `num` (NaN and ±Infinity
+  /// travel as `BINARY_DOUBLE`), `String`, `DateTime`, [OracleTimestampTz],
+  /// `Uint8List`, and nested maps/lists — every kind a fetched JSON value can
+  /// hold. Values travel as OSON (Oracle's binary JSON) under wire type 119.
   json,
 
   /// Oracle `SYS_REFCURSOR` (returned as an [OracleResultSet] in
@@ -341,10 +343,12 @@ class OracleBind {
           );
         }
       case OracleDbType.json:
-        // Recursive structure check: rejects non-Map/List top-level values
-        // and invalid nested members (DateTime, Uint8List, Set, non-finite
-        // doubles, non-String keys, arbitrary objects) at the call site.
-        assertValidJsonBindValue(value, 'value');
+        // Recursive structure check: rejects invalid members (Set, non-String
+        // keys, arbitrary objects, out-of-range dates, over-long field names)
+        // at the call site. The type is declared explicitly here, so a scalar
+        // JSON root (String, num, bool, DateTime, OracleTimestampTz,
+        // Uint8List) is allowed — type inference never produces one.
+        assertValidJsonBindValue(value, 'value', allowScalarRoot: true);
       case OracleDbType.cursor:
         // Cursor OUT binds cannot carry an input value; the server allocates
         // the cursor. Reaching here means an inOut constructor bypassed the

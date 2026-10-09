@@ -378,27 +378,85 @@ void main() {
 
     test('invalid nested JSON members fail before wire without leaking the '
         'value', () async {
-      await expectLater(
-        () => conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
-          [
-            {'when': DateTime.utc(2026)},
-          ],
-        ]),
-        throwsA(
-          isA<OracleException>().having(
-            (e) => e.message,
-            'message',
-            allOf(
-              // Names the invalid member's path/type, not the bind value.
-              contains('DateTime'),
-              // The offending value must never appear in the message.
-              isNot(contains('2026')),
-            ),
-          ),
+      for (final (doc, fragment) in <(Map<Object, Object?>, String)>[
+        (
+          {
+            'secret': 'hunter2-2026',
+            'when': <int>{2026},
+          },
+          'Unsupported JSON member type',
         ),
-      );
+        ({'secret': 'hunter2-2026', 'when': DateTime(-2026)}, 'BCE'),
+        ({'secret': 'hunter2-2026', 'when': DateTime(20260)}, '9999'),
+        ({'secret': 'hunter2-2026', 'k' * 256: 2026}, '255 UTF-8 bytes'),
+        ({'secret': 'hunter2-2026', 2026: 'x'}, 'keys must be String'),
+      ]) {
+        await expectLater(
+          () => conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
+            [doc],
+          ]),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  allOf(
+                    // Names the invalid member's path/type, not the value.
+                    contains(fragment),
+                    contains('row 0'),
+                    // The offending value must never appear in the message.
+                    isNot(contains('2026')),
+                    isNot(contains('hunter2')),
+                  ),
+                ),
+          ),
+          reason: fragment,
+        );
+      }
       expect(transport.executeCalls, equals(0));
     });
+
+    test('Oracle scalar JSON members (DateTime, OracleTimestampTz, Uint8List, '
+        'NaN / ±Infinity) pass validation and reach the wire unchanged '
+        '(Story 13.3)', () async {
+      transport.nextResponses.add(
+        ExecuteResponse(isSuccess: true, rowsAffected: 2),
+      );
+      final docA = <String, Object?>{
+        'd': DateTime(2026, 1, 2, 3, 4, 5),
+        'tz': OracleTimestampTz(DateTime.utc(2026), offsetMinutes: 330),
+        'b': Uint8List.fromList([1, 2, 3]),
+        'n': double.nan,
+      };
+      final docB = <Object?>[double.infinity, double.negativeInfinity];
+      await conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
+        [docA],
+        [docB],
+      ]);
+      expect(transport.executeCalls, equals(1));
+      final rows = transport.lastBulkRows!;
+      expect(rows[0][0], same(docA));
+      expect(rows[1][0], same(docB));
+      final slot = transport.lastBindValues!.single as BindVariable;
+      expect(slot.oraType, equals(oc.oraTypeJson));
+    });
+
+    test(
+      'inferred slots never produce a scalar JSON root: a bare scalar '
+      'keeps its own type and mixing it with a document is rejected',
+      () async {
+        await expectRejectedBeforeWire(
+          () => conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
+            [
+              <String, Object?>{'a': 1},
+            ],
+            ['plain string'],
+          ]),
+          ['Inconsistent bind value types'],
+        );
+      },
+    );
   });
 
   group('executeMany() execution and lifecycle', () {
@@ -559,6 +617,76 @@ void main() {
       ]);
       final slots = transport.lastBindValues!.cast<BindVariable>();
       expect(slots[0].dir, equals(BindDir.inputOutput));
+    });
+
+    test('a declared JSON slot accepts scalar JSON roots and Oracle scalar '
+        'members (Story 13.3)', () async {
+      final rows = <List<Object?>>[
+        ['text'],
+        [42],
+        [true],
+        [DateTime(2026, 1, 2)],
+        [OracleTimestampTz(DateTime.utc(2026), offsetMinutes: -480)],
+        [
+          Uint8List.fromList([1, 2]),
+        ],
+        [double.nan],
+        [
+          <String, Object?>{
+            'when': DateTime(2026),
+            'b': Uint8List(1),
+            'inf': double.infinity,
+          },
+        ],
+        [null],
+      ];
+      await conn.executeMany(
+        'BEGIN story_take_json(:1); END;',
+        rows,
+        OracleExecuteManyOptions(
+          bindDefs: [OracleBindDef.input(type: OracleDbType.json)],
+        ),
+      );
+      expect(transport.executeCalls, equals(1));
+      expect(transport.lastBulkRows, hasLength(rows.length));
+      final slot = transport.lastBindValues!.single as BindVariable;
+      expect(slot.oraType, equals(oc.oraTypeJson));
+    });
+
+    test('a declared JSON slot still rejects invalid values before wire, '
+        'without leaking them', () async {
+      for (final (value, fragment) in <(Object, String)>[
+        (<int>{7}, 'Unsupported JSON member type'),
+        (DateTime(-7), 'BCE'),
+        (<String, Object?>{'k': #sym}, 'rows[0][member #1]'),
+      ]) {
+        await expectLater(
+          () => conn.executeMany(
+            'BEGIN story_take_json(:1); END;',
+            [
+              [value],
+            ],
+            OracleExecuteManyOptions(
+              bindDefs: [OracleBindDef.input(type: OracleDbType.json)],
+            ),
+          ),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  allOf(
+                    contains('Invalid JSON bind value'),
+                    contains(fragment),
+                    isNot(contains('-7')),
+                  ),
+                ),
+          ),
+          reason: fragment,
+        );
+      }
+      expect(transport.executeCalls, equals(0));
     });
 
     test('a non-null value in an OUT-only slot fails before wire', () async {

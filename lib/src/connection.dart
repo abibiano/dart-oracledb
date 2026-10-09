@@ -3060,8 +3060,14 @@ class OracleConnection {
           mismatch('OracleTimestampTz or DateTime');
         }
       case OracleDbType.json:
+        // Declared JSON slot: a scalar JSON root is allowed (mirrors
+        // OracleBind(type: json)); re-wrap so no bind value reaches the text.
         try {
-          assertValidJsonBindValue(value, 'rows[$rowIndex]');
+          assertValidJsonBindValue(
+            value,
+            'rows[$rowIndex]',
+            allowScalarRoot: true,
+          );
         } on ArgumentError catch (e) {
           throw OracleException(
             errorCode: oraBindTypeError,
@@ -4017,9 +4023,21 @@ class OracleConnection {
             ),
           );
         } else {
-          bindMetadata.add(
-            BindMetadata(oraType: _inferOraType(raw), dir: BindDir.input),
-          );
+          final oraType = _inferOraType(raw);
+          if (oraType == oc.oraTypeJson) {
+            // A Map / List value binds as JSON: validate its members here, at
+            // the call site and before any transport work (sequence number,
+            // temp-LOB free-list drain, execute counters), not when the
+            // request is serialized. ArgumentError — the same contract as the
+            // OracleBind constructors; it never carries the bind value.
+            assertValidJsonBindValue(
+              raw,
+              bindNames != null
+                  ? "bindValues['${bindNames[i]}']"
+                  : 'bindValues[$i]',
+            );
+          }
+          bindMetadata.add(BindMetadata(oraType: oraType, dir: BindDir.input));
         }
       }
     }

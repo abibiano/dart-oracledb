@@ -439,15 +439,59 @@ void main() {
       expect(n.value, isNull);
     });
 
-    test('JSON IN OUT rejects top-level scalars and non-JSON Dart types', () {
-      for (final bad in <Object>[
-        'a string', // top-level scalars are out of scope: Map/List/null only
+    test('JSON IN OUT accepts scalar roots — the type is declared, so a '
+        'scalar JSON value is unambiguous (Story 13.3)', () {
+      for (final scalar in <Object>[
+        'a string',
+        '',
         42,
+        2.5,
+        double.nan,
+        double.infinity,
         true,
+        false,
+        DateTime(2026, 1, 2, 3, 4, 5),
         DateTime.utc(2026),
+        OracleTimestampTz(DateTime.utc(2026), offsetMinutes: 330),
         Uint8List.fromList([1, 2]),
+      ]) {
+        final b = OracleBind.inOut(
+          value: scalar,
+          type: OracleDbType.json,
+          maxSize: 4000,
+        );
+        expect(b.value, same(scalar));
+        expect(b.oracleTypeCode, equals(119));
+      }
+    });
+
+    test('JSON IN OUT accepts the Oracle scalars a fetched document holds, '
+        'nested anywhere (Story 13.3)', () {
+      final doc = <String, Object?>{
+        'when': DateTime.utc(2026),
+        'local': DateTime(2026, 3, 15, 10, 20, 30, 123, 456),
+        'tz': OracleTimestampTz(DateTime.utc(2026), offsetMinutes: -480),
+        'bytes': Uint8List(2),
+        'nums': <Object?>[double.nan, double.infinity, -double.infinity, 1e300],
+      };
+      expect(
+        OracleBind.inOut(
+          value: doc,
+          type: OracleDbType.json,
+          maxSize: 4000,
+        ).value,
+        same(doc),
+      );
+    });
+
+    test('JSON IN OUT still rejects non-JSON Dart types at the root', () {
+      for (final bad in <Object>[
         <int>{1, 2}, // Set
+        #symbol,
         Duration.zero, // arbitrary object
+        DateTime(-44), // BCE
+        DateTime(10000), // beyond Oracle's year 9999
+        OracleTimestampTz(DateTime.utc(0), offsetMinutes: 0), // BCE
       ]) {
         expect(
           () => OracleBind.inOut(
@@ -456,17 +500,14 @@ void main() {
             maxSize: 4000,
           ),
           throwsA(isA<ArgumentError>()),
-          reason: 'expected rejection for ${bad.runtimeType}',
+          reason: 'expected rejection for ${bad.runtimeType} $bad',
         );
       }
     });
 
     test('JSON IN OUT rejects invalid nested values at construction', () {
       for (final bad in <Object?>[
-        <String, Object?>{'when': DateTime.utc(2026)},
-        <String, Object?>{'bytes': Uint8List(2)},
-        <Object?>[double.nan],
-        <Object?>[double.infinity],
+        <String, Object?>{'when': DateTime(-1)},
         <String, Object?>{
           'deep': <Object?>[
             <String, Object?>{
@@ -474,7 +515,9 @@ void main() {
             },
           ],
         },
+        <Object?>[#symbol],
         <Object, Object?>{1: 'non-string key'},
+        <String, Object?>{'k' * 256: 'field name over 255 UTF-8 bytes'},
       ]) {
         expect(
           () => OracleBind.inOut(
@@ -485,6 +528,25 @@ void main() {
           throwsA(isA<ArgumentError>()),
           reason: 'expected rejection for $bad',
         );
+      }
+    });
+
+    test('JSON IN OUT rejection never echoes the bind value', () {
+      const secret = 'hunter2-top-secret';
+      try {
+        OracleBind.inOut(
+          value: <String, Object?>{
+            'password': secret,
+            'bad': <int>{1},
+          },
+          type: OracleDbType.json,
+          maxSize: 4000,
+        );
+        fail('expected an ArgumentError');
+      } on ArgumentError catch (e) {
+        expect(e.toString(), isNot(contains(secret)));
+        expect(e.toString(), contains('value[member #2]'));
+        expect(e.toString(), isNot(contains('bad')));
       }
     });
   });
