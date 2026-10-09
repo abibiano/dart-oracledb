@@ -29,6 +29,44 @@
   TO MONTH`, `INTERVAL DAY TO SECOND`, `JsonId`, VECTOR — still fail loudly
   with `OracleException` (`oraUnsupportedType`), whose message now names the
   kind and the supported scope.
+- **JSON stored in a `BLOB` (the Oracle 12c `IS JSON` pattern) now decodes
+  like native JSON.** A `BLOB` column with an `IS JSON` (or `IS JSON FORMAT
+  OSON`) check constraint returns `Map<String, Object?>` / `List<Object?>` /
+  a Dart scalar for eager `execute()`, `resultSet: true`,
+  `queryStream()` / `executeStream()` and implicit result sets, with SQL NULL
+  still `null`. Detection mirrors node-oracledb: the describe's `IS JSON` /
+  `IS OSON` flags, exposed as the new `ColumnMetadata.udsFlags`,
+  `ColumnMetadata.isJson` and `ColumnMetadata.isOson`. OSON content (magic
+  `FF 4A 5A`) decodes through the OSON codec; text content as UTF-8 (with or
+  without a byte-order mark) or UTF-16LE / UTF-16BE (with a byte-order mark,
+  or BOM-less). Writes are unchanged — a `Map` / `List` bind already lands in
+  such a column. Validated against Oracle 23ai and Oracle 21c.
+- **Behavior change:** such a column used to return the raw `Uint8List`.
+  `OracleExecuteOptions(fetchLobs: true)` is the opt-out — it still returns an
+  `OracleLob` handle over the untouched bytes. A value that is not strict JSON
+  fails the call loudly with `OracleException` (`oraUnsupportedType`, naming
+  the column) instead of returning bytes — this includes values the default
+  *lax* `IS JSON` constraint accepts, such as unquoted field names,
+  single-quoted strings, upper-case `TRUE`, and a zero-length `EMPTY_BLOB()`.
+  Corrupt OSON instead keeps the OSON decoder's error code (for example,
+  `oraProtocolError`).
+  `CLOB` / `VARCHAR2` / `RAW` `IS JSON` columns, plain `BLOB` columns, views
+  and expressions over the column (which describe without the flag) are
+  unchanged. A `REF CURSOR` OUT bind or nested `CURSOR()` column carrying the
+  BLOB remains undecodable, like any such cursor row carrying a LOB (existing
+  known limitation).
+
+### Fixes
+
+- **Implicit result sets (`DBMS_SQL.RETURN_RESULT`) whose rows carry a
+  CLOB / NCLOB / BLOB or native JSON column now decode**, eager and lazy
+  (`resultSet: true`), and under `fetchLobs: true` (eager) yield `OracleLob`
+  handles. Previously the first FETCH of such a cursor failed with ORA-12547
+  ("Integer too large: size=114"), and on Oracle 21c the malformed stream
+  left the connection unusable. As in node-oracledb (`requiresDefine`), the
+  driver now sends the cursor's LOB-prefetch defines before its first fetch.
+  REF CURSOR OUT binds and nested `CURSOR()` columns are unchanged. Validated
+  against Oracle 23ai and Oracle 21c.
 
 ## 1.4.0
 

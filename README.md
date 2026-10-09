@@ -21,7 +21,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 - **Bulk DML** — `executeMany()` runs one statement across many bind sets in a single round trip, with array `RETURNING`, per-iteration PL/SQL binds, batch errors, and per-row counts
 - **PL/SQL** — stored procedures and functions with OUT / IN OUT bind parameters
 - **Result sets & streaming** — consume large queries incrementally via `OracleResultSet` or `queryStream()` / `executeStream()` instead of materializing every row
-- **REF CURSOR & implicit results** — PL/SQL `SYS_REFCURSOR` OUT binds, `DBMS_SQL.RETURN_RESULT` implicit result sets, and nested `CURSOR()` columns (cursor rows must not carry a CLOB/NCLOB/BLOB column — see [Known Limitations](#known-limitations))
+- **REF CURSOR & implicit results** — PL/SQL `SYS_REFCURSOR` OUT binds, `DBMS_SQL.RETURN_RESULT` implicit result sets (including rows that carry CLOB/NCLOB/BLOB/JSON columns), and nested `CURSOR()` columns (nested-cursor and REF CURSOR rows must not carry a CLOB/NCLOB/BLOB column — see [Known Limitations](#known-limitations))
 - **LOB streaming & temporary LOBs** — `OracleExecuteOptions(fetchLobs: true)` returns a server-backed `OracleLob` with bounded `read()`/`write()`, `textStream()`/`byteStream()`/`writeStream()` for piece-by-piece transfer, and `createTemporaryClob()`/`createTemporaryNClob()`/`createTemporaryBlob()` for session-duration temporary LOBs
 - **Transactions** — commit, rollback, and transaction helper
 - **TIMESTAMP WITH TIME ZONE** — decoded as UTC `DateTime`, or as `OracleTimestampTz` preserving the original offset (opt-in)
@@ -453,6 +453,8 @@ for (final cursor in result.implicitResults) {
 
 Under `OracleExecuteOptions(resultSet: true)`, each element is a lazy `OracleResultSet` handle instead — `close()` (or fully drain) each one.
 
+Implicit result rows may carry CLOB / NCLOB / BLOB and JSON columns: they decode exactly like a top-level SELECT's (`String`, `Uint8List`, `Map`/`List`, and a BLOB `IS JSON` column as JSON), and under `fetchLobs: true` (eager path) the LOB columns come back as `OracleLob` handles. As in node-oracledb, the driver sends the cursor's LOB-prefetch defines before its first fetch.
+
 #### Nested cursor columns
 
 A `CURSOR(SELECT ...)` column in a query projection materializes inline on the parent row as a `List<OracleRow>` (an empty nested cursor is `[]`, a NULL cursor column is `null`), on the eager, streaming, and result-set paths alike:
@@ -554,9 +556,9 @@ final isAlive = await connection.ping();
 | TIMESTAMP WITH TIME ZONE  | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` |
 | RAW                       | `Uint8List` (see [RAW support](#raw-support))                                    |
 | CLOB                      | `String` (see [CLOB support](#clob-support), [Character Set Support](#character-set-support)) |
-| BLOB                      | `Uint8List` (see [BLOB support](#blob-support))                                  |
+| BLOB                      | `Uint8List` (see [BLOB support](#blob-support)); a BLOB `IS JSON` column decodes like JSON (see [JSON stored in a BLOB](#json-stored-in-a-blob-is-json)) |
 | JSON (21c+)               | `Map<String, Object?>` / `List<Object?>` (see [JSON support](#json-support))     |
-| CURSOR / REF CURSOR       | `OracleResultSet` (OUT bind) / `List<OracleRow>` (nested `CURSOR()` column) — cursor rows carrying a CLOB/NCLOB/BLOB column are not decodable (see [Result Sets & Streaming](#result-sets--streaming), [Known Limitations](#known-limitations)) |
+| CURSOR / REF CURSOR       | `OracleResultSet` (OUT bind) / `List<OracleRow>` (nested `CURSOR()` column) — REF CURSOR and nested-cursor rows carrying a CLOB/NCLOB/BLOB column are not decodable; implicit result sets are (see [Result Sets & Streaming](#result-sets--streaming), [Known Limitations](#known-limitations)) |
 | NULL                      | `null`                                                                           |
 
 ### RAW support
@@ -627,7 +629,10 @@ BLOB values round-trip as Dart `Uint8List`s by default (opt into an incremental
 - **Queries** — selecting a `BLOB` column returns a `Uint8List` (`null` for
   SQL NULL, an empty `Uint8List` for `EMPTY_BLOB()`). The driver reads LOB
   locators transparently and byte-for-byte — no character set conversion
-  ever touches the bytes; values above 64 KiB are covered by tests.
+  ever touches the bytes; values above 64 KiB are covered by tests. The one
+  exception is a BLOB column with an `IS JSON` check constraint, whose value
+  decodes to a `Map` / `List` / scalar — see
+  [JSON stored in a BLOB](#json-stored-in-a-blob-is-json).
 - **DML** — bind an ordinary `Uint8List` into a `BLOB` column with named or
   positional binds. Values above the 32,767-byte scalar bind limit are
   handled automatically: Oracle's long-data path for SQL (covered by tests to
@@ -1043,10 +1048,12 @@ explicit `TABLESPACE USERS` (or any ASSM tablespace) to the `CREATE TABLE`, or
 grant the schema a default ASSM tablespace. This is an environment/DDL
 requirement, not a driver limitation.
 
-**Native vs. textual JSON.** This support covers the dedicated `JSON` column
-type (OSON-backed, 21c+). JSON *text* stored in `VARCHAR2`/`CLOB`/`BLOB`
-columns — the pre-21c pattern with `IS JSON` constraints — keeps its ordinary
-`String`/`Uint8List` behavior; parse it with `dart:convert` or query it
+**Native vs. textual JSON.** The sections above cover the dedicated `JSON`
+column type (OSON-backed, 21c+). JSON stored the pre-21c way in a **`BLOB`**
+column with an `IS JSON` check constraint decodes to the same Dart values —
+see [JSON stored in a BLOB](#json-stored-in-a-blob-is-json) below. JSON *text*
+in `VARCHAR2` / `CLOB` (or `RAW`) `IS JSON` columns keeps its ordinary
+`String` / `Uint8List` behavior; parse it with `dart:convert` or query it
 through SQL/JSON functions. JSON text inserted *into* a native `JSON` column
 is parsed by the server and reads back as `Map`/`List`.
 
@@ -1056,6 +1063,66 @@ MONTH`, `INTERVAL DAY TO SECOND`, `JsonId`, and VECTOR inside JSON
 documents. Documents containing such scalars fail loudly with
 `OracleException` (`oraUnsupportedType`, naming the scalar kind) rather than
 decoding silently or partially.
+
+#### JSON stored in a BLOB (`IS JSON`)
+
+The Oracle 12c pattern — a `BLOB` column constrained `IS JSON` (or
+`IS JSON FORMAT OSON`) — reads back exactly like a native `JSON` column:
+`Map<String, Object?>`, `List<Object?>`, or a Dart scalar, with SQL NULL as
+`null`. It works for an eager `execute()`, `resultSet: true`,
+`queryStream()` / `executeStream()`, and implicit result sets (validated on
+Oracle 21c and 23ai; the decision comes from the column describe, never from
+the server version), so applications no longer hand-decode bytes per server
+version:
+
+```dart
+await connection.execute(
+  'CREATE TABLE orders (id NUMBER, doc BLOB CHECK (doc IS JSON))',
+);
+await connection.execute(
+  'INSERT INTO orders VALUES (1, :doc)',
+  {'doc': {'item': 'rocket', 'qty': 2}}, // a Map binds as JSON (21c+)
+);
+final result = await connection.execute('SELECT doc FROM orders');
+final doc = result.rows.first['DOC'] as Map<String, Object?>; // not bytes
+```
+
+- **Detection** follows node-oracledb: the column describe carries an
+  `IS JSON` (or OSON) flag, exposed as `ColumnMetadata.isJson` /
+  `ColumnMetadata.isOson` (raw word: `ColumnMetadata.udsFlags`). The flag
+  belongs to the table column — a view over the table, or an expression such
+  as `TO_BLOB(doc)`, describes without it and returns plain `Uint8List`.
+- **Content** — bytes starting with the OSON magic (`IS JSON FORMAT OSON`
+  columns) decode as OSON, including the Oracle-specific scalars listed
+  above. Anything else is JSON text: UTF-8 (with or without a byte-order
+  mark), or UTF-16LE / UTF-16BE (with a byte-order mark, or detected from the
+  zero-byte pattern without one — Oracle accepts both).
+- **Writes** need nothing new: bind a `Map` / `List` (it travels as native
+  JSON, so the server needs native JSON support — 21c+ with
+  `compatible >= 20`; it is stored as JSON text, or as OSON in a
+  `FORMAT OSON` column), or bind the JSON text bytes as a `Uint8List`
+  (`utf8.encode(jsonEncode(doc))`) on any server.
+- **Fails loud** — a value the driver cannot decode throws `OracleException`
+  (`oraUnsupportedType`, naming the column) for the whole call; it never
+  returns raw bytes, `null`, or a partial result. The default `IS JSON`
+  constraint is *lax*, so Oracle also accepts values that are not strict
+  JSON and that therefore fail here: lax syntax (unquoted field names,
+  single-quoted strings, upper-case `TRUE`), trailing NUL bytes, and a
+  zero-length `EMPTY_BLOB()`. Use `IS JSON STRICT` to keep such values out.
+- **Raw-bytes opt-out** — `OracleExecuteOptions(fetchLobs: true)` still
+  returns an `OracleLob` handle whose `read()` yields the stored bytes
+  untouched. For PL/SQL implicit results, use eager `execute()` with this
+  option; the combination of `resultSet: true` and `fetchLobs: true` is
+  unsupported for a PL/SQL block.
+- **Behavior change:** before this release such a column returned a
+  `Uint8List`; code that decoded those bytes itself must now accept the
+  decoded value (or opt out with `fetchLobs: true`).
+- **Not covered:** a `REF CURSOR` OUT bind or nested `CURSOR()` column
+  carrying the BLOB — such cursor rows are not decodable yet (see
+  [Known Limitations](#known-limitations)); and `CLOB` / `VARCHAR2` / `RAW`
+  `IS JSON` columns, which stay `String` / `Uint8List`; and a BLOB returned
+  through a PL/SQL OUT bind or `RETURNING ... INTO`, which carries no column
+  describe flag and so stays a `Uint8List`.
 
 ## Character Set Support
 
@@ -1183,7 +1250,7 @@ RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
 - **Statement cache and external DDL** — top-level DDL executed on the same connection clears the statement cache, but DDL issued from another session (or inside a PL/SQL block) can leave stale cached SELECT metadata. This matches node-oracledb thin-mode behavior.
 - **CLOB/BLOB cursor re-parse** — result cursors for queries selecting CLOB or BLOB columns are always re-parsed, never blind-reused from the statement cache (fresh defines are required to keep the LOB-prefetch metadata); RAW queries keep normal cursor reuse.
 - **NUMBER beyond 2⁵³** — integer-valued NUMBERs larger than 2⁵³ decode to `double` and lose precision (Dart `double` limit; matches node-oracledb).
-- **Nested `CURSOR()` / REF CURSOR rows carrying a LOB** — a row returned by a nested `CURSOR(...)` column or a `SYS_REFCURSOR` OUT bind that projects a `CLOB`/`NCLOB`/`BLOB` column **cannot be decoded by this driver**, with or without `fetchLobs`. Measured on both Oracle 23ai and 21c, such a statement fails with a protocol error (ORA-12547 / buffer underrun) as the cursor's rows are decoded; **on Oracle 21c the malformed stream also leaves the connection unusable**, so the session is lost and must be replaced (via `OraclePool` this happens on reclaim). This is the one fail-loud boundary in this driver that does not leave the connection usable. `fetchLobs: true` does **not** rescue the two shapes equally, because every LOB pre-check runs on already-decoded rows: for a **nested `CURSOR(...)` column** the decode fails first (inside the EXECUTE response), so `fetchLobs` changes nothing and the 21c session is lost either way; for a **`SYS_REFCURSOR` OUT bind** the describe decodes fine, so with `fetchLobs: true` you get the driver's clear rejection — after the execute round trip, but before the row FETCH that would poison the connection — and the session stays healthy. **Workaround (the only remedy for the nested-`CURSOR()` shape):** project the LOB column outside the cursor (join it into the outer SELECT, or return its key from the cursor and read the LOB in a second statement).
+- **Nested `CURSOR()` / REF CURSOR rows carrying a LOB** — a row returned by a nested `CURSOR(...)` column or a `SYS_REFCURSOR` OUT bind that projects a `CLOB`/`NCLOB`/`BLOB` column **cannot be decoded by this driver**, with or without `fetchLobs`. Measured on both Oracle 23ai and 21c, such a statement fails with a protocol error (ORA-12547 / buffer underrun) as the cursor's rows are decoded; **on Oracle 21c the malformed stream also leaves the connection unusable**, so the session is lost and must be replaced (via `OraclePool` this happens on reclaim). This is the one fail-loud boundary in this driver that does not leave the connection usable. `fetchLobs: true` does **not** rescue the two shapes equally, because every LOB pre-check runs on already-decoded rows: for a **nested `CURSOR(...)` column** the decode fails first (inside the EXECUTE response), so `fetchLobs` changes nothing and the 21c session is lost either way; for a **`SYS_REFCURSOR` OUT bind** the describe decodes fine, so with `fetchLobs: true` you get the driver's clear rejection — after the execute round trip, but before the row FETCH that would poison the connection — and the session stays healthy. **Workaround (the only remedy for the nested-`CURSOR()` shape):** project the LOB column outside the cursor (join it into the outer SELECT, or return its key from the cursor and read the LOB in a second statement). `DBMS_SQL.RETURN_RESULT` implicit result sets are not affected: their LOB / JSON columns decode normally.
 - **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work. As of 1.4 an **open fetched `OracleLob`** (from `fetchLobs: true`) also holds that slot — for the handle's whole lifetime, not just during a round trip, and including handles a streaming result set prefetched but you never asked for — so an unclosed LOB handle is the most likely cause of a concurrent-operation error; a **created-temporary** handle (`createTemporaryClob()` and friends) is deliberately exempt and can be read, written, and bound while open. See [Incremental LOB access with `fetchLobs`](#incremental-lob-access-with-fetchlobs).
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
 - **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) are rejected on decode; offset-based zones (e.g. `+02:00`) are supported. Region-name compatibility is planned as a post-1.0 temporal enhancement.

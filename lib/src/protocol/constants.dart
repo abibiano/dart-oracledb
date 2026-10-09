@@ -147,6 +147,21 @@ const int tnsLobLocFlagsAbstract = 0x40;
 /// Locator flag byte 2: initialized (TNS_LOB_LOC_FLAGS_INIT).
 const int tnsLobLocFlagsInit = 0x08;
 
+/// Describe-time column UDS flag: the column carries an `IS JSON` check
+/// constraint (TNS_UDS_FLAGS_IS_JSON —
+/// `reference/node-oracledb/lib/thin/protocol/constants.js`, value 0x100;
+/// read into `fetchInfo.isJson` by `base.js` `processColumnInfo`). Measured on
+/// `BLOB` / `CLOB` / `VARCHAR2` / `RAW` `IS JSON` columns: Oracle 21c reports
+/// the word as `0x100`, Oracle 23ai as `0x1100`.
+const int tnsUdsFlagsIsJson = 0x100;
+
+/// Describe-time column UDS flag: the column stores OSON (`IS JSON FORMAT
+/// OSON`) (TNS_UDS_FLAGS_IS_OSON — `constants.js`, value 0x800; read into
+/// `fetchInfo.isOson`). Measured on a `BLOB` `IS JSON FORMAT OSON` column:
+/// Oracle 21c reports `0x800` WITHOUT [tnsUdsFlagsIsJson], Oracle 23ai
+/// `0x1900` — so a JSON-column test must accept either bit.
+const int tnsUdsFlagsIsOson = 0x800;
+
 // ============================================================================
 // Oracle Data Type Indicators
 // ============================================================================

@@ -60,6 +60,17 @@ class ResultSetCursor {
   /// describe even on OFETCH). See `spec-nested-cursor-materialization.md`
   /// "S0 RECONCILIATION".
   ///
+  /// When [requiresDefine] is true, the FIRST fetch round is a DEFINE call
+  /// (`Transport.defineCursor`) instead of an OFETCH or a full EXECUTE; every
+  /// later round is a plain OFETCH. This is node-oracledb's `requiresDefine`
+  /// for a describe-created cursor carrying a CLOB / NCLOB / BLOB / JSON column
+  /// (`withData.js` `postProcess`): the defines announce the LOB-prefetch
+  /// shape, without which the server ships those values as bare locators the
+  /// decoder cannot read. It takes precedence over [requiresFullExecute]
+  /// exactly as in node-oracledb, whose `ExecuteMessage` writes DEFINE in
+  /// place of EXECUTE/FETCH when both are set. Only implicit result sets set
+  /// it today (Story 13.2).
+  ///
   /// ## Lazy LOB handles ([wrapLob] / [isLobHandle] / [closeLobHandles])
   ///
   /// Supplying `wrapLob` switches this cursor's per-batch LOB handling from
@@ -113,6 +124,7 @@ class ResultSetCursor {
     required bool preserveTimestampTimeZone,
     required bool materializePerBatch,
     bool requiresFullExecute = false,
+    bool requiresDefine = false,
     Future<void> Function(List<List<Object?>> batch)? onBatchDecoded,
     Object Function(LobLocator locator)? wrapLob,
     bool Function(Object? value)? isLobHandle,
@@ -123,6 +135,7 @@ class ResultSetCursor {
        _columns = columns,
        _serverHasMoreRows = serverHasMoreRows,
        _requiresFullExecute = requiresFullExecute,
+       _requiresDefine = requiresDefine,
        _prefetchRows = prefetchRows,
        _preserveTimestampTimeZone = preserveTimestampTimeZone,
        _materializePerBatch = materializePerBatch,
@@ -195,6 +208,10 @@ class ResultSetCursor {
   /// the ExecuteMessage once). See the constructor doc and CHANGE 1 in
   /// `spec-nested-cursor-materialization.md` "S0 RECONCILIATION".
   bool _requiresFullExecute;
+
+  /// Whether the FIRST fetch must be a DEFINE call (node-oracledb
+  /// `requiresDefine`) — see the constructor doc. Cleared after that fetch.
+  bool _requiresDefine;
 
   /// Last row of the most recently buffered batch, used as the duplicate-column
   /// dedup source for the first row of the next FETCH round (Oracle may encode
@@ -453,7 +470,21 @@ class ResultSetCursor {
     // than `prefetchRows` could hit id-only nested values on a continuation
     // OFETCH on 21c. Validated fixtures keep the outer cursor at or below the
     // prefetch, so this edge is not exercised (and not tested) here.
-    final fetched = _requiresFullExecute
+    //
+    // node-oracledb `requiresDefine` (constructor doc): a describe-created
+    // cursor with LOB / JSON columns opens with a DEFINE call. Measured on
+    // 23ai and 21c, its response already carries the first batch (up to
+    // `prefetchRows` rows) and an accurate end-of-fetch, exactly like the
+    // top-level LOB query's define in `Transport.sendExecute`.
+    var fetched = _requiresDefine
+        ? await _transport.defineCursor(
+            _cursorId,
+            _prefetchRows,
+            columns: _columns,
+            timeout: _fetchTimeout,
+            preserveTimestampTimeZone: _preserveTimestampTimeZone,
+          )
+        : _requiresFullExecute
         ? await _transport.sendExecute(
             '',
             isQuery: true,
@@ -472,6 +503,25 @@ class ResultSetCursor {
             previousRoundLastRow: _previousRoundLastRow,
           );
     _requiresFullExecute = false; // first fetch only; continuation uses OFETCH
+    if (_requiresDefine) {
+      _requiresDefine = false; // once: the defines persist on the cursor
+      // Defensive: should a server answer the DEFINE without rows yet report
+      // more pending (node-oracledb's `noPrefetch` reading of the call), fetch
+      // them now. A zero-row batch here would otherwise read as end-of-data to
+      // `nextRowData` and silently drop the whole result.
+      if (fetched.isSuccess &&
+          fetched.rows.isEmpty &&
+          fetched.moreRowsToFetch) {
+        fetched = await _transport.fetchRows(
+          _cursorId,
+          _prefetchRows,
+          columns: _columns,
+          timeout: _fetchTimeout,
+          preserveTimestampTimeZone: _preserveTimestampTimeZone,
+          previousRoundLastRow: _previousRoundLastRow,
+        );
+      }
+    }
     if (!fetched.isSuccess) {
       _fetchFailure = fetched;
       _failed = true;
@@ -493,6 +543,10 @@ class ResultSetCursor {
       final batch = _materializePerBatch
           ? await _transport.materializeLobs(
               fetched,
+              // A FETCH round's rows map to this cursor's describe, which the
+              // response itself need not carry; the BLOB IS JSON decode
+              // (Story 13.2) keys off these columns' UDS flags.
+              columns: _columns,
               timeout: _fetchTimeout,
               // Wrap instead of read when the connection asked for handles
               // (fetchLobs + resultSet). Null on every materialize path.

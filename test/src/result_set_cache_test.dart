@@ -107,6 +107,7 @@ class _FakeCacheTransport extends Transport {
   Future<ExecuteResponse> materializeLobs(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
+    List<ColumnMetadata>? columns,
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
     Object Function(LobLocator locator)? wrapLob,

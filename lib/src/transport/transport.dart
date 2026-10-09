@@ -14,6 +14,7 @@ import '../protocol/messages/execute_message.dart';
 import '../protocol/messages/fast_auth_message.dart';
 import '../protocol/messages/lob_op_message.dart';
 import '../protocol/messages/protocol_message.dart';
+import '../protocol/oson.dart' show decodeJsonBlobBytes;
 import 'packet.dart';
 import 'socket.dart';
 import 'tls.dart';
@@ -1284,10 +1285,21 @@ class Transport {
   /// callback is threaded through EVERY shape below (rows, OUT-bind values,
   /// OUT-bind rows, DML RETURNING nesting) so a LOB is never materialized on one
   /// shape while handle-wrapped on another.
+  ///
+  /// On the materialize path (no [wrapLob]) a row cell of a `BLOB` column the
+  /// describe flags `IS JSON` / `IS JSON FORMAT OSON`
+  /// ([ColumnMetadata.isJson] / [ColumnMetadata.isOson]) is decoded after its
+  /// read into the Dart JSON mapping (`Map` / `List` / scalar) by
+  /// `decodeJsonBlobBytes` — the 12c JSON-as-BLOB path. The row cells map to
+  /// [columns] by position, falling back to `response.columnMetadata` when
+  /// [columns] is null; pass it explicitly wherever the response may carry no
+  /// describe (a fetch round). A cell that fails to decode throws
+  /// [OracleException] for the whole call — no partially decoded rows.
   @internal
   Future<ExecuteResponse> materializeLobs(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
+    List<ColumnMetadata>? columns,
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
     Object Function(LobLocator locator)? wrapLob,
@@ -1295,6 +1307,7 @@ class Transport {
     return _materializeLobValues(
       response,
       bindMetadata: bindMetadata,
+      columns: columns,
       dmlReturning: dmlReturning,
       timeout: timeout,
       wrapLob: wrapLob,
@@ -1956,7 +1969,8 @@ class Transport {
 
   /// Replaces every [LobLocator] in a successful response's rows and OUT
   /// binds with its materialized value — `String` for CLOB, `Uint8List` for
-  /// BLOB.
+  /// BLOB, and the decoded Dart JSON value for a row cell of a BLOB column
+  /// flagged `IS JSON` / `IS OSON` in [columns] (see [materializeLobs]).
   ///
   /// Always runs AFTER the round trip that produced [response] has completed —
   /// never inside [sendExecute]. Every call site is in the connection layer or
@@ -1970,6 +1984,7 @@ class Transport {
   Future<ExecuteResponse> _materializeLobValues(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
+    List<ColumnMetadata>? columns,
     bool dmlReturning = false,
     Duration? timeout,
     Object Function(LobLocator locator)? wrapLob,
@@ -2105,6 +2120,46 @@ class Transport {
       return value;
     }
 
+    // Story 13.2 — JSON stored the Oracle 12c way: a BLOB column whose
+    // describe carries the IS JSON (0x100) or IS OSON (0x800) UDS flag
+    // (node-oracledb resultset.js `isJson` / `isOson` output converter). On the
+    // materialize path its bytes are decoded into the native-JSON Dart mapping
+    // right after the read. Never under fetchLobs (wrapLob != null): the
+    // OracleLob handle is the raw-bytes opt-out and stays untouched. Only BLOB:
+    // CLOB / VARCHAR2 / RAW IS JSON columns are out of scope and unchanged.
+    final effectiveColumns = columns ?? response.columnMetadata;
+    final jsonBlobColumns = <int, ColumnMetadata>{
+      if (wrapLob == null && hasRowLob)
+        for (var i = 0; i < effectiveColumns.length; i++)
+          if (effectiveColumns[i].oracleType == oraTypeBlob &&
+              (effectiveColumns[i].isJson || effectiveColumns[i].isOson))
+            i: effectiveColumns[i],
+    };
+    // Decoded once per distinct locator, like the read itself: an aliased
+    // locator (duplicate-column optimization) yields the SAME decoded value in
+    // every row, exactly as a native JSON column's duplicate cell does. Keyed
+    // with containsKey because a JSON `null` document decodes to null.
+    final decodedJson = <LobLocator, Object?>{};
+    Future<Object?> readJsonLocator(
+      LobLocator locator,
+      ColumnMetadata column,
+    ) async {
+      if (decodedJson.containsKey(locator)) return decodedJson[locator];
+      final bytes = await readLocator(locator);
+      final Object? value;
+      try {
+        value = decodeJsonBlobBytes(bytes as Uint8List);
+      } on OracleException catch (e) {
+        throw OracleException(
+          errorCode: e.errorCode,
+          message: 'BLOB IS JSON column "${column.name}": ${e.message}',
+          cause: e.cause,
+        );
+      }
+      decodedJson[locator] = value;
+      return value;
+    }
+
     var rows = response.rows;
     if (hasRowLob) {
       final newRows = <List<Object?>>[];
@@ -2113,7 +2168,10 @@ class Transport {
         for (var i = 0; i < newRow.length; i++) {
           final value = newRow[i];
           if (value is LobLocator) {
-            newRow[i] = await readLocator(value);
+            final jsonColumn = jsonBlobColumns[i];
+            newRow[i] = jsonColumn != null && value.oracleType == oraTypeBlob
+                ? await readJsonLocator(value, jsonColumn)
+                : await readLocator(value);
           }
         }
         newRows.add(newRow);
@@ -2464,6 +2522,65 @@ class Transport {
     int prefetchRows,
     Duration? timeout,
   ) async {
+    final response = await _sendDefine(
+      sql,
+      cursorId,
+      columns,
+      prefetchRows,
+      timeout,
+    );
+    if (!response.isSuccess) {
+      throw OracleException(
+        errorCode: response.errorCode ?? oraProtocolError,
+        message: response.errorMessage ?? 'LOB define call failed',
+      );
+    }
+    return response;
+  }
+
+  /// Sends the DEFINE call for an open, **describe-created** query cursor —
+  /// an implicit result set (`DBMS_SQL.RETURN_RESULT`) whose columns include a
+  /// CLOB / NCLOB / BLOB / JSON — and returns its decoded response WITHOUT
+  /// throwing on a server error, so the caller's FETCH-failure handling owns
+  /// it exactly as for a FETCH round.
+  ///
+  /// node-oracledb parity (`withData.js` `postProcess`: a describe-created
+  /// cursor with a LOB / JSON column gets `requiresDefine` + `noPrefetch`, so
+  /// its first `_fetchMoreRows` is an `ExecuteMessage` in DEFINE mode). The
+  /// defines carry the LOB-prefetch cont-flag; without them the server ships
+  /// each LOB / JSON value of a FETCH as a bare locator (no length / chunk-size
+  /// prefix) that the decoder cannot read — measured on Oracle 23ai and 21c as
+  /// ORA-12547 "Integer too large: size=114" on the first FETCH, and on 21c the
+  /// malformed stream poisons the transport. Rows may arrive in this response
+  /// (the authoritative first batch) or in the FETCH rounds that follow.
+  @internal
+  Future<ExecuteResponse> defineCursor(
+    int cursorId,
+    int numRows, {
+    required List<ColumnMetadata> columns,
+    Duration? timeout = const Duration(minutes: 2),
+    bool preserveTimestampTimeZone = false,
+  }) {
+    return _sendDefine(
+      '',
+      cursorId,
+      columns,
+      numRows,
+      timeout,
+      preserveTimestampTimeZone: preserveTimestampTimeZone,
+    );
+  }
+
+  /// Sends one DEFINE-mode [ExecuteRequest] for the open cursor [cursorId] and
+  /// returns the decoded response as-is (successful or not).
+  Future<ExecuteResponse> _sendDefine(
+    String sql,
+    int cursorId,
+    List<ColumnMetadata> columns,
+    int prefetchRows,
+    Duration? timeout, {
+    bool preserveTimestampTimeZone = false,
+  }) async {
     final request = ExecuteRequest(
       sql: sql,
       isQuery: true,
@@ -2479,22 +2596,16 @@ class Transport {
       operation: 'Define',
       expectedColumns: columns,
     );
-    final response = decodeExecuteResponse(
+    return decodeExecuteResponse(
       payload,
       isQuery: true,
       ttcFieldVersion: _ttcFieldVersion,
       endOfRequestSupport: _supportsEndOfRequest,
       expectedColumns: columns,
+      preserveTimestampTimeZone: preserveTimestampTimeZone,
       supportsNationalCharset: supportsNationalCharset,
       nationalCharset: nationalCharset,
     );
-    if (!response.isSuccess) {
-      throw OracleException(
-        errorCode: response.errorCode ?? oraProtocolError,
-        message: response.errorMessage ?? 'LOB define call failed',
-      );
-    }
-    return response;
   }
 
   Future<ExecuteResponse> _sendFetch(

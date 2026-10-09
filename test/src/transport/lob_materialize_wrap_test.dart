@@ -18,6 +18,7 @@ import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/protocol/messages/lob_op_message.dart';
+import 'package:oracledb/src/protocol/oson.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
 
@@ -1122,6 +1123,326 @@ void main() {
       expect(t.debugLobReadPieceUnits, equals(3));
       t.debugLobReadPieceUnits = null;
       expect(t.debugLobReadPieceUnits, isNull);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Story 13.2 — JSON stored in a BLOB (`IS JSON` / `IS JSON FORMAT OSON`).
+  //
+  // On the materialize path a row cell of a BLOB column whose describe carries
+  // the IS JSON (0x100) or IS OSON (0x800) UDS flag is decoded right after its
+  // READ. Never on the wrap path (fetchLobs: true is the raw-bytes opt-out),
+  // never for CLOB / plain BLOB columns, never for OUT binds.
+  // -------------------------------------------------------------------------
+  group('materializeLobs decodes BLOB IS JSON row cells (Story 13.2)', () {
+    const jsonBlob = ColumnMetadata(
+      name: 'DOC',
+      oracleType: oraTypeBlob,
+      maxLength: 4000,
+      udsFlags: 0x100, // Oracle 21c IS JSON
+    );
+    const jsonBlob23 = ColumnMetadata(
+      name: 'DOC23',
+      oracleType: oraTypeBlob,
+      maxLength: 4000,
+      udsFlags: 0x1100, // Oracle 23ai IS JSON
+    );
+    const osonOnlyBlob = ColumnMetadata(
+      name: 'ODOC',
+      oracleType: oraTypeBlob,
+      maxLength: 4000,
+      udsFlags: 0x800, // Oracle 21c IS JSON FORMAT OSON: no IS JSON bit
+    );
+    const plainBlob = ColumnMetadata(
+      name: 'PLAIN',
+      oracleType: oraTypeBlob,
+      maxLength: 4000,
+    );
+    const jsonClob = ColumnMetadata(
+      name: 'CDOC',
+      oracleType: oraTypeClob,
+      maxLength: 4000,
+      udsFlags: 0x100,
+    );
+    const label = ColumnMetadata(
+      name: 'LABEL',
+      oracleType: oraTypeVarchar,
+      maxLength: 10,
+    );
+
+    Uint8List bytesOf(String text) => Uint8List.fromList(text.codeUnits);
+
+    LobLocator blobLocator(int length, {int tag = 0}) {
+      final bytes = Uint8List(tnsLobLocatorBufferSize);
+      bytes[0] = tag;
+      return LobLocator(
+        locator: bytes,
+        oracleType: oraTypeBlob,
+        length: length,
+        chunkSize: 0,
+      );
+    }
+
+    _ChunkedReadTransport replying(List<Uint8List> payloads) =>
+        _ChunkedReadTransport([
+          for (final p in payloads) (data: p, amount: p.length),
+        ]);
+
+    test('a flagged BLOB cell decodes to the Dart JSON value; other cells and '
+        'SQL NULL are untouched', () async {
+      final doc = bytesOf('{"a":1,"b":[true,null]}');
+      final t = replying([doc]);
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          columnMetadata: const [label, jsonBlob],
+          rows: [
+            ['x', blobLocator(doc.length)],
+            ['y', null], // SQL NULL BLOB — no locator at all
+          ],
+        ),
+      );
+      expect(out.rows[0][0], equals('x'));
+      expect(
+        out.rows[0][1],
+        equals(<String, Object?>{
+          'a': 1,
+          'b': <Object?>[true, null],
+        }),
+      );
+      expect(out.rows[1][1], isNull);
+      expect(t.requests, hasLength(1));
+    });
+
+    test('the 23ai flag word (0x1100) and the 21c OSON-only word (0x800) '
+        'both select the decode; OSON bytes route to the OSON codec', () async {
+      final text = bytesOf('[1,"two"]');
+      final oson = encodeOson(<String, Object?>{'o': 2});
+      final t = replying([text, oson]);
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          columnMetadata: const [jsonBlob23, osonOnlyBlob],
+          rows: [
+            [
+              blobLocator(text.length, tag: 1),
+              blobLocator(oson.length, tag: 2),
+            ],
+          ],
+        ),
+      );
+      expect(out.rows.single[0], equals(<Object?>[1, 'two']));
+      expect(out.rows.single[1], equals(<String, Object?>{'o': 2}));
+    });
+
+    test('plain BLOB stays Uint8List and a CLOB IS JSON column stays String '
+        '(out of scope, unchanged)', () async {
+      final raw = bytesOf('{"looks":"like json"}');
+      const clobText = '{"c":1}';
+      final t = _ChunkedReadTransport([
+        (data: raw, amount: raw.length),
+        (data: bytesOf(clobText), amount: clobText.length),
+      ]);
+      final clobLocator = LobLocator(
+        locator: Uint8List(tnsLobLocatorBufferSize)..[0] = 9,
+        oracleType: oraTypeClob,
+        length: clobText.length,
+        chunkSize: 0,
+      );
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          columnMetadata: const [plainBlob, jsonClob],
+          rows: [
+            [blobLocator(raw.length), clobLocator],
+          ],
+        ),
+      );
+      expect(out.rows.single[0], isA<Uint8List>());
+      expect(out.rows.single[0], equals(raw));
+      expect(out.rows.single[1], equals(clobText));
+    });
+
+    test('explicit columns drive the decode when the response carries no '
+        'describe (a FETCH round)', () async {
+      final doc = bytesOf('{"fetched":true}');
+      final t = replying([doc]);
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          rows: [
+            [7, blobLocator(doc.length)],
+          ],
+        ),
+        columns: const [label, jsonBlob],
+      );
+      expect(out.rows.single[1], equals(<String, Object?>{'fetched': true}));
+    });
+
+    test('without any column metadata a BLOB stays raw bytes', () async {
+      final doc = bytesOf('{"a":1}');
+      final t = replying([doc]);
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          rows: [
+            [blobLocator(doc.length)],
+          ],
+        ),
+      );
+      expect(out.rows.single.single, isA<Uint8List>());
+    });
+
+    test('the wrap path (fetchLobs: true) hands back the handle: no READ and '
+        'no decode', () async {
+      final t = _ChunkedReadTransport([]);
+      final loc = blobLocator(12);
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          columnMetadata: const [jsonBlob],
+          rows: [
+            [loc],
+          ],
+        ),
+        wrapLob: _WrapMarker.new,
+      );
+      final marker = out.rows.single.single! as _WrapMarker;
+      expect(marker.locator, same(loc));
+      expect(t.requests, isEmpty);
+    });
+
+    test('an aliased locator is read and decoded once and shared, like a '
+        'native JSON duplicate cell', () async {
+      final doc = bytesOf('{"dup":1}');
+      final t = replying([doc]);
+      final loc = blobLocator(doc.length);
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          columnMetadata: const [jsonBlob],
+          rows: [
+            [loc],
+            [loc],
+          ],
+        ),
+      );
+      expect(t.requests, hasLength(1));
+      expect(out.rows[0][0], equals(<String, Object?>{'dup': 1}));
+      expect(identical(out.rows[0][0], out.rows[1][0]), isTrue);
+    });
+
+    test(
+      'an aliased JSON `null` document is cached too (not re-read)',
+      () async {
+        final doc = bytesOf('null');
+        final t = replying([doc, doc]);
+        final loc = blobLocator(doc.length);
+        final out = await t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            columnMetadata: const [jsonBlob],
+            rows: [
+              [loc],
+              [loc],
+            ],
+          ),
+        );
+        expect(out.rows[0][0], isNull);
+        expect(out.rows[1][0], isNull);
+        expect(t.requests, hasLength(1));
+      },
+    );
+
+    test('an undecodable cell fails the WHOLE call, naming the column — no '
+        'partial rows, never raw bytes', () async {
+      final good = bytesOf('[1]');
+      final lax = bytesOf('{a:1}'); // accepted by a lax IS JSON constraint
+      final t = replying([good, lax]);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            columnMetadata: const [jsonBlob],
+            rows: [
+              [blobLocator(good.length, tag: 1)],
+              [blobLocator(lax.length, tag: 2)],
+            ],
+          ),
+        ),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+              .having(
+                (e) => e.message,
+                'message',
+                allOf(contains('"DOC"'), contains('not strict JSON')),
+              ),
+        ),
+      );
+    });
+
+    test(
+      'a zero-length value (EMPTY_BLOB()) fails loud without a READ',
+      () async {
+        final t = _ChunkedReadTransport([]);
+        await expectLater(
+          t.materializeLobs(
+            ExecuteResponse(
+              isSuccess: true,
+              columnMetadata: const [jsonBlob],
+              rows: [
+                [blobLocator(0)],
+              ],
+            ),
+          ),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+                .having((e) => e.message, 'message', contains('empty')),
+          ),
+        );
+        expect(t.requests, isEmpty);
+      },
+    );
+
+    test('corrupt OSON keeps its oraProtocolError code through the column '
+        'wrap', () async {
+      final full = encodeOson(<String, Object?>{'a': 1});
+      final cut = Uint8List.sublistView(full, 0, full.length - 1);
+      final t = replying([cut]);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            columnMetadata: const [osonOnlyBlob],
+            rows: [
+              [blobLocator(cut.length)],
+            ],
+          ),
+        ),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('"ODOC"')),
+        ),
+      );
+    });
+
+    test('BLOB OUT binds are never decoded (only result columns carry the '
+        'flag)', () async {
+      final doc = bytesOf('{"out":1}');
+      final t = replying([doc]);
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          columnMetadata: const [jsonBlob],
+          outBindValues: [blobLocator(doc.length)],
+          outBindIndices: const [0],
+        ),
+      );
+      expect(out.outBindValues.single, isA<Uint8List>());
+      expect(out.outBindValues.single, equals(doc));
     });
   });
 }

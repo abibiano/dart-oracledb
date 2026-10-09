@@ -263,3 +263,33 @@ source_spec: `13-1-oracle-21c-native-json-oson.md`
 severity: medium
 reason: Verified live by reviewers on 23ai and 21c: SELECT TO_BINARY_DOUBLE(1.5) FROM dual returns null; _decodeValueByOraType has no case for oraType 100/101. Pre-existing, not caused by this story.
 status: open
+
+### DW-2: REF CURSOR OUT binds and nested CURSOR() columns whose rows carry a LOB still cannot be decoded; the implicit-result fix made here (a DEFINE call before the first FETCH) probably applies to the REF
+origin: spec-deferred 807de04b5efe
+location: lib/src/connection.dart _wrapRefCursorOutBinds / _drainNestedCursor; lib/src/protocol/result_set_cursor.dart requiresDefine
+source_spec: `13-2-oracle-12c-json-as-blob.md`
+severity: medium
+reason: Measured on 23ai and 21c during this story: implicit-result cursors with a CLOB/NCLOB/BLOB/JSON column failed their first FETCH with ORA-12547 "Integer too large: size=114" (21c transport poisoned) until a node-oracledb-style DEFINE call (withData.js postProcess requiresDefine/noPrefetch) was sent first. After that they decode on both servers, including a LOB plus nested CURSOR() row. REF CURSOR OUT binds are also describe-created cursors and fail at the same first FETCH. They were left unchanged because dual-env tests pin their fail-loud behavior (lob_chunked_streaming / lob_coexistence suites) and the deferred-work.md entry "A cursor row carrying a LOB cannot be DECODED at all" tracks them. A nested CURSOR() at top level fails earlier, inside the EXECUTE response, so it may need a different fix.
+status: open
+
+### DW-3: Top-level queries with a LOB/JSON column ignore preserveTimestampTimeZone for the first row batch, which the DEFINE call delivers.
+origin: spec-deferred f3ad072d95c0
+location: lib/src/transport/transport.dart sendExecute -> _sendLobDefines
+source_spec: `13-2-oracle-12c-json-as-blob.md`
+severity: medium
+reason: Found while reading the code and confirmed live on 23ai and 21c. With preserveTimestampTimeZone: true, SELECT TIMESTAMP '... +05:30' returns OracleTimestampTz, but SELECT TO_CLOB('x'), TIMESTAMP '... +05:30' returns DateTime. Transport.sendExecute calls _sendLobDefines, which decodes without the flag; later FETCH rounds pass it. This existed before this story and is unrelated to JSON. The new Transport.defineCursor used for implicit results does pass the flag.
+status: open
+
+### DW-4: An implicit result combining LOB and nested CURSOR() columns may fail on Oracle 21c after its first prefetch batch.
+origin: spec-deferred dd52ebc1455b
+location: lib/src/protocol/result_set_cursor.dart:480-505
+source_spec: `13-2-oracle-12c-json-as-blob.md`
+reason: The cursor's 21c nested-column workaround uses full EXECUTE only for the first fetch; continuation uses OFETCH. Existing live mixed-shape tests do not go past the prefetch window. A dual-database test with more outer rows than prefetch would settle whether the nested describe is omitted on continuation.
+status: open
+
+### DW-5: A DEFINE response and its defensive follow-up FETCH could both be empty while reporting more rows, ending lazy row delivery early.
+origin: spec-deferred ee3b9da22438
+location: lib/src/protocol/result_set_cursor.dart:508-522
+source_spec: `13-2-oracle-12c-json-as-blob.md`
+reason: nextRowData returns null after one empty _fetchNextBatch even if moreRowsToFetch remains true. The measured Oracle 21c and 23ai DEFINE responses carried their first rows, and no real two-empty-response case has been observed. A transport fixture or live server trace showing that response sequence would settle reachability.
+status: open

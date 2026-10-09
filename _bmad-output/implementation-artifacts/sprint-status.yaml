@@ -208,7 +208,7 @@ development_status:
   # Epic 13: JSON / OSON Parity [extends Story 4.4]
   epic-13: backlog
   13-1-oracle-21c-native-json-oson: done
-  13-2-oracle-12c-json-as-blob: backlog
+  13-2-oracle-12c-json-as-blob: done
   13-3-bind-fetch-json-mapping: backlog
   13-4-dual-env-integration-tests: backlog
   epic-13-retrospective: optional

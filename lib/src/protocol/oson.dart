@@ -15,6 +15,10 @@
 /// The encoder always emits OSON **version 1** (field names ≤ 255 UTF-8
 /// bytes), which both Oracle 21c and 23ai accept; version-3 long field names
 /// are rejected at encode time and supported on decode only.
+///
+/// [decodeJsonBlobBytes] covers JSON stored the Oracle 12c way — a `BLOB`
+/// column with an `IS JSON` check constraint — routing OSON-magic bytes to
+/// [decodeOson] and everything else through a text-JSON decode.
 library;
 
 import 'dart:convert';
@@ -930,3 +934,150 @@ class _OsonDecoder {
             'and float/double (intervals, JsonId, VECTOR) are not supported.',
       );
 }
+
+// ============================================================================
+// JSON stored in a BLOB (the Oracle 12c `IS JSON` pattern)
+// ============================================================================
+
+/// Decodes the content of a `BLOB` column the describe flags as JSON
+/// (`IS JSON` / `IS JSON FORMAT OSON` — `ColumnMetadata.isJson` /
+/// `ColumnMetadata.isOson`) into the same Dart mapping native `JSON` columns
+/// use: `Map<String, Object?>`, `List<Object?>`, `String`, `num`, `bool`, or
+/// `null` for a JSON `null` document.
+///
+/// Mirrors the node-oracledb `resultset.js` output converter (`isOson` →
+/// `OsonDecoder`, `isJson` → `JSON.parse`), but picks OSON vs text from the
+/// bytes rather than from the flag, so either storage form decodes whichever
+/// flag the server reported:
+///
+/// 1. Bytes starting with the OSON magic `FF 4A 5A` decode through
+///    [decodeOson]; its errors propagate unchanged (`oraProtocolError` for a
+///    truncated or corrupt document, `oraUnsupportedType` for unsupported
+///    nodes).
+/// 2. Anything else is JSON text. A byte-order mark selects the encoding and is
+///    stripped (`EF BB BF` UTF-8, `FF FE` UTF-16LE, `FE FF` UTF-16BE). Without
+///    one, a zero byte in exactly one of the first two bytes selects UTF-16
+///    (big-endian when the zero comes first) — RFC 8259 JSON text never holds
+///    an unescaped NUL, so this cannot misread a UTF-8 document, and Oracle's
+///    `IS JSON` check accepts BOM-less UTF-16 — and everything else is UTF-8.
+///    The text is then parsed by `jsonDecode` (strict RFC 8259).
+///
+/// Fail loud — never the raw bytes, never a silent `null`: throws
+/// [OracleException] with `oraUnsupportedType` for a zero-length value, an
+/// undecodable encoding (malformed UTF-8, an odd UTF-16 byte count, an
+/// unpaired surrogate), or text that is not strict JSON. That includes
+/// Oracle's lax JSON syntax (unquoted field names, single-quoted strings,
+/// upper-case `TRUE`), which the default (lax) `IS JSON` constraint accepts
+/// but this decoder does not. Messages never echo the document content.
+Object? decodeJsonBlobBytes(Uint8List data) {
+  if (data.isEmpty) {
+    throw _jsonBlobError(
+      'the value is empty (zero bytes), which is not a JSON document',
+    );
+  }
+  if (data.length >= 3 &&
+      data[0] == _magic1 &&
+      data[1] == _magic2 &&
+      data[2] == _magic3) {
+    return decodeOson(data);
+  }
+  final text = _decodeJsonText(data);
+  try {
+    return jsonDecode(text);
+  } on FormatException catch (e) {
+    throw _jsonBlobError(
+      'the content is not strict JSON text (${_formatErrorSummary(e)}). '
+      "Oracle's lax JSON syntax, which a default IS JSON constraint "
+      'accepts, is not supported; IS JSON STRICT keeps such values out',
+    );
+  }
+}
+
+/// Decodes JSON text bytes to a Dart string, choosing the encoding as
+/// documented on [decodeJsonBlobBytes].
+String _decodeJsonText(Uint8List data) {
+  // `utf16BigEndian` is null for UTF-8; `start` skips a byte-order mark.
+  final String encoding;
+  final int start;
+  final bool? utf16BigEndian;
+  if (data.length >= 3 &&
+      data[0] == 0xef &&
+      data[1] == 0xbb &&
+      data[2] == 0xbf) {
+    (encoding, start, utf16BigEndian) = ('UTF-8', 3, null);
+  } else if (data.length >= 2 && data[0] == 0xff && data[1] == 0xfe) {
+    (encoding, start, utf16BigEndian) = ('UTF-16LE', 2, false);
+  } else if (data.length >= 2 && data[0] == 0xfe && data[1] == 0xff) {
+    (encoding, start, utf16BigEndian) = ('UTF-16BE', 2, true);
+  } else if (data.length >= 2 && (data[0] == 0) != (data[1] == 0)) {
+    // BOM-less UTF-16: the zero byte is the high half of an ASCII code unit.
+    final bigEndian = data[0] == 0;
+    (encoding, start, utf16BigEndian) = (
+      bigEndian ? 'UTF-16BE' : 'UTF-16LE',
+      0,
+      bigEndian,
+    );
+  } else {
+    (encoding, start, utf16BigEndian) = ('UTF-8', 0, null);
+  }
+  try {
+    return utf16BigEndian == null
+        ? utf8.decode(Uint8List.sublistView(data, start))
+        : _decodeUtf16Strict(data, start, bigEndian: utf16BigEndian);
+  } on FormatException catch (e) {
+    throw _jsonBlobError(
+      'the bytes are not valid $encoding text (${_formatErrorSummary(e)})',
+    );
+  }
+}
+
+/// Decodes UTF-16 code units from [data] starting at byte [start], rejecting
+/// an odd byte count and unpaired surrogates (a lenient decode would hand
+/// `jsonDecode` a string no UTF-16 encoder could have produced).
+String _decodeUtf16Strict(
+  Uint8List data,
+  int start, {
+  required bool bigEndian,
+}) {
+  final byteCount = data.length - start;
+  if (byteCount.isOdd) {
+    throw FormatException('odd byte count $byteCount', null, data.length - 1);
+  }
+  final units = Uint16List(byteCount ~/ 2);
+  for (var i = 0; i < units.length; i++) {
+    final first = data[start + i * 2];
+    final second = data[start + i * 2 + 1];
+    units[i] = bigEndian ? (first << 8) | second : (second << 8) | first;
+  }
+  for (var i = 0; i < units.length; i++) {
+    final unit = units[i];
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      final hasLow =
+          i + 1 < units.length &&
+          units[i + 1] >= 0xdc00 &&
+          units[i + 1] <= 0xdfff;
+      if (!hasLow) {
+        throw FormatException('unpaired high surrogate', null, start + i * 2);
+      }
+      i++; // the low half of a valid pair
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      throw FormatException('unpaired low surrogate', null, start + i * 2);
+    }
+  }
+  return String.fromCharCodes(units);
+}
+
+/// The reason and position of [e] without its `source` — the source is the
+/// document itself, which must not leak into error messages or logs.
+String _formatErrorSummary(FormatException e) {
+  final offset = e.offset;
+  return offset == null ? e.message : '${e.message} at offset $offset';
+}
+
+OracleException _jsonBlobError(String reason) => OracleException(
+  errorCode: oraUnsupportedType,
+  message:
+      'Cannot decode JSON stored in a BLOB: $reason. Fetch with '
+      'OracleExecuteOptions(fetchLobs: true) to read the raw bytes as an '
+      'OracleLob instead.',
+);

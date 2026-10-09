@@ -273,4 +273,163 @@ void main() {
       );
     },
   );
+
+  // ==========================================================================
+  // Story 13.2 — implicit results whose rows carry a CLOB / NCLOB / BLOB.
+  //
+  // Such a cursor is describe-created, so — like node-oracledb's
+  // `requiresDefine` — the driver now sends the LOB-prefetch DEFINE call
+  // before its first FETCH. Before that, the first FETCH shipped bare locators
+  // the decoder could not read (ORA-12547 "Integer too large: size=114" on
+  // both servers, and a poisoned transport on 21c). Measured on 23ai and 21c.
+  // ==========================================================================
+  group(
+    'implicit result sets carrying LOB columns',
+    skip: !integrationEnabled ? 'Integration tests disabled' : null,
+    () {
+      OracleConnection? connectionHandle;
+      late OracleConnection connection;
+      final lobTable = uniqueTableName('impl_lob');
+      // More rows than the default prefetch (50): the DEFINE round delivers
+      // the first batch, continuation FETCH rounds the rest.
+      const rowCount = 60;
+
+      String clobOf(int i) => 'clob row $i ${'x' * i}';
+      List<int> blobOf(int i) => [i & 0xff, 0x00, 0xff, (i * 7) & 0xff];
+
+      setUp(() async {
+        connectionHandle = await connectForTest();
+        connection = connectionHandle!;
+        try {
+          await connection.execute(
+            'CREATE TABLE $lobTable (id NUMBER PRIMARY KEY, c CLOB, '
+            'n NCLOB, b BLOB)',
+          );
+        } on OracleException catch (e) {
+          if (e.errorCode != 955) rethrow; // leftover table — reuse
+          await connection.execute('TRUNCATE TABLE $lobTable');
+        }
+        await connection.execute('''
+          BEGIN
+            FOR i IN 1..$rowCount LOOP
+              INSERT INTO $lobTable (id, c, n, b) VALUES (i,
+                'clob row ' || i || ' ' || RPAD('x', i, 'x'),
+                'nclob ' || i,
+                HEXTORAW(LPAD(TRIM(TO_CHAR(MOD(i, 256), 'XX')), 2, '0') ||
+                  '00FF' ||
+                  LPAD(TRIM(TO_CHAR(MOD(i * 7, 256), 'XX')), 2, '0')));
+            END LOOP;
+          END;
+        ''');
+        await connection.commit();
+      });
+
+      tearDown(() async {
+        final c = connectionHandle;
+        connectionHandle = null;
+        await cleanUpConnection(
+          c,
+          dropStatements: ['DROP TABLE $lobTable PURGE'],
+        );
+      });
+
+      String block(String select) =>
+          '''
+        DECLARE
+          c1 SYS_REFCURSOR;
+          c2 SYS_REFCURSOR;
+        BEGIN
+          OPEN c1 FOR $select;
+          DBMS_SQL.RETURN_RESULT(c1);
+          OPEN c2 FOR SELECT id, c, b FROM $lobTable WHERE 1 = 0;
+          DBMS_SQL.RETURN_RESULT(c2);
+        END;
+      ''';
+
+      test('eager: every CLOB / BLOB (and NCLOB) row materializes across '
+          'FETCH rounds; an empty LOB cursor is []', () async {
+        final withNclob = connection.charsetInfo.supportsNationalCharacterSet;
+        final result = await connection.execute(
+          block(
+            'SELECT id, c, ${withNclob ? 'n' : 'NULL AS n'}, b '
+            'FROM $lobTable ORDER BY id',
+          ),
+        );
+        expect(result.implicitResults, hasLength(2));
+        final rows = result.implicitResults[0] as List<OracleRow>;
+        expect(rows, hasLength(rowCount));
+        for (var i = 1; i <= rowCount; i++) {
+          final row = rows[i - 1];
+          expect(row['ID'], equals(i));
+          expect(row['C'], equals(clobOf(i)), reason: 'row $i CLOB');
+          expect(row['B'], equals(blobOf(i)), reason: 'row $i BLOB');
+          if (withNclob) expect(row['N'], equals('nclob $i'));
+        }
+        expect(result.implicitResults[1], isEmpty);
+        // The session is healthy afterwards (21c used to be poisoned here).
+        final ok = await connection.execute('SELECT 1 AS V FROM dual');
+        expect(ok.rows.single['V'], equals(1));
+      });
+
+      test(
+        'lazy (resultSet: true): LOB rows stream through the handle',
+        () async {
+          final result = await connection.execute(
+            block('SELECT id, c, b FROM $lobTable ORDER BY id'),
+            null,
+            const OracleExecuteOptions(resultSet: true),
+          );
+          final first = result.implicitResults[0] as OracleResultSet;
+          final second = result.implicitResults[1] as OracleResultSet;
+          try {
+            final rows = await first.getRows(rowCount + 10);
+            expect(rows, hasLength(rowCount));
+            expect(rows.first['C'], equals(clobOf(1)));
+            expect(rows.last['B'], equals(blobOf(rowCount)));
+            expect(await second.getRows(5), isEmpty);
+          } finally {
+            await first.close();
+            await second.close();
+          }
+          expect(connection.hasOpenResultSet, isFalse);
+        },
+      );
+
+      test('fetchLobs: true hands back OracleLob handles for implicit rows, '
+          'and closeLobs() releases them', () async {
+        final result = await connection.execute(
+          block('SELECT id, c, b FROM $lobTable WHERE id <= 2 ORDER BY id'),
+          null,
+          const OracleExecuteOptions(fetchLobs: true),
+        );
+        final rows = result.implicitResults[0] as List<OracleRow>;
+        expect(rows, hasLength(2));
+        final clob = rows[1]['C']! as OracleLob;
+        final blob = rows[1]['B']! as OracleLob;
+        expect(await clob.read(), equals(clobOf(2)));
+        expect(await blob.read(), equals(blobOf(2)));
+        expect(await result.closeLobs(), equals(4));
+        expect(connection.hasOpenLob, isFalse);
+        final ok = await connection.execute('SELECT 1 AS V FROM dual');
+        expect(ok.rows.single['V'], equals(1));
+      });
+
+      test('a nested CURSOR() column alongside a LOB column materializes '
+          'too', () async {
+        final result = await connection.execute(
+          block(
+            'SELECT id, c, CURSOR(SELECT id * 10 AS v FROM dual) AS nc '
+            'FROM $lobTable WHERE id <= 3 ORDER BY id',
+          ),
+        );
+        final rows = result.implicitResults[0] as List<OracleRow>;
+        expect(rows, hasLength(3));
+        for (var i = 1; i <= 3; i++) {
+          expect(rows[i - 1]['C'], equals(clobOf(i)));
+          final nested = rows[i - 1]['NC']! as List<OracleRow>;
+          expect(nested.single['V'], equals(i * 10));
+        }
+      });
+    },
+  );
 }

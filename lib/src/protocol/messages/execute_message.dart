@@ -1043,6 +1043,7 @@ class ColumnMetadata {
     this.precision,
     this.scale,
     this.csfrm = 0,
+    this.udsFlags = 0,
   });
 
   /// Column name (uppercase as Oracle returns it).
@@ -1071,6 +1072,33 @@ class ColumnMetadata {
 
   /// Character set form (1 = implicit, 2 = NCHAR).
   final int csfrm;
+
+  /// Raw UDS flags word from the column describe (node-oracledb `base.js`
+  /// `processColumnInfo`). Bit `0x100` marks an `IS JSON` column and bit
+  /// `0x800` an OSON-format one — see [isJson] / [isOson]. Other bits are
+  /// server-internal and carry no driver meaning (Oracle 23ai additionally
+  /// sets `0x1000` on `IS JSON` columns). `0` for columns built without a
+  /// describe.
+  final int udsFlags;
+
+  /// Whether the describe flags this column as holding JSON through an
+  /// `IS JSON` check constraint (UDS flag `0x100`, node-oracledb
+  /// `fetchInfo.isJson`).
+  ///
+  /// The flag is a property of the table column: a view over the table or an
+  /// expression such as `TO_BLOB(col)` describes without it (measured on Oracle
+  /// 23ai and 21c). For a `BLOB` column flagged [isJson] or [isOson] the driver
+  /// decodes the fetched bytes into the same Dart `Map` / `List` / scalar
+  /// mapping native `JSON` columns use (`fetchLobs: true` still yields the raw
+  /// `OracleLob`); `CLOB` / `VARCHAR2` / `RAW` `IS JSON` columns are returned
+  /// unchanged.
+  bool get isJson => (udsFlags & tnsUdsFlagsIsJson) != 0;
+
+  /// Whether the describe flags this column as storing OSON (`IS JSON FORMAT
+  /// OSON`; UDS flag `0x800`, node-oracledb `fetchInfo.isOson`). Oracle 21c
+  /// reports this bit WITHOUT [isJson] on such a column, so callers testing
+  /// "is this a JSON column" must check both.
+  bool get isOson => (udsFlags & tnsUdsFlagsIsOson) != 0;
 }
 
 /// Decoder-side bind metadata used to interpret OUT bind values returned in
@@ -1755,7 +1783,7 @@ ColumnMetadata _processColumnInfo(ReadBuffer buf, int ttcFieldVersion) {
   final typeNameLen = buf.readUB4();
   if (typeNameLen > 0) buf.readBytesWithLength();
   buf.skipUB2(); // column position
-  buf.skipUB4(); // uds flags
+  final udsFlags = buf.readUB4(); // uds flags
   // 23.1: domain schema / name — only present when server negotiated >= 23.1
   if (ttcFieldVersion >= ttcCcapFieldVersion23_1) {
     final domainSchemaLen = buf.readUB4();
@@ -1802,6 +1830,7 @@ ColumnMetadata _processColumnInfo(ReadBuffer buf, int ttcFieldVersion) {
     precision: precision > 0 ? precision : null,
     scale: scale > 0 ? scale : null,
     csfrm: csfrm,
+    udsFlags: udsFlags,
   );
 }
 

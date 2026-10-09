@@ -25,6 +25,7 @@
 /// ```
 library;
 
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
@@ -1048,6 +1049,309 @@ void main() {
           reason: 'bind validation must reject ${value.runtimeType}',
         );
       }
+    });
+  });
+
+  // ==========================================================================
+  // Story 13.2 — JSON stored in a BLOB (the Oracle 12c `IS JSON` pattern).
+  // `decodeJsonBlobBytes` is what the transport runs on every materialized
+  // cell of a BLOB column the describe flags IS JSON / IS OSON.
+  // ==========================================================================
+  group('decodeJsonBlobBytes (BLOB IS JSON)', () {
+    Uint8List utf8Bytes(String text) => Uint8List.fromList(utf8.encode(text));
+
+    Uint8List utf16Bytes(
+      String text, {
+      required bool bigEndian,
+      bool bom = false,
+    }) {
+      final units = <int>[if (bom) 0xfeff, ...text.codeUnits];
+      final out = Uint8List(units.length * 2);
+      for (var i = 0; i < units.length; i++) {
+        final hi = (units[i] >> 8) & 0xff;
+        final lo = units[i] & 0xff;
+        out[i * 2] = bigEndian ? hi : lo;
+        out[i * 2 + 1] = bigEndian ? lo : hi;
+      }
+      return out;
+    }
+
+    Matcher throwsUnsupported([String? message]) =>
+        _throwsOracle(oraUnsupportedType, message);
+
+    test(
+      'object / array / scalar documents decode to Map / List / scalars',
+      () {
+        expect(
+          decodeJsonBlobBytes(utf8Bytes('{"a":1}')),
+          equals(<String, Object?>{'a': 1}),
+        );
+        expect(
+          decodeJsonBlobBytes(utf8Bytes('[1,2]')),
+          equals(<Object?>[1, 2]),
+        );
+        expect(decodeJsonBlobBytes(utf8Bytes('"s"')), equals('s'));
+        expect(decodeJsonBlobBytes(utf8Bytes('3')), equals(3));
+        expect(decodeJsonBlobBytes(utf8Bytes('3')), isA<int>());
+        expect(decodeJsonBlobBytes(utf8Bytes('-2.5')), equals(-2.5));
+        expect(decodeJsonBlobBytes(utf8Bytes('true')), isTrue);
+        expect(decodeJsonBlobBytes(utf8Bytes('false')), isFalse);
+        // A JSON `null` document is a value, not SQL NULL — it still decodes.
+        expect(decodeJsonBlobBytes(utf8Bytes('null')), isNull);
+      },
+    );
+
+    test('containers are Map<String, Object?> / List<Object?> like native '
+        'JSON, keep member order, and nest', () {
+      final decoded = decodeJsonBlobBytes(
+        utf8Bytes(
+          '{"zebra":1,"apple":[{"deep":[true,false,null,"x"]},2.5],'
+          '"mango":{"k1":"v1"}}',
+        ),
+      );
+      expect(decoded, isA<Map<String, Object?>>());
+      final map = decoded! as Map<String, Object?>;
+      expect(map.keys.toList(), equals(['zebra', 'apple', 'mango']));
+      expect(map['apple'], isA<List<Object?>>());
+      expect(
+        map,
+        equals(<String, Object?>{
+          'zebra': 1,
+          'apple': <Object?>[
+            <String, Object?>{
+              'deep': <Object?>[true, false, null, 'x'],
+            },
+            2.5,
+          ],
+          'mango': <String, Object?>{'k1': 'v1'},
+        }),
+      );
+    });
+
+    test('surrounding JSON whitespace is accepted', () {
+      expect(
+        decodeJsonBlobBytes(utf8Bytes(' \t\r\n [1] \n')),
+        equals(<Object?>[1]),
+      );
+    });
+
+    group('text encodings decode identically', () {
+      // Multi-byte UTF-8, BMP non-Latin and a supplementary-plane character
+      // (a UTF-16 surrogate pair) in both a key and a value.
+      const text = '{"ké":"é€ \u{1F680}","n":[1,2.5,null,true]}';
+      final expected = <String, Object?>{
+        'ké': 'é€ \u{1F680}',
+        'n': <Object?>[1, 2.5, null, true],
+      };
+
+      test('UTF-8 without BOM', () {
+        expect(decodeJsonBlobBytes(utf8Bytes(text)), equals(expected));
+      });
+
+      test('UTF-8 with BOM (EF BB BF)', () {
+        final bytes = Uint8List.fromList([
+          0xef,
+          0xbb,
+          0xbf,
+          ...utf8Bytes(text),
+        ]);
+        expect(decodeJsonBlobBytes(bytes), equals(expected));
+      });
+
+      test('UTF-16LE with BOM (FF FE)', () {
+        final bytes = utf16Bytes(text, bigEndian: false, bom: true);
+        expect(bytes.sublist(0, 2), equals([0xff, 0xfe]));
+        expect(decodeJsonBlobBytes(bytes), equals(expected));
+      });
+
+      test('UTF-16BE with BOM (FE FF)', () {
+        final bytes = utf16Bytes(text, bigEndian: true, bom: true);
+        expect(bytes.sublist(0, 2), equals([0xfe, 0xff]));
+        expect(decodeJsonBlobBytes(bytes), equals(expected));
+      });
+
+      test('BOM-less UTF-16LE / UTF-16BE (accepted by Oracle IS JSON) are '
+          'detected from the NUL pattern', () {
+        expect(
+          decodeJsonBlobBytes(utf16Bytes(text, bigEndian: false)),
+          equals(expected),
+        );
+        expect(
+          decodeJsonBlobBytes(utf16Bytes(text, bigEndian: true)),
+          equals(expected),
+        );
+        // Single-character scalar documents: the shortest UTF-16 form.
+        expect(decodeJsonBlobBytes(_hex('3100')), equals(1));
+        expect(decodeJsonBlobBytes(_hex('0031')), equals(1));
+      });
+
+      test('the bytes measured live from Oracle 23ai and 21c decode', () {
+        // Exactly what `SELECT` returned for rows inserted with HEXTORAW on
+        // both servers (the IS JSON constraint accepted every one).
+        expect(decodeJsonBlobBytes(_hex('fffe5b0031005d00')), equals([1]));
+        expect(decodeJsonBlobBytes(_hex('feff005b0031005d')), equals([1]));
+        expect(decodeJsonBlobBytes(_hex('efbbbf5b315d')), equals([1]));
+        expect(decodeJsonBlobBytes(_hex('5b0031005d00')), equals([1]));
+      });
+    });
+
+    group('OSON bytes (IS JSON FORMAT OSON)', () {
+      test('bytes starting FF 4A 5A decode exactly like decodeOson', () {
+        final doc = <String, Object?>{
+          'a': 1,
+          'list': <Object?>['x', null, true, 2.5],
+          'nested': <String, Object?>{'b': false},
+        };
+        final oson = encodeOson(doc);
+        expect(decodeJsonBlobBytes(oson), equals(doc));
+        expect(decodeJsonBlobBytes(oson), equals(decodeOson(oson)));
+      });
+
+      test('OSON scalar documents and Oracle-specific scalars decode', () {
+        expect(decodeJsonBlobBytes(_scalarDoc(_dateNode)), isA<DateTime>());
+        expect(
+          decodeJsonBlobBytes(_scalarDoc(_dateNode)),
+          equals(decodeOson(_scalarDoc(_dateNode))),
+        );
+      });
+
+      test('the OSON bytes measured live in a FORMAT OSON column decode', () {
+        // `{"o":2}` inserted as text into `BLOB CHECK (bo IS JSON FORMAT
+        // OSON)`, read back raw (byte-identical on 23ai and 21c).
+        final bytes = _hex(
+          'ff4a5a01 2106 01 0002 0008 0000 9e 0000 016f '
+          '84 01 01 0005 21 c103',
+        );
+        expect(decodeJsonBlobBytes(bytes), equals(<String, Object?>{'o': 2}));
+      });
+
+      test('corrupt / truncated OSON keeps the existing oraProtocolError', () {
+        final full = encodeOson(<String, Object?>{'a': 1});
+        expect(
+          () => decodeJsonBlobBytes(Uint8List.sublistView(full, 0, 3)),
+          _throwsOracle(oraProtocolError),
+        );
+        expect(
+          () => decodeJsonBlobBytes(
+            Uint8List.sublistView(full, 0, full.length - 1),
+          ),
+          _throwsOracle(oraProtocolError),
+        );
+      });
+
+      test('unsupported OSON nodes keep the existing oraUnsupportedType', () {
+        expect(
+          () => decodeJsonBlobBytes(_scalarDoc('3d 800000013e')),
+          throwsUnsupported('INTERVAL YEAR TO MONTH'),
+        );
+      });
+
+      test('a partial magic prefix is NOT treated as OSON', () {
+        // FF 4A alone: not the 3-byte magic, so it is text — and 0xFF can
+        // never start valid UTF-8, so it fails loud as an encoding error.
+        expect(
+          () => decodeJsonBlobBytes(_hex('ff4a')),
+          throwsUnsupported('UTF-8'),
+        );
+      });
+    });
+
+    group('fail loud — never raw bytes, never a silent null', () {
+      test('zero-length value (EMPTY_BLOB(), accepted by IS JSON) throws', () {
+        expect(
+          () => decodeJsonBlobBytes(Uint8List(0)),
+          throwsUnsupported('empty'),
+        );
+      });
+
+      test('a byte-order mark with no document throws', () {
+        for (final hex in ['efbbbf', 'fffe', 'feff']) {
+          expect(
+            () => decodeJsonBlobBytes(_hex(hex)),
+            throwsUnsupported('not strict JSON'),
+            reason: hex,
+          );
+        }
+      });
+
+      test('malformed and Oracle-lax JSON text throws (lax syntax is accepted '
+          'by a default IS JSON constraint, not by this decoder)', () {
+        for (final text in [
+          '{nope',
+          '{a:1}', // unquoted field name (lax)
+          "{'a':1}", // single-quoted string (lax)
+          '[TRUE]', // upper-case literal (lax)
+          '[1] x', // trailing garbage
+          '[1,]', // trailing comma
+          '{"a":1}{"b":2}', // two documents
+        ]) {
+          expect(
+            () => decodeJsonBlobBytes(utf8Bytes(text)),
+            throwsUnsupported('not strict JSON'),
+            reason: text,
+          );
+        }
+        // A trailing NUL (measured: Oracle IS JSON accepts `[1]` + 00).
+        expect(
+          () => decodeJsonBlobBytes(_hex('5b315d00')),
+          throwsUnsupported('not strict JSON'),
+        );
+      });
+
+      test('invalid encodings throw naming the encoding', () {
+        // Truncated 2-byte UTF-8 sequence inside a string.
+        expect(
+          () => decodeJsonBlobBytes(_hex('225b c3 22')),
+          throwsUnsupported('UTF-8'),
+        );
+        // Odd UTF-16 byte count (BOM'd and BOM-less).
+        expect(
+          () => decodeJsonBlobBytes(_hex('fffe 5b00 3100 5d')),
+          throwsUnsupported('UTF-16LE'),
+        );
+        expect(
+          () => decodeJsonBlobBytes(_hex('005b 0031 00')),
+          throwsUnsupported('UTF-16BE'),
+        );
+        // Unpaired surrogates: a high half at the end, a lone low half, and a
+        // high half followed by a non-surrogate.
+        expect(
+          () => decodeJsonBlobBytes(_hex('feff 0022 d83d')),
+          throwsUnsupported('unpaired high surrogate'),
+        );
+        expect(
+          () => decodeJsonBlobBytes(_hex('fffe 2200 00de 2200')),
+          throwsUnsupported('unpaired low surrogate'),
+        );
+        expect(
+          () => decodeJsonBlobBytes(_hex('feff 0022 d83d 0022')),
+          throwsUnsupported('unpaired high surrogate'),
+        );
+        // A UTF-32LE document is not a supported encoding: read as BOM-less
+        // UTF-16LE its NUL code units are not JSON.
+        expect(
+          () => decodeJsonBlobBytes(_hex('5b000000310000005d000000')),
+          throwsUnsupported('not strict JSON'),
+        );
+      });
+
+      test('error messages never echo the document content', () {
+        const secret = 'hunter2-top-secret';
+        for (final bytes in [
+          utf8Bytes('{"password":"$secret"'),
+          utf8Bytes('{password:"$secret"}'),
+          Uint8List.fromList([...utf8Bytes('{"p":"$secret'), 0xc3]),
+        ]) {
+          try {
+            decodeJsonBlobBytes(bytes);
+            fail('expected an OracleException');
+          } on OracleException catch (e) {
+            expect(e.message, isNot(contains(secret)));
+            expect(e.toString(), isNot(contains(secret)));
+            expect(e.message, contains('fetchLobs: true'));
+          }
+        }
+      });
     });
   });
 }

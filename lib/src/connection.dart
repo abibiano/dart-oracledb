@@ -1060,6 +1060,27 @@ class OracleConnection {
     }
   }
 
+  /// Whether an implicit result cursor described by [columns] needs a DEFINE
+  /// call before its first FETCH (node-oracledb `requiresDefine`, set in
+  /// `withData.js` `postProcess` for every describe-created cursor with a CLOB /
+  /// NCLOB / BLOB / JSON column).
+  ///
+  /// Without the defines the server ships those values as bare locators that
+  /// cannot be decoded: measured on Oracle 23ai and 21c, any implicit result
+  /// whose rows carry a LOB failed its first FETCH with ORA-12547 ("Integer too
+  /// large: size=114"), and on 21c the malformed stream poisoned the
+  /// transport. Story 13.2 needs this shape to read JSON stored in a BLOB.
+  /// REF CURSOR OUT binds and nested `CURSOR()` columns are deliberately NOT
+  /// changed here: they keep their documented, separately tracked fail-loud
+  /// behavior (see [_rejectCursorEmbeddedLob]).
+  static bool _implicitResultRequiresDefine(List<ColumnMetadata> columns) =>
+      columns.any(
+        (c) =>
+            c.oracleType == oc.oraTypeClob ||
+            c.oracleType == oc.oraTypeBlob ||
+            c.oracleType == oc.oraTypeJson,
+      );
+
   /// Eagerly drains every implicit result cursor ([descriptors]) returned by a
   /// PL/SQL `DBMS_SQL.RETURN_RESULT` block, in server-returned order, into one
   /// `List<OracleRow>` per cursor.
@@ -1116,8 +1137,13 @@ class OracleConnection {
       // node-oracledb requiresFullExecute: when this implicit result carries
       // nested CURSOR() columns, its FIRST fetch must be a full EXECUTE so
       // pre-23 (21c) ships the per-row nested describe inline (a plain OFETCH
-      // would shear). Scalar/LOB implicit results stay on plain OFETCH.
+      // would shear). Scalar implicit results stay on plain OFETCH; LOB/JSON
+      // ones open with a DEFINE instead (requiresDefine below).
       requiresFullExecute: cursorColumnIndicesOf(descriptor.columns).isNotEmpty,
+      // node-oracledb requiresDefine: an implicit result carrying a LOB / JSON
+      // column must announce its LOB-prefetch defines before the first FETCH
+      // (see _implicitResultRequiresDefine).
+      requiresDefine: _implicitResultRequiresDefine(descriptor.columns),
       // Deliberately NOT wrapping here: this is the EAGER drain, which
       // materializes (or wraps, under fetchLobs) ONCE over the fully-drained
       // result below so a locator aliased across rows yields one handle.
@@ -1167,6 +1193,9 @@ class OracleConnection {
     );
     response = await _transport.materializeLobs(
       response,
+      // The implicit result's own describe: drives the BLOB IS JSON decode
+      // (Story 13.2) on the materialize path.
+      columns: descriptor.columns,
       wrapLob: fetchLobs ? _registerLob : null,
     );
     // Implicit result rows can themselves carry cursor-valued columns; resolve
@@ -1211,8 +1240,11 @@ class OracleConnection {
         // node-oracledb requiresFullExecute: when this implicit result carries
         // nested CURSOR() columns, its FIRST fetch must be a full EXECUTE so
         // pre-23 (21c) ships the per-row nested describe inline (a plain OFETCH
-        // would shear). Scalar/LOB implicit results stay on plain OFETCH.
+        // would shear). Scalar implicit results stay on plain OFETCH; LOB/JSON
+        // ones open with a DEFINE instead (requiresDefine below).
         requiresFullExecute: nestedCursorIndices.isNotEmpty,
+        // node-oracledb requiresDefine — same reason as the eager drain.
+        requiresDefine: _implicitResultRequiresDefine(descriptor.columns),
         // Materialize cursor-valued columns in each fetched batch, mirroring the
         // streaming SELECT path. Null (no per-batch work) for the common
         // scalar/LOB implicit result.
@@ -3429,6 +3461,10 @@ class OracleConnection {
       // DML RETURNING nesting) inside _materializeLobValues, so a LOB is never
       // silently materialized on one shape while handle-wrapped on another
       // (Epic 11 retro action item 2).
+      //
+      // No explicit `columns`: a query response here always carries its
+      // describe (fresh, or the cached metadata a re-execute was decoded
+      // against), which drives the BLOB IS JSON decode (Story 13.2).
       response = await _transport.materializeLobs(
         response,
         bindMetadata: stmt.bindMetadata,
@@ -4285,7 +4321,8 @@ class OracleConnection {
     try {
       // Materialize the first batch's locators now (the streaming path
       // materializes each batch as it is fetched) — or, under fetchLobs, wrap
-      // them as handles instead.
+      // them as handles instead. The open response carries the describe, so
+      // the BLOB IS JSON decode (Story 13.2) needs no explicit `columns`.
       firstResponse = await _transport.materializeLobs(
         firstResponse,
         bindMetadata: stmt.bindMetadata,

@@ -1934,6 +1934,91 @@ void main() {
       expect(ttcStreamIsComplete(payload), isTrue);
     });
 
+    test('describe UDS flags surface as ColumnMetadata.udsFlags / isJson / '
+        'isOson (node-oracledb TNS_UDS_FLAGS_IS_JSON / IS_OSON)', () {
+      // Words measured live: 21c `IS JSON` 0x100, 23ai `IS JSON` 0x1100, 21c
+      // `IS JSON FORMAT OSON` 0x800 (no IS JSON bit), 23ai 0x1900.
+      for (final fieldVersion in [ttcCcapFieldVersion12_2, 24]) {
+        final payload = _buildPayload([
+          _describeInfo([
+            _columnInfo(
+              name: 'J21',
+              oraType: oraTypeBlob,
+              maxSize: 4000,
+              udsFlags: 0x100,
+              ttcFieldVersion: fieldVersion,
+            ),
+            _columnInfo(
+              name: 'J23',
+              oraType: oraTypeBlob,
+              maxSize: 4000,
+              udsFlags: 0x1100,
+              ttcFieldVersion: fieldVersion,
+            ),
+            _columnInfo(
+              name: 'O21',
+              oraType: oraTypeBlob,
+              maxSize: 4000,
+              udsFlags: 0x800,
+              ttcFieldVersion: fieldVersion,
+            ),
+            _columnInfo(
+              name: 'O23',
+              oraType: oraTypeBlob,
+              maxSize: 4000,
+              udsFlags: 0x1900,
+              ttcFieldVersion: fieldVersion,
+            ),
+            _columnInfo(
+              name: 'PLAIN',
+              oraType: oraTypeBlob,
+              maxSize: 4000,
+              ttcFieldVersion: fieldVersion,
+            ),
+            // A wide word with neither JSON bit must not read as JSON.
+            _columnInfo(
+              name: 'OTHER',
+              oraType: oraTypeBlob,
+              maxSize: 4000,
+              udsFlags: 0xFFFFF6FF,
+              ttcFieldVersion: fieldVersion,
+            ),
+          ]),
+          _errorMessage(errorNum: 1403, ttcFieldVersion: fieldVersion),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        final r = decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          ttcFieldVersion: fieldVersion,
+        );
+        expect(r.isSuccess, isTrue, reason: 'field version $fieldVersion');
+        final byName = {for (final c in r.columnMetadata) c.name: c};
+        expect(byName['J21']!.udsFlags, equals(0x100));
+        expect(byName['J21']!.isJson, isTrue);
+        expect(byName['J21']!.isOson, isFalse);
+        expect(byName['J23']!.udsFlags, equals(0x1100));
+        expect(byName['J23']!.isJson, isTrue);
+        expect(byName['J23']!.isOson, isFalse);
+        expect(byName['O21']!.isJson, isFalse);
+        expect(byName['O21']!.isOson, isTrue);
+        expect(byName['O23']!.isJson, isTrue);
+        expect(byName['O23']!.isOson, isTrue);
+        expect(byName['PLAIN']!.udsFlags, equals(0));
+        expect(byName['PLAIN']!.isJson, isFalse);
+        expect(byName['PLAIN']!.isOson, isFalse);
+        expect(byName['OTHER']!.udsFlags, equals(0xFFFFF6FF));
+        expect(byName['OTHER']!.isJson, isFalse);
+        expect(byName['OTHER']!.isOson, isFalse);
+        // The flags word sits mid-entry: every field after it still aligns,
+        // so the stream reaches its terminal message.
+        expect(
+          ttcStreamIsComplete(payload, ttcFieldVersion: fieldVersion),
+          isTrue,
+        );
+      }
+    });
+
     test('BLOB OUT bind decodes through the locator shape', () {
       final payload = _buildPayload([
         _ioVector([16]),
@@ -6526,6 +6611,7 @@ List<int> _columnInfo({
   int scaleByte = 0,
   int csfrm = 0,
   int? sizeField,
+  int udsFlags = 0,
 }) {
   final nameBytes = name.codeUnits;
   return [
@@ -6552,7 +6638,7 @@ List<int> _columnInfo({
     ..._ub4(0), // schema len = 0
     ..._ub4(0), // type name len = 0
     ..._ub2(0), // column position
-    ..._ub4(0), // uds flags
+    ..._ub4(udsFlags), // uds flags
     if (ttcFieldVersion >= ttcCcapFieldVersion23_1) ...[
       ..._ub4(0), // domain schema len = 0
       ..._ub4(0), // domain name len = 0

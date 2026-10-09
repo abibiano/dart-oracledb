@@ -11,10 +11,13 @@
 /// scalar-OUT-bind coexistence — all without a live server.
 library;
 
+import 'dart:typed_data';
+
 import 'package:oracledb/oracledb.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
+import 'package:oracledb/src/protocol/messages/lob_op_message.dart';
 import 'package:oracledb/src/transport/transport.dart';
 import 'package:test/test.dart';
 
@@ -46,7 +49,17 @@ class _ImplicitTransport extends Transport {
     required this.firstBatch,
     this.fetchesByCursor = const {},
     this.throwOnExecute,
+    this.lobReads,
   });
+
+  /// When non-null, [materializeLobs] runs the REAL `Transport`
+  /// implementation and every LOB READ is answered with the next payload here
+  /// (Story 13.2: the BLOB IS JSON decode). Null keeps the pass-through stub.
+  final List<Uint8List>? lobReads;
+  int _nextLobRead = 0;
+
+  /// The `columns` argument of every [materializeLobs] call, in order.
+  final List<List<ColumnMetadata>?> materializeColumns = [];
 
   ExecuteResponse firstBatch;
 
@@ -121,20 +134,150 @@ class _ImplicitTransport extends Transport {
     return ExecuteResponse(isSuccess: true, moreRowsToFetch: false);
   }
 
+  /// Every cursor id passed to [defineCursor], in call order.
+  final List<int> definedCursorIds = [];
+
+  /// The DEFINE call (node-oracledb `requiresDefine`) a LOB / JSON implicit
+  /// result issues before its first FETCH: like the live server, it returns no
+  /// rows and leaves the rows to the FETCH rounds that follow.
+  @override
+  Future<ExecuteResponse> defineCursor(
+    int cursorId,
+    int numRows, {
+    required List<ColumnMetadata> columns,
+    Duration? timeout = const Duration(minutes: 2),
+    bool preserveTimestampTimeZone = false,
+  }) async {
+    definedCursorIds.add(cursorId);
+    return ExecuteResponse(isSuccess: true, moreRowsToFetch: true);
+  }
+
   @override
   Future<ExecuteResponse> materializeLobs(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
+    List<ColumnMetadata>? columns,
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
     Object Function(LobLocator locator)? wrapLob,
-  }) async => response;
+  }) async {
+    materializeColumns.add(columns);
+    if (lobReads == null) return response;
+    return super.materializeLobs(
+      response,
+      bindMetadata: bindMetadata,
+      columns: columns,
+      dmlReturning: dmlReturning,
+      timeout: timeout,
+      wrapLob: wrapLob,
+    );
+  }
+
+  @override
+  Future<LobOpResponse> sendLobOp({
+    required int operation,
+    Uint8List? sourceLocator,
+    int sourceOffset = 0,
+    int destOffset = 0,
+    int destLength = 0,
+    bool sendAmount = false,
+    int amount = 0,
+    Uint8List? data,
+    Duration? timeout = const Duration(minutes: 2),
+  }) async {
+    final payload = lobReads![_nextLobRead++];
+    return LobOpResponse(
+      isSuccess: true,
+      data: payload,
+      amount: payload.length,
+    );
+  }
 }
+
+/// A BLOB column the describe flags `IS JSON` (Oracle 21c word 0x100).
+const _jsonBlobCol = ColumnMetadata(
+  name: 'DOC',
+  oracleType: oraTypeBlob,
+  maxLength: 4000,
+  udsFlags: tnsUdsFlagsIsJson,
+);
+
+LobLocator _blobLocator(int length) => LobLocator(
+  locator: Uint8List(tnsLobLocatorBufferSize),
+  oracleType: oraTypeBlob,
+  length: length,
+  chunkSize: 0,
+);
 
 const _plsql = 'BEGIN proc(:rc1, :rc2); END;';
 
 void main() {
   group('eager implicit results', () {
+    test(
+      'only an implicit cursor with a CLOB / BLOB / JSON column issues the '
+      'DEFINE call before its first FETCH (node-oracledb requiresDefine)',
+      () async {
+        final t = _ImplicitTransport(
+          firstBatch: ExecuteResponse(
+            isSuccess: true,
+            implicitResults: [
+              _cursor(101, [_col('A')]),
+              _cursor(202, [_col('C', oraTypeClob)]),
+              _cursor(303, [_col('J', oraTypeJson)]),
+              _cursor(404, [_col('B', oraTypeBlob)]),
+              _cursor(505, [_col('R', oraTypeRaw)]),
+            ],
+          ),
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+
+        final result = await conn.execute(_plsql);
+        expect(result.implicitResults, hasLength(5));
+        expect(t.definedCursorIds, equals([202, 303, 404]));
+        // Every cursor still drains through FETCH after its (optional) DEFINE.
+        expect(t.fetchedCursorIds, equals([101, 202, 303, 404, 505]));
+      },
+    );
+
+    test(
+      'a BLOB IS JSON column decodes through the implicit cursor describe '
+      '(Story 13.2) — the FETCH batches themselves carry no columns',
+      () async {
+        final doc = Uint8List.fromList('{"implicit":[1,2]}'.codeUnits);
+        final idCol = _col('ID');
+        final t = _ImplicitTransport(
+          firstBatch: ExecuteResponse(
+            isSuccess: true,
+            implicitResults: [
+              _cursor(101, [idCol, _jsonBlobCol]),
+            ],
+          ),
+          fetchesByCursor: {
+            101: [
+              _batch([
+                [1, _blobLocator(doc.length)],
+              ], more: false),
+            ],
+          },
+          lobReads: [doc],
+        );
+        final conn = OracleConnection.forTesting(transport: t);
+
+        final result = await conn.execute(_plsql);
+        final rows = result.implicitResults.single as List<OracleRow>;
+        expect(
+          rows.single['DOC'],
+          equals(<String, Object?>{
+            'implicit': <Object?>[1, 2],
+          }),
+        );
+        expect(t.materializeColumns.last, equals([idCol, _jsonBlobCol]));
+        // The LOB-carrying implicit cursor announced its defines first.
+        expect(t.definedCursorIds, equals([101]));
+        expect(t.fetchedCursorIds, equals([101]));
+      },
+    );
+
     test(
       'every implicit cursor is drained in order into List<OracleRow>',
       () async {
@@ -399,6 +542,44 @@ void main() {
   });
 
   group('lazy implicit results (resultSet: true)', () {
+    test('a BLOB IS JSON column decodes in each lazily fetched batch '
+        '(Story 13.2)', () async {
+      final doc = Uint8List.fromList('[true,"lazy"]'.codeUnits);
+      final t = _ImplicitTransport(
+        firstBatch: ExecuteResponse(
+          isSuccess: true,
+          implicitResults: [
+            _cursor(101, [_jsonBlobCol]),
+          ],
+        ),
+        fetchesByCursor: {
+          101: [
+            _batch([
+              [_blobLocator(doc.length)],
+            ], more: false),
+          ],
+        },
+        lobReads: [doc],
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+
+      final result = await conn.execute(
+        _plsql,
+        null,
+        const OracleExecuteOptions(resultSet: true),
+      );
+      final rs = result.implicitResults.single as OracleResultSet;
+      try {
+        final row = await rs.getRow();
+        expect(row!['DOC'], equals(<Object?>[true, 'lazy']));
+        expect(await rs.getRow(), isNull);
+      } finally {
+        await rs.close();
+      }
+      expect(t.materializeColumns.last, equals([_jsonBlobCol]));
+      expect(t.definedCursorIds, equals([101]));
+    });
+
     _ImplicitTransport twoCursorTransport() => _ImplicitTransport(
       firstBatch: ExecuteResponse(
         isSuccess: true,

@@ -16,6 +16,7 @@
 @Tags(['integration'])
 library;
 
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:oracledb/oracledb.dart';
@@ -919,6 +920,531 @@ void main() {
           );
           final row = await selectRow("JSON_SCALAR(HEXTORAW('FF')) AS v");
           expect(row['V'], equals([0xff]));
+        });
+      });
+
+      // ======================================================================
+      // Story 13.2 — JSON stored the Oracle 12c way: a BLOB column with an
+      // `IS JSON` check constraint. Plain BLOB / IS JSON works on every server,
+      // so only the tests that need native JSON support (a Map/List bind, an
+      // `IS JSON FORMAT OSON` column) honor the native-JSON probe.
+      // ======================================================================
+      group('JSON stored in a BLOB (IS JSON)', () {
+        OracleConnection? connectionHandle;
+        late OracleConnection connection;
+        final testTable = uniqueTableName('json_blob');
+
+        setUp(() async {
+          connectionHandle = await connectForTest();
+          connection = connectionHandle!;
+          try {
+            await connection.execute(
+              'CREATE TABLE $testTable (id NUMBER PRIMARY KEY, '
+              'doc BLOB CHECK (doc IS JSON), '
+              'plain BLOB, '
+              'cdoc CLOB CHECK (cdoc IS JSON), '
+              'vdoc VARCHAR2(200) CHECK (vdoc IS JSON)) TABLESPACE USERS',
+            );
+          } on OracleException catch (e) {
+            if (e.errorCode != 955) rethrow; // leftover table — reuse
+            await connection.execute('TRUNCATE TABLE $testTable');
+          }
+        });
+
+        tearDown(() async {
+          final c = connectionHandle;
+          connectionHandle = null;
+          await cleanUpConnection(
+            c,
+            dropStatements: ['DROP TABLE $testTable PURGE'],
+          );
+        });
+
+        Uint8List utf8Bytes(String text) =>
+            Uint8List.fromList(utf8.encode(text));
+
+        Future<int> insertDoc(Uint8List bytes) async {
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [id, bytes],
+          );
+          return id;
+        }
+
+        Future<Object?> selectDoc(int id) async {
+          final result = await connection.execute(
+            'SELECT doc FROM $testTable WHERE id = :1',
+            [id],
+          );
+          return result.rows.single['DOC'];
+        }
+
+        Matcher throwsBlobJsonUnsupported() => throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+              .having((e) => e.message, 'message', contains('"DOC"')),
+        );
+
+        test('object / array / scalar documents decode to Map / List / '
+            'scalars, and the describe flags the column IS JSON', () async {
+          final cases = <String, Object?>{
+            '{"a":1,"nested":{"b":[1,2,{"c":null}]}}': <String, Object?>{
+              'a': 1,
+              'nested': <String, Object?>{
+                'b': <Object?>[
+                  1,
+                  2,
+                  <String, Object?>{'c': null},
+                ],
+              },
+            },
+            '[1,2]': <Object?>[1, 2],
+            '"s"': 's',
+            '3': 3,
+            '2.5': 2.5,
+            'true': true,
+            'false': false,
+            // A JSON `null` document (accepted by IS JSON) is a value, not
+            // SQL NULL — it still decodes, to null.
+            'null': null,
+          };
+          final ids = <int, String>{};
+          for (final text in cases.keys) {
+            ids[await insertDoc(utf8Bytes(text))] = text;
+          }
+          final sql =
+              'SELECT id, doc FROM $testTable '
+              'WHERE id BETWEEN :1 AND :2 ORDER BY id';
+          final result = await connection.execute(sql, [
+            ids.keys.first,
+            ids.keys.last,
+          ]);
+          expect(result.rows, hasLength(cases.length));
+          for (final row in result.rows) {
+            final text = ids[row['ID']]!;
+            expect(row['DOC'], equals(cases[text]), reason: text);
+            expect(row['DOC'], isNot(isA<Uint8List>()), reason: text);
+          }
+          final first = result.rows.first['DOC'];
+          expect(first, isA<Map<String, Object?>>());
+          expect(
+            (first! as Map<String, Object?>).keys.toList(),
+            equals(['a', 'nested']),
+          );
+          expect(result.rows[1]['DOC'], isA<List<Object?>>());
+
+          // 21c reports 0x100, 23ai 0x1100: both carry the IS JSON bit.
+          final docColumn = result.columns.firstWhere((c) => c.name == 'DOC');
+          expect(docColumn.isJson, isTrue);
+          expect(docColumn.udsFlags & 0x100, equals(0x100));
+          final idColumn = result.columns.firstWhere((c) => c.name == 'ID');
+          expect(idColumn.isJson, isFalse);
+          expect(idColumn.isOson, isFalse);
+
+          // Statement-cache path: a LOB-carrying SELECT re-parses on reuse and
+          // must decode identically.
+          final again = await connection.execute(sql, [
+            ids.keys.first,
+            ids.keys.last,
+          ]);
+          expect(
+            again.rows.map((r) => r['DOC']).toList(),
+            equals(result.rows.map((r) => r['DOC']).toList()),
+          );
+        });
+
+        test('UTF-8 with/without BOM, UTF-16LE/BE with BOM and BOM-less UTF-16 '
+            'decode identically', () async {
+          const text = '{"ké":"é€ \u{1F680}","n":[1,null]}';
+          final expected = <String, Object?>{
+            'ké': 'é€ \u{1F680}',
+            'n': <Object?>[1, null],
+          };
+          Uint8List utf16({required bool bigEndian, required bool bom}) {
+            final units = <int>[if (bom) 0xfeff, ...text.codeUnits];
+            final out = Uint8List(units.length * 2);
+            for (var i = 0; i < units.length; i++) {
+              final hi = (units[i] >> 8) & 0xff;
+              final lo = units[i] & 0xff;
+              out[i * 2] = bigEndian ? hi : lo;
+              out[i * 2 + 1] = bigEndian ? lo : hi;
+            }
+            return out;
+          }
+
+          final encodings = <String, Uint8List>{
+            'UTF-8': utf8Bytes(text),
+            'UTF-8 BOM': Uint8List.fromList([
+              0xef,
+              0xbb,
+              0xbf,
+              ...utf8Bytes(text),
+            ]),
+            'UTF-16LE BOM': utf16(bigEndian: false, bom: true),
+            'UTF-16BE BOM': utf16(bigEndian: true, bom: true),
+            'UTF-16LE': utf16(bigEndian: false, bom: false),
+            'UTF-16BE': utf16(bigEndian: true, bom: false),
+          };
+          for (final entry in encodings.entries) {
+            // The IS JSON constraint itself accepts every one of these.
+            final id = await insertDoc(entry.value);
+            expect(await selectDoc(id), equals(expected), reason: entry.key);
+          }
+        });
+
+        test('SQL NULL stays null; plain BLOB, CLOB and VARCHAR2 IS JSON '
+            'columns come back unchanged', () async {
+          final id = nextTestId();
+          final raw = utf8Bytes('{"plain":"bytes"}');
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc, plain, cdoc, vdoc) '
+            'VALUES (:1, NULL, :2, :3, :4)',
+            [id, raw, '{"c":1}', '{"v":1}'],
+          );
+          final result = await connection.execute(
+            'SELECT doc, plain, cdoc, vdoc FROM $testTable WHERE id = :1',
+            [id],
+          );
+          final row = result.rows.single;
+          expect(row['DOC'], isNull);
+          expect(row['PLAIN'], isA<Uint8List>());
+          expect(row['PLAIN'], equals(raw));
+          expect(row['CDOC'], equals('{"c":1}'));
+          expect(row['VDOC'], equals('{"v":1}'));
+          final byName = {for (final c in result.columns) c.name: c};
+          expect(byName['PLAIN']!.isJson, isFalse);
+          // The CLOB / VARCHAR2 columns ARE flagged, but only BLOB decodes.
+          expect(byName['CDOC']!.isJson, isTrue);
+          expect(byName['VDOC']!.isJson, isTrue);
+        });
+
+        test(
+          'Map / List binds round-trip through the BLOB IS JSON column',
+          () async {
+            if (skipWithoutNativeJson()) return;
+            final mapId = nextTestId();
+            final listId = nextTestId();
+            final doc = <String, Object?>{
+              'name': 'rocket \u{1F680}',
+              'n': 7,
+              'tags': <Object?>['a', null, true, 2.5],
+            };
+            final list = <Object?>[
+              1,
+              'two',
+              <String, Object?>{'three': 3},
+            ];
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:id, :doc)',
+              {'id': mapId, 'doc': doc},
+            );
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [listId, list],
+            );
+            expect(await selectDoc(mapId), equals(doc));
+            expect(await selectDoc(listId), equals(list));
+          },
+        );
+
+        test('resultSet: true decodes every row in the first batch and across '
+            'continuation FETCH rounds', () async {
+          const rowCount = 7;
+          final base = nextTestId() * 100;
+          await connection.execute('''
+            BEGIN
+              FOR i IN 1..$rowCount LOOP
+                INSERT INTO $testTable (id, doc) VALUES ($base + i,
+                  UTL_RAW.CAST_TO_RAW('{"row":' || i || ',"tag":"streamed"}'));
+              END LOOP;
+            END;
+          ''');
+          final result = await connection.execute(
+            'SELECT id, doc FROM $testTable '
+            'WHERE id BETWEEN $base + 1 AND $base + $rowCount ORDER BY id',
+            null,
+            const OracleExecuteOptions(resultSet: true, fetchSize: 2),
+          );
+          final rs = result.resultSet!;
+          final docs = <Object?>[];
+          try {
+            for (
+              var row = await rs.getRow();
+              row != null;
+              row = await rs.getRow()
+            ) {
+              docs.add(row['DOC']);
+            }
+          } finally {
+            await rs.close();
+          }
+          expect(docs, hasLength(rowCount));
+          for (var i = 0; i < rowCount; i++) {
+            expect(
+              docs[i],
+              equals(<String, Object?>{'row': i + 1, 'tag': 'streamed'}),
+              reason: 'row ${i + 1}',
+            );
+          }
+        });
+
+        test('an eager SELECT larger than the prefetch window decodes every '
+            'row across FETCH rounds', () async {
+          const rowCount = 60; // default prefetch window is 50
+          final base = nextTestId() * 100;
+          await connection.execute('''
+            BEGIN
+              FOR i IN 1..$rowCount LOOP
+                INSERT INTO $testTable (id, doc) VALUES ($base + i,
+                  UTL_RAW.CAST_TO_RAW('[' || i || ',"eager"]'));
+              END LOOP;
+            END;
+          ''');
+          final result = await connection.execute(
+            'SELECT doc FROM $testTable '
+            'WHERE id BETWEEN $base + 1 AND $base + $rowCount ORDER BY id',
+          );
+          expect(result.rows, hasLength(rowCount));
+          for (var i = 0; i < rowCount; i++) {
+            expect(
+              result.rows[i]['DOC'],
+              equals(<Object?>[i + 1, 'eager']),
+              reason: 'row ${i + 1}',
+            );
+          }
+        });
+
+        // Implicit result cursors are describe-created: the driver sends the
+        // LOB-prefetch DEFINE call before the first FETCH (node-oracledb
+        // `requiresDefine`), without which ANY LOB column in an implicit result
+        // failed to decode (ORA-12547, and a poisoned transport on 21c).
+        test('an implicit result (DBMS_SQL.RETURN_RESULT) decodes every row, '
+            'eager and lazy, across FETCH rounds', () async {
+          const rowCount = 60; // > the default prefetch window (50)
+          final base = nextTestId() * 100;
+          await connection.execute('''
+            BEGIN
+              FOR i IN 1..$rowCount LOOP
+                INSERT INTO $testTable (id, doc) VALUES ($base + i,
+                  UTL_RAW.CAST_TO_RAW('{"implicit":' || i || '}'));
+              END LOOP;
+            END;
+          ''');
+          final block =
+              '''
+            DECLARE
+              c1 SYS_REFCURSOR;
+            BEGIN
+              OPEN c1 FOR SELECT id, doc FROM $testTable
+                WHERE id BETWEEN $base + 1 AND $base + $rowCount ORDER BY id;
+              DBMS_SQL.RETURN_RESULT(c1);
+            END;
+          ''';
+
+          final eager = await connection.execute(block);
+          expect(eager.implicitResults, hasLength(1));
+          final rows = eager.implicitResults.single as List<OracleRow>;
+          expect(rows, hasLength(rowCount));
+          for (var i = 0; i < rowCount; i++) {
+            expect(
+              rows[i]['DOC'],
+              equals(<String, Object?>{'implicit': i + 1}),
+              reason: 'eager row ${i + 1}',
+            );
+          }
+
+          final lazy = await connection.execute(
+            block,
+            null,
+            const OracleExecuteOptions(resultSet: true),
+          );
+          final rs = lazy.implicitResults.single as OracleResultSet;
+          try {
+            final streamed = await rs.getRows(rowCount + 10);
+            expect(streamed, hasLength(rowCount));
+            for (var i = 0; i < rowCount; i++) {
+              expect(
+                streamed[i]['DOC'],
+                equals(<String, Object?>{'implicit': i + 1}),
+                reason: 'lazy row ${i + 1}',
+              );
+            }
+          } finally {
+            await rs.close();
+          }
+        });
+
+        test('an implicit result under fetchLobs: true yields the raw-bytes '
+            'OracleLob', () async {
+          final bytes = utf8Bytes('{"implicit":"raw"}');
+          final id = await insertDoc(bytes);
+          final result = await connection.execute(
+            '''
+            DECLARE
+              c1 SYS_REFCURSOR;
+            BEGIN
+              OPEN c1 FOR SELECT doc FROM $testTable WHERE id = $id;
+              DBMS_SQL.RETURN_RESULT(c1);
+            END;
+          ''',
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+          final rows = result.implicitResults.single as List<OracleRow>;
+          final lob = rows.single['DOC']! as OracleLob;
+          try {
+            expect(await lob.read(), equals(bytes));
+          } finally {
+            await lob.close();
+          }
+          expect(connection.hasOpenLob, isFalse);
+        });
+
+        test(
+          'an implicit result carrying a native JSON column decodes too',
+          () async {
+            if (skipWithoutNativeJson()) return;
+            final result = await connection.execute('''
+            DECLARE
+              c1 SYS_REFCURSOR;
+            BEGIN
+              OPEN c1 FOR SELECT JSON_OBJECT('n' VALUE 1 RETURNING JSON) AS j,
+                UTL_RAW.CAST_TO_RAW('[1]') AS r FROM dual;
+              DBMS_SQL.RETURN_RESULT(c1);
+            END;
+          ''');
+            final rows = result.implicitResults.single as List<OracleRow>;
+            expect(rows.single['J'], equals(<String, Object?>{'n': 1}));
+            expect(rows.single['R'], equals([0x5b, 0x31, 0x5d]));
+          },
+        );
+
+        test('fetchLobs: true is the raw-bytes opt-out: an OracleLob yielding '
+            'the stored bytes', () async {
+          final bytes = utf8Bytes('{"raw":true}');
+          final id = await insertDoc(bytes);
+          final result = await connection.execute(
+            'SELECT doc FROM $testTable WHERE id = :1',
+            [id],
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+          final lob = result.rows.single['DOC']! as OracleLob;
+          try {
+            final read = await lob.read();
+            expect(read, isA<Uint8List>());
+            expect(read, equals(bytes));
+          } finally {
+            await lob.close();
+          }
+        });
+
+        test('malformed JSON is rejected by the IS JSON constraint', () async {
+          await expectLater(
+            connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [nextTestId(), utf8Bytes('{nope')],
+            ),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'errorCode',
+                2290, // ORA-02290: check constraint violated
+              ),
+            ),
+          );
+        });
+
+        test(
+          'values the lax IS JSON constraint accepts but strict JSON does '
+          'not (lax syntax, EMPTY_BLOB()) fail loud with no partial result; '
+          'the connection stays usable and fetchLobs still reads them',
+          () async {
+            final goodId = await insertDoc(utf8Bytes('[1]'));
+            final laxId = await insertDoc(utf8Bytes('{a:1}'));
+            final emptyId = nextTestId();
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, EMPTY_BLOB())',
+              [emptyId],
+            );
+            // Eager: the good row comes first, yet the whole call fails.
+            await expectLater(
+              connection.execute(
+                'SELECT doc FROM $testTable WHERE id IN (:1, :2) ORDER BY id',
+                [goodId, laxId],
+              ),
+              throwsBlobJsonUnsupported(),
+            );
+            await expectLater(selectDoc(emptyId), throwsBlobJsonUnsupported());
+            // Streaming: the first batch decodes inside execute(), so it fails
+            // there too.
+            await expectLater(
+              connection.execute('SELECT doc FROM $testTable WHERE id = :1', [
+                laxId,
+              ], const OracleExecuteOptions(resultSet: true)),
+              throwsBlobJsonUnsupported(),
+            );
+            // The connection is still usable, and fetchLobs reads the raw value.
+            expect(await selectDoc(goodId), equals(<Object?>[1]));
+            final raw = await connection.execute(
+              'SELECT doc FROM $testTable WHERE id = :1',
+              [laxId],
+              const OracleExecuteOptions(fetchLobs: true),
+            );
+            final lob = raw.rows.single['DOC']! as OracleLob;
+            try {
+              expect(await lob.read(), equals(utf8Bytes('{a:1}')));
+            } finally {
+              await lob.close();
+            }
+          },
+        );
+
+        test('an IS JSON FORMAT OSON column decodes its OSON bytes (21c reports '
+            'only the OSON flag)', () async {
+          if (skipWithoutNativeJson()) return;
+          final osonTable = uniqueTableName('json_blob_oson');
+          await connection.execute(
+            'CREATE TABLE $osonTable (id NUMBER PRIMARY KEY, '
+            'odoc BLOB CHECK (odoc IS JSON FORMAT OSON)) TABLESPACE USERS',
+          );
+          try {
+            final doc = <String, Object?>{
+              'oson': true,
+              'list': <Object?>[1, 'two', null],
+            };
+            await connection.execute(
+              'INSERT INTO $osonTable (id, odoc) VALUES (1, :1)',
+              [doc],
+            );
+            await connection.execute(
+              'INSERT INTO $osonTable (id, odoc) '
+              '''VALUES (2, UTL_RAW.CAST_TO_RAW('{"o":2}'))''',
+            );
+            final result = await connection.execute(
+              'SELECT id, odoc FROM $osonTable ORDER BY id',
+            );
+            expect(result.rows[0]['ODOC'], equals(doc));
+            expect(result.rows[1]['ODOC'], equals(<String, Object?>{'o': 2}));
+            final column = result.columns.firstWhere((c) => c.name == 'ODOC');
+            expect(column.isOson, isTrue);
+
+            // The stored bytes really are OSON (the decoder sniffed the magic).
+            final raw = await connection.execute(
+              'SELECT odoc FROM $osonTable WHERE id = 2',
+              null,
+              const OracleExecuteOptions(fetchLobs: true),
+            );
+            final lob = raw.rows.single['ODOC']! as OracleLob;
+            try {
+              final bytes = await lob.read() as Uint8List;
+              expect(bytes.sublist(0, 3), equals([0xff, 0x4a, 0x5a]));
+            } finally {
+              await lob.close();
+            }
+          } finally {
+            await connection.execute('DROP TABLE $osonTable PURGE');
+          }
         });
       });
     },
