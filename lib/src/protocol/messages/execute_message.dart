@@ -2166,6 +2166,21 @@ Object? _decodeValueByOraType(
       // A declared fixed scale (> 0) forces double; scale null (bare
       // NUMBER) or 0 (e.g. NUMBER(10)) keeps the int heuristic.
       return dt.decodeNumber(ReadBuffer(bytes), forceDouble: (scale ?? 0) > 0);
+    case oraTypeBinaryFloat:
+    case oraTypeBinaryDouble:
+      final bytes = buf.readBytesWithLength();
+      if (bytes.isEmpty) return null;
+      if (!strict) return null; // probe pass: bytes consumed, value unused
+      final expectedLength = oraType == oraTypeBinaryFloat ? 4 : 8;
+      if (bytes.length != expectedLength) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'Binary floating-point field has ${bytes.length} bytes '
+              '(expected $expectedLength for Oracle type $oraType)',
+        );
+      }
+      return dt.decodeBinaryFloatingPoint(bytes);
     case oraTypeDate:
       final bytes = buf.readBytesWithLength();
       if (bytes.isEmpty) return null;
@@ -2504,6 +2519,8 @@ bool _isSupportedRefCursorColumn(ColumnMetadata col) {
     case oraTypeInteger:
     case oraTypeFloat:
     case oraTypeVarnum:
+    case oraTypeBinaryFloat:
+    case oraTypeBinaryDouble:
     case oraTypeDate:
     case oraTypeTimestamp:
     case oraTypeTimestampLtz:

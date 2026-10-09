@@ -963,25 +963,9 @@ class _OsonDecoder {
   ReadBuffer _fixedPayload(int length) => ReadBuffer(_buf.readBytes(length));
 
   /// Decodes an Oracle BINARY_FLOAT ([length] 4) or BINARY_DOUBLE ([length]
-  /// 8) payload (node-oracledb `buffer.js` `parseBinaryFloat` /
-  /// `parseBinaryDouble`). Oracle stores IEEE 754 big-endian bits made
-  /// byte-comparable: a non-negative value has its sign bit set, a negative
-  /// value has every bit inverted. Undo that, then read the IEEE value —
-  /// NaN, ±Infinity and ±0 survive the transform.
-  double _decodeBinaryFloatingPoint(int length) {
-    final bytes = Uint8List.fromList(_buf.readBytes(length));
-    if ((bytes[0] & 0x80) != 0) {
-      bytes[0] &= 0x7f;
-    } else {
-      for (var i = 0; i < bytes.length; i++) {
-        bytes[i] ^= 0xff;
-      }
-    }
-    final data = ByteData.sublistView(bytes);
-    return length == 4
-        ? data.getFloat32(0, Endian.big)
-        : data.getFloat64(0, Endian.big);
-  }
+  /// 8) payload; see [dt.decodeBinaryFloatingPoint].
+  double _decodeBinaryFloatingPoint(int length) =>
+      dt.decodeBinaryFloatingPoint(_buf.readBytes(length));
 
   Object? _decodeContainerNode(int nodeType) {
     // Offset of this container's node-type byte within the tree segment —

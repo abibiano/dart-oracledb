@@ -341,6 +341,12 @@ void main() {
   group('OSON round-trip (encode → decode)', () {
     Object? roundTrip(Object? value) => decodeOson(encodeOson(value));
 
+    test('NUMBER values at the reported range extremes round-trip', () {
+      for (final value in [1e-129, 9.99e125]) {
+        expect(roundTrip(value), equals(value), reason: 'value $value');
+      }
+    });
+
     test('scalars', () {
       expect(roundTrip(null), isNull);
       expect(roundTrip(true), isTrue);

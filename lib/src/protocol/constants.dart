@@ -209,6 +209,12 @@ const int oraTypeChar = 96;
 /// for OUT binds. Buffer-size factor = 4 (node-oracledb DB_TYPE_CURSOR).
 const int oraTypeCursor = 102;
 
+/// BINARY_FLOAT data type (4-byte IEEE 754, byte-comparable form).
+const int oraTypeBinaryFloat = 100;
+
+/// BINARY_DOUBLE data type (8-byte IEEE 754, byte-comparable form).
+const int oraTypeBinaryDouble = 101;
+
 /// UROWID data type.
 const int oraTypeURowid = 104;
 

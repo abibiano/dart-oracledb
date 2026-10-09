@@ -1187,4 +1187,73 @@ void main() {
       );
     });
   });
+
+  group('decodeNumber precision at range extremes', () {
+    test('values in [1E-130, 1E-128) decode instead of collapsing to 0', () {
+      for (final v in [1e-130, 1e-129, 1.5e-129, 9.99e-129, -1e-129]) {
+        final decoded = decodeNumber(ReadBuffer(encodeNumber(v)));
+        expect(decoded, equals(v), reason: 'value $v');
+      }
+    });
+
+    test('large magnitudes are not one ulp off', () {
+      for (final v in [
+        9.99e125,
+        1.23456789e100,
+        1.2345678901234567e100,
+        -9.99e125,
+        1e125,
+      ]) {
+        final decoded = decodeNumber(ReadBuffer(encodeNumber(v)));
+        expect(decoded, equals(v), reason: 'value $v');
+      }
+    });
+
+    test('ordinary decimals and integers are unchanged', () {
+      expect(decodeNumber(ReadBuffer(encodeNumber(0.1))), equals(0.1));
+      expect(decodeNumber(ReadBuffer(encodeNumber(123.456))), equals(123.456));
+      expect(decodeNumber(ReadBuffer(encodeNumber(-42))), equals(-42));
+      expect(decodeNumber(ReadBuffer(encodeNumber(12345678901))), isA<int>());
+    });
+  });
+
+  group('decodeBinaryFloatingPoint', () {
+    Uint8List wire(double v, {bool single = false}) {
+      final d = ByteData(single ? 4 : 8);
+      single ? d.setFloat32(0, v) : d.setFloat64(0, v);
+      final b = d.buffer.asUint8List();
+      if ((b[0] & 0x80) == 0) {
+        b[0] |= 0x80;
+      } else {
+        for (var i = 0; i < b.length; i++) {
+          b[i] ^= 0xff;
+        }
+      }
+      return b;
+    }
+
+    test('decodes BINARY_DOUBLE', () {
+      for (final v in [1.5, -1.5, 0.0, 1e-300, 1e300, -2.25e-10]) {
+        expect(decodeBinaryFloatingPoint(wire(v)), equals(v));
+      }
+      expect(decodeBinaryFloatingPoint(wire(double.infinity)), double.infinity);
+      expect(
+        decodeBinaryFloatingPoint(wire(double.negativeInfinity)),
+        double.negativeInfinity,
+      );
+      expect(decodeBinaryFloatingPoint(wire(double.nan)).isNaN, isTrue);
+    });
+
+    test('decodes BINARY_FLOAT', () {
+      expect(decodeBinaryFloatingPoint(wire(2.5, single: true)), equals(2.5));
+      expect(decodeBinaryFloatingPoint(wire(-0.5, single: true)), equals(-0.5));
+    });
+
+    test('rejects an invalid payload length', () {
+      expect(
+        () => decodeBinaryFloatingPoint([1, 2, 3]),
+        throwsA(isA<OracleException>()),
+      );
+    });
+  });
 }

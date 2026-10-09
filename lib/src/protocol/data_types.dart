@@ -222,8 +222,11 @@ num decodeNumber(ReadBuffer buffer, {int? length, bool forceDouble = false}) {
   final startPos = buffer.position;
   final firstByte = buffer.readUint8();
 
-  // Special case: zero
-  if (firstByte == 0x80) {
+  // Special case: zero is the lone byte 0x80. A positive value with exponent
+  // -64 (magnitudes in [1E-130, 1E-128)) also starts with 0x80 but carries
+  // mantissa bytes, so the byte alone is not enough to call it zero.
+  final isLoneByte = length != null ? length == 1 : !buffer.hasRemaining;
+  if (firstByte == 0x80 && isLoneByte) {
     return forceDouble ? 0.0 : 0;
   }
 
@@ -271,15 +274,38 @@ num decodeNumber(ReadBuffer buffer, {int? length, bool forceDouble = false}) {
     digits.add(digit);
   }
 
-  // Reconstruct the number using exponent
-  // exponent tells us the power of 100 for the first digit
-  // e.g., exponent=2 means first digit is at 100^1 position
+  // Reconstruct the value as digits x 10^e10 and let a single correctly
+  // rounded step produce the double. Accumulating digit * 100^k terms in
+  // floating point loses an ulp on large magnitudes (9.99e125) and underflows
+  // the repeated `/ 100` for tiny ones (1e-129 -> 0).
+  // Digit k (0-based) sits at 100^(exponent - 1 - k), so the whole mantissa
+  // is an integer scaled by 10^(2 * (exponent - digits.length)).
   var result = 0.0;
-  var currentExponent = exponent - 1; // Start from exponent - 1 for first digit
-
-  for (final digit in digits) {
-    result += digit * _pow100(currentExponent);
-    currentExponent--;
+  if (digits.isNotEmpty) {
+    final e10 = 2 * (exponent - digits.length);
+    if (digits.length <= 7) {
+      // At most 14 decimal digits: the integer mantissa is exact in a double,
+      // and a single multiply/divide by an exactly representable power of ten
+      // (<= 1e22) is correctly rounded (Clinger fast path).
+      var mantissa = 0;
+      for (final digit in digits) {
+        mantissa = mantissa * 100 + digit;
+      }
+      if (e10 >= 0 && e10 <= 22) {
+        result = mantissa * _exactPowersOfTen[e10];
+      } else if (e10 < 0 && e10 >= -22) {
+        result = mantissa / _exactPowersOfTen[-e10];
+      } else {
+        result = double.parse('${mantissa}e$e10');
+      }
+    } else {
+      final text = StringBuffer();
+      for (final digit in digits) {
+        if (digit < 10) text.write('0');
+        text.write(digit);
+      }
+      result = double.parse('${text}e$e10');
+    }
   }
 
   if (isNegative) {
@@ -287,7 +313,7 @@ num decodeNumber(ReadBuffer buffer, {int? length, bool forceDouble = false}) {
   }
 
   // Symmetric with the encode-side rejection of NaN/±Infinity: if the
-  // decoded value overflowed `_pow100` (Oracle exponent past ~+155) the
+  // decoded value overflowed the double range (Oracle exponent past ~+155) the
   // result is non-finite and cannot be exposed to callers. Surface as a
   // protocol error rather than silently returning Infinity.
   if (!result.isFinite) {
@@ -341,23 +367,41 @@ String _decimalString(num absValue) {
   return '${allDigits.substring(0, pointIdx)}.${allDigits.substring(pointIdx)}';
 }
 
-/// Helper function to calculate powers of 100.
-double _pow100(int exponent) {
-  if (exponent == 0) return 1.0;
-  if (exponent > 0) {
-    var result = 1.0;
-    for (var i = 0; i < exponent; i++) {
-      result *= 100.0;
-    }
-    return result;
-  } else {
-    var result = 1.0;
-    for (var i = 0; i < -exponent; i++) {
-      result /= 100.0;
-    }
-    return result;
+/// Decodes an Oracle BINARY_FLOAT (4 bytes) or BINARY_DOUBLE (8 bytes) payload
+/// (node-oracledb `buffer.js` `parseBinaryFloat` / `parseBinaryDouble`).
+///
+/// Oracle stores IEEE 754 big-endian bits made byte-comparable: a non-negative
+/// value has its sign bit set, a negative value has every bit inverted. Undo
+/// that, then read the IEEE value — NaN, ±Infinity and ±0 survive the
+/// transform. A BINARY_FLOAT widens to the exact [double].
+double decodeBinaryFloatingPoint(List<int> payload) {
+  if (payload.length != 4 && payload.length != 8) {
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message:
+          'BINARY_FLOAT/BINARY_DOUBLE field has ${payload.length} bytes '
+          '(expected 4 or 8)',
+    );
   }
+  final bytes = Uint8List.fromList(payload);
+  if ((bytes[0] & 0x80) != 0) {
+    bytes[0] &= 0x7f;
+  } else {
+    for (var i = 0; i < bytes.length; i++) {
+      bytes[i] ^= 0xff;
+    }
+  }
+  final data = ByteData.sublistView(bytes);
+  return bytes.length == 4
+      ? data.getFloat32(0, Endian.big)
+      : data.getFloat64(0, Endian.big);
 }
+
+/// Powers of ten that a double represents exactly (1e0 .. 1e22).
+const List<double> _exactPowersOfTen = [
+  1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, //
+  1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
 
 // ============================================================================
 // Oracle DATE Encoding/Decoding

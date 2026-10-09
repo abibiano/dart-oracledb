@@ -6,7 +6,9 @@ location: lib/src/protocol/messages/execute_message.dart:2273
 source_spec: `13-1-oracle-21c-native-json-oson.md`
 severity: medium
 reason: Verified live by reviewers on 23ai and 21c: SELECT TO_BINARY_DOUBLE(1.5) FROM dual returns null; _decodeValueByOraType has no case for oraType 100/101. Pre-existing, not caused by this story.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-number-binary-float-codec
+resolution-undo: 5fc6fa38fb5b52d89cb434d2d5407f1e724ded706772761eeca09e35ed26848e 2026-10-09 7374617475733a206f70656e
 
 ### DW-2: REF CURSOR OUT binds and nested CURSOR() columns whose rows carry a LOB still cannot be decoded; the implicit-result fix made here (a DEFINE call before the first FETCH) probably applies to the REF
 origin: spec-deferred 807de04b5efe
@@ -52,7 +54,9 @@ location: lib/src/protocol/data_types.dart decodeNumber
 source_spec: `13-3-bind-fetch-json-mapping.md`
 severity: medium
 reason: Probed during review: decodeOson(encodeOson(1e-129)) returns 0, and 9.99e125 returns 9.989999999999999e+125. The defect is in decodeNumber and affects NUMBER columns as well, so it predates this story.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-number-binary-float-codec
+resolution-undo: 5fc6fa38fb5b52d89cb434d2d5407f1e724ded706772761eeca09e35ed26848e 2026-10-09 7374617475733a206f70656e
 
 ### DW-7: Native JSON columns in a REF CURSOR OUT bind or a nested CURSOR() fail on Oracle 21c with ORA-00600 [kollAdjustDuration] [119]; requiresDefine is applied only to implicit results.
 
