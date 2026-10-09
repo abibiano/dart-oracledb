@@ -57,6 +57,7 @@ class OracleExecuteOptions {
     this.fetchSize,
     this.maxRows = 0,
     this.fetchLobs = false,
+    this.rawJsonBlobs = false,
   });
 
   /// When `true`, [OracleConnection.execute] returns a lazy
@@ -146,6 +147,39 @@ class OracleExecuteOptions {
   /// * `executeStream()` / `queryStream()` always materialize — they take no
   ///   `fetchLobs` argument.
   final bool fetchLobs;
+
+  /// When `true`, a `BLOB` column with an `IS JSON` (or `IS JSON FORMAT OSON`)
+  /// check constraint — one whose describe sets [ColumnMetadata.isJson] or
+  /// [ColumnMetadata.isOson] — is returned as its stored bytes, a `Uint8List`
+  /// exactly like a plain `BLOB`, instead of being decoded into the
+  /// `Map<String, Object?>` / `List<Object?>` / scalar a native `JSON` column
+  /// yields.
+  ///
+  /// Defaults to `false`: such a column decodes by default. That default is
+  /// this driver's own choice — node-oracledb returns the raw `Buffer` unless
+  /// `oracledb.future.oldJsonColumnAsObj` is enabled — so set this to keep code
+  /// that decodes the bytes itself working, or to read a value the decoder
+  /// rejects:
+  ///
+  /// * no JSON validation runs, so content that is not strict JSON (Oracle's
+  ///   lax syntax, a zero-length `EMPTY_BLOB()`) comes back as bytes instead of
+  ///   failing the call;
+  /// * a SQL `NULL` is still Dart `null`;
+  /// * every other column is unaffected: a native `JSON` column still decodes,
+  ///   and `CLOB` / `VARCHAR2` / `RAW` `IS JSON` columns and plain `BLOB`s
+  ///   never decode in the first place.
+  ///
+  /// It applies to every row this call returns: [OracleResult.rows], every
+  /// batch of a [resultSet], PL/SQL implicit results (eager, or lazy with
+  /// [resultSet]), and the rows of a REF CURSOR OUT bind or nested
+  /// `CURSOR(...)` column produced by the call.
+  ///
+  /// With [fetchLobs] also `true`, [fetchLobs] wins: the column is an
+  /// [OracleLob] handle, whose `read()` yields the same untouched bytes.
+  /// A BLOB inside a REF CURSOR OUT bind or nested `CURSOR(...)` row cannot be
+  /// wrapped as a handle; with [fetchLobs] such a call fails instead.
+  /// `executeStream()` / `queryStream()` take no options and always decode.
+  final bool rawJsonBlobs;
 }
 
 /// Per-call options for [OracleConnection.executeMany].
@@ -755,9 +789,14 @@ class OracleConnection {
   /// throws on id 0), and PL/SQL is never cache-eligible, so the result set is
   /// non-cached: [OracleResultSet.close] queues its id through the existing
   /// close-cursor piggyback.
+  ///
+  /// [rawJsonBlobs] keeps a BLOB `IS JSON` column in the REF cursor's rows — and
+  /// in any nested `CURSOR(...)` column inside them — as raw bytes on every
+  /// lazily fetched batch, matching the rest of the call's rows.
   List<Object?> _wrapRefCursorOutBinds(
     ExecuteResponse response, {
-    bool fetchLobs = false,
+    required bool fetchLobs,
+    required bool rawJsonBlobs,
   }) {
     final values = response.outBindValues;
     var cursorCount = 0;
@@ -841,12 +880,15 @@ class OracleConnection {
                 batch,
                 nestedCursorIndices,
                 fetchLobs: fetchLobs,
+                rawJsonBlobs: rawJsonBlobs,
               ),
         // Deliberately NOT wrapping (AC6): a REF cursor's own LOB columns were
         // already rejected above, and this cursor's batches stay on the
         // materialize path. Stated explicitly so the wrap decision is visible at
         // every ResultSetCursor construction site, not defaulted by accident.
         wrapLob: null,
+        // The per-batch materialize honors the call's BLOB IS JSON opt-out.
+        rawJsonBlobs: rawJsonBlobs,
       );
       final rs = OracleResultSet.fromCursor(
         connection: this,
@@ -893,10 +935,15 @@ class OracleConnection {
   /// column as well as the REF CURSOR OUT-bind one in [_wrapRefCursorOutBinds].
   /// It keeps the flag-threading contract total: `fetchLobs` never silently
   /// materializes a cursor-embedded LOB at any entry point or nesting depth.
+  ///
+  /// [rawJsonBlobs] is threaded the same way, to arbitrary depth, so a BLOB
+  /// `IS JSON` column inside a nested cursor stays raw bytes whenever the call
+  /// asked for them — `required` for the same reason as [fetchLobs].
   Future<void> _materializeNestedCursorsInBatch(
     List<List<Object?>> rows,
     List<int> cursorColumnIndices, {
     required bool fetchLobs,
+    required bool rawJsonBlobs,
   }) async {
     if (cursorColumnIndices.isEmpty || rows.isEmpty) return;
     final drained = <int, List<OracleRow>>{};
@@ -920,7 +967,11 @@ class OracleConnection {
         var nestedRows = drained[value.cursorId];
         if (nestedRows == null) {
           try {
-            nestedRows = await _drainNestedCursor(value, fetchLobs: fetchLobs);
+            nestedRows = await _drainNestedCursor(
+              value,
+              fetchLobs: fetchLobs,
+              rawJsonBlobs: rawJsonBlobs,
+            );
           } catch (_) {
             // The reject can also arrive from BELOW: [_drainNestedCursor]
             // recurses into this method for a deeper `CURSOR()` column, and a
@@ -995,9 +1046,14 @@ class OracleConnection {
   /// `required` for the
   /// same reason as on [_materializeNestedCursorsInBatch]: a defaulted `false`
   /// silently disables a reject that protects the session.
+  ///
+  /// [rawJsonBlobs] applies to this cursor's own per-batch materialize and is
+  /// forwarded to any deeper cursor, so the BLOB IS JSON opt-out holds at every
+  /// nesting depth.
   Future<List<OracleRow>> _drainNestedCursor(
     DecodedCursorResult decoded, {
     required bool fetchLobs,
+    required bool rawJsonBlobs,
   }) async {
     // A nested cursor can itself project a CURSOR() column. Computed once here
     // so it also drives requiresFullExecute below (pre-23 needs the inline
@@ -1023,17 +1079,21 @@ class OracleConnection {
       // Deliberately NOT wrapping (AC6): a nested cursor's LOB columns are
       // rejected by the caller before this drain, and its batches materialize.
       wrapLob: null,
+      // The per-batch materialize honors the call's BLOB IS JSON opt-out.
+      rawJsonBlobs: rawJsonBlobs,
     );
     try {
       final rawRows = await nested.nextAllRowsData();
       // Resolve any deeper CURSOR() columns with the same eager pass, recursing
       // through this method (the close queue dedupes ids, so recursion never
-      // double-reaps). fetchLobs propagates to arbitrary nesting depth.
+      // double-reaps). fetchLobs and rawJsonBlobs propagate to arbitrary
+      // nesting depth.
       if (deeperCursorIndices.isNotEmpty) {
         await _materializeNestedCursorsInBatch(
           rawRows,
           deeperCursorIndices,
           fetchLobs: fetchLobs,
+          rawJsonBlobs: rawJsonBlobs,
         );
       }
       final builder = OracleRowBuilder(decoded.columns);
@@ -1072,7 +1132,8 @@ class OracleConnection {
   Future<List<Object>> _drainImplicitResults(
     List<DecodedCursorResult> descriptors, {
     int maxRows = 0,
-    bool fetchLobs = false,
+    required bool fetchLobs,
+    required bool rawJsonBlobs,
   }) async {
     try {
       final out = <Object>[];
@@ -1082,6 +1143,7 @@ class OracleConnection {
             descriptor,
             maxRows: maxRows,
             fetchLobs: fetchLobs,
+            rawJsonBlobs: rawJsonBlobs,
           ),
         );
       }
@@ -1103,7 +1165,8 @@ class OracleConnection {
   Future<List<OracleRow>> _drainOneImplicitResult(
     DecodedCursorResult descriptor, {
     int maxRows = 0,
-    bool fetchLobs = false,
+    required bool fetchLobs,
+    required bool rawJsonBlobs,
   }) async {
     final cursor = ResultSetCursor(
       transport: _transport,
@@ -1128,6 +1191,10 @@ class OracleConnection {
       // materializes (or wraps, under fetchLobs) ONCE over the fully-drained
       // result below so a locator aliased across rows yields one handle.
       wrapLob: null,
+      // Inert here (materializePerBatch: false — this cursor materializes
+      // nothing); the result-wide materialize below applies it. Passed anyway
+      // so every construction site states the call's answer.
+      rawJsonBlobs: rawJsonBlobs,
     );
     // maxRows (node-oracledb parity): a positive N caps this implicit result at
     // exactly N rows and stops fetching once N is reached; 0 = unlimited.
@@ -1177,6 +1244,8 @@ class OracleConnection {
       // (Story 13.2) on the materialize path.
       columns: descriptor.columns,
       wrapLob: fetchLobs ? _registerLob : null,
+      // ... unless the call opted out of it (raw bytes).
+      rawJsonBlobs: rawJsonBlobs,
     );
     // Implicit result rows can themselves carry cursor-valued columns; resolve
     // them with the same eager nested-cursor pass SELECT rows use.
@@ -1186,6 +1255,7 @@ class OracleConnection {
         response.rows,
         nestedCursorIndices,
         fetchLobs: fetchLobs,
+        rawJsonBlobs: rawJsonBlobs,
       );
     }
     final builder = OracleRowBuilder(descriptor.columns);
@@ -1201,9 +1271,14 @@ class OracleConnection {
   /// regular operations fail fast meanwhile, and each handle's cursor id rides
   /// the existing close-cursor piggyback on `close()`. Synchronous and never
   /// throws — so it cannot leave a partially registered group. AC4 / AC5.
+  ///
+  /// [rawJsonBlobs] is honored by every handle's per-batch materialize (and by
+  /// nested cursors inside its rows): unlike `fetchLobs`, the BLOB IS JSON
+  /// opt-out needs no handle lifecycle, so it is supported on this lazy group.
   List<Object> _wrapImplicitResultsLazy(
     List<DecodedCursorResult> descriptors, {
     required int prefetchRows,
+    required bool rawJsonBlobs,
   }) {
     final handles = <Object>[];
     for (final descriptor in descriptors) {
@@ -1239,6 +1314,7 @@ class OracleConnection {
                 batch,
                 nestedCursorIndices,
                 fetchLobs: false,
+                rawJsonBlobs: rawJsonBlobs,
               ),
         // Deliberately NOT wrapping (AC6): `resultSet: true` + `fetchLobs: true`
         // on a PL/SQL block is rejected pre-wire in `execute()` precisely so this
@@ -1246,6 +1322,8 @@ class OracleConnection {
         // too, since a defaulted parameter is exactly how such a path silently
         // diverges from the rest.
         wrapLob: null,
+        // The per-batch materialize honors the call's BLOB IS JSON opt-out.
+        rawJsonBlobs: rawJsonBlobs,
       );
       final rs = OracleResultSet.fromCursor(
         connection: this,
@@ -1459,6 +1537,12 @@ class OracleConnection {
     }
 
     final fetchLobs = options?.fetchLobs ?? false;
+    // Threaded to every materialize entry point below — eager rows, the lazy
+    // result set's first and continuation batches, eager and lazy implicit
+    // results, REF CURSOR OUT binds and nested CURSOR() columns — so a BLOB IS
+    // JSON column never decodes on one shape of this call while staying raw on
+    // another.
+    final rawJsonBlobs = options?.rawJsonBlobs ?? false;
 
     if (options?.resultSet == true) {
       final effectiveFetchSize = options!.fetchSize ?? _defaultPrefetchRows;
@@ -1508,6 +1592,10 @@ class OracleConnection {
             bindValues,
             lazyImplicit: true,
             implicitPrefetchRows: effectiveFetchSize,
+            // Rejected above when true: the lazy group cannot wrap handles.
+            fetchLobs: false,
+            // Supported: the raw-bytes opt-out needs no handle lifecycle.
+            rawJsonBlobs: rawJsonBlobs,
           );
         } finally {
           _executeInProgress = false;
@@ -1537,6 +1625,7 @@ class OracleConnection {
           bindValues,
           prefetchRows: effectiveFetchSize,
           fetchLobs: fetchLobs,
+          rawJsonBlobs: rawJsonBlobs,
         );
       } finally {
         _executeInProgress = false;
@@ -1560,6 +1649,7 @@ class OracleConnection {
         bindValues,
         maxRows: maxRows,
         fetchLobs: fetchLobs,
+        rawJsonBlobs: rawJsonBlobs,
       );
     } finally {
       _executeInProgress = false;
@@ -1738,7 +1828,14 @@ class OracleConnection {
 
     _executeInProgress = true;
     try {
-      return await _executeGuarded(sql, null, bulk: bulk);
+      return await _executeGuarded(
+        sql,
+        null,
+        bulk: bulk,
+        // executeMany takes no fetch options: its rows (if any) decode by
+        // default, like executeStream / queryStream.
+        rawJsonBlobs: false,
+      );
     } finally {
       _executeInProgress = false;
     }
@@ -3226,6 +3323,8 @@ class OracleConnection {
           _charsetDetectionSql,
           null,
           forceUncacheable: true,
+          // Two VARCHAR2 columns: no BLOB IS JSON column to keep raw.
+          rawJsonBlobs: false,
         );
       } finally {
         _executeInProgress = false;
@@ -3303,6 +3402,11 @@ class OracleConnection {
   /// threaded into every LOB materialization entry point — the result-wide
   /// materialize below and the eager implicit-result drain — so the wrap-vs-
   /// materialize decision can never split across shapes.
+  ///
+  /// [rawJsonBlobs] (`OracleExecuteOptions.rawJsonBlobs`) keeps BLOB `IS JSON`
+  /// columns as raw bytes and is threaded to the same entry points as
+  /// [fetchLobs] — plus the lazy implicit-result group, where (unlike a handle
+  /// wrap) it is supported. `required` so every caller states its answer.
   Future<OracleResult> _executeGuarded(
     String sql,
     Object? bindValues, {
@@ -3311,6 +3415,7 @@ class OracleConnection {
     int maxRows = 0,
     bool forceUncacheable = false,
     bool fetchLobs = false,
+    required bool rawJsonBlobs,
     _ExecuteManyCall? bulk,
   }) async {
     _log.fine(
@@ -3362,6 +3467,9 @@ class OracleConnection {
           // drained result below — result-wide locator dedup, so a value aliased
           // into several rows yields exactly one handle.
           wrapLob: null,
+          // Inert here (materializePerBatch: false); the result-wide
+          // materialize below applies it. Stated so the answer is visible.
+          rawJsonBlobs: rawJsonBlobs,
         );
         // maxRows (node-oracledb parity): 0 = unlimited; a positive N caps the
         // eager SELECT drain at exactly N rows and stops fetching once N is
@@ -3450,12 +3558,14 @@ class OracleConnection {
       //
       // No explicit `columns`: a query response here always carries its
       // describe (fresh, or the cached metadata a re-execute was decoded
-      // against), which drives the BLOB IS JSON decode (Story 13.2).
+      // against), which drives the BLOB IS JSON decode (Story 13.2) — skipped
+      // under rawJsonBlobs, which keeps those cells as the bytes read.
       response = await _transport.materializeLobs(
         response,
         bindMetadata: stmt.bindMetadata,
         dmlReturning: bulk?.dmlReturning ?? false,
         wrapLob: fetchLobs ? _registerLob : null,
+        rawJsonBlobs: rawJsonBlobs,
       );
 
       // Eagerly materialize any cursor-typed SELECT columns
@@ -3474,6 +3584,7 @@ class OracleConnection {
             response.rows,
             cursorColumnIndices,
             fetchLobs: fetchLobs,
+            rawJsonBlobs: rawJsonBlobs,
           );
         }
       }
@@ -3564,6 +3675,7 @@ class OracleConnection {
       final outBindValues = _wrapRefCursorOutBinds(
         response,
         fetchLobs: fetchLobs,
+        rawJsonBlobs: rawJsonBlobs,
       );
 
       // Implicit results from DBMS_SQL.RETURN_RESULT (PL/SQL only; the list is
@@ -3576,11 +3688,13 @@ class OracleConnection {
             ? _wrapImplicitResultsLazy(
                 response.implicitResults,
                 prefetchRows: implicitPrefetchRows,
+                rawJsonBlobs: rawJsonBlobs,
               )
             : await _drainImplicitResults(
                 response.implicitResults,
                 maxRows: maxRows,
                 fetchLobs: fetchLobs,
+                rawJsonBlobs: rawJsonBlobs,
               );
       }
 
@@ -4164,6 +4278,8 @@ class OracleConnection {
         // Deliberately NOT wrapping: this test-facing seam has no fetchLobs
         // surface, so its LOB columns stay on the materialize path (AC6).
         fetchLobs: false,
+        // Nor a rawJsonBlobs surface: BLOB IS JSON columns decode.
+        rawJsonBlobs: false,
       );
     } finally {
       // The open round trip is complete; the cursor is now idle between pulls.
@@ -4231,6 +4347,9 @@ class OracleConnection {
         // listener would be a footgun, so no fetchLobs parameter is offered on
         // these signatures.
         fetchLobs: false,
+        // These signatures take no options at all: BLOB IS JSON columns
+        // decode, as documented on OracleExecuteOptions.rawJsonBlobs.
+        rawJsonBlobs: false,
       );
     } finally {
       // The open round trip is complete; the cursor is now idle between pulls.
@@ -4280,10 +4399,16 @@ class OracleConnection {
   /// wraps (Epic 11 retro action item 2). When true, both the FIRST batch here
   /// and every continuation batch inside [ResultSetCursor] replace their LOB
   /// locators with [OracleLob] handles instead of reading them.
+  ///
+  /// [rawJsonBlobs] is `required` for the same reason: it reaches the FIRST
+  /// batch's materialize here, the cursor's per-batch materialize, and the
+  /// nested-cursor pass on both, so a BLOB IS JSON column cannot decode in one
+  /// batch of the result set and stay raw in another.
   Future<OracleResultSet> _openResultSetGuarded(
     String sql,
     Object? bindValues, {
     required bool fetchLobs,
+    required bool rawJsonBlobs,
     int? prefetchRows,
   }) async {
     _log.fine(
@@ -4327,6 +4452,7 @@ class OracleConnection {
         firstResponse,
         bindMetadata: stmt.bindMetadata,
         wrapLob: fetchLobs ? wrapFirstBatchLob : null,
+        rawJsonBlobs: rawJsonBlobs,
       );
 
       // Eagerly materialize any cursor-typed SELECT columns in the first batch
@@ -4346,6 +4472,7 @@ class OracleConnection {
           firstResponse.rows,
           cursorColumnIndices,
           fetchLobs: fetchLobs,
+          rawJsonBlobs: rawJsonBlobs,
         );
       }
 
@@ -4434,6 +4561,7 @@ class OracleConnection {
                 batch,
                 cursorColumnIndices,
                 fetchLobs: fetchLobs,
+                rawJsonBlobs: rawJsonBlobs,
               ),
         // Story 12.3 AC4/AC5: under fetchLobs each continuation batch's LOB
         // columns are wrapped as handles, and the cursor is given the predicate +
@@ -4442,6 +4570,9 @@ class OracleConnection {
         wrapLob: fetchLobs ? _registerLob : null,
         isLobHandle: fetchLobs ? _isLobHandleValue : null,
         closeLobHandles: fetchLobs ? _closeLobHandles : null,
+        // Continuation batches keep BLOB IS JSON columns raw exactly when the
+        // first batch (materialized above) did.
+        rawJsonBlobs: rawJsonBlobs,
       );
       // Handed to the result set, which now owns the reap: the first batch's
       // handles live in the cursor's buffer and are reachable from

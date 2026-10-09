@@ -1097,9 +1097,10 @@ class ColumnMetadata {
   /// expression such as `TO_BLOB(col)` describes without it (measured on Oracle
   /// 23ai and 21c). For a `BLOB` column flagged [isJson] or [isOson] the driver
   /// decodes the fetched bytes into the same Dart `Map` / `List` / scalar
-  /// mapping native `JSON` columns use (`fetchLobs: true` still yields the raw
-  /// `OracleLob`); `CLOB` / `VARCHAR2` / `RAW` `IS JSON` columns are returned
-  /// unchanged.
+  /// mapping native `JSON` columns use by default
+  /// (`OracleExecuteOptions(rawJsonBlobs: true)` keeps the raw `Uint8List`, and
+  /// `fetchLobs: true` still yields an `OracleLob`); `CLOB` / `VARCHAR2` / `RAW`
+  /// `IS JSON` columns are returned unchanged.
   bool get isJson => (udsFlags & tnsUdsFlagsIsJson) != 0;
 
   /// Whether the describe flags this column as storing OSON (`IS JSON FORMAT

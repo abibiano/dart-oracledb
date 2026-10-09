@@ -1444,5 +1444,190 @@ void main() {
       expect(out.outBindValues.single, isA<Uint8List>());
       expect(out.outBindValues.single, equals(doc));
     });
+
+    // DW-8: `OracleExecuteOptions(rawJsonBlobs: true)` turns the decode off.
+    group('rawJsonBlobs: true (the raw-bytes opt-out)', () {
+      test(
+        'a flagged BLOB cell (IS JSON 21c / 23ai word, OSON-only word) is '
+        'the raw Uint8List as read; SQL NULL and other cells untouched',
+        () async {
+          final text = bytesOf('{"a":1}');
+          final text23 = bytesOf('[1,"two"]');
+          final oson = encodeOson(<String, Object?>{'o': 2});
+          final t = replying([text, text23, oson]);
+          final out = await t.materializeLobs(
+            ExecuteResponse(
+              isSuccess: true,
+              columnMetadata: const [label, jsonBlob, jsonBlob23, osonOnlyBlob],
+              rows: [
+                [
+                  'x',
+                  blobLocator(text.length, tag: 1),
+                  blobLocator(text23.length, tag: 2),
+                  blobLocator(oson.length, tag: 3),
+                ],
+                ['y', null, null, null], // SQL NULL — no locator at all
+              ],
+            ),
+            rawJsonBlobs: true,
+          );
+          final row = out.rows[0];
+          expect(row[0], equals('x'));
+          for (final (i, bytes) in [(1, text), (2, text23), (3, oson)]) {
+            expect(row[i], isA<Uint8List>(), reason: 'column $i');
+            expect(row[i], equals(bytes), reason: 'column $i');
+          }
+          // The OSON image is handed back untouched, magic included.
+          expect(
+            (row[3]! as Uint8List).sublist(0, 3),
+            equals([0xff, 0x4a, 0x5a]),
+          );
+          expect(out.rows[1], equals(['y', null, null, null]));
+          expect(t.requests, hasLength(3));
+        },
+      );
+
+      test('content the decoder rejects (lax JSON, corrupt OSON) comes back as '
+          'bytes with no error', () async {
+        final lax = bytesOf('{a:1}');
+        final full = encodeOson(<String, Object?>{'a': 1});
+        final cut = Uint8List.sublistView(full, 0, full.length - 1);
+        final t = replying([lax, cut]);
+        final out = await t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            columnMetadata: const [jsonBlob, osonOnlyBlob],
+            rows: [
+              [
+                blobLocator(lax.length, tag: 1),
+                blobLocator(cut.length, tag: 2),
+              ],
+            ],
+          ),
+          rawJsonBlobs: true,
+        );
+        expect(out.rows.single[0], equals(lax));
+        expect(out.rows.single[1], equals(cut));
+      });
+
+      test('a zero-length value (EMPTY_BLOB()) is an empty Uint8List, with no '
+          'READ and no error', () async {
+        final t = _ChunkedReadTransport([]);
+        final out = await t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            columnMetadata: const [jsonBlob],
+            rows: [
+              [blobLocator(0)],
+            ],
+          ),
+          rawJsonBlobs: true,
+        );
+        expect(out.rows.single.single, isA<Uint8List>());
+        expect(out.rows.single.single, isEmpty);
+        expect(t.requests, isEmpty);
+      });
+
+      test(
+        'an aliased locator is read once and shared, like any plain BLOB',
+        () async {
+          final doc = bytesOf('{"dup":1}');
+          final t = replying([doc]);
+          final loc = blobLocator(doc.length);
+          final out = await t.materializeLobs(
+            ExecuteResponse(
+              isSuccess: true,
+              columnMetadata: const [jsonBlob],
+              rows: [
+                [loc],
+                [loc],
+              ],
+            ),
+            rawJsonBlobs: true,
+          );
+          expect(t.requests, hasLength(1));
+          expect(out.rows[0][0], equals(doc));
+          expect(identical(out.rows[0][0], out.rows[1][0]), isTrue);
+        },
+      );
+
+      test(
+        'explicit columns (a describe-less FETCH round) keep the cell raw',
+        () async {
+          final doc = bytesOf('{"fetched":true}');
+          final t = replying([doc]);
+          final out = await t.materializeLobs(
+            ExecuteResponse(
+              isSuccess: true,
+              rows: [
+                [7, blobLocator(doc.length)],
+              ],
+            ),
+            columns: const [label, jsonBlob],
+            rawJsonBlobs: true,
+          );
+          expect(out.rows.single[1], isA<Uint8List>());
+          expect(out.rows.single[1], equals(doc));
+        },
+      );
+
+      test(
+        'the wrap path still wins (fetchLobs + rawJsonBlobs): the handle, no '
+        'READ',
+        () async {
+          final t = _ChunkedReadTransport([]);
+          final loc = blobLocator(12);
+          final out = await t.materializeLobs(
+            ExecuteResponse(
+              isSuccess: true,
+              columnMetadata: const [jsonBlob],
+              rows: [
+                [loc],
+              ],
+            ),
+            wrapLob: _WrapMarker.new,
+            rawJsonBlobs: true,
+          );
+          final marker = out.rows.single.single! as _WrapMarker;
+          expect(marker.locator, same(loc));
+          expect(t.requests, isEmpty);
+        },
+      );
+
+      test(
+        'plain BLOB / CLOB IS JSON / BLOB OUT bind cells are unaffected',
+        () async {
+          final plain = bytesOf('{"looks":"like json"}');
+          const clobText = '{"c":1}';
+          final out1 = bytesOf('{"out":1}');
+          final t = _ChunkedReadTransport([
+            (data: plain, amount: plain.length),
+            (data: bytesOf(clobText), amount: clobText.length),
+            (data: out1, amount: out1.length),
+          ]);
+          final clobLocator = LobLocator(
+            locator: Uint8List(tnsLobLocatorBufferSize)..[0] = 9,
+            oracleType: oraTypeClob,
+            length: clobText.length,
+            chunkSize: 0,
+          );
+          final out = await t.materializeLobs(
+            ExecuteResponse(
+              isSuccess: true,
+              columnMetadata: const [plainBlob, jsonClob],
+              rows: [
+                [blobLocator(plain.length, tag: 1), clobLocator],
+              ],
+              outBindValues: [blobLocator(out1.length, tag: 2)],
+              outBindIndices: const [0],
+            ),
+            rawJsonBlobs: true,
+          );
+          expect(out.rows.single[0], equals(plain));
+          expect(out.rows.single[1], equals(clobText));
+          expect(out.outBindValues.single, equals(out1));
+        },
+      );
+    });
   });
 }

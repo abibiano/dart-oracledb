@@ -1131,16 +1131,36 @@ final doc = result.rows.first['DOC'] as Map<String, Object?>; // not bytes
   constraint is *lax*, so Oracle also accepts values that are not strict
   JSON and that therefore fail here: lax syntax (unquoted field names,
   single-quoted strings, upper-case `TRUE`), trailing NUL bytes, and a
-  zero-length `EMPTY_BLOB()`. Use `IS JSON STRICT` to keep such values out.
-- **Raw-bytes opt-out** — `OracleExecuteOptions(fetchLobs: true)` still
-  returns an `OracleLob` handle whose `read()` yields the stored bytes
-  untouched. It affects only the LOB columns: a native `JSON` column in the
-  same row is not a LOB and still decodes to its Dart value. For PL/SQL implicit results, use eager `execute()` with this
-  option; the combination of `resultSet: true` and `fetchLobs: true` is
-  unsupported for a PL/SQL block.
-- **Behavior change:** before this release such a column returned a
+  zero-length `EMPTY_BLOB()`. Use `IS JSON STRICT` to keep such values out,
+  or read them as bytes with `rawJsonBlobs: true` (below).
+- **Raw-bytes opt-out** — `OracleExecuteOptions(rawJsonBlobs: true)` returns
+  such a column as the stored `Uint8List` (its type before 1.5.0): no decode
+  and no JSON validation (lax or empty values read without an error), SQL NULL
+  still `null`. It applies to every row of that call — eager `execute()`, every
+  batch of `resultSet: true`, implicit results (eager and `resultSet: true`),
+  and REF CURSOR OUT bind / nested `CURSOR()` rows — and only to BLOB
+  `IS JSON` columns: a native `JSON` column in the same row still decodes.
+  `queryStream()` / `executeStream()` take no options and always decode.
+
+  ```dart
+  final raw = await connection.execute(
+    'SELECT doc FROM orders',
+    null,
+    const OracleExecuteOptions(rawJsonBlobs: true),
+  );
+  final bytes = raw.rows.first['DOC'] as Uint8List;
+  ```
+
+  `OracleExecuteOptions(fetchLobs: true)` still returns an `OracleLob` handle
+  whose `read()` yields the stored bytes untouched, and wins when both options
+  are set. It too affects only the LOB columns. For PL/SQL implicit results,
+  use eager `execute()` with `fetchLobs`; the combination of `resultSet: true`
+  and `fetchLobs: true` is unsupported for a PL/SQL block.
+- **Behavior change (1.5.0):** before this release such a column returned a
   `Uint8List`; code that decoded those bytes itself must now accept the
-  decoded value (or opt out with `fetchLobs: true`).
+  decoded value or pass `rawJsonBlobs: true`. Decoding by default is this
+  driver's choice — node-oracledb returns the raw `Buffer` unless
+  `oracledb.future.oldJsonColumnAsObj` is enabled.
 - **Not covered:** `fetchLobs: true` for a `REF CURSOR` OUT bind or nested
   `CURSOR()` column carrying the BLOB — those rows decode without the option,
   but embedded LOB handles are not supported (see

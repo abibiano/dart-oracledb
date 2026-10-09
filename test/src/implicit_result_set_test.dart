@@ -160,6 +160,7 @@ class _ImplicitTransport extends Transport {
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
     Object Function(LobLocator locator)? wrapLob,
+    bool rawJsonBlobs = false,
   }) async {
     materializeColumns.add(columns);
     if (lobReads == null) return response;
@@ -170,6 +171,7 @@ class _ImplicitTransport extends Transport {
       dmlReturning: dmlReturning,
       timeout: timeout,
       wrapLob: wrapLob,
+      rawJsonBlobs: rawJsonBlobs,
     );
   }
 

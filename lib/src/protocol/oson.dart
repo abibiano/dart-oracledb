@@ -1083,10 +1083,15 @@ class _OsonDecoder {
 /// use: `Map<String, Object?>`, `List<Object?>`, `String`, `num`, `bool`, or
 /// `null` for a JSON `null` document.
 ///
-/// Mirrors the node-oracledb `resultset.js` output converter (`isOson` →
-/// `OsonDecoder`, `isJson` → `JSON.parse`), but picks OSON vs text from the
-/// bytes rather than from the flag, so either storage form decodes whichever
-/// flag the server reported:
+/// Ports the node-oracledb `resultset.js` output converter (`isOson` →
+/// `OsonDecoder`, `isJson` → `JSON.parse`) — but it is NOT a default-behavior
+/// parity claim: node-oracledb installs that converter only when
+/// `oracledb.future.oldJsonColumnAsObj` is enabled (default `false`), so out of
+/// the box it returns such a column as a raw `Buffer`. This driver decodes by
+/// default instead; `OracleExecuteOptions(rawJsonBlobs: true)` (or `fetchLobs:
+/// true`, for an `OracleLob`) is the per-call way back to the raw bytes. It also
+/// picks OSON vs text from the bytes rather than from the flag, so either
+/// storage form decodes whichever flag the server reported:
 ///
 /// 1. Bytes starting with the OSON magic `FF 4A 5A` decode through
 ///    [decodeOson]; its errors propagate unchanged (`oraProtocolError` for a
@@ -1216,6 +1221,7 @@ OracleException _jsonBlobError(String reason) => OracleException(
   errorCode: oraUnsupportedType,
   message:
       'Cannot decode JSON stored in a BLOB: $reason. Fetch with '
-      'OracleExecuteOptions(fetchLobs: true) to read the raw bytes as an '
-      'OracleLob instead.',
+      'OracleExecuteOptions(rawJsonBlobs: true) to read the raw bytes as a '
+      'Uint8List, or with OracleExecuteOptions(fetchLobs: true) to read them '
+      'through an OracleLob instead.',
 );

@@ -66,6 +66,9 @@ class _FakeTransport extends Transport {
   /// 'define' / 'fetch' / 'execute', in call order.
   final List<String> calls = [];
   final List<List<ColumnMetadata>?> materializeColumns = [];
+
+  /// The `rawJsonBlobs` argument of every [materializeLobs] call, in order.
+  final List<bool> materializeRawJsonBlobs = [];
   bool? definePreserveTimestampTimeZone;
 
   @override
@@ -139,8 +142,10 @@ class _FakeTransport extends Transport {
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
     Object Function(LobLocator locator)? wrapLob,
+    bool rawJsonBlobs = false,
   }) {
     materializeColumns.add(columns);
+    materializeRawJsonBlobs.add(rawJsonBlobs);
     return super.materializeLobs(
       response,
       bindMetadata: bindMetadata,
@@ -148,6 +153,7 @@ class _FakeTransport extends Transport {
       dmlReturning: dmlReturning,
       timeout: timeout,
       wrapLob: wrapLob,
+      rawJsonBlobs: rawJsonBlobs,
     );
   }
 
@@ -178,6 +184,7 @@ ResultSetCursor _cursor(
   bool requiresFullExecute = false,
   bool materializePerBatch = true,
   bool preserveTimestampTimeZone = false,
+  bool rawJsonBlobs = false,
 }) => ResultSetCursor(
   transport: transport,
   cursorId: 7,
@@ -189,6 +196,7 @@ ResultSetCursor _cursor(
   materializePerBatch: materializePerBatch,
   requiresDefine: requiresDefine,
   requiresFullExecute: requiresFullExecute,
+  rawJsonBlobs: rawJsonBlobs,
 );
 
 Future<List<List<Object?>>> _drainAll(ResultSetCursor cursor) async {
@@ -291,6 +299,79 @@ void main() {
       // No further FETCH and no partial row afterwards.
       expect(await cursor.nextRowData(), isNull);
       expect(transport.calls, equals(['fetch']));
+    });
+  });
+
+  // DW-8: `OracleExecuteOptions(rawJsonBlobs: true)` must reach EVERY batch
+  // this cursor materializes — the DEFINE batch and each continuation FETCH —
+  // or a streamed result would decode some batches and not others.
+  group('ResultSetCursor per-batch rawJsonBlobs (DW-8)', () {
+    test('the DEFINE batch and a continuation FETCH batch both keep the '
+        'flagged BLOB column as raw bytes', () async {
+      final a = _bytes('{"n":1}');
+      final lax = _bytes('{n:2}'); // would fail the strict decode
+      final transport = _FakeTransport(
+        defineResponse: _batch([
+          [1, _blob(a.length)],
+          [2, null],
+        ], more: true),
+        fetches: [
+          _batch([
+            [3, _blob(lax.length)],
+          ], more: false),
+        ],
+        reads: [a, lax],
+      );
+      final cursor = _cursor(
+        transport,
+        requiresDefine: true,
+        rawJsonBlobs: true,
+      );
+
+      final rows = await _drainAll(cursor);
+      expect(rows, hasLength(3));
+      expect(rows[0][1], isA<Uint8List>());
+      expect(rows[0][1], equals(a));
+      expect(rows[1][1], isNull);
+      expect(rows[2][1], isA<Uint8List>());
+      expect(rows[2][1], equals(lax));
+      expect(cursor.hasFailed, isFalse);
+      expect(transport.calls, equals(['define', 'fetch']));
+      expect(transport.materializeRawJsonBlobs, equals([true, true]));
+    });
+
+    test('the default cursor still decodes (flag threaded as false)', () async {
+      final doc = _bytes('[1]');
+      final transport = _FakeTransport(
+        fetches: [
+          _batch([
+            [1, _blob(doc.length)],
+          ], more: false),
+        ],
+        reads: [doc],
+      );
+      final rows = await _drainAll(_cursor(transport));
+      expect(rows.single[1], equals([1]));
+      expect(transport.materializeRawJsonBlobs, equals([false]));
+    });
+
+    test('the eager drain (materializePerBatch: false) never materializes, so '
+        'the flag is inert there', () async {
+      final transport = _FakeTransport(
+        fetches: [
+          _batch([
+            [1, _blob(3)],
+          ], more: false),
+        ],
+      );
+      final cursor = _cursor(
+        transport,
+        materializePerBatch: false,
+        rawJsonBlobs: true,
+      );
+      final drained = await cursor.drainRemaining(maxFetchIterations: 10);
+      expect(drained.single[1], isA<LobLocator>());
+      expect(transport.materializeRawJsonBlobs, isEmpty);
     });
   });
 

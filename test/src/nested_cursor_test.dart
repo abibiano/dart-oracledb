@@ -149,6 +149,7 @@ class _NestedCursorTransport extends Transport {
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
     Object Function(LobLocator locator)? wrapLob,
+    bool rawJsonBlobs = false,
   }) async {
     // Record whether the fetchLobs wrap decision reached this call, so tests can
     // assert the flag was threaded through the nested-cursor / REF-cursor drain.

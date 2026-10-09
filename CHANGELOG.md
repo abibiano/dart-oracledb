@@ -70,20 +70,33 @@
   without a byte-order mark) or UTF-16LE / UTF-16BE (with a byte-order mark,
   or BOM-less). Writes are unchanged — a `Map` / `List` bind already lands in
   such a column. Validated against Oracle 23ai and Oracle 21c.
-- **Behavior change:** such a column used to return the raw `Uint8List`.
-  `OracleExecuteOptions(fetchLobs: true)` is the opt-out — it still returns an
-  `OracleLob` handle over the untouched bytes. A value that is not strict JSON
-  fails the call loudly with `OracleException` (`oraUnsupportedType`, naming
-  the column) instead of returning bytes — this includes values the default
-  *lax* `IS JSON` constraint accepts, such as unquoted field names,
-  single-quoted strings, upper-case `TRUE`, and a zero-length `EMPTY_BLOB()`.
-  Corrupt OSON instead keeps the OSON decoder's error code (for example,
-  `oraProtocolError`).
+- **Behavior change in 1.5.0:** such a column returned the raw `Uint8List` in
+  1.4.0 and earlier, and now decodes by default. This default is the driver's
+  own choice, not node-oracledb parity: node-oracledb returns the raw `Buffer`
+  unless `oracledb.future.oldJsonColumnAsObj` is enabled. A value that is not
+  strict JSON fails the call loudly with `OracleException`
+  (`oraUnsupportedType`, naming the column) instead of returning bytes — this
+  includes values the default *lax* `IS JSON` constraint accepts, such as
+  unquoted field names, single-quoted strings, upper-case `TRUE`, and a
+  zero-length `EMPTY_BLOB()`. Corrupt OSON instead keeps the OSON decoder's
+  error code (for example, `oraProtocolError`).
   `CLOB` / `VARCHAR2` / `RAW` `IS JSON` columns, plain `BLOB` columns, views
   and expressions over the column (which describe without the flag) are
-  unchanged. A `REF CURSOR` OUT bind or nested `CURSOR()` column carrying the
-  BLOB remains undecodable, like any such cursor row carrying a LOB (existing
-  known limitation).
+  unchanged. The rows of a `REF CURSOR` OUT bind or a nested `CURSOR()`
+  column decode the BLOB too.
+- **New `OracleExecuteOptions(rawJsonBlobs: true)` opts out of that decode**
+  per call: the column comes back as the stored `Uint8List` — the type 1.4.0
+  returned — with no JSON validation (so lax or empty values read without an
+  error) and SQL NULL still `null`. It covers every row the call returns —
+  eager `execute()`, every batch of `resultSet: true`, implicit result sets
+  (eager and `resultSet: true`), and the rows of a `REF CURSOR` OUT bind or
+  nested `CURSOR()` column — and leaves every other column alone (a native
+  `JSON` column still decodes). `OracleExecuteOptions(fetchLobs: true)` still
+  returns an `OracleLob` handle over the untouched bytes and wins when both are
+  set for ordinary rows; a cursor-embedded BLOB fails with `fetchLobs: true`
+  because those rows cannot return LOB handles. `queryStream()` /
+  `executeStream()` take no options and always decode.
+  Validated against Oracle 23ai and Oracle 21c.
 
 ### Fixes
 
@@ -94,8 +107,9 @@
   ("Integer too large: size=114"), and on Oracle 21c the malformed stream
   left the connection unusable. As in node-oracledb (`requiresDefine`), the
   driver now sends the cursor's LOB-prefetch defines before its first fetch.
-  REF CURSOR OUT binds and nested `CURSOR()` columns are unchanged. Validated
-  against Oracle 23ai and Oracle 21c.
+  REF CURSOR OUT binds and nested `CURSOR()` columns carrying such a column
+  get the same defines and decode too (`fetchLobs: true` still rejects a LOB
+  there). Validated against Oracle 23ai and Oracle 21c.
 - **`preserveTimestampTimeZone: true` now applies to the first row batch of a
   query that selects a CLOB / NCLOB / BLOB or native JSON column.** That
   batch arrives in the driver's DEFINE round trip, which decoded `TIMESTAMP

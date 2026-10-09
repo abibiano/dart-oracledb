@@ -1992,6 +1992,369 @@ void main() {
             await connection.execute('DROP TABLE $osonTable PURGE');
           }
         });
+
+        // ------------------------------------------------------------------
+        // DW-8: `OracleExecuteOptions(rawJsonBlobs: true)` — the per-call
+        // raw-bytes opt-out from the default decode. Every shape below runs on
+        // a plain `BLOB IS JSON` column (no native-JSON requirement) except the
+        // OSON-format case, which honors the native-JSON probe like its
+        // siblings above.
+        // ------------------------------------------------------------------
+        const rawJson = OracleExecuteOptions(rawJsonBlobs: true);
+
+        /// Inserts [rowCount] text documents with ids `base + 1 .. base +
+        /// rowCount`; the LAST one uses lax syntax (unquoted field name), which
+        /// the default `IS JSON` constraint accepts but the decoder rejects.
+        /// Returns `base`.
+        Future<int> insertNumberedDocs(int rowCount) async {
+          final base = nextTestId() * 100;
+          await connection.execute('''
+            BEGIN
+              FOR i IN 1..$rowCount LOOP
+                INSERT INTO $testTable (id, doc) VALUES ($base + i,
+                  UTL_RAW.CAST_TO_RAW(CASE WHEN i = $rowCount
+                    THEN '{lax:' || i || '}'
+                    ELSE '{"row":' || i || '}' END));
+              END LOOP;
+            END;
+          ''');
+          return base;
+        }
+
+        Uint8List numberedDoc(int i, int rowCount) =>
+            utf8Bytes(i == rowCount ? '{lax:$i}' : '{"row":$i}');
+
+        void expectNumberedRaw(List<Object?> docs, int rowCount, String path) {
+          expect(docs, hasLength(rowCount), reason: path);
+          for (var i = 0; i < rowCount; i++) {
+            expect(docs[i], isA<Uint8List>(), reason: '$path row ${i + 1}');
+            expect(
+              docs[i],
+              equals(numberedDoc(i + 1, rowCount)),
+              reason: '$path row ${i + 1}',
+            );
+          }
+        }
+
+        test('rawJsonBlobs: true returns the stored bytes on eager execute() — '
+            'lax and EMPTY_BLOB() values included — while the default '
+            'decodes; SQL NULL and the other columns are unaffected', () async {
+          final good = utf8Bytes('{"k\u{00E9}":[1,true,null]}');
+          final laxBytes = utf8Bytes('{a:1}');
+          final goodId = await insertDoc(good);
+          final laxId = await insertDoc(laxBytes);
+          final emptyId = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, EMPTY_BLOB())',
+            [emptyId],
+          );
+          final nullId = nextTestId();
+          final plain = utf8Bytes('{"plain":1}');
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc, plain, cdoc) '
+            'VALUES (:1, NULL, :2, :3)',
+            [nullId, plain, '{"c":1}'],
+          );
+          final sql =
+              'SELECT id, doc, plain, cdoc FROM $testTable '
+              'WHERE id IN (:1, :2, :3, :4) ORDER BY id';
+          final binds = [goodId, laxId, emptyId, nullId];
+
+          // The default decodes, so the lax / empty rows fail the whole call —
+          // and the error names the opt-out.
+          await expectLater(
+            connection.execute(sql, binds),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    contains('rawJsonBlobs: true'),
+                  ),
+            ),
+          );
+
+          final raw = await connection.execute(sql, binds, rawJson);
+          expect(raw.rows, hasLength(4));
+          final docs = raw.rows.map((r) => r['DOC']).toList();
+          expect(docs[0], isA<Uint8List>());
+          expect(docs[0], equals(good));
+          expect(docs[1], equals(laxBytes));
+          expect(docs[2], isA<Uint8List>());
+          expect(docs[2], isEmpty, reason: 'EMPTY_BLOB() is zero bytes');
+          expect(docs[3], isNull, reason: 'SQL NULL stays null');
+          expect(raw.rows[3]['PLAIN'], equals(plain));
+          expect(raw.rows[3]['CDOC'], equals('{"c":1}'));
+          // Only the value changes: the describe still flags the column.
+          final docColumn = raw.columns.firstWhere((c) => c.name == 'DOC');
+          expect(docColumn.isJson, isTrue);
+
+          // The option is per call: the very next default fetch decodes again
+          // (options are not part of the statement-cache key).
+          expect(
+            await selectDoc(goodId),
+            equals(<String, Object?>{
+              'k\u{00E9}': <Object?>[1, true, null],
+            }),
+          );
+          final rawAgain = await connection.execute(
+            'SELECT doc FROM $testTable WHERE id = :1',
+            [goodId],
+            rawJson,
+          );
+          expect(rawAgain.rows.single['DOC'], equals(good));
+          expect(connection.hasOpenLob, isFalse);
+        });
+
+        test('rawJsonBlobs: true keeps every row raw across FETCH rounds: an '
+            'eager SELECT over the prefetch window, and resultSet: true in its '
+            'first and continuation batches', () async {
+          const rowCount = 60; // > the default prefetch window (50)
+          final base = await insertNumberedDocs(rowCount);
+          final sql =
+              'SELECT id, doc FROM $testTable '
+              'WHERE id BETWEEN $base + 1 AND $base + $rowCount ORDER BY id';
+
+          final eager = await connection.execute(sql, null, rawJson);
+          expectNumberedRaw(
+            eager.rows.map((r) => r['DOC']).toList(),
+            rowCount,
+            'eager',
+          );
+
+          final result = await connection.execute(
+            sql,
+            null,
+            const OracleExecuteOptions(
+              resultSet: true,
+              fetchSize: 4,
+              rawJsonBlobs: true,
+            ),
+          );
+          final rs = result.resultSet!;
+          final docs = <Object?>[];
+          try {
+            for (
+              var row = await rs.getRow();
+              row != null;
+              row = await rs.getRow()
+            ) {
+              docs.add(row['DOC']);
+            }
+          } finally {
+            await rs.close();
+          }
+          // The lax LAST row arrives on a continuation batch: no validation.
+          expectNumberedRaw(docs, rowCount, 'resultSet');
+
+          // Without the option the same rows decode, so the lax row fails.
+          await expectLater(
+            connection.execute(sql),
+            throwsBlobJsonUnsupported(),
+          );
+          expect(connection.hasOpenResultSet, isFalse);
+          expect(
+            await selectDoc(base + 1),
+            equals(<String, Object?>{'row': 1}),
+          );
+        });
+
+        test('rawJsonBlobs: true keeps an implicit result raw, eager and lazy '
+            '(resultSet: true), across FETCH rounds', () async {
+          const rowCount = 60; // > the default prefetch window (50)
+          final base = await insertNumberedDocs(rowCount);
+          String block(int last) =>
+              '''
+            DECLARE
+              c1 SYS_REFCURSOR;
+            BEGIN
+              OPEN c1 FOR SELECT id, doc FROM $testTable
+                WHERE id BETWEEN $base + 1 AND $base + $last ORDER BY id;
+              DBMS_SQL.RETURN_RESULT(c1);
+            END;
+          ''';
+
+          final eager = await connection.execute(
+            block(rowCount),
+            null,
+            rawJson,
+          );
+          final rows = eager.implicitResults.single as List<OracleRow>;
+          expectNumberedRaw(
+            rows.map((r) => r['DOC']).toList(),
+            rowCount,
+            'eager implicit',
+          );
+
+          final lazy = await connection.execute(
+            block(rowCount),
+            null,
+            const OracleExecuteOptions(
+              resultSet: true,
+              fetchSize: 4,
+              rawJsonBlobs: true,
+            ),
+          );
+          final rs = lazy.implicitResults.single as OracleResultSet;
+          try {
+            final streamed = await rs.getRows(rowCount + 10);
+            expectNumberedRaw(
+              streamed.map((r) => r['DOC']).toList(),
+              rowCount,
+              'lazy implicit',
+            );
+          } finally {
+            await rs.close();
+          }
+
+          // The default still decodes the strict rows (the lax last one is
+          // left out so the call succeeds).
+          final decoded = await connection.execute(block(rowCount - 1));
+          final decodedRows = decoded.implicitResults.single as List<OracleRow>;
+          expect(decodedRows, hasLength(rowCount - 1));
+          expect(decodedRows.first['DOC'], equals(<String, Object?>{'row': 1}));
+          expect(connection.hasOpenResultSet, isFalse);
+        });
+
+        test('fetchLobs: true wins over rawJsonBlobs: true — an OracleLob over '
+            'the stored bytes, eager and resultSet: true', () async {
+          final bytes = utf8Bytes('{"both":true}');
+          final id = await insertDoc(bytes);
+          final sql = 'SELECT doc FROM $testTable WHERE id = :1';
+
+          final eager = await connection.execute(sql, [
+            id,
+          ], const OracleExecuteOptions(fetchLobs: true, rawJsonBlobs: true));
+          final lob = eager.rows.single['DOC']! as OracleLob;
+          try {
+            expect(await lob.read(), equals(bytes));
+          } finally {
+            await lob.close();
+          }
+
+          final streamed = await connection.execute(
+            sql,
+            [id],
+            const OracleExecuteOptions(
+              resultSet: true,
+              fetchLobs: true,
+              rawJsonBlobs: true,
+            ),
+          );
+          final rs = streamed.resultSet!;
+          try {
+            final row = await rs.getRow();
+            final handle = row!['DOC']! as OracleLob;
+            try {
+              expect(await handle.read(), equals(bytes));
+            } finally {
+              await handle.close();
+            }
+          } finally {
+            await rs.close();
+          }
+          expect(connection.hasOpenLob, isFalse);
+          expect(connection.hasOpenResultSet, isFalse);
+        });
+
+        test('rawJsonBlobs: true reaches REF CURSOR OUT bind rows and nested '
+            'CURSOR() rows; both still decode by default', () async {
+          final bytes = utf8Bytes('{"cursor":[1,2]}');
+          const decodedDoc = <String, Object?>{
+            'cursor': <Object?>[1, 2],
+          };
+          final id = await insertDoc(bytes);
+          final proc = uniqueObjectName('pjbraw');
+          await connection.execute(
+            'CREATE OR REPLACE PROCEDURE $proc (rc OUT SYS_REFCURSOR) IS '
+            'BEGIN OPEN rc FOR SELECT doc FROM $testTable WHERE id = $id; END;',
+          );
+          try {
+            Future<Object?> refCursorDoc(OracleExecuteOptions? options) async {
+              final result = await connection.execute('BEGIN $proc(:c); END;', {
+                'c': OracleBind.out(type: OracleDbType.cursor),
+              }, options);
+              final rs = result.outBinds['c']! as OracleResultSet;
+              try {
+                return (await rs.getRows()).single['DOC'];
+              } finally {
+                await rs.close();
+              }
+            }
+
+            final rawRef = await refCursorDoc(rawJson);
+            expect(rawRef, isA<Uint8List>());
+            expect(rawRef, equals(bytes));
+            expect(await refCursorDoc(null), equals(decodedDoc));
+          } finally {
+            await connection.execute('DROP PROCEDURE $proc');
+          }
+
+          final nestedSql =
+              'SELECT CURSOR(SELECT doc FROM $testTable WHERE id = $id) AS n '
+              'FROM dual';
+          final rawNested = await connection.execute(nestedSql, null, rawJson);
+          final rawRows = rawNested.rows.single['N']! as List<OracleRow>;
+          expect(rawRows.single['DOC'], isA<Uint8List>());
+          expect(rawRows.single['DOC'], equals(bytes));
+          final nested = await connection.execute(nestedSql);
+          final rows = nested.rows.single['N']! as List<OracleRow>;
+          expect(rows.single['DOC'], equals(decodedDoc));
+          expect(connection.hasOpenResultSet, isFalse);
+        });
+
+        test('rawJsonBlobs: true returns an IS JSON FORMAT OSON column as its '
+            'OSON image (21c reports only the OSON flag) while a native JSON '
+            'column in the same row still decodes', () async {
+          if (skipWithoutNativeJson()) return;
+          final osonTable = uniqueTableName('json_blob_raw');
+          await connection.execute(
+            'CREATE TABLE $osonTable (id NUMBER PRIMARY KEY, '
+            'odoc BLOB CHECK (odoc IS JSON FORMAT OSON), j JSON) '
+            'TABLESPACE USERS',
+          );
+          try {
+            await connection.execute(
+              'INSERT INTO $osonTable (id, odoc, j) VALUES (1, :1, :2)',
+              [
+                <String, Object?>{'o': 1},
+                <String, Object?>{'n': 2},
+              ],
+            );
+            final sql = 'SELECT odoc, j FROM $osonTable WHERE id = 1';
+            final decoded = await connection.execute(sql);
+            expect(
+              decoded.rows.single['ODOC'],
+              equals(<String, Object?>{'o': 1}),
+            );
+
+            final raw = await connection.execute(sql, null, rawJson);
+            final bytes = raw.rows.single['ODOC'];
+            expect(bytes, isA<Uint8List>());
+            expect(
+              (bytes! as Uint8List).sublist(0, 3),
+              equals([0xff, 0x4a, 0x5a]),
+            );
+            // A native JSON column is not a BLOB: the option leaves it alone.
+            expect(raw.rows.single['J'], equals(<String, Object?>{'n': 2}));
+
+            // Byte-identical to what an OracleLob handle reads.
+            final viaLob = await connection.execute(
+              sql,
+              null,
+              const OracleExecuteOptions(fetchLobs: true),
+            );
+            final lob = viaLob.rows.single['ODOC']! as OracleLob;
+            try {
+              expect(await lob.read(), equals(bytes));
+            } finally {
+              await lob.close();
+            }
+          } finally {
+            await connection.execute('DROP TABLE $osonTable PURGE');
+          }
+        });
       });
     },
   );

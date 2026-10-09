@@ -1915,6 +1915,8 @@ void main() {
           } on OracleException catch (e) {
             expect(e.message, isNot(contains(secret)));
             expect(e.toString(), isNot(contains(secret)));
+            // Both opt-outs are named: the raw Uint8List and the OracleLob.
+            expect(e.message, contains('rawJsonBlobs: true'));
             expect(e.message, contains('fetchLobs: true'));
           }
         }

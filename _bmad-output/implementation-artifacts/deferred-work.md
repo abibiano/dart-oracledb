@@ -74,7 +74,9 @@ origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-
 location: lib/src/transport/transport.dart:2130-2137; lib/src/protocol/oson.dart:1096-1126
 severity: high
 reason: Retro action 2 (F4), a HUMAN DECISION: opt-in flag vs documented breaking change, then pick the release version for CHANGELOG Unreleased (pubspec is 1.4.0) and correct the node-oracledb parity claim in the oson.dart doc. CHANGELOG line 73 admits the old raw-Uint8List behaviour changed.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-blob-json-raw-optout
+resolution-undo: 389edda2043c4fe47c31b56e88c72bdb2bc2b9932f7cdbf22b9c7b01b026908b 2026-10-09 7374617475733a206f70656e
 decision (Abibiano, 2026-10-09): keep BLOB IS JSON/IS OSON decode default-on, add a per-query raw opt-out option (e.g. rawJsonBlobs) returning Uint8List, document the behavior change in CHANGELOG, release as 1.5.0, and correct the node-oracledb parity claim in the oson.dart doc.
 
 ### DW-9: Four hand-copied needs-LOB-define / is-JSON column predicates disagree: two test CLOB and BLOB only, two also test JSON.
@@ -975,4 +977,12 @@ origin: spec-deferred dcbbadeeba7c
 location: lib/src/protocol/result_set_cursor.dart:507
 source_spec: `spec-refcursor-lob-json-define.md`
 reason: ResultSetCursor._fetchNextBatch falls back to fetchRows when DEFINE returns zero rows with moreRowsToFetch, after clearing requiresFullExecute. A test transport that produces this response, or a reproducible Oracle server response, is needed to determine whether the nested cursor value then lacks its describe. The live combined-shape cases returned rows in the DEFINE response and passed.
+status: open
+
+### DW-126: queryStream()/executeStream()/executeMany() have no way to opt out of BLOB IS JSON decode, and the decode error hint names options those entry points cannot take.
+origin: spec-deferred 2ec3429dcef9
+location: lib/src/connection.dart (queryStream/executeStream), lib/src/protocol/oson.dart error hint
+source_spec: `spec-dw-8-blob-json-raw-optout.md`
+severity: low
+reason: The spec's Never list excludes new options there; the intent says per-query on OracleExecuteOptions. Documented in CHANGELOG/README/dartdoc. A stream caller hitting a lax or empty value cannot get raw bytes.
 status: open

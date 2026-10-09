@@ -114,6 +114,13 @@ class ResultSetCursor {
   /// early (`closeLobHandles` is null), wedging the connection with no public API
   /// to find them. They are unused on the eager drain path ([drainRemaining]),
   /// which never wraps.
+  ///
+  /// [rawJsonBlobs] (`OracleExecuteOptions.rawJsonBlobs`) is forwarded to every
+  /// per-batch `Transport.materializeLobs` call, so a BLOB `IS JSON` column
+  /// stays raw bytes in EVERY fetched batch rather than only the first one the
+  /// caller materialized. Inert when [materializePerBatch] is false — the
+  /// caller's result-wide pass applies it there — and under [wrapLob], which
+  /// already skips the decode.
   ResultSetCursor({
     required Transport transport,
     required int cursorId,
@@ -129,6 +136,7 @@ class ResultSetCursor {
     Object Function(LobLocator locator)? wrapLob,
     bool Function(Object? value)? isLobHandle,
     Future<void> Function(Iterable<Object> handles)? closeLobHandles,
+    bool rawJsonBlobs = false,
     Duration? fetchTimeout = const Duration(minutes: 2),
   }) : _transport = transport,
        _cursorId = cursorId,
@@ -143,6 +151,7 @@ class ResultSetCursor {
        _wrapLob = wrapLob,
        _isLobHandle = isLobHandle,
        _closeLobHandles = closeLobHandles,
+       _rawJsonBlobs = rawJsonBlobs,
        _fetchTimeout = fetchTimeout,
        _buffer = Queue<List<Object?>>.of(firstBatch),
        _previousRoundLastRow = firstBatch.isNotEmpty ? firstBatch.last : null,
@@ -171,6 +180,10 @@ class ResultSetCursor {
 
   /// Closes handles the caller never received. Null when [_wrapLob] is.
   final Future<void> Function(Iterable<Object> handles)? _closeLobHandles;
+
+  /// Keeps a BLOB `IS JSON` / `IS OSON` column as raw bytes on every per-batch
+  /// materialize (`OracleExecuteOptions.rawJsonBlobs`). False by default.
+  final bool _rawJsonBlobs;
 
   /// Handles from the CURRENT batch that were handed to the caller, tracked by
   /// identity so an aliased handle counts as delivered for every row it appears
@@ -572,6 +585,10 @@ class ResultSetCursor {
                       wrappedThisBatch.add(handle);
                       return handle;
                     },
+              // Same raw-bytes answer as the batch the caller materialized
+              // before seeding this cursor, so a continuation batch never
+              // decodes a BLOB IS JSON column the first batch left raw.
+              rawJsonBlobs: _rawJsonBlobs,
             )
           : fetched;
       // Eager nested-cursor materialization runs AFTER LOB materialization and

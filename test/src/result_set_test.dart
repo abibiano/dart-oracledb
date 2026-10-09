@@ -144,6 +144,7 @@ class _FakeResultSetTransport extends Transport {
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
     Object Function(LobLocator locator)? wrapLob,
+    bool rawJsonBlobs = false,
   }) async {
     materializeCalls++;
     materializeWrapLobFlags.add(wrapLob != null);

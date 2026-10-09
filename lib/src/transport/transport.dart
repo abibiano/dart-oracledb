@@ -1297,6 +1297,13 @@ class Transport {
   /// [columns] is null; pass it explicitly wherever the response may carry no
   /// describe (a fetch round). A cell that fails to decode throws
   /// [OracleException] for the whole call — no partially decoded rows.
+  ///
+  /// [rawJsonBlobs] (`OracleExecuteOptions.rawJsonBlobs`) switches that decode
+  /// off: a flagged BLOB cell is materialized exactly like a plain BLOB — the
+  /// raw `Uint8List` as read, with no JSON validation, so content that is not
+  /// strict JSON comes back without an error. It never changes the wrap path
+  /// ([wrapLob] already skips the decode and wins when both are set), and it
+  /// touches nothing but BLOB `IS JSON` / `IS OSON` row cells.
   @internal
   Future<ExecuteResponse> materializeLobs(
     ExecuteResponse response, {
@@ -1305,6 +1312,7 @@ class Transport {
     bool dmlReturning = false,
     Duration? timeout = const Duration(minutes: 2),
     Object Function(LobLocator locator)? wrapLob,
+    bool rawJsonBlobs = false,
   }) {
     return _materializeLobValues(
       response,
@@ -1313,6 +1321,7 @@ class Transport {
       dmlReturning: dmlReturning,
       timeout: timeout,
       wrapLob: wrapLob,
+      rawJsonBlobs: rawJsonBlobs,
     );
   }
 
@@ -1972,7 +1981,8 @@ class Transport {
   /// Replaces every [LobLocator] in a successful response's rows and OUT
   /// binds with its materialized value — `String` for CLOB, `Uint8List` for
   /// BLOB, and the decoded Dart JSON value for a row cell of a BLOB column
-  /// flagged `IS JSON` / `IS OSON` in [columns] (see [materializeLobs]).
+  /// flagged `IS JSON` / `IS OSON` in [columns] unless [rawJsonBlobs] is set
+  /// (see [materializeLobs]).
   ///
   /// Always runs AFTER the round trip that produced [response] has completed —
   /// never inside [sendExecute]. Every call site is in the connection layer or
@@ -1990,6 +2000,7 @@ class Transport {
     bool dmlReturning = false,
     Duration? timeout,
     Object Function(LobLocator locator)? wrapLob,
+    bool rawJsonBlobs = false,
   }) async {
     if (!response.isSuccess) return response;
     final hasRowLob = response.rows.any(
@@ -2127,11 +2138,13 @@ class Transport {
     // (node-oracledb resultset.js `isJson` / `isOson` output converter). On the
     // materialize path its bytes are decoded into the native-JSON Dart mapping
     // right after the read. Never under fetchLobs (wrapLob != null): the
-    // OracleLob handle is the raw-bytes opt-out and stays untouched. Only BLOB:
-    // CLOB / VARCHAR2 / RAW IS JSON columns are out of scope and unchanged.
+    // OracleLob handle stays untouched. Never under rawJsonBlobs either: the
+    // caller asked for the stored bytes, so the cell takes the plain-BLOB
+    // branch below (a Uint8List, no validation). Only BLOB: CLOB / VARCHAR2 /
+    // RAW IS JSON columns are out of scope and unchanged.
     final effectiveColumns = columns ?? response.columnMetadata;
     final jsonBlobColumns = <int, ColumnMetadata>{
-      if (wrapLob == null && hasRowLob)
+      if (wrapLob == null && !rawJsonBlobs && hasRowLob)
         for (var i = 0; i < effectiveColumns.length; i++)
           if (effectiveColumns[i].oracleType == oraTypeBlob &&
               (effectiveColumns[i].isJson || effectiveColumns[i].isOson))
