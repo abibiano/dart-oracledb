@@ -44,10 +44,10 @@ void main() {
           hasJson
               ? "INSERT INTO $table (id, c, n, b, bj, j) VALUES (1, 'hello clob', "
                     "TO_NCLOB(UNISTR('caf\\00E9')), UTL_RAW.CAST_TO_RAW('bin'), "
-                    "UTL_RAW.CAST_TO_RAW('{\"b\":2}'), JSON('{\"a\":1}'))"
+                    "UTL_RAW.CAST_TO_RAW('{\"b\":2.0}'), JSON('{\"a\":1}'))"
               : "INSERT INTO $table (id, c, n, b, bj) VALUES (1, 'hello clob', "
                     "TO_NCLOB(UNISTR('caf\\00E9')), UTL_RAW.CAST_TO_RAW('bin'), "
-                    "UTL_RAW.CAST_TO_RAW('{\"b\":2}'))",
+                    "UTL_RAW.CAST_TO_RAW('{\"b\":2.0}'))",
         );
         await connection.commit();
       });
@@ -168,11 +168,16 @@ void main() {
           final rows = await rs.getRows();
           await rs.close();
           expect(rows.single['BJ'], equals({'b': 2}));
+          expect((rows.single['BJ'] as Map<String, Object?>)['b'], isA<int>());
           final nestedResult = await connection.execute(
             'SELECT CURSOR(SELECT bj FROM $table) AS n FROM $outer',
           );
           final nested = nestedResult.rows.single['N'] as List<OracleRow>;
           expect(nested.single['BJ'], equals({'b': 2}));
+          expect(
+            (nested.single['BJ'] as Map<String, Object?>)['b'],
+            isA<int>(),
+          );
         } finally {
           await connection.execute('DROP PROCEDURE $proc');
         }

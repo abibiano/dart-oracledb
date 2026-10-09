@@ -451,6 +451,40 @@ void main() {
   });
 
   group('OSON decode — hand-crafted fixtures', () {
+    test('malformed UTF-8 in a string node raises oraProtocolError', () {
+      // String node 0x33, length 1, payload 0xff (never valid UTF-8).
+      expect(
+        () => decodeOson(_scalarDoc('33 01 ff')),
+        _throwsOracle(oraProtocolError, 'Corrupt OSON payload'),
+      );
+      try {
+        decodeOson(_scalarDoc('33 01 ff'));
+        fail('Expected a protocol error');
+      } on OracleException catch (e) {
+        expect(e.cause, isNull, reason: 'the cause must not expose OSON bytes');
+      }
+      // Packed-length string node: type 0x02 = length 2, truncated sequence.
+      expect(
+        () => decodeOson(_scalarDoc('02 e2 82')),
+        _throwsOracle(oraProtocolError),
+      );
+    });
+
+    test('malformed UTF-8 in a field name raises oraProtocolError', () {
+      final doc = Uint8List.fromList(encodeOson(<String, Object?>{'ab': 1}));
+      var at = -1;
+      for (var i = 0; i + 2 < doc.length; i++) {
+        if (doc[i] == 2 && doc[i + 1] == 0x61 && doc[i + 2] == 0x62) at = i;
+      }
+      expect(at, isNonNegative, reason: 'length-prefixed name in segment');
+      doc[at + 1] = 0xff;
+      doc[at + 2] = 0xfe;
+      expect(
+        () => decodeOson(doc),
+        _throwsOracle(oraProtocolError, 'Corrupt OSON payload'),
+      );
+    });
+
     test('zero-length integer node (0x40 / 0x50) decodes to 0', () {
       // Scalar document: magic, version 1, flags INLINE_LEAF|IS_SCALAR,
       // uint16 tree segment size, then the bare node byte. The length
@@ -1663,6 +1697,31 @@ void main() {
         expect(decodeJsonBlobBytes(utf8Bytes('-2.5')), equals(-2.5));
         expect(decodeJsonBlobBytes(utf8Bytes('true')), isTrue);
         expect(decodeJsonBlobBytes(utf8Bytes('false')), isFalse);
+        // Integral doubles normalize to int like OSON NUMBER; fractions stay.
+        for (final text in ['1.0', '1e2', '-0.0', '1E+2']) {
+          expect(
+            decodeJsonBlobBytes(utf8Bytes(text)),
+            isA<int>(),
+            reason: text,
+          );
+        }
+        expect(decodeJsonBlobBytes(utf8Bytes('1e2')), equals(100));
+        expect(decodeJsonBlobBytes(utf8Bytes('-0.0')), equals(0));
+        expect(
+          decodeJsonBlobBytes(utf8Bytes('{"a":[2.0,{"b":1.5}]}')),
+          equals(<String, Object?>{
+            'a': <Object?>[
+              2,
+              <String, Object?>{'b': 1.5},
+            ],
+          }),
+        );
+        final nested =
+            decodeJsonBlobBytes(utf8Bytes('{"a":[2.0]}'))!
+                as Map<String, Object?>;
+        expect((nested['a']! as List<Object?>).single, isA<int>());
+        // Beyond 2^53 stays a double (decodeNumber's safe-range rule).
+        expect(decodeJsonBlobBytes(utf8Bytes('1e30')), isA<double>());
         // A JSON `null` document is a value, not SQL NULL — it still decodes.
         expect(decodeJsonBlobBytes(utf8Bytes('null')), isNull);
       },
@@ -1837,6 +1896,16 @@ void main() {
             () => decodeJsonBlobBytes(_hex(hex)),
             throwsUnsupported('not strict JSON'),
             reason: hex,
+          );
+        }
+      });
+
+      test('non-finite number literals are rejected', () {
+        for (final text in ['1e999', '-1e999', '[1,{"a":1e400}]']) {
+          expect(
+            () => decodeJsonBlobBytes(utf8Bytes(text)),
+            throwsUnsupported('not strict JSON'),
+            reason: text,
           );
         }
       });

@@ -712,6 +712,13 @@ Object? decodeOson(Uint8List data) {
       message: 'Truncated or corrupt OSON payload',
       cause: e,
     );
+  } on FormatException catch (e) {
+    // Malformed UTF-8 in a field name or string node. The message never
+    // echoes the document content.
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message: 'Corrupt OSON payload: ${_formatErrorSummary(e)}',
+    );
   }
 }
 
@@ -1095,7 +1102,7 @@ class _OsonDecoder {
 ///
 /// 1. Bytes starting with the OSON magic `FF 4A 5A` decode through
 ///    [decodeOson]; its errors propagate unchanged (`oraProtocolError` for a
-///    truncated or corrupt document, `oraUnsupportedType` for unsupported
+///    truncated or corrupt document, including malformed UTF-8 names/strings, `oraUnsupportedType` for unsupported
 ///    nodes).
 /// 2. Anything else is JSON text. A byte-order mark selects the encoding and is
 ///    stripped (`EF BB BF` UTF-8, `FF FE` UTF-16LE, `FE FF` UTF-16BE). Without
@@ -1103,7 +1110,9 @@ class _OsonDecoder {
 ///    (big-endian when the zero comes first) — RFC 8259 JSON text never holds
 ///    an unescaped NUL, so this cannot misread a UTF-8 document, and Oracle's
 ///    `IS JSON` check accepts BOM-less UTF-16 — and everything else is UTF-8.
-///    The text is then parsed by `jsonDecode` (strict RFC 8259).
+///    The text is then parsed by `jsonDecode` (strict RFC 8259); integral
+///    numbers (`1.0`, `1e2`) decode to `int` as OSON NUMBER does, and a
+///    non-finite literal such as `1e999` is rejected.
 ///
 /// Fail loud — never the raw bytes, never a silent `null`: throws
 /// [OracleException] with `oraUnsupportedType` for a zero-length value, an
@@ -1126,7 +1135,7 @@ Object? decodeJsonBlobBytes(Uint8List data) {
   }
   final text = _decodeJsonText(data);
   try {
-    return jsonDecode(text);
+    return jsonDecode(text, reviver: _textJsonReviver);
   } on FormatException catch (e) {
     throw _jsonBlobError(
       'the content is not strict JSON text (${_formatErrorSummary(e)}). '
@@ -1134,6 +1143,21 @@ Object? decodeJsonBlobBytes(Uint8List data) {
       'accepts, is not supported; IS JSON STRICT keeps such values out',
     );
   }
+}
+
+/// Aligns text-JSON numbers with OSON NUMBER decoding: an integral double
+/// within the safe range (`1.0`, `1e2`) becomes `int`, like `decodeNumber`,
+/// and a non-finite literal (`1e999` parses to Infinity) is rejected, since
+/// strict JSON has no Infinity and it would re-bind as BINARY_DOUBLE.
+Object? _textJsonReviver(Object? key, Object? value) {
+  if (value is! double) return value;
+  if (!value.isFinite) {
+    throw const FormatException('number literal out of double range');
+  }
+  if (value == value.truncateToDouble() && value.abs() <= 9007199254740992) {
+    return value.toInt();
+  }
+  return value;
 }
 
 /// Decodes JSON text bytes to a Dart string, choosing the encoding as

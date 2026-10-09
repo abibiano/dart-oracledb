@@ -105,7 +105,9 @@ origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-
 location: lib/src/protocol/oson.dart:1140 vs 884-888
 severity: medium
 reason: Retro action 5 (F9), a 13.2 x 13.3 cross-story interaction. Normalize integral doubles to int via a reviver and reject non-finite literals from text JSON.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-oson-decode-hardening
+resolution-undo: 6087acf5ea5bf6a9d0b7ea05523c80825c3ebd94b55fb74a57a09bddf357f0e6 2026-10-09 7374617475733a206f70656e
 
 ### DW-12: JSON bind validation gaps: no depth or cycle guard (StackOverflowError), UTC DateTime stored zone-less, a fetched OSON v3 key over 255 bytes cannot re-bind, declared-JSON String/Uint8List roots silently double-encode, NaN and Infinity accepted by default, validation repeated up to 3 times per document.
 
@@ -122,7 +124,9 @@ origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-
 location: lib/src/protocol/oson.dart:858, 879-883, 948
 severity: medium
 reason: Retro action 7 (F11). Wrap FormatException as OracleException (oraProtocolError) in decodeOson and make readJsonLocator add column context for any decode failure.
-status: open
+status: done 2026-10-09
+resolution: resolved by sweep bundle dw-oson-decode-hardening
+resolution-undo: 6087acf5ea5bf6a9d0b7ea05523c80825c3ebd94b55fb74a57a09bddf357f0e6 2026-10-09 7374617475733a206f70656e
 
 ### DW-14: Intermittent first-run failure (ORA-03125 in the eager-continuation test setup) of the 23ai JSON integration suites, output never captured and never ledgered.
 
@@ -985,4 +989,12 @@ location: lib/src/connection.dart (queryStream/executeStream), lib/src/protocol/
 source_spec: `spec-dw-8-blob-json-raw-optout.md`
 severity: low
 reason: The spec's Never list excludes new options there; the intent says per-query on OracleExecuteOptions. Documented in CHANGELOG/README/dartdoc. A stream caller hitting a lax or empty value cannot get raw bytes.
+status: open
+
+### DW-127: Numeric JSON literals outside the exact double range can lose precision before the text JSON reviver runs.
+origin: spec-deferred cf5fffe584a5
+location: lib/src/protocol/oson.dart:1153
+source_spec: `bmad-build-auto-result-oson-decode-hardening.md`
+severity: medium
+reason: Dart jsonDecode rounds 9007199254740993.0 to 9007199254740992.0 before the reviver sees it. The OSON NUMBER decoder also reconstructs through double. Exact numeric semantics need a separate parser and cross-format design.
 status: open

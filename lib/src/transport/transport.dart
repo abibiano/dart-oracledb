@@ -2170,6 +2170,14 @@ class Transport {
           message: 'BLOB IS JSON column "${column.name}": ${e.message}',
           cause: e.cause,
         );
+      } on FormatException catch (e) {
+        // Defensive: decodeJsonBlobBytes wraps these, but any decode failure
+        // must carry the column context.
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message: 'BLOB IS JSON column "${column.name}": ${e.message}',
+          cause: e,
+        );
       }
       decodedJson[locator] = value;
       return value;
