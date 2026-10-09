@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Oracle-specific scalars inside native `JSON` values now decode** instead of
+  failing the whole row. A JSON document (or scalar JSON value, e.g.
+  `JSON_SCALAR(SYSDATE)`) that carries Oracle `DATE` / `TIMESTAMP` values
+  decodes them to `DateTime` and `RAW` / binary to `Uint8List` (as the
+  matching columns do), `TIMESTAMP WITH TIME ZONE` always to
+  `OracleTimestampTz` regardless of `preserveTimestampTimeZone` (a column
+  returns a UTC `DateTime` by default), and `BINARY_FLOAT` / `BINARY_DOUBLE`
+  to `double` (NaN and ±Infinity included). BCE dates and region-name time
+  zones still fail loudly, as they do for columns. Surrounding members and
+  key order are unaffected. Validated against Oracle 23ai and Oracle 21c.
+- **Behavior change:** documents that previously failed with
+  `oraUnsupportedType` now return maps/lists containing `DateTime`,
+  `OracleTimestampTz`, `Uint8List`, or NaN/±Infinity `double` members, so
+  `jsonEncode()` on such a fetched document can throw
+  `JsonUnsupportedObjectError`. Decoding is one-way for now: binding
+  `DateTime`, `OracleTimestampTz`, `Uint8List`, or non-finite `double`
+  members inside a JSON document is still rejected at the call site, and a
+  finite fetched `BINARY_FLOAT` / `BINARY_DOUBLE` member re-binds as an OSON
+  `NUMBER` (scalar type changes; a `BINARY_FLOAT` keeps its widened
+  single-precision value). Convert those members before writing a fetched
+  document back.
+- JSON values holding the remaining Oracle-specific scalars — `INTERVAL YEAR
+  TO MONTH`, `INTERVAL DAY TO SECOND`, `JsonId`, VECTOR — still fail loudly
+  with `OracleException` (`oraUnsupportedType`), whose message now names the
+  kind and the supported scope.
+
 ## 1.4.0
 
 Public LOB streaming and temporary LOBs — `OracleLob`. CLOB, NCLOB and BLOB

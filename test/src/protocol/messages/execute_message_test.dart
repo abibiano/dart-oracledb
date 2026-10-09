@@ -2247,16 +2247,48 @@ void main() {
       expect(ttcStreamIsComplete(payload), isTrue);
     });
 
+    test('Oracle-specific OSON scalar column decodes in the strict pass', () {
+      // Server-captured JSON_SCALAR(TO_BINARY_DOUBLE(1.5)) document (Oracle
+      // 23ai and 21c): flags INLINE_LEAF | LEN_IN_PCODE | IS_SCALAR, then
+      // the BINARY_DOUBLE node.
+      final oson = [
+        0xff, 0x4a, 0x5a, 0x01, // magic + version
+        0x00, 0x16, // flags
+        0x00, 0x09, // tree segment size
+        0x36, 0xbf, 0xf8, 0, 0, 0, 0, 0, 0, // BINARY_DOUBLE 1.5
+      ];
+      final payload = _buildPayload([
+        _describeInfo([
+          _columnInfo(name: 'DOC', oraType: oraTypeJson, maxSize: 0),
+        ]),
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._ub4(40),
+          ..._ub8(oson.length),
+          ..._ub4(8132),
+          ..._bytesWithLength(oson),
+          ..._bytesWithLength(List.filled(40, 0xAB)),
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: true);
+      expect(r.rows.single.single, equals(1.5));
+      expect(ttcStreamIsComplete(payload), isTrue);
+    });
+
     test(
       'unsupported OSON scalar node still fails loud in the strict pass',
       () {
-        // Scalar OSON document whose node is BINARY_DOUBLE (0x36) — outside
-        // the supported standard-JSON scope.
+        // Scalar OSON document whose node is INTERVAL YEAR TO MONTH (0x3d) —
+        // an Oracle-specific scalar with no driver type yet (BINARY_DOUBLE
+        // and the other date/binary/float kinds decode since Story 13.1).
         final badOson = [
           0xff, 0x4a, 0x5a, 0x01, // magic + version
           0x00, 0x12, // flags: INLINE_LEAF | IS_SCALAR
-          0x00, 0x09, // tree segment size
-          0x36, 1, 2, 3, 4, 5, 6, 7, 8, // BINARY_DOUBLE node
+          0x00, 0x06, // tree segment size
+          0x3d, 0x80, 0x00, 0x00, 0x01, 0x3e, // INTERVAL '1-2' YEAR TO MONTH
         ];
         final payload = _buildPayload([
           _describeInfo([
@@ -2279,7 +2311,11 @@ void main() {
           throwsA(
             isA<OracleException>()
                 .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
-                .having((e) => e.message, 'message', contains('BINARY_DOUBLE')),
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('INTERVAL YEAR TO MONTH'),
+                ),
           ),
         );
         // The lenient probe consumes the bytes without decoding the document.

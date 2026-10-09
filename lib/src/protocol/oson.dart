@@ -4,9 +4,13 @@
 /// Ported from the bundled node-oracledb reference implementation:
 /// `reference/node-oracledb/lib/impl/datahandlers/oson.js` (encoder/decoder)
 /// and `reference/node-oracledb/lib/impl/datahandlers/constants.js` (format
-/// constants). Scope is standard JSON documents: objects, arrays,
-/// strings, numbers, booleans, and null. Oracle-specific OSON scalar kinds
-/// (dates, timestamps, intervals, binary, vector, JsonId, ...) fail loud.
+/// constants). The encoder covers standard JSON documents: objects, arrays,
+/// strings, numbers, booleans, and null. The decoder additionally maps the
+/// Oracle-specific OSON scalar kinds the driver already has a Dart type for
+/// (DATE / TIMESTAMP → `DateTime`, TIMESTAMP WITH TIME ZONE →
+/// `OracleTimestampTz`, BINARY_FLOAT / BINARY_DOUBLE → `double`, binary
+/// (RAW) → `Uint8List`); the remaining Oracle-specific kinds (intervals,
+/// JsonId, extended/VECTOR, unknown) fail loud.
 ///
 /// The encoder always emits OSON **version 1** (field names ≤ 255 UTF-8
 /// bytes), which both Oracle 21c and 23ai accept; version-3 long field names
@@ -521,13 +525,26 @@ class _OsonEncoder {
 
 /// Decodes OSON bytes into Dart JSON values: `Map<String, Object?>` for
 /// objects, `List<Object?>` for arrays, and `null` / `bool` / `num` /
-/// `String` for scalar members.
+/// `String` for standard scalar members.
+///
+/// Oracle-specific scalar nodes decode as follows (node-oracledb `oson.js`
+/// `_decodeNode` byte layouts; date/time nodes reuse the column codecs):
+/// - DATE and 7-byte TIMESTAMP → `DateTime` (local wall clock, like a DATE
+///   column);
+/// - TIMESTAMP (11 bytes) → `DateTime` with fractional seconds (truncated to
+///   microseconds, like a TIMESTAMP column);
+/// - TIMESTAMP WITH TIME ZONE (13 bytes) → `OracleTimestampTz` (UTC instant
+///   plus the original offset) always — unlike a column, this does not
+///   depend on `preserveTimestampTimeZone`;
+/// - BINARY_FLOAT / BINARY_DOUBLE → `double` (NaN and ±Infinity included);
+/// - binary (RAW) → `Uint8List` (a copy, never a view of [data]).
 ///
 /// Throws [OracleException]:
 /// - `oraProtocolError` for malformed/truncated payloads or bad magic bytes;
-/// - `oraUnsupportedType` for unsupported OSON versions and Oracle-specific
-///   scalar node types outside the standard-JSON scope (never decode
-///   them silently to `null`).
+/// - `oraUnsupportedType` for unsupported OSON versions, BCE dates/timestamps,
+///   region-id time zones, and Oracle-specific scalar node types without a
+///   driver type yet (intervals, JsonId, extended/VECTOR, unknown) — never
+///   decoded silently to `null`, and never returned partially.
 Object? decodeOson(Uint8List data) {
   try {
     return _OsonDecoder(data).decode();
@@ -711,31 +728,45 @@ class _OsonDecoder {
         // packed 0x40/0x50 nodes, with the length in a separate uint8.
         final numberLength = _buf.readUint8();
         return numberLength == 0 ? 0 : _decodeNumber(numberLength);
-      // Oracle-specific scalar kinds are out of the standard-JSON
-      // scope: fail loud rather than decode silently to null. Each
-      // case is named so the error message tells callers what the document
-      // actually contains.
+      // Oracle-specific scalar kinds with an existing Dart type decode over
+      // fixed-length payloads (node-oracledb oson.js `_decodeNode`: 7 / 7 /
+      // 11 / 13-byte dates through the column codecs, 4 / 8-byte binary
+      // float / double through _decodeBinaryFloatingPoint). Codec errors
+      // (BCE century, region-id or out-of-range zone) propagate unchanged; a
+      // short payload underflows into the BufferException → oraProtocolError
+      // path.
       case _nodeDate:
-        throw _unsupportedNode(nodeType, 'DATE');
+        return dt.decodeDate(_fixedPayload(7));
       case _nodeTimestamp7:
-        throw _unsupportedNode(nodeType, 'TIMESTAMP (7-byte)');
+        // A TIMESTAMP whose fractional seconds are zero: the DATE-shaped
+        // 7-byte form. Decoded by the TIMESTAMP codec so a BCE value names
+        // TIMESTAMP; the resulting DateTime is identical to decodeDate's.
+        return dt.decodeTimestamp(_fixedPayload(7));
       case _nodeTimestamp:
-        throw _unsupportedNode(nodeType, 'TIMESTAMP');
+        return dt.decodeTimestamp(_fixedPayload(11));
       case _nodeTimestampTz:
-        throw _unsupportedNode(nodeType, 'TIMESTAMP WITH TIME ZONE');
+        return dt.decodeTimestampTz(_fixedPayload(13));
       case _nodeBinaryFloat:
-        throw _unsupportedNode(nodeType, 'BINARY_FLOAT');
+        return _decodeBinaryFloatingPoint(4);
       case _nodeBinaryDouble:
-        throw _unsupportedNode(nodeType, 'BINARY_DOUBLE');
+        return _decodeBinaryFloatingPoint(8);
+      case _nodeBinaryLenUint16:
+        // Copy out of the OSON document: a view would alias the caller's
+        // [data] buffer and keep the whole document alive (and reachable via
+        // `.buffer`) for as long as the decoded value is held.
+        return Uint8List.fromList(_buf.readBytes(_buf.readUint16BE()));
+      case _nodeBinaryLenUint32:
+        return Uint8List.fromList(_buf.readBytes(_buf.readUint32BE()));
+      // Oracle-specific kinds with no driver type yet (intervals and VECTOR
+      // arrive with Epics 14/15): fail loud rather than decode silently to
+      // null. Each case is named so the error message tells callers what the
+      // document actually contains.
       case _nodeIntervalYM:
         throw _unsupportedNode(nodeType, 'INTERVAL YEAR TO MONTH');
       case _nodeIntervalDS:
         throw _unsupportedNode(nodeType, 'INTERVAL DAY TO SECOND');
       case _nodeId:
         throw _unsupportedNode(nodeType, 'JsonId');
-      case _nodeBinaryLenUint16:
-      case _nodeBinaryLenUint32:
-        throw _unsupportedNode(nodeType, 'binary (RAW scalar)');
       case _nodeExtended:
         throw _unsupportedNode(nodeType, 'extended (VECTOR)');
     }
@@ -767,6 +798,32 @@ class _OsonDecoder {
   /// column decoding (the reference returns JS `number` for both).
   num _decodeNumber(int length) =>
       dt.decodeNumber(ReadBuffer(_buf.readBytes(length)));
+
+  /// Reads a fixed [length]-byte scalar payload into its own [ReadBuffer] so
+  /// the column codecs see exactly the bytes of this node (their tolerant
+  /// length handling keys off `remaining`).
+  ReadBuffer _fixedPayload(int length) => ReadBuffer(_buf.readBytes(length));
+
+  /// Decodes an Oracle BINARY_FLOAT ([length] 4) or BINARY_DOUBLE ([length]
+  /// 8) payload (node-oracledb `buffer.js` `parseBinaryFloat` /
+  /// `parseBinaryDouble`). Oracle stores IEEE 754 big-endian bits made
+  /// byte-comparable: a non-negative value has its sign bit set, a negative
+  /// value has every bit inverted. Undo that, then read the IEEE value —
+  /// NaN, ±Infinity and ±0 survive the transform.
+  double _decodeBinaryFloatingPoint(int length) {
+    final bytes = Uint8List.fromList(_buf.readBytes(length));
+    if ((bytes[0] & 0x80) != 0) {
+      bytes[0] &= 0x7f;
+    } else {
+      for (var i = 0; i < bytes.length; i++) {
+        bytes[i] ^= 0xff;
+      }
+    }
+    final data = ByteData.sublistView(bytes);
+    return length == 4
+        ? data.getFloat32(0, Endian.big)
+        : data.getFloat64(0, Endian.big);
+  }
 
   Object? _decodeContainerNode(int nodeType) {
     // Offset of this container's node-type byte within the tree segment —
@@ -865,8 +922,11 @@ class _OsonDecoder {
         errorCode: oraUnsupportedType,
         message:
             'Unsupported OSON node type '
-            '0x${nodeType.toRadixString(16)} ($kind). This driver supports '
-            'standard JSON values only: objects, arrays, strings, numbers, '
-            'booleans, and null.',
+            '0x${nodeType.toRadixString(16)} ($kind). This driver decodes '
+            'standard JSON values (objects, arrays, strings, numbers, '
+            'booleans, null) and the Oracle DATE, TIMESTAMP, TIMESTAMP WITH '
+            'TIME ZONE, BINARY_FLOAT, BINARY_DOUBLE and binary (RAW) '
+            'scalars; Oracle-specific JSON scalars beyond date/time, binary '
+            'and float/double (intervals, JsonId, VECTOR) are not supported.',
       );
 }

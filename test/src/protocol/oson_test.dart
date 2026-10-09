@@ -30,7 +30,10 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 
 import 'package:oracledb/src/errors.dart';
+import 'package:oracledb/src/oracle_timestamp_tz.dart';
+import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart' show oraUnsupportedType;
+import 'package:oracledb/src/protocol/data_types.dart' as dt;
 import 'package:oracledb/src/protocol/oson.dart';
 
 Uint8List _hex(String hex) {
@@ -44,6 +47,100 @@ Uint8List _hex(String hex) {
 
 String _toHex(Uint8List bytes) =>
     bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+/// Wraps one tree node in an OSON scalar document exactly as Oracle 21c and
+/// 23ai send it: magic, version 1, flags `INLINE_LEAF | LEN_IN_PCODE |
+/// IS_SCALAR` (0x0016), uint16 tree-segment size, then the node bytes.
+Uint8List _scalarDoc(String nodeHex) {
+  final node = _hex(nodeHex);
+  return _hex(
+    'ff4a5a01 0016 ${node.length.toRadixString(16).padLeft(4, '0')} '
+    '$nodeHex',
+  );
+}
+
+/// Builds an OSON document that embeds hand-built Oracle-specific scalar
+/// nodes, which the encoder (standard JSON only) refuses to produce.
+///
+/// [build] receives one placeholder string per entry of [nodesHex] and
+/// returns a standard-JSON document using them. The document is encoded,
+/// then each placeholder's string node (`0x33`, uint8 length, bytes) is
+/// overwritten in place with the matching scalar node. Every placeholder is
+/// sized so its string node spans exactly as many bytes as the scalar node
+/// it stands for, so all tree offsets stay valid.
+Uint8List _embedNodes(
+  List<String> nodesHex,
+  Object? Function(List<String> slots) build,
+) {
+  final nodes = [for (final n in nodesHex) _hex(n)];
+  final slots = <String>[
+    for (var i = 0; i < nodes.length; i++)
+      // Tag char (A, B, ...) keeps slots distinct; pad to node length - 2.
+      String.fromCharCode(0x41 + i) + 'z' * (nodes[i].length - 3),
+  ];
+  final out = Uint8List.fromList(encodeOson(build(slots)));
+  for (var i = 0; i < nodes.length; i++) {
+    final needle = [0x33, slots[i].length, ...slots[i].codeUnits];
+    final hits = <int>[];
+    for (var p = 0; p + needle.length <= out.length; p++) {
+      var match = true;
+      for (var k = 0; k < needle.length && match; k++) {
+        match = out[p + k] == needle[k];
+      }
+      if (match) hits.add(p);
+    }
+    expect(hits, hasLength(1), reason: 'placeholder ${slots[i]} not unique');
+    out.setRange(hits.single, hits.single + nodes[i].length, nodes[i]);
+  }
+  return out;
+}
+
+/// Matches an [OracleException] carrying [code] (and, optionally, a message
+/// containing [message]).
+Matcher _throwsOracle(int code, [String? message]) {
+  var matcher = isA<OracleException>().having(
+    (e) => e.errorCode,
+    'errorCode',
+    code,
+  );
+  if (message != null) {
+    matcher = matcher.having((e) => e.message, 'message', contains(message));
+  }
+  return throwsA(matcher);
+}
+
+/// IEEE single-precision rounding of [value], as a BINARY_FLOAT stores it.
+double _float32(double value) => Float32List.fromList([value])[0];
+
+// Scalar nodes captured from live servers (byte-identical on Oracle 23ai and
+// 21c for the SQL value noted on each) unless marked hand-built.
+
+/// `DATE '2024-03-15'` with time 10:20:30 (DATE node 0x3c, 7 bytes).
+const _dateNode = '3c 787c030f0b151f';
+
+/// `TIMESTAMP '2024-03-15 10:20:30'` — zero fraction, so Oracle sends the
+/// 7-byte TIMESTAMP7 node (0x7d).
+const _timestamp7Node = '7d 787c030f0b151f';
+
+/// `TIMESTAMP '2024-03-15 10:20:30.123456'` (TIMESTAMP node 0x39, 11 bytes:
+/// DATE part + big-endian nanoseconds 123456000).
+const _timestampNode = '39 787c030f0b151f 075bca00';
+
+/// `TIMESTAMP '2024-03-15 10:20:30.5 +05:30'` (TSTZ node 0x7c, 13 bytes):
+/// the fields are the UTC instant 04:50:30.5, then tzHour+20 / tzMinute+60.
+const _timestampTzNode = '7c 787c030f05331f 1dcd6500 195a';
+
+/// `TO_BINARY_FLOAT(0.5)` (BINARY_FLOAT node 0x7f, 4 bytes).
+const _binaryFloatNode = '7f bf000000';
+
+/// `TO_BINARY_DOUBLE(1.5)` (BINARY_DOUBLE node 0x36, 8 bytes).
+const _binaryDoubleNode = '36 bff8000000000000';
+
+/// `HEXTORAW('00FF10')` (binary node 0x3a, uint16 length).
+const _binary16Node = '3a 0003 00ff10';
+
+/// Hand-built uint32-length binary node (0x3b) carrying `CAFE`.
+const _binary32Node = '3b 00000002 cafe';
 
 void main() {
   group('OSON encode — reference-backed fixtures (node-oracledb parity)', () {
@@ -424,41 +521,531 @@ void main() {
       );
     });
 
-    test('unsupported Oracle-specific scalar nodes fail loud', () {
-      // Scalar-document payloads with the node type swapped to each
-      // unsupported Oracle-specific kind. Header: magic, v1, flags
-      // INLINE_LEAF|IS_SCALAR, uint16 tree size, then the node.
+    test('Oracle-specific scalar nodes without a driver type fail loud', () {
+      // Scalar-document payloads with the node type set to each kind that
+      // still has no Dart representation (intervals and VECTOR arrive with
+      // Epics 14/15). Header: magic, v1, flags INLINE_LEAF|IS_SCALAR, uint16
+      // tree size, then the node. Generous trailing zero bytes ensure a
+      // fixed-length read could never underrun before the type check fires.
       const unsupportedNodes = {
-        0x3c: 'DATE',
-        0x7d: 'TIMESTAMP7',
-        0x39: 'TIMESTAMP',
-        0x7c: 'TIMESTAMP_TZ',
-        0x7f: 'BINARY_FLOAT',
-        0x36: 'BINARY_DOUBLE',
-        0x3d: 'INTERVAL_YM',
-        0x3e: 'INTERVAL_DS',
-        0x7e: 'ID (JsonId)',
-        0x3a: 'BINARY_LENGTH_UINT16',
-        0x3b: 'BINARY_LENGTH_UINT32',
-        0x7b: 'EXTENDED (vector)',
+        0x3d: 'INTERVAL YEAR TO MONTH',
+        0x3e: 'INTERVAL DAY TO SECOND',
+        0x7e: 'JsonId',
+        0x7b: 'extended (VECTOR)',
+        // Unassigned node types fall through every decoder branch.
+        0x35: 'unknown',
+        0x3f: 'unknown',
+        0x70: 'unknown',
+        0x7a: 'unknown',
       };
       for (final entry in unsupportedNodes.entries) {
         final node = entry.key.toRadixString(16).padLeft(2, '0');
-        // Pad generous trailing zero bytes so fixed-length scalar reads do
-        // not underrun before the type check fires.
         final payload = _hex(
           'ff4a5a010012 0010 $node 0000000000000000000000000000',
         );
         expect(
           () => decodeOson(payload),
+          _throwsOracle(oraUnsupportedType, '0x$node (${entry.value})'),
+          reason: 'expected fail-loud for ${entry.value}',
+        );
+      }
+    });
+
+    test('server-captured interval scalars fail loud with the new scope '
+        'message', () {
+      // JSON_SCALAR(INTERVAL '1-2' YEAR TO MONTH) and
+      // JSON_SCALAR(INTERVAL '3 04:05:06' DAY TO SECOND), byte-identical on
+      // Oracle 23ai and 21c.
+      final cases = {
+        'ff4a5a01001600063d800000013e': 'INTERVAL YEAR TO MONTH',
+        'ff4a5a010016000c3e8000000340414280000000': 'INTERVAL DAY TO SECOND',
+      };
+      for (final entry in cases.entries) {
+        expect(
+          () => decodeOson(_hex(entry.key)),
           throwsA(
-            isA<OracleException>().having(
-              (e) => e.errorCode,
-              'errorCode',
-              oraUnsupportedType,
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+                .having((e) => e.message, 'message', contains(entry.value))
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains(
+                    'Oracle-specific JSON scalars beyond date/time, binary '
+                    'and float/double',
+                  ),
+                ),
+          ),
+        );
+      }
+    });
+
+    test('an unsupported scalar nested deep in a document fails the whole '
+        'decode (nothing returned partially)', () {
+      // Interval YM (6 bytes), JsonId (4 bytes) and extended (3 bytes)
+      // nodes, each placed after supported members inside a nested object.
+      const nested = {
+        '3d 800000013e': 'INTERVAL YEAR TO MONTH',
+        '7e 02 aabb': 'JsonId',
+        '7b 01 00': 'extended (VECTOR)',
+      };
+      for (final entry in nested.entries) {
+        final fixture = _embedNodes(
+          [_dateNode, entry.key],
+          (s) => <String, Object?>{
+            'ok': 'standard',
+            'inner': <Object?>[
+              1,
+              <String, Object?>{'when': s[0], 'bad': s[1]},
+            ],
+          },
+        );
+        expect(
+          () => decodeOson(fixture),
+          _throwsOracle(oraUnsupportedType, entry.value),
+        );
+      }
+    });
+
+    test(
+      'truncated Oracle-specific scalar payloads raise oraProtocolError',
+      () {
+        // Each node declares (or implies) more bytes than the payload holds:
+        // the short read underflows into the BufferException path.
+        const truncated = {
+          'DATE (3 of 7 bytes)': '3c 787c03',
+          'TIMESTAMP7 (6 of 7 bytes)': '7d 787c030f0b15',
+          'TIMESTAMP (10 of 11 bytes)': '39 787c030f0b151f 075bca',
+          'TIMESTAMP WITH TIME ZONE (12 of 13 bytes)':
+              '7c 787c030f05331f 1dcd6500 19',
+          'BINARY_FLOAT (3 of 4 bytes)': '7f bf0000',
+          'BINARY_DOUBLE (7 of 8 bytes)': '36 bff80000000000',
+          'binary uint16 (2 of 4 bytes)': '3a 0004 dead',
+          'binary uint16 (length cut)': '3a 00',
+          'binary uint32 (3 of 5 bytes)': '3b 00000005 010203',
+          'binary uint32 (length cut)': '3b 0000',
+          'binary uint32 (4 GiB length)': '3b ffffffff 00',
+        };
+        for (final entry in truncated.entries) {
+          expect(
+            () => decodeOson(_scalarDoc(entry.value)),
+            _throwsOracle(
+              oraProtocolError,
+              'Truncated or corrupt OSON payload',
+            ),
+            reason: entry.key,
+          );
+        }
+      },
+    );
+  });
+
+  group('OSON decode — Oracle-specific scalars', () {
+    group('DATE / TIMESTAMP', () {
+      test('DATE node decodes to the same DateTime as decodeDate', () {
+        // JSON_SCALAR(DATE '2024-03-15') and JSON_SCALAR(TO_DATE(
+        // '2024-03-15 10:20:30', ...)), captured from both servers.
+        final dateOnly = decodeOson(_scalarDoc('3c 787c030f010101'));
+        expect(dateOnly, equals(DateTime(2024, 3, 15)));
+        final withTime = decodeOson(_scalarDoc(_dateNode));
+        expect(withTime, equals(DateTime(2024, 3, 15, 10, 20, 30)));
+        expect(
+          withTime,
+          equals(dt.decodeDate(ReadBuffer(_hex('787c030f0b151f')))),
+        );
+        // Local wall clock, exactly like a DATE column.
+        expect((withTime! as DateTime).isUtc, isFalse);
+      });
+
+      test('TIMESTAMP7 node decodes to the same DateTime as decodeDate', () {
+        final value = decodeOson(_scalarDoc(_timestamp7Node));
+        expect(value, isA<DateTime>());
+        expect(
+          value,
+          equals(dt.decodeDate(ReadBuffer(_hex('787c030f0b151f')))),
+        );
+        expect((value! as DateTime).isUtc, isFalse);
+      });
+
+      test('TIMESTAMP node keeps fractional seconds like decodeTimestamp', () {
+        final value = decodeOson(_scalarDoc(_timestampNode));
+        expect(value, equals(DateTime(2024, 3, 15, 10, 20, 30, 123, 456)));
+        expect(
+          value,
+          equals(
+            dt.decodeTimestamp(ReadBuffer(_hex('787c030f0b151f075bca00'))),
+          ),
+        );
+        expect((value! as DateTime).isUtc, isFalse);
+      });
+
+      test('TIMESTAMP node truncates nanoseconds toward zero', () {
+        // .123456789 → nanos 0x075BCD15; Dart keeps microseconds only.
+        final value = decodeOson(_scalarDoc('39 787c030f0b151f 075bcd15'));
+        expect(value, equals(DateTime(2024, 3, 15, 10, 20, 30, 123, 456)));
+      });
+
+      test('BCE dates and timestamps raise oraUnsupportedType', () {
+        // Century byte 99 (< 100) marks a BCE year — same rejection as
+        // DATE/TIMESTAMP columns. The message pins which codec ran: DATE
+        // nodes use decodeDate, every TIMESTAMP form the timestamp parser.
+        const bce = {
+          'DATE': ('3c 6364010101 0101', 'BCE DATE'),
+          'TIMESTAMP7': ('7d 6364010101 0101', 'BCE TIMESTAMP'),
+          'TIMESTAMP': ('39 6364010101 0101 00000000', 'BCE TIMESTAMP'),
+          'TIMESTAMP WITH TIME ZONE': (
+            '7c 6364010101 0101 00000000 143c',
+            'BCE TIMESTAMP',
+          ),
+        };
+        for (final MapEntry(key: kind, value: (node, message)) in bce.entries) {
+          expect(
+            () => decodeOson(_scalarDoc(node)),
+            _throwsOracle(oraUnsupportedType, message),
+            reason: kind,
+          );
+        }
+      });
+    });
+
+    group('TIMESTAMP WITH TIME ZONE', () {
+      test('decodes to OracleTimestampTz like decodeTimestampTz', () {
+        final value = decodeOson(_scalarDoc(_timestampTzNode));
+        expect(value, isA<OracleTimestampTz>());
+        final tz = value! as OracleTimestampTz;
+        expect(tz.utc, equals(DateTime.utc(2024, 3, 15, 4, 50, 30, 500)));
+        expect(tz.offsetMinutes, equals(330));
+        expect(
+          tz,
+          equals(
+            dt.decodeTimestampTz(
+              ReadBuffer(_hex('787c030f05331f1dcd6500195a')),
             ),
           ),
-          reason: 'expected fail-loud for ${entry.value}',
+        );
+      });
+
+      test('negative and zero offsets survive', () {
+        // TIMESTAMP '2024-03-15 10:20:30 -08:00' → UTC 18:20:30, 12/60.
+        final minus8 = decodeOson(
+          _scalarDoc('7c 787c030f13151f 00000000 0c3c'),
+        );
+        expect(
+          minus8,
+          equals(
+            OracleTimestampTz(
+              DateTime.utc(2024, 3, 15, 18, 20, 30),
+              offsetMinutes: -480,
+            ),
+          ),
+        );
+        // +00:00 → zone bytes 20/60.
+        final utc = decodeOson(_scalarDoc('7c 787c030f0b151f 0ee6b280 143c'));
+        expect(
+          utc,
+          equals(
+            OracleTimestampTz(
+              DateTime.utc(2024, 3, 15, 10, 20, 30, 250),
+              offsetMinutes: 0,
+            ),
+          ),
+        );
+      });
+
+      test('region-id zone raises the existing oraUnsupportedType', () {
+        // JSON_SCALAR(TO_TIMESTAMP_TZ('2024-03-15 10:20:30 US/Pacific',
+        // ... TZR)), captured from both servers: byte 11 has its high bit set.
+        expect(
+          () =>
+              decodeOson(_hex('ff4a5a010016000e7c787c030f12151f00000000899c')),
+          _throwsOracle(oraUnsupportedType, 'region-id'),
+        );
+      });
+
+      test('malformed zone bytes raise the existing oraProtocolError', () {
+        // byte11 = 0 → -20h, outside Oracle's offset band.
+        expect(
+          () => decodeOson(_scalarDoc('7c 787c030f05331f 00000000 003c')),
+          _throwsOracle(oraProtocolError, 'TIMESTAMP TZ offset out of range'),
+        );
+      });
+    });
+
+    group('BINARY_FLOAT / BINARY_DOUBLE', () {
+      test('BINARY_DOUBLE: positive, negative, zero, extremes', () {
+        final cases = <String, double>{
+          // Server-captured: TO_BINARY_DOUBLE(1.5) / (-2.25).
+          '36 bff8000000000000': 1.5,
+          '36 3ffdffffffffffff': -2.25,
+          '36 c000000000000000': 2.0,
+          '36 8000000000000000': 0.0,
+          // Largest finite double and the smallest subnormal.
+          '36 ffefffffffffffff': double.maxFinite,
+          '36 8000000000000001': double.minPositive,
+          '36 0010000000000000': -double.maxFinite,
+        };
+        for (final entry in cases.entries) {
+          final value = decodeOson(_scalarDoc(entry.key));
+          expect(value, isA<double>(), reason: entry.key);
+          expect(value, equals(entry.value), reason: entry.key);
+        }
+        // Negative zero: Oracle inverts every bit of 0x8000... → 0x7fff....
+        final negZero =
+            decodeOson(_scalarDoc('36 7fffffffffffffff'))! as double;
+        expect(negZero, equals(0.0));
+        expect(negZero.isNegative, isTrue);
+      });
+
+      test('BINARY_DOUBLE: NaN and ±Infinity (server-captured)', () {
+        expect(decodeOson(_hex('ff4a5a010016000936fff8000000000000')), isNaN);
+        expect(
+          decodeOson(_hex('ff4a5a010016000936fff0000000000000')),
+          equals(double.infinity),
+        );
+        expect(
+          decodeOson(_hex('ff4a5a010016000936000fffffffffffff')),
+          equals(double.negativeInfinity),
+        );
+      });
+
+      test('BINARY_FLOAT: positive, negative, zero, single-precision '
+          'rounding', () {
+        // Server-captured: TO_BINARY_FLOAT(3.14) / (-0.25) / (0.5).
+        final pi = decodeOson(_hex('ff4a5a01001600057fc048f5c3'));
+        expect(pi, isA<double>());
+        expect(pi, equals(_float32(3.14)));
+        expect(pi, isNot(equals(3.14)));
+        expect(decodeOson(_hex('ff4a5a01001600057f417fffff')), equals(-0.25));
+        expect(decodeOson(_scalarDoc(_binaryFloatNode)), equals(0.5));
+        expect(decodeOson(_scalarDoc('7f 80000000')), equals(0.0));
+        final negZero = decodeOson(_scalarDoc('7f 7fffffff'))! as double;
+        expect(negZero, equals(0.0));
+        expect(negZero.isNegative, isTrue);
+      });
+
+      test('BINARY_FLOAT: NaN and ±Infinity', () {
+        // IEEE 0x7fc00000 / 0x7f800000 → sign bit set; 0xff800000 → inverted.
+        expect(decodeOson(_scalarDoc('7f ffc00000')), isNaN);
+        expect(decodeOson(_scalarDoc('7f ff800000')), equals(double.infinity));
+        expect(
+          decodeOson(_scalarDoc('7f 007fffff')),
+          equals(double.negativeInfinity),
+        );
+      });
+    });
+
+    group('binary (RAW)', () {
+      test('uint16 length form (server-captured HEXTORAW)', () {
+        final value = decodeOson(_hex('ff4a5a01001600073a0004deadbeef'));
+        expect(value, isA<Uint8List>());
+        expect(value, equals([0xde, 0xad, 0xbe, 0xef]));
+      });
+
+      test('uint32 length form, including a > 65535-byte payload', () {
+        expect(decodeOson(_scalarDoc(_binary32Node)), equals([0xca, 0xfe]));
+        final big = Uint8List.fromList(
+          List<int>.generate(70000, (i) => i % 251),
+        );
+        // Oracle sends a 70,000-byte JSON_SCALAR(blob) as a scalar document
+        // with a uint32 tree segment (flags 0x1016) and a uint32 binary node.
+        final header = _hex('ff4a5a01 1016 00011175 3b 00011170');
+        final doc = Uint8List(header.length + big.length)
+          ..setRange(0, header.length, header)
+          ..setRange(header.length, header.length + big.length, big);
+        final value = decodeOson(doc);
+        expect(value, isA<Uint8List>());
+        expect(value, equals(big));
+      });
+
+      test('empty binary decodes to an empty Uint8List, not null', () {
+        for (final node in ['3a 0000', '3b 00000000']) {
+          final value = decodeOson(_scalarDoc(node));
+          expect(value, isA<Uint8List>(), reason: node);
+          expect(value, isEmpty, reason: node);
+        }
+      });
+
+      test('returns a copy, not a view of the OSON payload', () {
+        final payload = _hex('ff4a5a01001600073a0004deadbeef');
+        final value = decodeOson(payload)! as Uint8List;
+        payload.fillRange(0, payload.length, 0);
+        expect(value, equals([0xde, 0xad, 0xbe, 0xef]));
+        expect(value.lengthInBytes, equals(value.buffer.lengthInBytes));
+      });
+    });
+
+    group('documents', () {
+      test('server-captured mixed object keeps member types and key order '
+          '(21c and 23ai header variants)', () {
+        // JSON_OBJECT('s' VALUE 'x', 'n' VALUE 42, 'd' VALUE DATE
+        // '2024-03-15', 'ts' VALUE TIMESTAMP '2024-03-15 10:20:30.123',
+        // 'tz' VALUE TIMESTAMP '2024-03-15 10:20:30 -08:00',
+        // 'bd' VALUE TO_BINARY_DOUBLE(1.5), 'bf' VALUE TO_BINARY_FLOAT(0.5),
+        // 'r' VALUE HEXTORAW('00FF10') RETURNING JSON). 21c sends a uint16
+        // tree segment size (flags 0x2106); 23ai a uint32 one (0x3106).
+        const body =
+            '0000131531397073829b000c00120002000f00060004000000090173016e0164'
+            '02747302747a026264026266017284080703060508010402001a001c001f0027'
+            '00330041004a004f017821c12b3c787c030f01010139787c030f0b151f0754d4'
+            'c07c787c030f13151f000000000c3c36bff80000000000007fbf0000003a0003'
+            '00ff10';
+        final fixtures = {
+          '21c': _hex('ff4a5a01 2106 08 0014 0055 $body'),
+          '23ai': _hex('ff4a5a01 3106 08 0014 00000055 $body'),
+        };
+        for (final entry in fixtures.entries) {
+          final decoded = decodeOson(entry.value);
+          expect(decoded, isA<Map<String, Object?>>(), reason: entry.key);
+          final doc = decoded! as Map<String, Object?>;
+          expect(
+            doc.keys.toList(),
+            equals(['s', 'n', 'd', 'ts', 'tz', 'bd', 'bf', 'r']),
+            reason: entry.key,
+          );
+          expect(doc['s'], equals('x'));
+          expect(doc['n'], equals(42));
+          expect(doc['d'], equals(DateTime(2024, 3, 15)));
+          expect(doc['ts'], equals(DateTime(2024, 3, 15, 10, 20, 30, 123)));
+          expect(
+            doc['tz'],
+            equals(
+              OracleTimestampTz(
+                DateTime.utc(2024, 3, 15, 18, 20, 30),
+                offsetMinutes: -480,
+              ),
+            ),
+          );
+          expect(doc['bd'], equals(1.5));
+          expect(doc['bf'], equals(0.5));
+          expect(doc['r'], isA<Uint8List>());
+          expect(doc['r'], equals([0x00, 0xff, 0x10]));
+        }
+      });
+
+      test('server-captured array of date, binary and double', () {
+        // JSON_ARRAY(DATE '2024-03-15', HEXTORAW('ABCD'),
+        // TO_BINARY_DOUBLE(2) RETURNING JSON), both servers.
+        final decoded = decodeOson(
+          _hex(
+            'ff4a5a012006000000001e0000c0030008001000153c787c030f010101'
+            '3a0002abcd36c000000000000000',
+          ),
+        );
+        expect(decoded, isA<List<Object?>>());
+        final list = decoded! as List<Object?>;
+        expect(list, hasLength(3));
+        expect(list[0], equals(DateTime(2024, 3, 15)));
+        expect(list[1], isA<Uint8List>());
+        expect(list[1], equals([0xab, 0xcd]));
+        expect(list[2], equals(2.0));
+      });
+
+      test('every supported kind nested in objects and arrays, alongside '
+          'standard members, in order', () {
+        final fixture = _embedNodes(
+          [
+            _dateNode,
+            _timestamp7Node,
+            _timestampNode,
+            _timestampTzNode,
+            _binaryFloatNode,
+            _binaryDoubleNode,
+            _binary16Node,
+            _binary32Node,
+          ],
+          (s) => <String, Object?>{
+            'name': 'mixed',
+            'temporal': <String, Object?>{
+              'date': s[0],
+              'ts7': s[1],
+              'ts': s[2],
+              'tstz': s[3],
+            },
+            'count': 3,
+            'numbers': <Object?>[s[4], 7, s[5], null],
+            'blobs': <Object?>[
+              <String, Object?>{'short': s[6]},
+              <Object?>[s[7], true],
+            ],
+            'tail': 'kept',
+          },
+        );
+        final decoded = decodeOson(fixture)! as Map<String, Object?>;
+        expect(
+          decoded.keys.toList(),
+          equals(['name', 'temporal', 'count', 'numbers', 'blobs', 'tail']),
+        );
+        expect(decoded['name'], equals('mixed'));
+        expect(decoded['count'], equals(3));
+        expect(decoded['tail'], equals('kept'));
+
+        final temporal = decoded['temporal']! as Map<String, Object?>;
+        expect(temporal.keys.toList(), equals(['date', 'ts7', 'ts', 'tstz']));
+        expect(temporal['date'], equals(DateTime(2024, 3, 15, 10, 20, 30)));
+        expect(temporal['ts7'], equals(DateTime(2024, 3, 15, 10, 20, 30)));
+        expect(
+          temporal['ts'],
+          equals(DateTime(2024, 3, 15, 10, 20, 30, 123, 456)),
+        );
+        expect(
+          temporal['tstz'],
+          equals(
+            OracleTimestampTz(
+              DateTime.utc(2024, 3, 15, 4, 50, 30, 500),
+              offsetMinutes: 330,
+            ),
+          ),
+        );
+
+        expect(decoded['numbers'], equals(<Object?>[0.5, 7, 1.5, null]));
+        final numbers = decoded['numbers']! as List<Object?>;
+        expect(numbers[0], isA<double>());
+        expect(numbers[1], isA<int>());
+
+        final blobs = decoded['blobs']! as List<Object?>;
+        final short = (blobs[0]! as Map<String, Object?>)['short'];
+        expect(short, isA<Uint8List>());
+        expect(short, equals([0x00, 0xff, 0x10]));
+        final inner = blobs[1]! as List<Object?>;
+        expect(inner[0], isA<Uint8List>());
+        expect(inner[0], equals([0xca, 0xfe]));
+        expect(inner[1], isTrue);
+      });
+
+      test('a BCE date nested in a document fails the whole decode', () {
+        final fixture = _embedNodes(
+          ['3c 6364010101 0101'],
+          (s) => <String, Object?>{
+            'ok': 1,
+            'list': <Object?>[s[0]],
+          },
+        );
+        expect(
+          () => decodeOson(fixture),
+          _throwsOracle(oraUnsupportedType, 'BCE'),
+        );
+      });
+    });
+
+    test('encode/bind still reject the decoded Oracle scalar types '
+        '(bind support is Story 13.3)', () {
+      final decodedOnly = <Object>[
+        DateTime(2024, 3, 15),
+        OracleTimestampTz(DateTime.utc(2024), offsetMinutes: 0),
+        Uint8List.fromList([1, 2]),
+        double.nan,
+        double.infinity,
+      ];
+      for (final value in decodedOnly) {
+        expect(
+          () => encodeOson(<String, Object?>{'v': value}),
+          throwsA(isA<OracleException>()),
+          reason: 'encodeOson must reject ${value.runtimeType}',
+        );
+        expect(
+          () => assertValidJsonBindValue(<Object?>[value], 'doc'),
+          throwsA(isA<ArgumentError>()),
+          reason: 'bind validation must reject ${value.runtimeType}',
         );
       }
     });

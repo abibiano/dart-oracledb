@@ -979,15 +979,44 @@ An `IN OUT` bind's returned locator likewise reports `true` and frees itself on
 
 Oracle's **native `JSON` data type** (introduced in Oracle Database 21c;
 requires database `compatible >= 20`) round-trips as ordinary Dart values —
-`Map<String, Object?>` for objects, `List<Object?>` for arrays, with members
-decoding as `null` / `bool` / `num` / `String` and nested maps/lists. On the
+`Map<String, Object?>` for objects, `List<Object?>` for arrays, or a Dart
+scalar for a scalar JSON root. Members decode
+decoding as `null` / `bool` / `num` / `String` and nested maps/lists (plus
+the Oracle-specific scalars listed below). On the
 wire, values travel in Oracle's binary JSON format (OSON) under the native
 type — no `jsonEncode()`/`jsonDecode()` round-trip through text, no Oracle
 Client, no LOB read round trips:
 
-- **Queries** — selecting a `JSON` column returns a `Map`/`List` (`null` for
-  SQL NULL). Document shape and member order are preserved; statement-cache
+- **Queries** — selecting a `JSON` column returns a `Map`, `List`, or scalar
+  (`null` for SQL NULL or a JSON null root). Document shape and member order
+  are preserved; statement-cache
   cursor reuse and multi-batch fetches work normally.
+- **Oracle-specific scalars (decode)** — a JSON value may also hold Oracle
+  scalars the server keeps in their native form (e.g. from
+  `JSON_SCALAR(SYSDATE)` or `JSON_OBJECT(... RETURNING JSON)` over typed
+  columns). They decode as follows, wherever they appear in the document:
+
+  | Scalar inside the JSON value          | Dart type            |
+  | ------------------------------------- | -------------------- |
+  | `DATE`, `TIMESTAMP`                   | `DateTime` — same as a `DATE` / `TIMESTAMP` column (local wall clock, fractional seconds truncated to microseconds) |
+  | `TIMESTAMP WITH TIME ZONE`            | Always `OracleTimestampTz` (UTC instant + original offset), regardless of `preserveTimestampTimeZone` — unlike a column, which returns a UTC `DateTime` by default |
+  | `BINARY_FLOAT`, `BINARY_DOUBLE`       | `double` (NaN and ±Infinity included; `BINARY_FLOAT` widened from single precision) |
+  | `RAW` / binary                        | `Uint8List` — an empty binary JSON scalar is an empty list of bytes; an empty `RAW` column decodes to `null` |
+
+  BCE dates and region-name time zones (e.g. `US/Pacific`) fail loudly with
+  `OracleException`, as they do for columns.
+
+  **Behavior change:** documents that previously failed with
+  `oraUnsupportedType` now return maps/lists containing `DateTime`,
+  `OracleTimestampTz`, `Uint8List`, or NaN/±Infinity `double` members, so
+  `jsonEncode()` on such a fetched document can throw
+  `JsonUnsupportedObjectError`. Decoding is also one-way for now: binding a
+  document that contains `DateTime`, `OracleTimestampTz`, `Uint8List`, or a
+  non-finite `double` is rejected at the call site, and a finite fetched
+  `BINARY_FLOAT` / `BINARY_DOUBLE` member re-binds as an OSON `NUMBER` (the
+  scalar type changes, and a `BINARY_FLOAT` keeps its widened single-precision
+  value, e.g. `3.140000104904175`). Convert those members before writing a
+  fetched document back.
 - **DML** — bind an ordinary `Map<String, Object?>` or `List<Object?>` into a
   `JSON` column with named or positional binds; the driver encodes it as
   OSON. Members may be `null`, `bool`, finite `num`, `String`, and nested
@@ -1021,10 +1050,12 @@ columns — the pre-21c pattern with `IS JSON` constraints — keeps its ordinar
 through SQL/JSON functions. JSON text inserted *into* a native `JSON` column
 is parsed by the server and reads back as `Map`/`List`.
 
-Not in scope: SODA, JSON-relational duality views, `JsonId`, VECTOR, and
-Oracle-specific JSON scalar types (dates/timestamps/intervals/binary inside
-JSON documents). Documents containing such scalars fail loudly with
-`OracleException` rather than decoding silently.
+Not in scope: SODA, JSON-relational duality views, and the Oracle-specific
+JSON scalars beyond date/time, binary and float/double — `INTERVAL YEAR TO
+MONTH`, `INTERVAL DAY TO SECOND`, `JsonId`, and VECTOR inside JSON
+documents. Documents containing such scalars fail loudly with
+`OracleException` (`oraUnsupportedType`, naming the scalar kind) rather than
+decoding silently or partially.
 
 ## Character Set Support
 
@@ -1104,7 +1135,7 @@ After the 1.0 release, the project roadmap includes larger API and compatibility
 
 | Priority | Planned enhancement                                                                       |
 | -------- | ----------------------------------------------------------------------------------------- |
-| 1        | Extended JSON / OSON parity (Oracle-specific JSON scalars, OSON-in-BLOB helpers)          |
+| 1        | Extended JSON / OSON parity (binding Oracle-specific JSON scalars, interval/VECTOR/`JsonId` JSON scalars, OSON-in-BLOB helpers) |
 | 2        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
 | 3        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
 
