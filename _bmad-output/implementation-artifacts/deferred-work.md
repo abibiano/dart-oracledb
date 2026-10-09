@@ -301,3 +301,103 @@ source_spec: `13-3-bind-fetch-json-mapping.md`
 severity: medium
 reason: Probed during review: decodeOson(encodeOson(1e-129)) returns 0, and 9.99e125 returns 9.989999999999999e+125. The defect is in decodeNumber and affects NUMBER columns as well, so it predates this story.
 status: open
+
+### DW-7: Native JSON columns in a REF CURSOR OUT bind or a nested CURSOR() fail on Oracle 21c with ORA-00600 [kollAdjustDuration] [119]; requiresDefine is applied only to implicit results.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: lib/src/connection.dart:829-843, 1026-1043, 1076
+severity: high
+reason: Retro action 1 (F3). Reviewer live probe: 23ai passes, 21c fails, implicit-result control passes on 21c. Apply requiresDefine to _wrapRefCursorOutBinds and _drainNestedCursor and add dual-env tests for both shapes; DW-2 covers only the LOB variant.
+status: open
+
+### DW-8: Decide the BLOB IS JSON / IS OSON decode default: it is on by default with no opt-out, unlike node-oracledb where oldJsonColumnAsObj defaults to false.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: lib/src/transport/transport.dart:2130-2137; lib/src/protocol/oson.dart:1096-1126
+severity: high
+reason: Retro action 2 (F4), a HUMAN DECISION: opt-in flag vs documented breaking change, then pick the release version for CHANGELOG Unreleased (pubspec is 1.4.0) and correct the node-oracledb parity claim in the oson.dart doc. CHANGELOG line 73 admits the old raw-Uint8List behaviour changed.
+status: open
+decision (Abibiano, 2026-10-09): keep BLOB IS JSON/IS OSON decode default-on, add a per-query raw opt-out option (e.g. rawJsonBlobs) returning Uint8List, document the behavior change in CHANGELOG, release as 1.5.0, and correct the node-oracledb parity claim in the oson.dart doc.
+
+### DW-9: Four hand-copied needs-LOB-define / is-JSON column predicates disagree: two test CLOB and BLOB only, two also test JSON.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: lib/src/connection.dart:704, 1079-1081, 3715; lib/src/transport/transport.dart:1086-1091
+severity: medium
+reason: Retro action 3 (F5). Add one ColumnMetadata getter and use it at all four sites; decide deliberately where JSON is excluded. Consequence today: the fetchLobs reject guard and cached-cursor re-parse ignore a native JSON column.
+status: open
+
+### DW-10: preserveTimestampTimeZone is not forwarded on the top-level DEFINE round, so the first batch yields DateTime and later batches OracleTimestampTz; the real Transport.defineCursor is untested.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: lib/src/transport/transport.dart:1093-1099, 2518-2539, 2557-2572
+severity: medium
+reason: Retro action 4 (F6). Closes DW-3: forward the flag through _sendLobDefines and add a live test over the real defineCursor with preserveTimestampTimeZone true plus a failing-DEFINE unit test of the non-throwing contract.
+status: open
+
+### DW-11: Text-JSON BLOB decoding returns double for 1.0 / 1e2 where OSON NUMBER returns int, and a text 1e999 becomes Infinity that now re-binds as BINARY_DOUBLE.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: lib/src/protocol/oson.dart:1140 vs 884-888
+severity: medium
+reason: Retro action 5 (F9), a 13.2 x 13.3 cross-story interaction. Normalize integral doubles to int via a reviver and reject non-finite literals from text JSON.
+status: open
+
+### DW-12: JSON bind validation gaps: no depth or cycle guard (StackOverflowError), UTC DateTime stored zone-less, a fetched OSON v3 key over 255 bytes cannot re-bind, declared-JSON String/Uint8List roots silently double-encode, NaN and Infinity accepted by default, validation repeated up to 3 times per document.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: lib/src/protocol/oson.dart:143-200, 544-556; lib/src/oracle_bind.dart:154-159, 351
+severity: medium
+reason: Retro action 6 (F10, F12). The NaN/Infinity default and the String-root behaviour need a Winston/Abibiano decision; the guard, UTC handling and key-length symmetry are plain fixes.
+status: open
+decision (Abibiano, 2026-10-09): reject NaN and +/-Infinity JSON bind members by default with an ArgumentError naming the member path, add an opt-in allowNonFinite; a declared-JSON String root stays a valid JSON string scalar and is documented; depth/cycle guard, UTC DateTime handling and key-length rebind symmetry are plain fixes.
+
+### DW-13: decodeOson wraps only BufferException, so malformed UTF-8 in a field name or string node escapes as FormatException instead of the documented OracleException.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: lib/src/protocol/oson.dart:858, 879-883, 948
+severity: medium
+reason: Retro action 7 (F11). Wrap FormatException as OracleException (oraProtocolError) in decodeOson and make readJsonLocator add column context for any decode failure.
+status: open
+
+### DW-14: Intermittent first-run failure (ORA-03125 in the eager-continuation test setup) of the 23ai JSON integration suites, output never captured and never ledgered.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: test/integration/json_data_type_integration_test.dart
+severity: medium
+reason: Retro action 8 (F1). Recorded only in the 13-2 story notes (lines 161, 174); seen once again during the epic-13 retro, then 6 clean reruns. Find the cause or capture the failing output.
+status: open
+
+### DW-15: Ledger and doc drift: DW-4 and DW-5 lost their severity lines, doc/architecture.md still says execute_message.dart is ~1767 LOC (it is 3020), and skipWithoutNativeJson/_expectJsonValue are duplicated across two JSON integration files.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: _bmad-output/implementation-artifacts/deferred-work.md DW-4, DW-5; doc/architecture.md:71; test/integration/json_data_type_integration_test.dart:33,83 and json_coexistence_integration_test.dart:73,144
+severity: low
+reason: Retro action 9 (F16, F17). DW-4 was medium (unverified) and DW-5 high (unverified) in the 13-2 frontmatter; hoist the helpers into test_helper.dart as Epic 12's 12.4 AC9 did.
+status: open
+
+### DW-16: sprint-status.yaml epic-13 entry was still backlog although all four stories were done.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: _bmad-output/implementation-artifacts/sprint-status.yaml:209
+severity: low
+reason: Retro action 10. Already set to done on 2026-10-09 during the retro follow-up; close this entry on the next sweep after confirming the file.
+status: open
+
+### DW-17: The Compose 23ai service uses the unpinned image database/free:latest, which now reports Oracle 26ai (23.26.1); the 23ai evidence came from a temporary pinned 23.9 container.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: docker-compose.yml:13
+severity: medium
+reason: Retro action 11 (F2), a HUMAN DECISION: pin the image or record the 26ai drift as an accepted risk in CLAUDE.md / CONTRIBUTING.md.
+status: open
+decision (Abibiano, 2026-10-09): pin the primary compose service to the validated 23.9 tag so 23ai results stay reproducible; 26ai may be added later as a separate optional profile.
+
+### DW-18: Process: no epic-boundary review ran for Epic 13, and the retro review found cross-story defects (REF CURSOR JSON, predicate drift, text/OSON number types) that per-story reviews missed.
+
+origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-09.md)
+location: n/a
+severity: medium
+reason: Retro action 12, a PROCESS decision for the operator: run an epic-boundary review for every epic, and run one for Epic 13 before Epic 14 starts. Not code work for a sweep bundle.
+status: open
+decision (Abibiano, 2026-10-09): fix DW-7 to DW-15 via the sweep, then run one epic-boundary review over the epic-13 diff to confirm convergence, and make a boundary review a standard step for every epic from Epic 14 on (operator process, not a sweep bundle).
