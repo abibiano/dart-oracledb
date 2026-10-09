@@ -36,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 2026-07-26  # Epic 12 retrospective complete: epic-12-retrospective -> done; epic-11 action items reconciled; epic-12 action items added (draft PR non-convergence flagged)
+last_updated: 10-09-2026 12:08 # Epic 12 retrospective complete: epic-12-retrospective -> done; epic-11 action items reconciled; epic-12 action items added (draft PR non-convergence flagged)
 project: dart-oracledb
 project_key: NOKEY
 tracking_system: file-system
@@ -211,7 +211,7 @@ development_status:
   13-2-oracle-12c-json-as-blob: done
   13-3-bind-fetch-json-mapping: done
   13-4-dual-env-integration-tests: done
-  epic-13-retrospective: optional
+  epic-13-retrospective: done
 
   # Epic 14: Temporal Compatibility & Fetch Type Handlers [extends Epic 4 / Story 7.9]
   epic-14: backlog
@@ -242,58 +242,165 @@ development_status:
 # ==========================================================================
 action_items:
   - epic: 11
-    action: "Recalibrate CI coverage floor 68% -> 73% as a one-line diff bundled into the first Epic 12 story (standalone retro-item form has slipped 4 epics)"
+    action: "Recalibrate CI coverage floor 68% -> 73% as a one-line diff bundled into
+      the first Epic 12 story (standalone retro-item form has slipped 4 epics)"
     owner: "Amelia"
     status: done  # Epic-12 retro (2026-07-26): landed in 12.1's own diff exactly as prescribed
   - epic: 11
-    action: "When a story introduces an option flag that changes wire-decode shape, enumerate every decode entry point it must thread through (per-story flag-threading checklist) to avoid cross-story latent traps like 11.3 -> 11.4"
+    action: "When a story introduces an option flag that changes wire-decode shape,
+      enumerate every decode entry point it must thread through (per-story flag-threading
+      checklist) to avoid cross-story latent traps like 11.3 -> 11.4"
     owner: "Amelia"
     status: in-progress  # Epic-12 retro (2026-07-26): fetchLobs threaded via required internal params (found 3 omitted sites); epic-boundary review still found one unthreaded site outside that discipline (_openResultSetGuarded -> _materializeNestedCursorsInBatch)
   - epic: 11
-    action: "Make deferred-work target field actually enforced (flag any new deferral lacking one) or formally remove the field from the template"
+    action: "Make deferred-work target field actually enforced (flag any new deferral
+      lacking one) or formally remove the field from the template"
     owner: "Amelia"
     status: in-progress  # Epic-12 retro (2026-07-26): 12.4 AC9 retroactively added target: + epic-exit disposition to every carried Epic 12 ledger item (best compliance yet), but still manual diligence, not a mechanical check
   - epic: 11
-    action: "Pre-story confirmation review of the OracleLob streaming surface: temp-LOB free-on-close lifecycle + in-flight/leak guard against the chunked sendLobOp loop, reusing Epic 11 cursor-lifecycle precedent, before Story 12.1 ACs"
+    action: "Pre-story confirmation review of the OracleLob streaming surface: temp-LOB
+      free-on-close lifecycle + in-flight/leak guard against the chunked sendLobOp
+      loop, reusing Epic 11 cursor-lifecycle precedent, before Story 12.1 ACs"
     owner: "Winston"
     status: open  # Epic-12 retro (2026-07-26): NOT addressed -- create-story made the API-surface/scoping decisions itself; no separate pre-story architect review happened. 12.2 later hit the created-temp-LOB/slot-rule tension this review had the best shot at catching early. Not modified per retro workflow rule (not-addressed items are left open).
   - epic: 11
-    action: "Carry the Oracle 21c MERGE dmlRowCounts under-count limitation forward as a known-server-behavior reference for any Epic 12+ story combining batch results with MERGE"
+    action: "Carry the Oracle 21c MERGE dmlRowCounts under-count limitation forward
+      as a known-server-behavior reference for any Epic 12+ story combining batch
+      results with MERGE"
     owner: "Amelia"
     status: done  # Epic-12 retro (2026-07-26): documented in project-context.md's Integration Test Rules and remains discoverable; no Epic 12 story combined batch+MERGE so it was never exercised, but the ask was to keep it carried forward
   - epic: 12
-    action: "Resolve Epic 12's non-convergence before treating the draft PR as mergeable: either run a confirming third epic-boundary iteration, or have a human reviewer walk the draft PR end-to-end given iteration 2's own-fix-regression pattern"
+    action: "Resolve Epic 12's non-convergence before treating the draft PR as mergeable:
+      either run a confirming third epic-boundary iteration, or have a human reviewer
+      walk the draft PR end-to-end given iteration 2's own-fix-regression pattern"
     owner: "Abibiano + Amelia"
     status: open
   - epic: 12
-    action: "File the nested-CURSOR()/REF-CURSOR LOB decode defect as its own protocol/decode story (per deferred-work.md's own recommendation), not an Epic-13+ leftover"
+    action: "File the nested-CURSOR()/REF-CURSOR LOB decode defect as its own protocol/decode
+      story (per deferred-work.md's own recommendation), not an Epic-13+ leftover"
     owner: "Amelia"
     status: open
   - epic: 12
-    action: "Update architecture.md's 'one lifecycle model' invariant to name the created-temporary-LOB slot-guard exemption explicitly"
+    action: "Update architecture.md's 'one lifecycle model' invariant to name the
+      created-temporary-LOB slot-guard exemption explicitly"
     owner: "Winston"
     status: open
   - epic: 12
-    action: "Audit every flag threaded through connection.dart/transport.dart and confirm every internal call site receiving it declares the parameter required, closing the one gap the epic-boundary review found by hand"
+    action: "Audit every flag threaded through connection.dart/transport.dart and
+      confirm every internal call site receiving it declares the parameter required,
+      closing the one gap the epic-boundary review found by hand"
     owner: "Amelia"
     status: open
   - epic: 12
-    action: "Make deferred-work.md's target field mechanically enforced (e.g. a review-lens or lint check) instead of relying on per-story diligence -- 4th consecutive epic noting this gap"
+    action: "Make deferred-work.md's target field mechanically enforced (e.g. a review-lens
+      or lint check) instead of relying on per-story diligence -- 4th consecutive
+      epic noting this gap"
     owner: "Amelia"
     status: open
   - epic: 12
-    action: "Decide whether to enable/backfill TEA (bmad-testarch-*) workflows before Epic 13, given Epic 12 ran with no trace/NFR/test-review gate and 12.4's own ACs were the only epic exit criteria by default"
+    action: "Decide whether to enable/backfill TEA (bmad-testarch-*) workflows before
+      Epic 13, given Epic 12 ran with no trace/NFR/test-review gate and 12.4's own
+      ACs were the only epic exit criteria by default"
     owner: "Abibiano"
     status: open
   - epic: 12
-    action: "Pre-story confirmation review of the JSON/OSON scalar-codec surface (13.1/13.2 wire shapes) before 13.1 ACs are authored -- the exact step skipped for Epic 12 (Epic 11 action item, not addressed)"
+    action: "Pre-story confirmation review of the JSON/OSON scalar-codec surface (13.1/13.2
+      wire shapes) before 13.1 ACs are authored -- the exact step skipped for Epic
+      12 (Epic 11 action item, not addressed)"
     owner: "Winston"
     status: open
   - epic: 12
-    action: "Light enrichment pass on epics.md's Epic 13-15 one-line story stubs, using the level of detail Epic 12's stories ended up needing, so create-story inherits less ad hoc scoping risk"
+    action: "Light enrichment pass on epics.md's Epic 13-15 one-line story stubs,
+      using the level of detail Epic 12's stories ended up needing, so create-story
+      inherits less ad hoc scoping risk"
     owner: "Amelia"
     status: open
   - epic: 12
-    action: "Name the 'epic-closing dual-env story also owns release artifacts + any defect its own measurement pass proves true' pattern explicitly (in project-context.md or create-story guidance), rather than re-confirming it ad hoc per epic"
+    action: "Name the 'epic-closing dual-env story also owns release artifacts + any
+      defect its own measurement pass proves true' pattern explicitly (in project-context.md
+      or create-story guidance), rather than re-confirming it ad hoc per epic"
     owner: "Amelia"
     status: open
+  - id: "epic-13-retro-item-15-fix-ref-cursor-out-bind-and-nested-curso"
+    epic: 13
+    action: "Fix REF CURSOR OUT bind and nested CURSOR() native JSON on Oracle 21c
+      (ORA-00600 119) by applying requiresDefine; add dual-env tests"
+    owner: "Amelia"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-13-retro-item-16-decide-blob-is-json-decode-default-opt-i"
+    epic: 13
+    action: "Decide BLOB IS JSON decode default (opt-in vs documented breaking change),
+      choose release version for Unreleased, correct node-oracledb parity claim in
+      oson.dart"
+    owner: "Abibiano"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-13-retro-item-17-unify-the-needs-lob-define-json-column-p"
+    epic: 13
+    action: "Unify the needs-LOB-define/JSON column predicate into one ColumnMetadata
+      getter used at connection.dart and transport.dart sites"
+    owner: "Amelia"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-13-retro-item-18-forward-preservetimestamptimezone-throug"
+    epic: 13
+    action: "Forward preserveTimestampTimeZone through _sendLobDefines and add a live
+      test over the real Transport.defineCursor (closes DW-3)"
+    owner: "Amelia"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-13-retro-item-19-make-text-json-number-decoding-consisten"
+    epic: 13
+    action: "Make text-JSON number decoding consistent with OSON (int vs double) and
+      reject non-finite literals from text JSON"
+    owner: "Amelia"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-13-retro-item-20-harden-json-bind-validation-depth-cycle"
+    epic: 13
+    action: "Harden JSON bind validation: depth/cycle guard, UTC DateTime, long-key
+      rebind symmetry, String/Uint8List root warning, NaN/Infinity default decision"
+    owner: "Amelia + Winston"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-13-retro-item-21-wrap-utf8-decode-formatexception-in-deco"
+    epic: 13
+    action: "Wrap utf8.decode FormatException in decodeOson as OracleException"
+    owner: "Amelia"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-13-retro-item-22-record-the-intermittent-23ai-ora-03125-f"
+    epic: 13
+    action: "Record the intermittent 23ai ORA-03125 first-run JSON suite failure in
+      deferred-work.md and capture output on next occurrence"
+    owner: "Amelia"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-13-retro-item-23-restore-missing-severity-on-dw-4-dw-5-fi"
+    epic: 13
+    action: "Restore missing severity on DW-4/DW-5, fix architecture.md execute_message
+      LOC drift, hoist duplicated JSON integration test helpers to test_helper.dart"
+    owner: "Amelia"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-13-retro-item-24-reconcile-sprint-status-epic-13-entry-ba"
+    epic: 13
+    action: "Reconcile sprint-status epic-13 entry (backlog although all stories done)
+      via sprint tooling"
+    owner: "Abibiano"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-13-retro-item-25-pin-the-compose-23ai-image-or-record-the"
+    epic: 13
+    action: "Pin the Compose 23ai image or record the 26ai drift as an accepted risk"
+    owner: "Winston"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-13-retro-item-26-run-an-epic-boundary-review-for-every-ep"
+    epic: 13
+    action: "Run an epic-boundary review for every epic; Epic 13 had none and this
+      retro found cross-story defects"
+    owner: "Abibiano"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
