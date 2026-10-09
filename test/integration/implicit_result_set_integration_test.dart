@@ -430,6 +430,53 @@ void main() {
           expect(nested.single['V'], equals(i * 10));
         }
       });
+
+      // More outer rows than the prefetch window (50): the first batch comes
+      // from the DEFINE round, the rest from continuation FETCH rounds, which
+      // must still decode the nested CURSOR() column (21c continuation).
+      final nestedSelect =
+          'SELECT id, c, CURSOR(SELECT id * 10 AS v FROM dual) AS nc '
+          'FROM $lobTable ORDER BY id';
+
+      void expectNestedRow(OracleRow row, int i) {
+        expect(row['ID'], equals(i));
+        expect(row['C'], equals(clobOf(i)), reason: 'row $i CLOB');
+        final nested = row['NC']! as List<OracleRow>;
+        expect(nested.single['V'], equals(i * 10), reason: 'row $i nested');
+      }
+
+      test('eager: LOB + nested CURSOR() past the prefetch window', () async {
+        final result = await connection.execute(block(nestedSelect));
+        final rows = result.implicitResults[0] as List<OracleRow>;
+        expect(rows, hasLength(rowCount));
+        for (var i = 1; i <= rowCount; i++) {
+          expectNestedRow(rows[i - 1], i);
+        }
+        final ok = await connection.execute('SELECT 1 AS V FROM dual');
+        expect(ok.rows.single['V'], equals(1));
+      });
+
+      test('lazy: LOB + nested CURSOR() past the prefetch window', () async {
+        final result = await connection.execute(
+          block(nestedSelect),
+          null,
+          const OracleExecuteOptions(resultSet: true),
+        );
+        final first = result.implicitResults[0] as OracleResultSet;
+        final second = result.implicitResults[1] as OracleResultSet;
+        try {
+          final rows = await first.getRows(rowCount + 10);
+          expect(rows, hasLength(rowCount));
+          for (var i = 1; i <= rowCount; i++) {
+            expectNestedRow(rows[i - 1], i);
+          }
+          expect(await second.getRows(5), isEmpty);
+        } finally {
+          await first.close();
+          await second.close();
+        }
+        expect(connection.hasOpenResultSet, isFalse);
+      });
     },
   );
 }

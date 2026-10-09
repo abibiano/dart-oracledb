@@ -234,6 +234,38 @@ void main() {
       expect(transport.calls, equals(['fetch']));
     });
 
+    test('an empty DEFINE answer plus an empty defensive FETCH that still '
+        'report more rows keeps fetching until rows arrive', () async {
+      final doc = _bytes('{"k":1}');
+      final transport = _FakeTransport(
+        defineResponse: _batch(const [], more: true),
+        fetches: [
+          _batch(const [], more: true), // defensive FETCH, still empty
+          _batch([
+            [1, _blob(doc.length)],
+          ], more: false),
+        ],
+        reads: [doc],
+      );
+      final cursor = _cursor(transport, requiresDefine: true);
+
+      final rows = await _drainAll(cursor);
+      expect(rows, hasLength(1));
+      expect(rows.single[0], equals(1));
+      expect(transport.calls, equals(['define', 'fetch', 'fetch']));
+    });
+
+    test('a server that never delivers rows fails loud instead of looping '
+        'or ending the result early', () async {
+      final transport = _FakeTransport(
+        fetches: [for (var i = 0; i < 200; i++) _batch(const [], more: true)],
+      );
+      final cursor = _cursor(transport);
+      await expectLater(cursor.nextRowData(), throwsA(isA<OracleException>()));
+      expect(cursor.hasFailed, isTrue);
+      expect(await cursor.nextRowData(), isNull);
+    });
+
     test('an undecodable streamed cell fails the batch loud and the cursor '
         'enters its terminal failure state', () async {
       final transport = _FakeTransport(

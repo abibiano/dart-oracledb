@@ -270,12 +270,27 @@ class ResultSetCursor {
   /// Throws [OracleException] if a FETCH round fails (fail-loud: a partial /
   /// corrupt stream is never silently swallowed).
   Future<List<Object?>?> nextRowData() async {
-    if (_buffer.isEmpty) {
+    // A round may legitimately return zero rows while still reporting more
+    // pending (e.g. an empty DEFINE answer followed by an empty defensive
+    // FETCH), so keep fetching until rows arrive or the server says it is done.
+    // The cap turns a server that never delivers into a loud failure instead of
+    // an endless loop or a silently truncated result.
+    var emptyRounds = 0;
+    while (_buffer.isEmpty) {
       if (!_serverHasMoreRows) return null;
+      if (++emptyRounds > _maxConsecutiveEmptyFetches) {
+        _failed = true;
+        _serverHasMoreRows = false;
+        throw const OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'Server returned $_maxConsecutiveEmptyFetches consecutive empty '
+              'FETCH responses while reporting more rows pending',
+        );
+      }
       await _fetchNextBatch();
       final failure = _fetchFailure;
       if (failure != null) throw _failureException(failure);
-      if (_buffer.isEmpty) return null;
     }
     final row = _buffer.removeFirst();
     // The SINGLE row-delivery choke point (nextRowsData / nextAllRowsData both
@@ -465,11 +480,11 @@ class ResultSetCursor {
     // (inline describe even on OFETCH). See
     // `spec-nested-cursor-materialization.md` "S0 RECONCILIATION".
     //
-    // KNOWN pre-23 limitation: only the FIRST fetch is a full EXECUTE. An OUTER
-    // cursor that itself carries nested-cursor columns AND returns MORE rows
-    // than `prefetchRows` could hit id-only nested values on a continuation
-    // OFETCH on 21c. Validated fixtures keep the outer cursor at or below the
-    // prefetch, so this edge is not exercised (and not tested) here.
+    // Pre-23 note: only the FIRST fetch is a full EXECUTE. A LOB-carrying outer
+    // cursor with nested `CURSOR()` columns returning MORE rows than
+    // `prefetchRows` was verified live on 21c and 23ai (implicit result, 60 rows
+    // over a 50-row prefetch): the DEFINE round delivers the first batch and
+    // continuation OFETCH rounds still decode the nested cursors.
     //
     // node-oracledb `requiresDefine` (constructor doc): a describe-created
     // cursor with LOB / JSON columns opens with a DEFINE call. Measured on
@@ -637,6 +652,10 @@ class ResultSetCursor {
       _log.warning('Failed to reap a failed batch\'s OracleLob handle: $e');
     }
   }
+
+  /// Consecutive zero-row FETCH rounds [nextRowData] tolerates while the server
+  /// still reports more rows pending.
+  static const int _maxConsecutiveEmptyFetches = 100;
 
   static OracleException _failureException(ExecuteResponse failure) {
     return OracleException(
