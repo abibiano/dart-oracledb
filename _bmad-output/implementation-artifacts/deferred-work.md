@@ -271,7 +271,9 @@ decision: 2026-10-09 Leave documented behaviour — Documented sharp edge; resul
 origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-env-integration-tests, 2026-07-26)"), 2026-10-09
 location: lib/src/oracle_lob.dart
 reason: ⏳ **An `IN OUT` `OracleLob` bind CONSUMES the handle (ORA-22922) with no driver-authored error.** Carried unchanged — 12.2 documents it, the README states it, dual-env tests pin it, and 12.4 deliberately did NOT add a "consumed" state. 12.4 did make this shape safer in passing: the replacement LOB Oracle puts behind the bind is TEMP-flagged and is now freed (the AC4 fix), so the shape no longer leaks a session temporary LOB per call. **Epic-exit disposition:** a UX improvement needing its own lifecycle decision (does a consumed handle still need `close()`? — today yes, and that is what the tests assert). target: post-1.4 LOB API parity story. [lib/src/oracle_lob.dart; lib/src/connection.dart `_validateLobBindValue`]
-status: open
+status: done 2026-10-09
+resolution: closed by human decision: Documented in README and dartdocs
+decision: 2026-10-09 Leave documented — Documented in README and dartdocs
 decision: 2026-10-09 Add a consumed state — Mark an OracleLob consumed when bound IN OUT so read()/write() fail with a driver-authored message; keep close() working; update tests and docs.
 
 ### DW-34: A full-length single LOB READ scales super-linearly with value size (~141 s for a 32 M-unit CLOB on 23ai). Carried unchanged — no buffer-accumulation…
