@@ -19,6 +19,8 @@ library;
 
 import 'dart:typed_data';
 
+import 'package:meta/meta.dart' show internal;
+
 import 'errors.dart';
 // A LOB-typed bind may carry an OracleLob handle as its value (Story 12.2), so
 // the construction-time type check needs the type. `oracle_lob.dart` imports
@@ -108,10 +110,27 @@ enum OracleDbType {
   /// `maxSize` bytes fails loud with [OracleException] instead of being
   /// truncated. IN OUT values may be `Map<String, Object?>`, `List<Object?>`,
   /// `null`, or — because the type is declared — a scalar JSON root; members
-  /// (and scalar roots) may be `null`, `bool`, `num` (NaN and ±Infinity
-  /// travel as `BINARY_DOUBLE`), `String`, `DateTime`, [OracleTimestampTz],
-  /// `Uint8List`, and nested maps/lists — every kind a fetched JSON value can
-  /// hold. Values travel as OSON (Oracle's binary JSON) under wire type 119.
+  /// (and scalar roots) may be `null`, `bool`, `num`, `String`, `DateTime`,
+  /// [OracleTimestampTz], `Uint8List`, and nested maps/lists — every kind a
+  /// fetched JSON value can hold. Values travel as OSON (Oracle's binary JSON)
+  /// under wire type 119.
+  ///
+  /// - A declared-JSON `String` value is a JSON **string scalar**, never
+  ///   parsed: `'{"a":1}'` binds as the string `"{\"a\":1}"`. Bind the `Map`
+  ///   itself rather than `jsonEncode(map)`.
+  /// - NaN and ±Infinity are rejected by default (an [ArgumentError] naming
+  ///   the member path); pass `allowNonFinite: true` to [OracleBind.inOut] to
+  ///   send them as `BINARY_DOUBLE`.
+  /// - A UTC `DateTime` (`isUtc`) travels as TIMESTAMP WITH TIME ZONE at
+  ///   `+00:00` and comes back as an [OracleTimestampTz] for the same
+  ///   instant; a local `DateTime` keeps its wall-clock fields.
+  /// - Field names up to 255 UTF-8 bytes work on every server; names of
+  ///   256..65535 bytes need Oracle 23ai (the document travels as OSON
+  ///   version 3). On an older server the execute fails with an
+  ///   [ArgumentError] before anything is sent — Oracle 21c would store such
+  ///   a document but could not read it back.
+  /// - Objects and arrays may nest at most 1000 levels (Oracle's JSON limit);
+  ///   deeper or cyclic values are rejected with an [ArgumentError].
   json,
 
   /// Oracle `SYS_REFCURSOR` (returned as an [OracleResultSet] in
@@ -180,8 +199,9 @@ class OracleBind {
   /// numeric and date/timestamp binds use fixed protocol sizes.
   OracleBind.out({required this.type, this.maxSize})
     : value = null,
-      direction = BindDir.output {
-    _validate(type, maxSize, null);
+      direction = BindDir.output,
+      allowNonFinite = false {
+    _jsonLongFieldNamePath = _validate(type, maxSize, null);
   }
 
   /// Declares an IN OUT bind: sends [value] to the server and reads the
@@ -196,8 +216,18 @@ class OracleBind {
   ///
   /// [OracleDbType.cursor] IN OUT binds are not supported; use
   /// [OracleBind.out] with `type: OracleDbType.cursor` instead.
-  OracleBind.inOut({required this.value, required this.type, this.maxSize})
-    : direction = BindDir.inputOutput {
+  ///
+  /// [allowNonFinite] applies to [OracleDbType.json] only: when `true`, NaN
+  /// and ±Infinity members (or a non-finite scalar root) are accepted and
+  /// travel as `BINARY_DOUBLE`; by default they are rejected at construction
+  /// with an [ArgumentError] naming the member path. Setting it on any other
+  /// type throws [OracleException] (`oraBindTypeError`).
+  OracleBind.inOut({
+    required this.value,
+    required this.type,
+    this.maxSize,
+    this.allowNonFinite = false,
+  }) : direction = BindDir.inputOutput {
     if (type == OracleDbType.cursor) {
       throw const OracleException(
         errorCode: oraBindTypeError,
@@ -207,10 +237,32 @@ class OracleBind {
             'SYS_REFCURSOR OUT parameter',
       );
     }
-    _validate(type, maxSize, value);
+    if (allowNonFinite && type != OracleDbType.json) {
+      throw OracleException(
+        errorCode: oraBindTypeError,
+        message:
+            'OracleBind.inOut(allowNonFinite: true) applies only to '
+            'OracleDbType.json binds (got $type)',
+      );
+    }
+    _jsonLongFieldNamePath = _validate(
+      type,
+      maxSize,
+      value,
+      allowNonFinite: allowNonFinite,
+    );
   }
 
-  static void _validate(OracleDbType type, int? maxSize, Object? value) {
+  /// Validates the spec and, for a JSON value, returns the path of the first
+  /// object holding a field name over 255 UTF-8 bytes (else `null`): the
+  /// connection refuses such a value on a pre-23 server without walking the
+  /// document a second time.
+  static String? _validate(
+    OracleDbType type,
+    int? maxSize,
+    Object? value, {
+    bool allowNonFinite = false,
+  }) {
     if (maxSize != null && maxSize <= 0) {
       throw OracleException(
         errorCode: oraBindTypeError,
@@ -236,7 +288,7 @@ class OracleBind {
     // than letting a mismatch surface as a ClassCastError during wire
     // encoding, which is far from the call site. OUT-only binds always pass
     // `value: null` and are unaffected.
-    if (value == null) return;
+    if (value == null) return null;
     // POLICY for every type-mismatch throw below: report only the offending
     // runtime TYPE, never the value. `ArgumentError.value` renders its value
     // through `Error.safeToString`, which for a String emits the whole thing —
@@ -344,11 +396,20 @@ class OracleBind {
         }
       case OracleDbType.json:
         // Recursive structure check: rejects invalid members (Set, non-String
-        // keys, arbitrary objects, out-of-range dates, over-long field names)
-        // at the call site. The type is declared explicitly here, so a scalar
+        // keys, arbitrary objects, out-of-range dates, over-long field names,
+        // non-finite numbers unless opted in, cyclic or over-deep nesting) at
+        // the call site. The type is declared explicitly here, so a scalar
         // JSON root (String, num, bool, DateTime, OracleTimestampTz,
-        // Uint8List) is allowed — type inference never produces one.
-        assertValidJsonBindValue(value, 'value', allowScalarRoot: true);
+        // Uint8List) is allowed — type inference never produces one. This is
+        // the ONLY validation of the value: the connection hands it to the
+        // wire layer as already validated, checking only the returned
+        // long-field-name path against the server's OSON version.
+        return assertValidJsonBindValue(
+          value,
+          'value',
+          allowScalarRoot: true,
+          allowNonFinite: allowNonFinite,
+        );
       case OracleDbType.cursor:
         // Cursor OUT binds cannot carry an input value; the server allocates
         // the cursor. Reaching here means an inOut constructor bypassed the
@@ -360,10 +421,17 @@ class OracleBind {
               '(got ${value.runtimeType}); cursor binds are OUT-only',
         );
     }
+    return null;
   }
 
   /// Input value sent to the server. `null` for OUT-only binds.
   final Object? value;
+
+  /// For a JSON value: the path of the first object holding a field name
+  /// over 255 UTF-8 bytes, recorded by the one construction-time validation
+  /// walk; `null` when every name fits OSON version 1 (or not JSON). Read by
+  /// the connection through [jsonLongFieldNamePathOf].
+  late final String? _jsonLongFieldNamePath;
 
   /// The Oracle type expected on the wire.
   final OracleDbType type;
@@ -378,6 +446,11 @@ class OracleBind {
   /// **OSON bytes** (the binary JSON wire encoding) for [OracleDbType.json].
   final int? maxSize;
 
+  /// Whether an [OracleDbType.json] IN OUT value may hold NaN / ±Infinity
+  /// (sent as `BINARY_DOUBLE`). Always `false` for [OracleBind.out] and for
+  /// every non-JSON type.
+  final bool allowNonFinite;
+
   /// Direction on the wire. Only [BindDir.output] and [BindDir.inputOutput]
   /// are produced by the public constructors; [BindDir.input] binds are
   /// supplied as raw Dart values, not [OracleBind] instances.
@@ -386,6 +459,17 @@ class OracleBind {
   /// The Oracle wire-protocol type indicator for [type].
   int get oracleTypeCode => oracleTypeCodeFor(type);
 }
+
+/// The path (rooted at `value`) of the first object in [bind]'s JSON value
+/// holding a field name longer than 255 UTF-8 bytes — which only Oracle 23ai
+/// stores (OSON version 3) — or `null` when there is none.
+///
+/// Package-internal (not exported from `lib/oracledb.dart`, and kept off the
+/// class so it is not public API): the connection reads it to refuse such a
+/// value on a pre-23 server without re-walking a document the constructor
+/// already validated.
+@internal
+String? jsonLongFieldNamePathOf(OracleBind bind) => bind._jsonLongFieldNamePath;
 
 /// Maps a public [OracleDbType] to its Oracle wire-protocol type indicator.
 ///

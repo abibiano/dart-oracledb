@@ -999,13 +999,16 @@ Client, no LOB read round trips:
 
   | Scalar inside the JSON value          | Dart type (fetch)    | Bound from Dart as |
   | ------------------------------------- | -------------------- | ------------------ |
-  | `DATE`, `TIMESTAMP`                   | `DateTime` — same as a `DATE` / `TIMESTAMP` column (local wall clock, fractional seconds truncated to microseconds) | `DateTime` → a `TIMESTAMP` (7 bytes with no sub-second part, else 11), written from its wall-clock fields exactly like a `DATE` / `TIMESTAMP` column bind (a UTC `DateTime` therefore comes back as a local one with the same fields) |
+  | `DATE`, `TIMESTAMP`                   | `DateTime` — same as a `DATE` / `TIMESTAMP` column (local wall clock, fractional seconds truncated to microseconds) | A local `DateTime` → a `TIMESTAMP` (7 bytes with no sub-second part, else 11), written from its wall-clock fields exactly like a `DATE` / `TIMESTAMP` column bind. A UTC `DateTime` (`isUtc`) names an instant, so it travels as `TIMESTAMP WITH TIME ZONE` at `+00:00` instead and fetches back as an `OracleTimestampTz` for the same instant |
   | `TIMESTAMP WITH TIME ZONE`            | Always `OracleTimestampTz` (UTC instant + original offset), regardless of `preserveTimestampTimeZone` — unlike a column, which returns a UTC `DateTime` by default | `OracleTimestampTz` → `TIMESTAMP WITH TIME ZONE`, offset preserved |
-  | `BINARY_FLOAT`, `BINARY_DOUBLE`       | `double` (NaN and ±Infinity included; `BINARY_FLOAT` widened from single precision) | NaN, ±Infinity, and doubles outside Oracle `NUMBER`'s range (magnitude ≥ 1E126, or a non-zero magnitude below 1E-130) → `BINARY_DOUBLE`; every other `num`, including `0.0` / `-0.0`, stays `NUMBER`. node-oracledb sends only NaN as `BINARY_DOUBLE`; ±Infinity and out-of-range doubles are a Dart-driver extension (node-oracledb cannot bind them) |
+  | `BINARY_FLOAT`, `BINARY_DOUBLE`       | `double` (NaN and ±Infinity included; `BINARY_FLOAT` widened from single precision) | Doubles outside Oracle `NUMBER`'s range (magnitude ≥ 1E126, or a non-zero magnitude below 1E-130) → `BINARY_DOUBLE`; every other finite `num`, including `0.0` / `-0.0`, stays `NUMBER`. NaN and ±Infinity are **rejected by default** (strict JSON has no such values) with an `ArgumentError` naming the member's path; opt in per bind with `OracleBind.inOut(..., type: OracleDbType.json, allowNonFinite: true)` to send them as `BINARY_DOUBLE`. node-oracledb sends NaN as `BINARY_DOUBLE` unasked and cannot bind ±Infinity or out-of-range doubles at all |
   | `RAW` / binary                        | `Uint8List` — an empty binary JSON scalar is an empty list of bytes; an empty `RAW` column decodes to `null` | `Uint8List` → binary (bytes, never an array of numbers) |
 
   Any fetched document therefore binds back without conversion and fetches
-  back equal, with these narrowings of the stored form:
+  back equal — except that NaN / ±Infinity members re-bind only through the
+  `allowNonFinite` opt-in (a PL/SQL `IN OUT JSON` parameter), and field names
+  over 255 UTF-8 bytes only on Oracle 23ai — with these narrowings of the
+  stored form:
   - a `DATE` node re-binds as a 7-byte `TIMESTAMP` (same `DateTime`);
   - a finite `BINARY_FLOAT` / `BINARY_DOUBLE` within `NUMBER`'s range
     re-binds as `NUMBER` (equal value; an integral value then decodes as
@@ -1029,11 +1032,24 @@ Client, no LOB read round trips:
   nested maps/lists; anything else (e.g. `Set`, a non-`String` key, an
   arbitrary object) fails loudly at the call site with `ArgumentError`
   (`OracleException` with `oraBindTypeError` from `executeMany()`) before any
-  round trip, and the error never echoes the document. Field names are
-  limited to 255 UTF-8 bytes (the limit shared by all supported server
-  versions). Numeric members follow the same NUMBER contract as scalar
-  columns: integers beyond 2⁵³ decode to `double` and lose precision (see
-  [Known limitations](#known-limitations)).
+  round trip, and the error never echoes the document — it names the
+  offending member by position (list index, or 1-based object member
+  ordinal such as `[member #2]`), never by value or key. The same applies to:
+  - **NaN / ±Infinity** — rejected by default; a DML or `executeMany()` bind
+    has no opt-in, only `OracleBind.inOut(..., allowNonFinite: true)` does.
+  - **Field names** — up to 255 UTF-8 bytes on every server; up to 65535
+    bytes on Oracle 23ai (the document then travels as OSON version 3, and
+    the server can query those names). An older server refuses longer names
+    at the call site: Oracle 21c would store such a document but could not
+    read it back.
+  - **Nesting** — objects and arrays may nest at most 1000 levels (Oracle's
+    JSON limit); a deeper value, or a cyclic one (a map or list that contains
+    itself), fails instead of overflowing the stack. A sub-document shared by
+    two members is fine.
+
+  Each document is validated once per bind. Numeric members follow the same
+  NUMBER contract as scalar columns: integers beyond 2⁵³ decode to `double`
+  and lose precision (see [Known limitations](#known-limitations)).
 - **Scalar JSON values** — a bare `String`, `num`, `DateTime`, `Uint8List`,
   … bind keeps its usual column type (`VARCHAR2`, `NUMBER`, `DATE`, `RAW`),
   so a `String` bound into a `JSON` column is parsed by the server as JSON
@@ -1046,13 +1062,17 @@ Client, no LOB read round trips:
   one: its binds always take their type from the value, and `executeMany()`
   rejects `bindDefs` for plain array DML. The root may be any supported
   scalar (`String`, `num`, `bool`, `DateTime`, `OracleTimestampTz`,
-  `Uint8List`).
+  `Uint8List`). A declared-JSON `String` is a JSON **string** scalar, never
+  parsed: `'{"a":1}'` stores the string `"{\"a\":1}"` — bind the `Map`
+  itself, not `jsonEncode(map)`.
 - **PL/SQL OUT / IN OUT** — declare
   `OracleBind.out(type: OracleDbType.json, maxSize: ...)` or
   `OracleBind.inOut(value: ..., type: OracleDbType.json, maxSize: ...)`;
   values decode through `result.outBinds`. `maxSize` counts **OSON bytes**
   (the binary wire encoding) and bounds the returned document — a larger
-  return fails loudly instead of truncating.
+  return fails loudly instead of truncating. `OracleBind.inOut(...,
+  allowNonFinite: true)` lets the value hold NaN / ±Infinity (sent as
+  `BINARY_DOUBLE`); the flag is JSON-only and rejected on other types.
 
 **Creating `JSON` tables — tablespace requirement.** A native `JSON` column
 requires a tablespace that uses **Automatic Segment Space Management (ASSM)**.
@@ -1118,7 +1138,8 @@ final doc = result.rows.first['DOC'] as Map<String, Object?>; // not bytes
   `compatible >= 20`; it is stored as JSON text, or as OSON in a
   `FORMAT OSON` column), or bind the JSON text bytes as a `Uint8List`
   (`utf8.encode(jsonEncode(doc))`) on any server. Oracle-specific scalar
-  members (`DateTime`, `OracleTimestampTz`, `Uint8List`, NaN/±Infinity) are
+  members (`DateTime`, `OracleTimestampTz`, `Uint8List`, and NaN/±Infinity
+  through the `allowNonFinite` opt-in) are
   converted by the server: a text `IS JSON` column stores Oracle's JSON text
   serialization — dates as ISO-8601 strings (`"2024-03-15T10:20:30"`),
   binary as a hex string (`"DEAD"`), NaN/±Infinity as `"Nan"` / `"Inf"` /

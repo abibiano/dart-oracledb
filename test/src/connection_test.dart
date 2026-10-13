@@ -332,10 +332,24 @@ void main() {
           ),
           (
             <String, Object?>{
-              'doc': <String, Object?>{'pw': secret, 'k' * 256: 1},
+              'doc': <String, Object?>{'pw': secret, 'k' * 65536: 1},
             },
-            '255 UTF-8 bytes',
+            '65535 UTF-8 bytes',
           ),
+          // DW-12: NaN / ±Infinity need OracleBind.inOut(allowNonFinite:
+          // true); a raw Map / List bind has no opt-in.
+          (
+            [
+              1,
+              <String, Object?>{
+                'pw': secret,
+                'n': <Object?>[double.nan],
+              },
+            ],
+            'not finite (NaN or ±Infinity) at bindValues[1][member #2][0];',
+          ),
+          (<String, Object?>{'doc': _cyclicDoc(secret)}, 'cyclic'),
+          (<String, Object?>{'doc': _deepDoc(secret, 1001)}, '1000 levels'),
         ];
         for (final (binds, fragment) in cases) {
           final sql = binds is Map
@@ -358,15 +372,110 @@ void main() {
           '(Story 13.3)', () async {
         final transport = _FakeTransport();
         final conn = OracleConnection.forTesting(transport: transport);
-        await conn.execute('INSERT INTO t (doc) VALUES (:1)', [
-          <String, Object?>{
-            'd': DateTime(2026),
-            'tz': OracleTimestampTz(DateTime.utc(2026), offsetMinutes: 60),
-            'b': Uint8List(2),
-            'n': double.nan,
-          },
-        ]);
+        final doc = <String, Object?>{
+          'd': DateTime(2026),
+          'utc': DateTime.utc(2026),
+          'tz': OracleTimestampTz(DateTime.utc(2026), offsetMinutes: 60),
+          'b': Uint8List(2),
+          'huge': 1e300,
+          'k' * 300: 1, // OSON v3 field name (DW-12)
+          'deepest': _deepDoc('leaf', 999), // 1000 levels with the root
+        };
+        await conn.execute('INSERT INTO t (doc) VALUES (:1)', [doc]);
         expect(transport.executeCalls, equals(1));
+        // Validated once, here, then handed to the wire layer pre-wrapped as
+        // a JSON bind carrying the caller's document untouched.
+        final bind = transport.lastBindValues!.single! as BindVariable;
+        expect(bind.oraType, equals(119)); // oraTypeJson
+        expect(bind.value, same(doc));
+        expect(bind.allowNonFinite, isFalse);
+      });
+
+      test('on a pre-23 server, JSON field names over 255 UTF-8 bytes fail at '
+          'the call site before any transport work — raw Map / List binds '
+          'and OracleBind values alike (DW-12)', () async {
+        // Oracle 21c negotiates a TTC field version below 23.1 (17). It would
+        // store a version-3 OSON document and then be unable to read it.
+        final transport = _FakeTransport()..debugTtcFieldVersion = 16;
+        final conn = OracleConnection.forTesting(transport: transport);
+        const secret = 'hunter2-top-secret';
+        final doc = <String, Object?>{
+          'pw': secret,
+          'outer': <String, Object?>{'$secret${'k' * 256}': 1},
+        };
+        await expectLater(
+          conn.execute('INSERT INTO t (doc) VALUES (:doc)', {'doc': doc}),
+          throwsA(
+            isA<ArgumentError>()
+                .having(
+                  (e) => '$e',
+                  'toString',
+                  allOf(
+                    contains('Oracle Database 23ai or later'),
+                    contains("at bindValues['doc'][member #2])"),
+                  ),
+                )
+                .having((e) => '$e', 'toString', isNot(contains(secret))),
+          ),
+        );
+        // OracleBind validates before it knows the server, so it constructs;
+        // the connection refuses it from the path the constructor recorded.
+        final bind = OracleBind.inOut(
+          value: doc,
+          type: OracleDbType.json,
+          maxSize: 4000,
+        );
+        await expectLater(
+          conn.execute('BEGIN p(:doc); END;', {'doc': bind}),
+          throwsA(
+            isA<ArgumentError>()
+                .having((e) => e.name, 'name', "bindValues['doc']")
+                .having(
+                  (e) => '$e',
+                  'toString',
+                  allOf(
+                    contains('Oracle Database 23ai or later'),
+                    contains('at value[member #2])'),
+                  ),
+                )
+                .having((e) => '$e', 'toString', isNot(contains(secret))),
+          ),
+        );
+        expect(transport.executeCalls, equals(0));
+
+        // 255-byte names bind on every server...
+        await conn.execute('INSERT INTO t (doc) VALUES (:doc)', {
+          'doc': <String, Object?>{'k' * 255: 1},
+        });
+        expect(transport.executeCalls, equals(1));
+        // ...and the same long-name OracleBind goes through on 23ai.
+        transport.debugTtcFieldVersion = 24;
+        await conn.execute('BEGIN p(:doc); END;', {'doc': bind});
+        expect(transport.executeCalls, equals(2));
+      });
+
+      test('OracleBind.inOut(type: json, allowNonFinite: true) carries the '
+          'opt-in to the wire layer (DW-12)', () async {
+        final transport = _FakeTransport();
+        final conn = OracleConnection.forTesting(transport: transport);
+        final doc = <String, Object?>{
+          'nan': double.nan,
+          'inf': <Object?>[double.infinity, double.negativeInfinity],
+        };
+        await conn.execute('BEGIN p(:doc); END;', {
+          'doc': OracleBind.inOut(
+            value: doc,
+            type: OracleDbType.json,
+            maxSize: 4000,
+            allowNonFinite: true,
+          ),
+        });
+        expect(transport.executeCalls, equals(1));
+        final bind = transport.lastBindValues!.single! as BindVariable;
+        expect(bind.oraType, equals(119)); // oraTypeJson
+        expect(bind.value, same(doc));
+        expect(bind.dir, equals(BindDir.inputOutput));
+        expect(bind.allowNonFinite, isTrue);
       });
     });
 
@@ -1210,6 +1319,24 @@ void main() {
   });
 }
 
+/// A JSON document that contains itself (through a nested list), holding
+/// [secret] so tests can assert the error never echoes document content.
+Map<String, Object?> _cyclicDoc(String secret) {
+  final doc = <String, Object?>{'pw': secret};
+  doc['self'] = <Object?>[doc];
+  return doc;
+}
+
+/// A JSON value nesting objects and arrays exactly [levels] deep (the
+/// outermost container is level 1), with [leaf] in the innermost array.
+Object _deepDoc(String leaf, int levels) {
+  Object value = <Object?>[leaf];
+  for (var i = 1; i < levels; i++) {
+    value = i.isOdd ? <String, Object?>{'k': value} : <Object?>[value];
+  }
+  return value;
+}
+
 /// Minimal in-process [Transport] stand-in for connection-level cache and
 /// concurrency tests. Overrides only the surface [OracleConnection.execute]
 /// touches; everything else inherits the unconnected base behavior.
@@ -1226,6 +1353,7 @@ class _FakeTransport extends Transport {
   int lastCursorId = -1;
   List<int> lastCursorsToClose = const <int>[];
   List<ColumnMetadata>? lastExpectedColumns;
+  List<Object?>? lastBindValues;
 
   @override
   bool get isConnected => true;
@@ -1260,6 +1388,7 @@ class _FakeTransport extends Transport {
     lastCursorId = cursorId;
     lastCursorsToClose = cursorsToClose;
     lastExpectedColumns = expectedColumns;
+    lastBindValues = bindValues;
     final gate = executeGate;
     if (gate != null) {
       executeGate = null; // only the first call parks

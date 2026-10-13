@@ -2757,9 +2757,45 @@ void main() {
         () => BindVariable(value: <Object, Object?>{1: 'bad key'}),
         throwsA(isA<ArgumentError>()),
       );
+      // DW-12: names up to 65535 UTF-8 bytes are valid (OSON v3); longer
+      // ones, non-finite numbers, cycles and >1000-deep nesting are not.
       expect(
-        () => BindVariable(value: <String, Object?>{'k' * 256: 1}),
+        BindVariable(value: <String, Object?>{'k' * 256: 1}).oraType,
+        equals(oraTypeJson),
+      );
+      expect(
+        () => BindVariable(value: <String, Object?>{'k' * 65536: 1}),
         throwsA(isA<ArgumentError>()),
+      );
+      expect(
+        () => BindVariable(value: <Object?>[1, double.nan]),
+        throwsA(isA<ArgumentError>()),
+      );
+      final cyclic = <String, Object?>{};
+      cyclic['self'] = cyclic;
+      expect(
+        () => BindVariable(value: cyclic),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => '${e.message}',
+            'message',
+            contains('cyclic'),
+          ),
+        ),
+      );
+      Object deep = <Object?>[];
+      for (var i = 0; i < 2000; i++) {
+        deep = <Object?>[deep];
+      }
+      expect(
+        () => BindVariable(value: deep),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => '${e.message}',
+            'message',
+            contains('1000 levels'),
+          ),
+        ),
       );
     });
 
@@ -2769,11 +2805,119 @@ void main() {
         't': DateTime.utc(2026),
         'tz': OracleTimestampTz(DateTime.utc(2026), offsetMinutes: 60),
         'b': Uint8List(2),
-        'nan': double.nan,
-        'inf': <Object?>[double.infinity],
+        'huge': <Object?>[1e300],
       };
       final bind = BindVariable(value: doc);
       expect(bind.oraType, equals(oraTypeJson));
+    });
+
+    test('NaN / ±Infinity need allowNonFinite, which also reaches the OSON '
+        'encoder (DW-12)', () {
+      final doc = <String, Object?>{
+        'nan': double.nan,
+        'inf': <Object?>[double.infinity, double.negativeInfinity],
+      };
+      expect(
+        () => BindVariable(value: doc),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => '${e.message}',
+            'message',
+            contains('value[member #1]'),
+          ),
+        ),
+      );
+      expect(
+        () => BindVariable(
+          value: double.nan,
+          oraType: oraTypeJson,
+          maxSize: 4000,
+          dir: BindDir.inputOutput,
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+      final bind = BindVariable(
+        value: doc,
+        oraType: oraTypeJson,
+        maxSize: 4000,
+        dir: BindDir.inputOutput,
+        allowNonFinite: true,
+      );
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [bind],
+      );
+      final oson = encodeOson(doc, allowNonFinite: true);
+      expect(
+        _indexOfSub(req.toBytes(), _bytesWithLength(oson)),
+        greaterThanOrEqualTo(0),
+        reason: 'opted-in non-finite OSON document not found in the request',
+      );
+    });
+
+    test('a long (OSON v3) field name encodes for a 23.1+ field version and '
+        'fails loud below it — the encoder backstop to the connection check '
+        '(DW-12)', () {
+      final doc = <String, Object?>{'k' * 300: 1};
+      ExecuteRequest request(int ttcFieldVersion) => ExecuteRequest(
+        sql: 'INSERT INTO t VALUES (:1)',
+        isQuery: false,
+        ttcFieldVersion: ttcFieldVersion,
+        bindValues: [doc],
+      );
+      final oson = encodeOson(doc);
+      expect(oson[3], equals(3));
+      // Over 252 bytes the payload travels chunked, so look for its leading
+      // bytes (magic, version 3, headers, the start of the long name).
+      expect(
+        _indexOfSub(
+          request(ttcCcapFieldVersion23_1).toBytes(),
+          oson.sublist(0, 64),
+        ),
+        greaterThanOrEqualTo(0),
+      );
+      expect(
+        request(ttcCcapFieldVersion23_1 - 1).toBytes,
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+              .having(
+                (e) => e.message,
+                'message',
+                contains('Oracle Database 23ai or later'),
+              ),
+        ),
+      );
+    });
+
+    test('alreadyValidated skips the construction-time walk; the OSON '
+        'encoder still fails loud on a value that went bad (DW-12)', () {
+      // The connection validates a document exactly once and hands it over
+      // pre-validated; a document that is invalid anyway (mutated after
+      // validation) is caught by the encoder's own checks, not encoded.
+      final doc = <String, Object?>{'n': double.nan};
+      final bind = BindVariable(
+        value: doc,
+        oraType: oraTypeJson,
+        alreadyValidated: true,
+      );
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t VALUES (:1)',
+        isQuery: false,
+        bindValues: [bind],
+      );
+      expect(
+        req.toBytes,
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraUnsupportedType,
+          ),
+        ),
+      );
     });
 
     test('a scalar JSON root needs the explicit JSON type; inference keeps '

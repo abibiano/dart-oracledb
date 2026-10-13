@@ -47,12 +47,21 @@ enum BindDir {
 /// [maxSize].
 class BindVariable {
   /// Creates a bind variable.
+  ///
+  /// [allowNonFinite] lets a JSON value hold NaN / ±Infinity (encoded as
+  /// BINARY_DOUBLE); it is enforced again by the OSON encoder at write time.
+  /// [alreadyValidated] skips the JSON structure validation for a value the
+  /// caller has just validated with the same rules (an `OracleBind` IN OUT
+  /// value, a connection-validated Map/List, an executeMany row value), so a
+  /// document is walked by the validator once, not once per wrap.
   BindVariable({
     required this.value,
     int? oraType,
     this.maxSize,
     this.dir = BindDir.input,
     this.isNChar = false,
+    this.allowNonFinite = false,
+    bool alreadyValidated = false,
   }) : oraType = oraType ?? _inferType(value) {
     // JSON binds (inferred from a Map/List value or declared explicitly)
     // must hold a valid JSON value. Validating at construction surfaces bad
@@ -60,11 +69,12 @@ class BindVariable {
     // at the call site instead of mid-encode. A scalar JSON root is allowed
     // only when the JSON type was passed explicitly: inference maps scalars
     // to their own column types (String → VARCHAR2, Uint8List → RAW, ...).
-    if (this.oraType == oraTypeJson) {
+    if (this.oraType == oraTypeJson && !alreadyValidated) {
       assertValidJsonBindValue(
         value,
         'value',
         allowScalarRoot: oraType != null,
+        allowNonFinite: allowNonFinite,
       );
     }
   }
@@ -90,6 +100,11 @@ class BindVariable {
   /// travel as UTF-16BE rather than UTF-8. Set from the public
   /// `OracleDbType.nVarchar`/`nClob` binds.
   final bool isNChar;
+
+  /// Whether a JSON value may hold NaN / ±Infinity (sent as BINARY_DOUBLE).
+  /// Set from `OracleBind.inOut(allowNonFinite: true)`; ignored for non-JSON
+  /// binds.
+  final bool allowNonFinite;
 
   /// Whether the server will return a value for this bind (OUT or IN OUT).
   bool get hasOutput => dir == BindDir.output || dir == BindDir.inputOutput;
@@ -496,7 +511,12 @@ class ExecuteRequest extends Message {
       if (rows == null) {
         // Single ROW_DATA message containing all bind values for one
         // iteration.
-        _writeRowData(buffer, binds, isPlSql: isPlSql);
+        _writeRowData(
+          buffer,
+          binds,
+          isPlSql: isPlSql,
+          ttcFieldVersion: ttcFieldVersion,
+        );
       } else {
         // executeMany (array DML and PL/SQL iteration): one ROW_DATA message
         // per iteration (node-oracledb execute.js encode() writes
@@ -516,23 +536,32 @@ class ExecuteRequest extends Message {
                   '${binds.length} bind slots',
             );
           }
-          _writeRowData(buffer, [
-            for (var i = 0; i < binds.length; i++)
-              // DML RETURNING: the RETURNING ... INTO targets (OUT / IN OUT
-              // binds) are written in the metadata block above but OMITTED
-              // from the per-iteration row data — the server populates them
-              // and streams the returned values back (node-oracledb
-              // writeBindParamsRow skips isReturnBind variables). Every other
-              // executeMany shape writes all slots (array-DML IN binds and
-              // PL/SQL OUT null-indicator placeholders alike).
-              if (!(dmlReturning && binds[i].hasOutput))
-                BindVariable(
-                  value: row[i],
-                  oraType: binds[i].oraType,
-                  maxSize: binds[i].maxSize,
-                  isNChar: binds[i].isNChar,
-                ),
-          ], isPlSql: isPlSql);
+          _writeRowData(
+            buffer,
+            [
+              for (var i = 0; i < binds.length; i++)
+                // DML RETURNING: the RETURNING ... INTO targets (OUT / IN OUT
+                // binds) are written in the metadata block above but OMITTED
+                // from the per-iteration row data — the server populates them
+                // and streams the returned values back (node-oracledb
+                // writeBindParamsRow skips isReturnBind variables). Every other
+                // executeMany shape writes all slots (array-DML IN binds and
+                // PL/SQL OUT null-indicator placeholders alike).
+                if (!(dmlReturning && binds[i].hasOutput))
+                  BindVariable(
+                    value: row[i],
+                    oraType: binds[i].oraType,
+                    maxSize: binds[i].maxSize,
+                    isNChar: binds[i].isNChar,
+                    allowNonFinite: binds[i].allowNonFinite,
+                    // Every executeMany row value was validated against its
+                    // slot by the connection before any wire work.
+                    alreadyValidated: true,
+                  ),
+            ],
+            isPlSql: isPlSql,
+            ttcFieldVersion: ttcFieldVersion,
+          );
         }
       }
     }
@@ -550,11 +579,18 @@ class ExecuteRequest extends Message {
   ///
   /// Static (library-shared): [ReExecuteRequest] writes its per-iteration
   /// rows through the same function so the two messages cannot drift.
+  ///
+  /// [ttcFieldVersion] gates JSON field names over 255 UTF-8 bytes (OSON
+  /// version 3) to Oracle 23.1+ servers, like node-oracledb's
+  /// `_osonMaxFieldNameSize`. The connection already rejected such names for
+  /// an older server; this is the encoder backstop.
   static void _writeRowData(
     WriteBuffer buffer,
     List<BindVariable> rowBinds, {
     required bool isPlSql,
+    required int ttcFieldVersion,
   }) {
+    final osonLongFieldNames = ttcFieldVersion >= ttcCcapFieldVersion23_1;
     buffer.writeUint8(ttcMsgTypeRowData);
     final deferredLongBinds = <BindVariable>[];
     for (final bind in rowBinds) {
@@ -567,10 +603,10 @@ class ExecuteRequest extends Message {
         deferredLongBinds.add(bind);
         continue;
       }
-      _writeBindValue(buffer, bind);
+      _writeBindValue(buffer, bind, osonLongFieldNames: osonLongFieldNames);
     }
     for (final bind in deferredLongBinds) {
-      _writeBindValue(buffer, bind);
+      _writeBindValue(buffer, bind, osonLongFieldNames: osonLongFieldNames);
     }
   }
 
@@ -690,14 +726,23 @@ class ExecuteRequest extends Message {
     }
   }
 
-  static void _writeBindValue(WriteBuffer buffer, BindVariable bind) {
+  static void _writeBindValue(
+    WriteBuffer buffer,
+    BindVariable bind, {
+    required bool osonLongFieldNames,
+  }) {
     final value = bind.value;
     final oraType = _wireTypeFor(bind);
     if (oraType == oraTypeJson) {
       // JSON binds always ship an OSON payload — node-oracledb excludes
       // JSON from the null-indicator shortcut and encodes null as the OSON
       // scalar null (writeBindParamsColumn → writeOson).
-      _writeOsonValue(buffer, value);
+      _writeOsonValue(
+        buffer,
+        value,
+        allowNonFinite: bind.allowNonFinite,
+        allowLongFieldNames: osonLongFieldNames,
+      );
       return;
     }
     if (oraType == oraTypeCursor) {
@@ -789,8 +834,17 @@ class ExecuteRequest extends Message {
   /// Writes a JSON bind value: a 40-byte value-based "QLocator" followed by
   /// the OSON document as length-prefixed bytes (node-oracledb
   /// `packet.js writeOson` / `writeQLocator`, byte-for-byte).
-  static void _writeOsonValue(WriteBuffer buffer, Object? value) {
-    final oson = encodeOson(value);
+  static void _writeOsonValue(
+    WriteBuffer buffer,
+    Object? value, {
+    required bool allowNonFinite,
+    required bool allowLongFieldNames,
+  }) {
+    final oson = encodeOson(
+      value,
+      allowNonFinite: allowNonFinite,
+      allowLongFieldNames: allowLongFieldNames,
+    );
     final locator = WriteBuffer()
       ..writeUint16BE(38) // internal length
       ..writeUint16BE(tnsLobQLocatorVersion)
@@ -996,15 +1050,24 @@ class ReExecuteRequest extends Message {
       }
       // Same per-row shape (and shared writer) as the full execute; only the
       // slot subset differs. PL/SQL row rules apply: no long-data deferral.
-      ExecuteRequest._writeRowData(buffer, [
-        for (var i = 0; i < templates.length; i++)
-          BindVariable(
-            value: row[i],
-            oraType: templates[i].oraType,
-            maxSize: templates[i].maxSize,
-            isNChar: templates[i].isNChar,
-          ),
-      ], isPlSql: true);
+      ExecuteRequest._writeRowData(
+        buffer,
+        [
+          for (var i = 0; i < templates.length; i++)
+            BindVariable(
+              value: row[i],
+              oraType: templates[i].oraType,
+              maxSize: templates[i].maxSize,
+              isNChar: templates[i].isNChar,
+              allowNonFinite: templates[i].allowNonFinite,
+              // Every executeMany row — these re-executed iterations included —
+              // was validated by the connection before the first RPC.
+              alreadyValidated: true,
+            ),
+        ],
+        isPlSql: true,
+        ttcFieldVersion: ttcFieldVersion,
+      );
     }
   }
 }

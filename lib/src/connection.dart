@@ -16,7 +16,8 @@ import 'protocol/constants.dart' as oc;
 import 'protocol/data_types.dart' as dt;
 import 'protocol/lob_locator.dart';
 import 'protocol/messages/execute_message.dart';
-import 'protocol/oson.dart' show assertValidJsonBindValue;
+import 'protocol/oson.dart'
+    show assertValidJsonBindValue, longJsonFieldNameUnsupportedMessage;
 import 'protocol/result_set_cursor.dart';
 import 'result.dart';
 import 'result_set.dart';
@@ -2586,7 +2587,11 @@ class OracleConnection {
           // promises bind values never appear in error messages. The .message
           // text already names the invalid member's path and runtimeType.
           try {
-            assertValidJsonBindValue(value, 'rows[$r]');
+            assertValidJsonBindValue(
+              value,
+              'rows[$r]',
+              allowLongFieldNames: _transport.supportsLongJsonFieldNames,
+            );
           } on ArgumentError catch (e) {
             throw OracleException(
               errorCode: oraBindTypeError,
@@ -3144,6 +3149,7 @@ class OracleConnection {
             value,
             'rows[$rowIndex]',
             allowScalarRoot: true,
+            allowLongFieldNames: _transport.supportsLongJsonFieldNames,
           );
         } on ArgumentError catch (e) {
           throw OracleException(
@@ -4053,6 +4059,22 @@ class OracleConnection {
                   '${charsetInfo.nationalCharset}.',
             );
           }
+          // A JSON IN OUT value was fully validated by the OracleBind
+          // constructor, which cannot know the server yet: it recorded where
+          // (if anywhere) the document holds a field name over 255 UTF-8
+          // bytes. Only Oracle 23ai stores those (OSON version 3) — a pre-23
+          // server would accept the document and then be unable to read it —
+          // so refuse it here, before any wire work, without a second walk.
+          final longFieldNamePath = jsonLongFieldNamePathOf(raw);
+          if (longFieldNamePath != null &&
+              !_transport.supportsLongJsonFieldNames) {
+            throw ArgumentError(
+              longJsonFieldNameUnsupportedMessage(longFieldNamePath),
+              bindNames != null
+                  ? "bindValues['${bindNames[i]}']"
+                  : 'bindValues[$i]',
+            );
+          }
           // An OracleLob supplied as an OracleBind's value (the IN / IN OUT
           // PL/SQL shape) binds as its LOB LOCATOR, exactly like the raw-value
           // path below. Validate the handle and the declared type here, before
@@ -4081,6 +4103,10 @@ class OracleConnection {
             maxSize: raw.maxSize,
             dir: raw.direction,
             isNChar: isNChar,
+            allowNonFinite: raw.allowNonFinite,
+            // The OracleBind constructor already validated the value (a JSON
+            // document included, under its own allowNonFinite setting).
+            alreadyValidated: true,
           );
           bindMetadata.add(
             BindMetadata(
@@ -4131,6 +4157,14 @@ class OracleConnection {
               bindNames != null
                   ? "bindValues['${bindNames[i]}']"
                   : 'bindValues[$i]',
+              allowLongFieldNames: _transport.supportsLongJsonFieldNames,
+            );
+            // Hand the wire layer the validated document wrapped, so the
+            // request encoder does not re-walk it when it wraps raw values.
+            bindList[i] = BindVariable(
+              value: raw,
+              oraType: oc.oraTypeJson,
+              alreadyValidated: true,
             );
           }
           bindMetadata.add(BindMetadata(oraType: oraType, dir: BindDir.input));

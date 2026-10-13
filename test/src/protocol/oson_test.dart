@@ -318,23 +318,98 @@ void main() {
       );
     });
 
-    test('rejects field names longer than 255 UTF-8 bytes', () {
-      // 255 bytes is fine (works on both 21c and 23ai); 256 fails loud. The
-      // codec stays on OSON version 1 (short field names) deliberately —
-      // version 3 long names are unsupported on pre-23 servers.
-      final ok = 'k' * 255;
-      final tooLong = 'k' * 256;
-      expect(encodeOson(<String, Object?>{ok: 1}), isA<Uint8List>());
-      expect(
-        () => encodeOson(<String, Object?>{tooLong: 1}),
-        throwsA(
-          isA<OracleException>().having(
-            (e) => e.message,
-            'message',
-            contains('255'),
+    test('field names up to 65535 UTF-8 bytes encode; longer ones fail loud '
+        '(DW-12)', () {
+      // 255 bytes stays OSON version 1 (every server); 256..65535 bytes
+      // switch the document to version 3 (Oracle 23ai long field names).
+      expect(encodeOson(<String, Object?>{'k' * 255: 1})[3], equals(1));
+      expect(encodeOson(<String, Object?>{'k' * 256: 1})[3], equals(3));
+      expect(encodeOson(<String, Object?>{'k' * 65535: 1})[3], equals(3));
+      // Multi-byte: 21845 three-byte characters are exactly 65535 bytes.
+      expect(encodeOson(<String, Object?>{'€' * 21845: 1})[3], equals(3));
+      for (final tooLong in ['k' * 65536, '€' * 21846]) {
+        expect(
+          () => encodeOson(<String, Object?>{tooLong: 1}),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+                .having((e) => e.message, 'message', contains('65535')),
           ),
-        ),
-      );
+        );
+      }
+    });
+
+    test('rejects NaN / ±Infinity unless allowNonFinite (DW-12)', () {
+      for (final bad in [
+        double.nan,
+        double.infinity,
+        double.negativeInfinity,
+      ]) {
+        for (final doc in <Object?>[
+          bad,
+          <Object?>[1, bad],
+          <String, Object?>{
+            'a': <String, Object?>{'b': bad},
+          },
+        ]) {
+          expect(
+            () => encodeOson(doc),
+            _throwsOracle(oraUnsupportedType, 'allowNonFinite'),
+            reason: '$doc',
+          );
+          expect(
+            encodeOson(doc, allowNonFinite: true),
+            isA<Uint8List>(),
+            reason: '$doc',
+          );
+        }
+      }
+      // Finite doubles beyond NUMBER's range need no opt-in.
+      expect(decodeOson(encodeOson(<Object?>[1e300])), equals([1e300]));
+    });
+
+    test('rejects cyclic values instead of overflowing the stack '
+        '(DW-12)', () {
+      final selfMap = <String, Object?>{'a': 1};
+      selfMap['self'] = selfMap;
+      final selfList = <Object?>[1];
+      selfList.add(selfList);
+      final outer = <String, Object?>{};
+      final inner = <Object?>[outer];
+      outer['inner'] = <String, Object?>{'list': inner};
+      for (final cyclic in <Object>[selfMap, selfList, outer, inner]) {
+        expect(
+          () => encodeOson(cyclic),
+          _throwsOracle(oraUnsupportedType, 'cyclic'),
+        );
+      }
+      // A container shared by two siblings is not a cycle: it encodes twice.
+      final shared = <String, Object?>{'x': 1};
+      final dag = <Object?>[shared, shared];
+      expect(decodeOson(encodeOson(dag)), equals([shared, shared]));
+    });
+
+    test('accepts exactly $maxJsonNestingDepth nested levels and rejects '
+        'one more, without a StackOverflowError (DW-12)', () {
+      Object nested(int levels) {
+        Object value = <Object?>[];
+        for (var i = 1; i < levels; i++) {
+          value = i.isEven ? <Object?>[value] : <String, Object?>{'k': value};
+        }
+        return value;
+      }
+
+      expect(maxJsonNestingDepth, equals(1000));
+      final deepest = nested(maxJsonNestingDepth);
+      // `equals` recurses only 100 levels by default.
+      expect(decodeOson(encodeOson(deepest)), equals(deepest, 2000));
+      for (final levels in [maxJsonNestingDepth + 1, 200000]) {
+        expect(
+          () => encodeOson(nested(levels)),
+          _throwsOracle(oraUnsupportedType, '1000 levels'),
+          reason: '$levels levels',
+        );
+      }
     });
   });
 
@@ -447,6 +522,212 @@ void main() {
       final decoded = roundTrip(doc)! as Map<String, Object?>;
       expect(decoded, equals(doc));
       expect(decoded.keys.toList(), equals(doc.keys.toList()));
+    });
+  });
+
+  // ==========================================================================
+  // DW-12 — field names over 255 bytes encode as OSON version 3, so a fetched
+  // version-3 document (Oracle 23ai) re-binds.
+  // ==========================================================================
+  group('OSON encode — version 3 long field names', () {
+    Object? roundTrip(Object? value) => decodeOson(encodeOson(value));
+
+    // Server-captured (Oracle 23ai): the text `{"a"*300: 1, "s": 2,
+    // "b"*260: 3}` inserted into a `BLOB IS JSON FORMAT OSON` column and read
+    // back raw. Everything but the tree segment is reproduced byte-for-byte
+    // below; the server's tree uses packed number nodes the encoder never
+    // emits, so the tree is compared through the decoder instead.
+    final a300 = 'a' * 300;
+    final b260 = 'b' * 260;
+    String hexOf(String s) => _toHex(Uint8List.fromList(utf8.encode(s)));
+    final serverDoc = _hex(
+      [
+        'ff4a5a03', // magic, version 3
+        '2106', // primary flags (server adds LEN_IN_PCODE 0x04)
+        '01', // one short field name (uint8: 3 names in all)
+        '0002', // short field-names segment size
+        '0100', // secondary flags: SEC_FNAMES_SEG_UINT16
+        '00000002', // two long field names
+        '00000234', // long field-names segment size: 302 + 262
+        '0014', // tree segment size
+        '0000', // tiny nodes
+        '82', // short hash ids: 's'
+        '0000', // short name offsets
+        '0173', // short names: uint8 length + 's'
+        '018f', // long hash ids (2 bytes each): a*300 (FNV low byte, then
+        '45ad', // second byte), then b*260
+        '0000', // long name offsets (uint16)
+        '012e',
+        '012c${hexOf(a300)}', // uint16 length + name
+        '0104${hexOf(b260)}',
+        // Tree: object, 3 children, field ids 2 (a300) 1 (s) 3 (b260),
+        // uint16 offsets, packed NUMBER nodes 1, 2, 3.
+        '8403 020103 000b000e0011 21c102 21c103 21c104',
+      ].join(),
+    );
+
+    test('a server-encoded version-3 document decodes and re-encodes as '
+        'version 3 with the same header and field-name segments', () {
+      final fetched = decodeOson(serverDoc)! as Map<String, Object?>;
+      expect(fetched, equals(<String, Object?>{a300: 1, 's': 2, b260: 3}));
+      expect(fetched.keys.toList(), equals([a300, 's', b260]));
+
+      final again = encodeOson(fetched);
+      // Version 3; our primary flags are the v1 set (no packed nodes).
+      expect(_toHex(again.sublist(0, 6)), equals('ff4a5a032102'));
+      // Extended header (short count/size, secondary flags, long count/size)
+      // matches the server's byte-for-byte...
+      expect(
+        _toHex(again.sublist(6, 19)),
+        equals(_toHex(serverDoc.sublist(6, 19))),
+      );
+      // ...and so do the short and long field-name segments, the server's
+      // 2-byte long hash ids included (after our own tree-size + tiny-nodes
+      // fields at 19..22).
+      const segmentsLength = 1 + 2 + 2 + 4 + 4 + 302 + 262;
+      expect(
+        _toHex(again.sublist(23, 23 + segmentsLength)),
+        equals(_toHex(serverDoc.sublist(23, 23 + segmentsLength))),
+      );
+      expect(decodeOson(again), equals(fetched));
+      expect(
+        (decodeOson(again)! as Map<String, Object?>).keys.toList(),
+        equals(fetched.keys.toList()),
+      );
+    });
+
+    test('a document whose names all fit in 255 bytes stays version 1', () {
+      final bytes = encodeOson(<String, Object?>{
+        'k' * 255: <String, Object?>{'x': 1},
+      });
+      expect(bytes[3], equals(1));
+    });
+
+    test('only long names: the short segment is empty', () {
+      final doc = <String, Object?>{
+        'z' * 256: <Object?>[
+          <String, Object?>{'y' * 65535: true},
+        ],
+      };
+      final bytes = encodeOson(doc);
+      expect(bytes[3], equals(3));
+      // Zero short names (uint8), empty short segment (uint16).
+      expect(_toHex(bytes.sublist(6, 9)), equals('000000'));
+      expect(roundTrip(doc), equals(doc));
+    });
+
+    test('long field ids follow every short id, also with uint16 field ids '
+        '(>255 names in all) and repeated long names', () {
+      final doc = <String, Object?>{
+        for (var i = 0; i < 300; i++) 'short_$i': i,
+        'L' * 400: 'first long',
+        'nested': <Object?>[
+          <String, Object?>{'L' * 400: 'repeated long', 'M' * 300: null},
+        ],
+      };
+      final bytes = encodeOson(doc);
+      expect(bytes[3], equals(3));
+      final decoded = roundTrip(doc)! as Map<String, Object?>;
+      expect(decoded, equals(doc));
+      expect(decoded.keys.toList(), equals(doc.keys.toList()));
+    });
+
+    test('a long field-names segment beyond 65535 bytes switches to uint32 '
+        'offsets (secondary flags 0)', () {
+      final doc = <String, Object?>{
+        for (var i = 0; i < 300; i++)
+          '${'n' * 296}${i.toString().padLeft(4, '0')}': i,
+      };
+      final bytes = encodeOson(doc);
+      expect(bytes[3], equals(3));
+      // No short names; uint16 field ids (300 names); the secondary flags
+      // drop SEC_FNAMES_SEG_UINT16 once the long segment passes 65535 bytes.
+      expect(_toHex(bytes.sublist(6, 11)), equals('0000000000'));
+      expect(_toHex(bytes.sublist(10, 12)), equals('0000'));
+      final decoded = roundTrip(doc)! as Map<String, Object?>;
+      expect(decoded, equals(doc));
+      expect(decoded.keys.toList(), equals(doc.keys.toList()));
+    });
+
+    /// The long field-name segment of a version-3 document as
+    /// `(name byte length, 2-byte hash id)` pairs in field-id order.
+    List<(int, String)> longNameOrder(Uint8List b) {
+      final r = ReadBuffer(b)..skip(4);
+      final flags = r.readUint16BE();
+      expect(b[3], equals(3), reason: 'not a version-3 document');
+      final numShort = (flags & 0x08) != 0
+          ? r.readUint32BE()
+          : (flags & 0x0400) != 0
+          ? r.readUint16BE()
+          : r.readUint8();
+      final shortWide = (flags & 0x0800) != 0;
+      final shortSize = shortWide ? r.readUint32BE() : r.readUint16BE();
+      final longOffsets16 = (r.readUint16BE() & 0x100) != 0;
+      final numLong = r.readUint32BE();
+      r
+        ..skip(4) // long segment size
+        ..skip((flags & 0x1000) != 0 ? 4 : 2) // tree segment size
+        ..skip(2) // tiny nodes
+        ..skip(numShort * (shortWide ? 5 : 3) + shortSize);
+      final hashes = [for (var i = 0; i < numLong; i++) _toHex(r.readBytes(2))];
+      final offsets = [
+        for (var i = 0; i < numLong; i++)
+          longOffsets16 ? r.readUint16BE() : r.readUint32BE(),
+      ];
+      final segment = r.position;
+      return [
+        for (var i = 0; i < numLong; i++)
+          (
+            (b[segment + offsets[i]] << 8) | b[segment + offsets[i] + 1],
+            hashes[i],
+          ),
+      ];
+    }
+
+    test('long names sort by their 16-bit hash id (FNV low byte, then '
+        'second byte), then byte length — the order Oracle 23ai writes and '
+        'searches', () {
+      // Each expectation is the order Oracle 23ai itself wrote for the
+      // document `{x: 1, y: 2}` stored as text in an `IS JSON FORMAT OSON`
+      // column (captured live). The server binary-searches this array: a
+      // long name filed out of order is invisible to JSON_VALUE.
+      String name(int i) =>
+          '${'n' * (256 + i % 40)}${i.toString().padLeft(4, '0')}';
+      for (final (x, y, serverOrder) in <(String, String, List<(int, String)>)>[
+        // Same low byte f4: y (longer) has the smaller second byte, so it
+        // comes first. Sorting on the 8-bit id then length — node-oracledb
+        // and python-oracledb — files x first, and the server then misses y.
+        (name(43), name(87), [(267, 'f434'), (263, 'f4b9')]),
+        // low(x) 4e < low(y) d5 while second(x) e4 > second(y) 16: the low
+        // byte is the HIGH half of the 16-bit id.
+        (name(1), name(0), [(261, '4ee4'), (260, 'd516')]),
+        // Identical 16-bit ids: the shorter name first.
+        (name(38), name(166), [(266, 'ae59'), (298, 'ae59')]),
+      ]) {
+        final bytes = encodeOson(<String, Object?>{x: 1, y: 2});
+        expect(longNameOrder(bytes), equals(serverOrder));
+        final decoded = decodeOson(bytes)! as Map<String, Object?>;
+        expect(decoded, equals(<String, Object?>{x: 1, y: 2}));
+        expect(decoded.keys.toList(), equals([x, y]));
+      }
+    });
+
+    test('allowLongFieldNames: false (a pre-23 server) refuses names over '
+        '255 bytes instead of emitting version 3', () {
+      expect(
+        encodeOson(<String, Object?>{
+          'k' * 255: 1,
+        }, allowLongFieldNames: false)[3],
+        equals(1),
+      );
+      expect(
+        () => encodeOson(<String, Object?>{
+          'a': <Object?>[
+            <String, Object?>{'k' * 256: 1},
+          ],
+        }, allowLongFieldNames: false),
+        _throwsOracle(oraUnsupportedType, 'Oracle Database 23ai or later'),
+      );
     });
   });
 
@@ -1106,7 +1387,7 @@ void main() {
     /// The tree-segment node bytes of an encoded scalar document (everything
     /// after the 8-byte scalar header: magic, version, flags, uint16 size).
     String scalarNode(Object? value) {
-      final bytes = encodeOson(value);
+      final bytes = encodeOson(value, allowNonFinite: true);
       // INLINE_LEAF | IS_SCALAR with a uint16 tree segment size.
       expect(_toHex(bytes.sublist(0, 6)), equals('ff4a5a010012'));
       final size = (bytes[6] << 8) | bytes[7];
@@ -1145,14 +1426,15 @@ void main() {
         );
       });
 
-      test('NaN → BINARY_DOUBLE scalar document', () {
+      test('NaN → BINARY_DOUBLE scalar document (allowNonFinite)', () {
         expect(
-          _toHex(encodeOson(double.nan)),
+          _toHex(encodeOson(double.nan, allowNonFinite: true)),
           equals('ff4a5a010012000936fff8000000000000'),
         );
       });
 
-      test('document mixing dates, buffers, NaN and a NUMBER', () {
+      test('document mixing dates, buffers, NaN and a NUMBER '
+          '(allowNonFinite)', () {
         expect(
           _toHex(
             encodeOson(<String, Object?>{
@@ -1165,7 +1447,7 @@ void main() {
                 DateTime(2000),
                 7,
               ],
-            }),
+            }, allowNonFinite: true),
           ),
           equals(
             'ff4a5a01210205000e005c000031707381e5000700020000000900050164'
@@ -1225,11 +1507,46 @@ void main() {
         );
       });
 
-      test('local and UTC DateTimes both write their own wall-clock fields, '
-          'exactly like a DATE / TIMESTAMP column bind', () {
+      test('a UTC DateTime keeps its zone: 13-byte TIMESTAMP_TZ at +00:00, '
+          'identical to an OracleTimestampTz at offset 0 (DW-12)', () {
+        final utc = DateTime.utc(2024, 3, 15, 10, 20, 30);
+        // UTC fields 10:20:30, zero fraction, tzHour 0+20 / tzMinute 0+60.
+        expect(scalarNode(utc), equals(hex('7c 787c030f0b151f 00000000 143c')));
         expect(
-          scalarNode(DateTime.utc(2024, 3, 15, 10, 20, 30)),
-          equals(scalarNode(DateTime(2024, 3, 15, 10, 20, 30))),
+          scalarNode(utc),
+          equals(scalarNode(OracleTimestampTz(utc, offsetMinutes: 0))),
+        );
+        final fractional = DateTime.utc(2024, 3, 15, 10, 20, 30, 123, 456);
+        expect(
+          scalarNode(fractional),
+          equals(hex('7c 787c030f0b151f 075bca00 143c')),
+        );
+        // A local DateTime keeps writing its wall-clock fields, zone-less.
+        expect(
+          scalarNode(DateTime(2024, 3, 15, 10, 20, 30)),
+          equals(hex('7d 787c030f0b151f')),
+        );
+      });
+
+      test('a UTC DateTime round-trips as an OracleTimestampTz holding the '
+          'same instant, at the AD / 9999 boundaries too', () {
+        for (final utc in [
+          DateTime.utc(2024, 3, 15, 10, 20, 30),
+          DateTime.utc(2024, 3, 15, 10, 20, 30, 0, 1),
+          DateTime.utc(1),
+          DateTime.utc(9999, 12, 31, 23, 59, 59, 999, 999),
+        ]) {
+          final decoded =
+              decodeOson(encodeOson(<String, Object?>{'t': utc}))!
+                  as Map<String, Object?>;
+          expect(decoded['t'], isA<OracleTimestampTz>(), reason: '$utc');
+          final tz = decoded['t']! as OracleTimestampTz;
+          expect(tz.utc, equals(utc), reason: '$utc');
+          expect(tz.offsetMinutes, equals(0), reason: '$utc');
+        }
+        expect(
+          () => encodeOson(DateTime.utc(10000)),
+          _throwsOracle(oraUnsupportedType, 'year'),
         );
       });
     });
@@ -1358,7 +1675,8 @@ void main() {
     });
 
     group('round-trip (encode → decode) as the same Dart type and value', () {
-      Object? roundTrip(Object? value) => decodeOson(encodeOson(value));
+      Object? roundTrip(Object? value) =>
+          decodeOson(encodeOson(value, allowNonFinite: true));
 
       test('every Oracle scalar as a scalar root', () {
         final local = DateTime(2024, 3, 15, 10, 20, 30);
@@ -1458,16 +1776,16 @@ void main() {
       isA<ArgumentError>().having((e) => e.message, 'message', message),
     );
 
-    test('accepts every kind the decoder produces, as members', () {
+    test('accepts every kind the decoder produces, as members — non-finite '
+        'numbers under allowNonFinite', () {
       final doc = <String, Object?>{
         'd': DateTime(2024, 3, 15),
         'utc': DateTime.utc(2024, 3, 15, 1, 2, 3, 4, 5),
         'tz': OracleTimestampTz(DateTime.utc(2024), offsetMinutes: -570),
         'b': Uint8List.fromList([1, 2]),
-        'nan': double.nan,
-        'inf': double.infinity,
-        'ninf': double.negativeInfinity,
         'huge': 1e300,
+        'tiny': 5e-200,
+        'long ${'k' * 300}': 1, // OSON v3 field name (Oracle 23ai)
         'list': <Object?>[
           Uint8List(0),
           'x',
@@ -1482,6 +1800,16 @@ void main() {
         () => assertValidJsonBindValue(doc.values.toList(), 'v'),
         returnsNormally,
       );
+      final nonFinite = <String, Object?>{
+        ...doc,
+        'nan': double.nan,
+        'inf': double.infinity,
+        'ninf': double.negativeInfinity,
+      };
+      expect(
+        () => assertValidJsonBindValue(nonFinite, 'v', allowNonFinite: true),
+        returnsNormally,
+      );
     });
 
     test('scalar roots need allowScalarRoot (an explicitly JSON-typed '
@@ -1489,12 +1817,13 @@ void main() {
       final scalars = <Object>[
         'x',
         '',
+        '{"a":1}', // a JSON string scalar, never parsed
         3,
         2.5,
-        double.nan,
         true,
         false,
         DateTime(2024),
+        DateTime.utc(2024),
         OracleTimestampTz(DateTime.utc(2024), offsetMinutes: 0),
         Uint8List.fromList([1]),
       ];
@@ -1513,6 +1842,263 @@ void main() {
       for (final value in <Object?>[null, <String, Object?>{}, <Object?>[]]) {
         expect(() => assertValidJsonBindValue(value, 'v'), returnsNormally);
       }
+      // A non-finite scalar root also needs allowNonFinite.
+      expect(
+        () => assertValidJsonBindValue(double.nan, 'v', allowScalarRoot: true),
+        throwsArgument(contains('not finite')),
+      );
+      expect(
+        () => assertValidJsonBindValue(
+          double.infinity,
+          'v',
+          allowScalarRoot: true,
+          allowNonFinite: true,
+        ),
+        returnsNormally,
+      );
+    });
+
+    group('DW-12 hardening', () {
+      test('NaN / ±Infinity members are rejected by default, naming the '
+          'member path but never the value', () {
+        final cases = <(Object Function(double bad), String)>[
+          (
+            (bad) => <String, Object?>{
+              'a': <Object?>[1, bad],
+            },
+            'v[member #1][1]',
+          ),
+          ((bad) => <Object?>['x', bad], 'v[1]'),
+          (
+            (bad) => <String, Object?>{
+              'ok': 1,
+              'deep': <Object?>[
+                <String, Object?>{'n': bad},
+              ],
+            },
+            'v[member #2][0][member #1]',
+          ),
+        ];
+        for (final (build, path) in cases) {
+          for (final allowScalarRoot in [false, true]) {
+            // One message per path, whichever non-finite value it was: the
+            // error must not reveal NaN vs +Infinity vs -Infinity.
+            final messages = <String>{};
+            for (final bad in [
+              double.nan,
+              double.infinity,
+              double.negativeInfinity,
+            ]) {
+              final doc = build(bad);
+              try {
+                assertValidJsonBindValue(
+                  doc,
+                  'v',
+                  allowScalarRoot: allowScalarRoot,
+                );
+                fail('expected an ArgumentError for $path');
+              } on ArgumentError catch (e) {
+                expect(e.invalidValue, isNull);
+                expect('${e.message}', contains('at $path;'));
+                expect('${e.message}', contains('allowNonFinite: true'));
+                expect(e.toString(), isNot(contains('got')));
+                messages.add(e.toString());
+              }
+              expect(
+                () => assertValidJsonBindValue(
+                  doc,
+                  'v',
+                  allowScalarRoot: allowScalarRoot,
+                  allowNonFinite: true,
+                ),
+                returnsNormally,
+              );
+            }
+            expect(messages, hasLength(1), reason: path);
+          }
+        }
+      });
+
+      test('a cyclic value is rejected as cyclic, not by a '
+          'StackOverflowError; a shared (DAG) sub-document is fine', () {
+        final selfMap = <String, Object?>{'a': 1};
+        selfMap['self'] = selfMap;
+        final selfList = <Object?>[];
+        selfList.add(selfList);
+        final outer = <String, Object?>{'pw': 'hunter2'};
+        outer['inner'] = <Object?>[
+          <String, Object?>{'back': outer},
+        ];
+        for (final (cyclic, path) in <(Object, String)>[
+          (selfMap, 'v[member #2]'),
+          (selfList, 'v[0]'),
+          (outer, 'v[member #2][0][member #1]'),
+        ]) {
+          for (final allowScalarRoot in [false, true]) {
+            expect(
+              () => assertValidJsonBindValue(
+                cyclic,
+                'v',
+                allowScalarRoot: allowScalarRoot,
+              ),
+              throwsA(
+                isA<ArgumentError>()
+                    .having(
+                      (e) => '${e.message}',
+                      'message',
+                      contains('cyclic'),
+                    )
+                    .having((e) => '${e.message}', 'message', contains(path))
+                    .having(
+                      (e) => e.toString(),
+                      'toString',
+                      isNot(contains('hunter2')),
+                    ),
+              ),
+            );
+          }
+        }
+        final shared = <String, Object?>{'x': 1};
+        expect(
+          () => assertValidJsonBindValue(<Object?>[
+            shared,
+            shared,
+            <String, Object?>{'again': shared},
+          ], 'v'),
+          returnsNormally,
+        );
+      });
+
+      test('nesting is capped at $maxJsonNestingDepth levels (the root is '
+          'level 1) with a clean ArgumentError, however deep the value', () {
+        Object nested(int levels) {
+          Object value = <String, Object?>{};
+          for (var i = 1; i < levels; i++) {
+            value = i.isEven ? <String, Object?>{'k': value} : <Object?>[value];
+          }
+          return value;
+        }
+
+        expect(
+          () => assertValidJsonBindValue(nested(maxJsonNestingDepth), 'v'),
+          returnsNormally,
+        );
+        for (final levels in [maxJsonNestingDepth + 1, 100000]) {
+          expect(
+            () => assertValidJsonBindValue(nested(levels), 'v'),
+            throwsA(
+              isA<ArgumentError>().having(
+                (e) => '${e.message}',
+                'message',
+                allOf(contains('1000 levels'), isNot(contains('[member'))),
+              ),
+            ),
+            reason: '$levels levels',
+          );
+        }
+      });
+
+      test('field names of 256..65535 UTF-8 bytes are accepted (a fetched '
+          'OSON v3 document re-binds); longer ones fail naming the path', () {
+        for (final key in [
+          'k' * 256,
+          'k' * 65535,
+          '€' * 21845, // 65535 bytes in 21845 code units
+          '🚀' * 16383, // 65532 bytes in 32766 code units
+        ]) {
+          expect(
+            () => assertValidJsonBindValue(<String, Object?>{key: 1}, 'v'),
+            returnsNormally,
+            reason: '${key.length} code units',
+          );
+        }
+        for (final key in ['k' * 65536, '€' * 21846]) {
+          expect(
+            () => assertValidJsonBindValue(<String, Object?>{
+              'outer': <String, Object?>{key: 1},
+            }, 'v'),
+            throwsArgument(
+              allOf(
+                contains('65535 UTF-8 bytes'),
+                contains('at v[member #1])'),
+              ),
+            ),
+          );
+        }
+      });
+
+      test('returns the path of the first object holding a name over 255 '
+          'bytes; allowLongFieldNames: false (a pre-23 server) refuses it '
+          'naming the path, never the name', () {
+        expect(assertValidJsonBindValue(null, 'v'), isNull);
+        expect(
+          assertValidJsonBindValue(<String, Object?>{
+            'k' * 255: <String, Object?>{'${'é' * 127}k': 1},
+          }, 'v'),
+          isNull,
+        );
+        final doc = <String, Object?>{
+          'a': <Object?>[
+            1,
+            <String, Object?>{'secret-${'k' * 300}': 1},
+          ],
+          'b': <String, Object?>{'m' * 400: 2},
+        };
+        expect(assertValidJsonBindValue(doc, 'v'), equals('v[member #1][1]'));
+        expect(
+          assertValidJsonBindValue(
+            <Object?>[
+              <String, Object?>{'é' * 128: 1}, // 256 bytes in 128 units
+            ],
+            'v',
+            allowScalarRoot: true,
+          ),
+          equals('v[0]'),
+        );
+        for (final allowScalarRoot in [false, true]) {
+          expect(
+            () => assertValidJsonBindValue(
+              doc,
+              'v',
+              allowScalarRoot: allowScalarRoot,
+              allowLongFieldNames: false,
+            ),
+            throwsA(
+              isA<ArgumentError>()
+                  .having(
+                    (e) => '${e.message}',
+                    'message',
+                    allOf(
+                      contains('Oracle Database 23ai or later'),
+                      contains('got 307 bytes at v[member #1][1])'),
+                    ),
+                  )
+                  .having(
+                    (e) => e.toString(),
+                    'toString',
+                    isNot(contains('secret')),
+                  ),
+            ),
+          );
+        }
+        // 255 bytes stays fine on every server; 65536 keeps its own error.
+        expect(
+          assertValidJsonBindValue(
+            <String, Object?>{'k' * 255: 1},
+            'v',
+            allowLongFieldNames: false,
+          ),
+          isNull,
+        );
+        expect(
+          () => assertValidJsonBindValue(
+            <String, Object?>{'k' * 65536: 1},
+            'v',
+            allowLongFieldNames: false,
+          ),
+          throwsArgument(contains('65535 UTF-8 bytes are not supported')),
+        );
+      });
     });
 
     test('still rejects Set, Symbol, arbitrary objects, non-String keys, '
@@ -1535,12 +2121,16 @@ void main() {
         <Object?>[DateTime(0)]: 'BCE',
         <Object?>[DateTime(10000)]: '9999',
         <Object?>[OracleTimestampTz(DateTime.utc(-1), offsetMinutes: 0)]: 'BCE',
-        <String, Object?>{'k' * 256: 1}: '256 bytes',
-        // 128 two-byte characters: 128 code units but 256 UTF-8 bytes.
-        <String, Object?>{'é' * 128: 1}: '256 bytes',
+        <Object?>[DateTime.utc(10000)]: '9999',
+        <String, Object?>{'k' * 65536: 1}: '65536 bytes',
+        // 32768 two-byte characters: 32768 code units but 65536 UTF-8 bytes.
+        <String, Object?>{'é' * 32768: 1}: '65536 bytes',
         <String, Object?>{
-          'outer': <String, Object?>{'🚀' * 64: 1},
+          'outer': <String, Object?>{'🚀' * 16384: 1},
         }: 'at v[member #1])',
+        <String, Object?>{
+          'a': <Object?>[1, double.nan],
+        }: 'v[member #1][1]',
       };
       for (final MapEntry(key: value, value: message) in cases.entries) {
         for (final allowScalarRoot in [false, true]) {
@@ -1586,7 +2176,8 @@ void main() {
           'bad': <int>{1},
         },
         <String, Object?>{'password': secret, 'd': DateTime(-44)},
-        <String, Object?>{'password': secret, 'k' * 300: 1},
+        <String, Object?>{'password': secret, 'k' * 65536: 1},
+        <String, Object?>{'password': secret, 'n': double.nan},
         <Object, Object?>{'password': secret, 1: 2},
         secret, // scalar root without allowScalarRoot
       ]) {
@@ -1624,9 +2215,16 @@ void main() {
         ),
         (
           <String, Object?>{
-            secretKey: <String, Object?>{'k' * 256: 1},
+            secretKey: <String, Object?>{'k' * 65536: 1},
           },
           'at v[member #1])',
+        ),
+        (
+          <String, Object?>{
+            'ok': 1,
+            secretKey: <Object?>[double.infinity],
+          },
+          'at v[member #2][0];',
         ),
         (
           <String, Object?>{

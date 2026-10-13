@@ -108,6 +108,21 @@ class Transport {
   /// Returns the negotiated TTC field version.
   int get ttcFieldVersion => _ttcFieldVersion;
 
+  /// Whether the server stores JSON field names longer than 255 UTF-8 bytes
+  /// (OSON version 3, Oracle Database 23.1+).
+  ///
+  /// node-oracledb parity (`_osonMaxFieldNameSize`: 65535 from TTC field
+  /// version 23.1, else 255), additionally requiring a 23+ server banner: a
+  /// pre-23 server that sends no compile capabilities leaves
+  /// [ttcFieldVersion] at its default maximum (see
+  /// [shouldWriteAuthPhaseTwoToken]). Getting this wrong is silent data
+  /// corruption, not an error — Oracle 21c stores a bound version-3 document
+  /// without complaint, but then cannot read it (`JSON_SERIALIZE` raises
+  /// ORA-40441 and `JSON_VALUE` returns NULL, measured live) — so the
+  /// connection refuses long field names before the wire when this is false.
+  bool get supportsLongJsonFieldNames =>
+      _ttcFieldVersion >= ttcCcapFieldVersion23_1 && _serverMajorVersion >= 23;
+
   /// TTC function message sequence number.
   /// Incremented for each TTC function message sent (1, 2, 3, ...).
   /// Starts at 1 to match node-oracledb behavior.

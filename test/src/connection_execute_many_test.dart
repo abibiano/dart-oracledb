@@ -378,6 +378,12 @@ void main() {
 
     test('invalid nested JSON members fail before wire without leaking the '
         'value', () async {
+      final cyclic = <Object, Object?>{'secret': 'hunter2-2026'};
+      cyclic['self'] = <Object?>[cyclic];
+      Object deep = <Object?>['hunter2-2026'];
+      for (var i = 0; i < 1500; i++) {
+        deep = <String, Object?>{'k': deep};
+      }
       for (final (doc, fragment) in <(Map<Object, Object?>, String)>[
         (
           {
@@ -388,8 +394,19 @@ void main() {
         ),
         ({'secret': 'hunter2-2026', 'when': DateTime(-2026)}, 'BCE'),
         ({'secret': 'hunter2-2026', 'when': DateTime(20260)}, '9999'),
-        ({'secret': 'hunter2-2026', 'k' * 256: 2026}, '255 UTF-8 bytes'),
+        ({'secret': 'hunter2-2026', 'k' * 65536: 2026}, '65535 UTF-8 bytes'),
         ({'secret': 'hunter2-2026', 2026: 'x'}, 'keys must be String'),
+        // DW-12: non-finite numbers (no opt-in on this path), cycles and
+        // over-deep nesting are rejected the same way.
+        (
+          {
+            'secret': 'hunter2-2026',
+            'n': <Object?>[double.nan],
+          },
+          'not finite (NaN or ±Infinity) at rows[0][member #2][0];',
+        ),
+        (cyclic, 'cyclic'),
+        ({'secret': 'hunter2-2026', 'deep': deep}, '1000 levels'),
       ]) {
         await expectLater(
           () => conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
@@ -418,18 +435,19 @@ void main() {
     });
 
     test('Oracle scalar JSON members (DateTime, OracleTimestampTz, Uint8List, '
-        'NaN / ±Infinity) pass validation and reach the wire unchanged '
-        '(Story 13.3)', () async {
+        'out-of-NUMBER-range doubles, long field names) pass validation and '
+        'reach the wire unchanged (Story 13.3, DW-12)', () async {
       transport.nextResponses.add(
         ExecuteResponse(isSuccess: true, rowsAffected: 2),
       );
       final docA = <String, Object?>{
         'd': DateTime(2026, 1, 2, 3, 4, 5),
+        'utc': DateTime.utc(2026, 1, 2, 3, 4, 5),
         'tz': OracleTimestampTz(DateTime.utc(2026), offsetMinutes: 330),
         'b': Uint8List.fromList([1, 2, 3]),
-        'n': double.nan,
+        'k' * 300: 1, // OSON v3 field name
       };
-      final docB = <Object?>[double.infinity, double.negativeInfinity];
+      final docB = <Object?>[1e300, -5e-200];
       await conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
         [docA],
         [docB],
@@ -441,6 +459,59 @@ void main() {
       final slot = transport.lastBindValues!.single as BindVariable;
       expect(slot.oraType, equals(oc.oraTypeJson));
     });
+
+    test(
+      'on a pre-23 server, JSON field names over 255 UTF-8 bytes fail '
+      'before wire — inferred and declared JSON slots alike (DW-12)',
+      () async {
+        transport.debugTtcFieldVersion = 16; // Oracle 21c
+        final doc = <String, Object?>{'ok': 1, 'hunter2-${'k' * 300}': 2026};
+        final declared = OracleExecuteManyOptions(
+          bindDefs: [OracleBindDef.input(type: OracleDbType.json)],
+        );
+        for (final call in <Future<OracleResult> Function()>[
+          () => conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
+            [
+              <String, Object?>{'k' * 255: 1},
+            ],
+            [doc],
+          ]),
+          () => conn.executeMany('BEGIN story_take_json(:1); END;', [
+            ['scalar'],
+            [doc],
+          ], declared),
+        ]) {
+          await expectLater(
+            call,
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    allOf(
+                      contains('Oracle Database 23ai or later'),
+                      contains('row 1'),
+                      contains('at rows[1])'),
+                      isNot(contains('hunter2')),
+                      isNot(contains('2026')),
+                    ),
+                  ),
+            ),
+          );
+        }
+        expect(transport.executeCalls, equals(0));
+        // A 23.1+ field version lets the same rows through.
+        transport.debugTtcFieldVersion = 24;
+        transport.nextResponses.add(
+          ExecuteResponse(isSuccess: true, rowsAffected: 1),
+        );
+        await conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
+          [doc],
+        ]);
+        expect(transport.executeCalls, equals(1));
+      },
+    );
 
     test(
       'inferred slots never produce a scalar JSON root: a bare scalar '
@@ -630,12 +701,13 @@ void main() {
         [
           Uint8List.fromList([1, 2]),
         ],
-        [double.nan],
+        [1e300],
         [
           <String, Object?>{
             'when': DateTime(2026),
+            'utc': DateTime.utc(2026),
             'b': Uint8List(1),
-            'inf': double.infinity,
+            'k' * 300: 1, // OSON v3 field name
           },
         ],
         [null],
@@ -655,10 +727,22 @@ void main() {
 
     test('a declared JSON slot still rejects invalid values before wire, '
         'without leaking them', () async {
+      final cyclic = <Object?>[];
+      cyclic.add(cyclic);
       for (final (value, fragment) in <(Object, String)>[
         (<int>{7}, 'Unsupported JSON member type'),
         (DateTime(-7), 'BCE'),
         (<String, Object?>{'k': #sym}, 'rows[0][member #1]'),
+        // DW-12: a declared JSON slot has no allowNonFinite opt-in; NaN /
+        // ±Infinity are rejected as a scalar root and as members alike.
+        (double.nan, 'not finite (NaN or ±Infinity) at rows[0];'),
+        (
+          <String, Object?>{
+            'k': <Object?>[double.negativeInfinity],
+          },
+          'not finite (NaN or ±Infinity) at rows[0][member #1][0];',
+        ),
+        (cyclic, 'cyclic'),
       ]) {
         await expectLater(
           () => conn.executeMany(

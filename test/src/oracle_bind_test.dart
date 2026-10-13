@@ -444,10 +444,11 @@ void main() {
       for (final scalar in <Object>[
         'a string',
         '',
+        // A declared-JSON String is a JSON string scalar, never parsed.
+        '{"a":1}',
         42,
         2.5,
-        double.nan,
-        double.infinity,
+        1e300,
         true,
         false,
         DateTime(2026, 1, 2, 3, 4, 5),
@@ -462,6 +463,7 @@ void main() {
         );
         expect(b.value, same(scalar));
         expect(b.oracleTypeCode, equals(119));
+        expect(b.allowNonFinite, isFalse);
       }
     });
 
@@ -472,7 +474,9 @@ void main() {
         'local': DateTime(2026, 3, 15, 10, 20, 30, 123, 456),
         'tz': OracleTimestampTz(DateTime.utc(2026), offsetMinutes: -480),
         'bytes': Uint8List(2),
-        'nums': <Object?>[double.nan, double.infinity, -double.infinity, 1e300],
+        'nums': <Object?>[1e300, -5e-200, 0.0],
+        // DW-12: a fetched OSON v3 (Oracle 23ai) long field name re-binds.
+        'k' * 300: 'long field name',
       };
       expect(
         OracleBind.inOut(
@@ -482,6 +486,175 @@ void main() {
         ).value,
         same(doc),
       );
+    });
+
+    group('allowNonFinite (DW-12)', () {
+      const nonFinite = [double.nan, double.infinity, double.negativeInfinity];
+
+      test('NaN / ±Infinity are rejected by default — as a scalar root or '
+          'nested — with an ArgumentError naming the member path only', () {
+        for (final bad in nonFinite) {
+          for (final (value, path) in <(Object, String)>[
+            (bad, 'value;'),
+            (
+              <String, Object?>{
+                'a': <Object?>[1, bad],
+              },
+              'value[member #1][1];',
+            ),
+            (
+              <Object?>[
+                'x',
+                <String, Object?>{'secret-key': 1, 'n': bad},
+              ],
+              'value[1][member #2];',
+            ),
+          ]) {
+            try {
+              OracleBind.inOut(
+                value: value,
+                type: OracleDbType.json,
+                maxSize: 4000,
+              );
+              fail('expected an ArgumentError for $path');
+            } on ArgumentError catch (e) {
+              expect(e.invalidValue, isNull);
+              expect(e.toString(), contains('at $path'));
+              expect(e.toString(), contains('allowNonFinite: true'));
+              expect(e.toString(), isNot(contains('secret-key')));
+              expect(e.toString(), isNot(contains('got')));
+            }
+          }
+        }
+      });
+
+      test('opting in accepts them as a scalar root and nested anywhere', () {
+        for (final bad in nonFinite) {
+          for (final value in <Object>[
+            bad,
+            <Object?>[bad],
+            <String, Object?>{
+              'a': <String, Object?>{
+                'b': <Object?>[1, bad],
+              },
+            },
+          ]) {
+            final b = OracleBind.inOut(
+              value: value,
+              type: OracleDbType.json,
+              maxSize: 4000,
+              allowNonFinite: true,
+            );
+            expect(b.allowNonFinite, isTrue);
+            expect(b.value, same(value));
+          }
+        }
+      });
+
+      test('opting in does not relax any other JSON rule', () {
+        final cyclic = <String, Object?>{'n': double.nan};
+        cyclic['self'] = cyclic;
+        for (final bad in <Object>[
+          cyclic,
+          <String, Object?>{
+            's': <int>{1},
+          },
+          <Object?>[DateTime(-1)],
+          <String, Object?>{'k' * 65536: double.nan},
+        ]) {
+          expect(
+            () => OracleBind.inOut(
+              value: bad,
+              type: OracleDbType.json,
+              maxSize: 4000,
+              allowNonFinite: true,
+            ),
+            throwsA(isA<ArgumentError>()),
+          );
+        }
+      });
+
+      test('defaults to false, and OUT binds never allow non-finite', () {
+        expect(
+          OracleBind.inOut(
+            value: <Object?>[1],
+            type: OracleDbType.json,
+            maxSize: 4000,
+          ).allowNonFinite,
+          isFalse,
+        );
+        expect(
+          OracleBind.out(type: OracleDbType.json, maxSize: 4000).allowNonFinite,
+          isFalse,
+        );
+      });
+
+      test('is rejected on every non-JSON type with oraBindTypeError, even '
+          'with a null value', () {
+        for (final (type, value) in <(OracleDbType, Object?)>[
+          (OracleDbType.number, 1.5),
+          (OracleDbType.number, null),
+          (OracleDbType.varchar, 'x'),
+          (OracleDbType.timestampTz, DateTime.utc(2026)),
+          (OracleDbType.blob, Uint8List(1)),
+        ]) {
+          expect(
+            () => OracleBind.inOut(
+              value: value,
+              type: type,
+              maxSize: 10,
+              allowNonFinite: true,
+            ),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', equals(6502))
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    contains('allowNonFinite'),
+                  ),
+            ),
+            reason: '$type',
+          );
+        }
+        // OracleDbType.number keeps refusing NaN on its own.
+        expect(
+          () => OracleBind.inOut(value: double.nan, type: OracleDbType.number),
+          throwsA(isA<ArgumentError>()),
+        );
+      });
+    });
+
+    test('JSON IN OUT rejects cyclic and over-deep values cleanly — no '
+        'StackOverflowError (DW-12)', () {
+      final selfMap = <String, Object?>{'a': 1};
+      selfMap['self'] = selfMap;
+      final selfList = <Object?>[1];
+      selfList.add(<String, Object?>{'back': selfList});
+      Object deep = <String, Object?>{};
+      for (var i = 0; i < 5000; i++) {
+        deep = <Object?>[deep];
+      }
+      for (final (bad, reason) in <(Object, String)>[
+        (selfMap, 'cyclic'),
+        (selfList, 'cyclic'),
+        (deep, '1000 levels'),
+      ]) {
+        expect(
+          () => OracleBind.inOut(
+            value: bad,
+            type: OracleDbType.json,
+            maxSize: 4000,
+          ),
+          throwsA(
+            isA<ArgumentError>().having(
+              (e) => '${e.message}',
+              'message',
+              contains(reason),
+            ),
+          ),
+        );
+      }
     });
 
     test('JSON IN OUT still rejects non-JSON Dart types at the root', () {
@@ -517,7 +690,8 @@ void main() {
         },
         <Object?>[#symbol],
         <Object, Object?>{1: 'non-string key'},
-        <String, Object?>{'k' * 256: 'field name over 255 UTF-8 bytes'},
+        <String, Object?>{'k' * 65536: 'field name over 65535 UTF-8 bytes'},
+        <String, Object?>{'n': double.nan}, // non-finite without opt-in
       ]) {
         expect(
           () => OracleBind.inOut(

@@ -96,9 +96,11 @@ Map<String, Object?> _richDoc() => <String, Object?>{
     offsetMinutes: 330,
   ),
   'raw': Uint8List.fromList([0xde, 0xad, 0xbe, 0xef]),
-  'nan': double.nan,
-  'inf': double.infinity,
+  // NaN / ±Infinity are opt-in since DW-12 (OracleBind.inOut(allowNonFinite:
+  // true)), so this DML-bound fixture holds only finite numbers; step 3 adds
+  // the non-finite members through that opt-in.
   'huge': 1e200, // beyond NUMBER: travels as BINARY_DOUBLE
+  'tiny': -1e-200, // below NUMBER's smallest magnitude: BINARY_DOUBLE too
   'n': 42,
   'd': -12.5,
   'flags': <Object?>[true, false, null],
@@ -350,7 +352,7 @@ void main() {
           final nativeList = <Object?>[
             DateTime(1999, 12, 31, 23, 59, 59),
             Uint8List.fromList([0xca, 0xfe]),
-            double.negativeInfinity,
+            -1e200,
             _cjk,
             null,
             true,
@@ -520,20 +522,27 @@ void main() {
             },
           );
           _expectJsonValue(stored.outBinds['doc'], rich);
-          final inOut = await connection.execute(
-            'BEGIN $mutateProc(:doc); END;',
-            {
-              'doc': OracleBind.inOut(
-                value: rich,
-                type: OracleDbType.json,
-                maxSize: 4000,
-              ),
-            },
-          );
+          // The IN OUT bind opts in to non-finite numbers (DW-12): they
+          // travel as BINARY_DOUBLE and come back unchanged.
+          final richNonFinite = <String, Object?>{
+            ...rich,
+            'nan': double.nan,
+            'inf': double.infinity,
+            'ninf': double.negativeInfinity,
+          };
+          final inOut = await connection
+              .execute('BEGIN $mutateProc(:doc); END;', {
+                'doc': OracleBind.inOut(
+                  value: richNonFinite,
+                  type: OracleDbType.json,
+                  maxSize: 4000,
+                  allowNonFinite: true,
+                ),
+              });
           // JSON_OBJECT_T rebuilds the object in its own member order.
           _expectJsonValue(
             inOut.outBinds['doc'],
-            <String, Object?>{...rich, 'status': 'done'},
+            <String, Object?>{...richNonFinite, 'status': 'done'},
             r'$',
             false,
           );
@@ -572,6 +581,40 @@ void main() {
           expect(
             () => OracleBind.inOut(
               value: <Object, Object?>{1: 'non-string key'},
+              type: OracleDbType.json,
+              maxSize: 4000,
+            ),
+            throwsA(isA<ArgumentError>()),
+          );
+          // DW-12: a non-finite number without the opt-in is rejected the
+          // same way on every path.
+          await expectLater(
+            connection.execute(positionalInsertSql, [
+              nextTestId(),
+              <String, Object?>{
+                'n': <Object?>[double.nan],
+              },
+            ]),
+            throwsA(isA<ArgumentError>()),
+          );
+          await expectLater(
+            connection.executeMany(positionalInsertSql, [
+              [
+                nextTestId(),
+                <Object?>[double.infinity],
+              ],
+            ]),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'errorCode',
+                oraBindTypeError,
+              ),
+            ),
+          );
+          expect(
+            () => OracleBind.inOut(
+              value: double.negativeInfinity,
               type: OracleDbType.json,
               maxSize: 4000,
             ),
@@ -710,7 +753,7 @@ void main() {
             _richDoc(),
             <Object?>[
               DateTime(2024),
-              double.infinity,
+              1e300,
               Uint8List.fromList([7]),
               _accented,
             ],

@@ -41,39 +41,46 @@ bool skipWithoutNativeJson() {
 }
 
 /// A document holding every Oracle-specific scalar kind the driver binds
-/// (Story 13.3), nested at several depths alongside standard members.
-Map<String, Object?> _oracleScalarDoc() => <String, Object?>{
-  's': 'text',
-  'date': DateTime(2024, 3, 15, 10, 20, 30), // TIMESTAMP7 node
-  'midnight': DateTime(2024, 3, 15),
-  'ts': DateTime(2024, 3, 15, 10, 20, 30, 123, 456), // TIMESTAMP node
-  'micro': DateTime(2024, 3, 15, 10, 20, 30, 0, 1),
-  'tz': OracleTimestampTz(
-    DateTime.utc(2024, 3, 15, 4, 50, 30, 500),
-    offsetMinutes: 330,
-  ),
-  'tzMinus': OracleTimestampTz(
-    DateTime.utc(2024, 3, 15, 19, 50, 30),
-    offsetMinutes: -570,
-  ),
-  'bytes': Uint8List.fromList([0xde, 0xad, 0xbe, 0xef]),
-  'empty': Uint8List(0),
-  'nan': double.nan,
-  'inf': double.infinity,
-  'ninf': double.negativeInfinity,
-  'huge': 1e200, // beyond NUMBER: travels as BINARY_DOUBLE
-  'n': 42,
-  'd': 2.5,
-  'nested': <String, Object?>{
-    'list': <Object?>[
-      DateTime(2000),
-      Uint8List.fromList([1]),
-      null,
-      true,
-      -0.5,
-    ],
-  },
-};
+/// (Story 13.3), nested at several depths alongside standard members. NaN /
+/// ±Infinity members are added only with [nonFinite]: since DW-12 they bind
+/// only through `OracleBind.inOut(..., allowNonFinite: true)`.
+Map<String, Object?> _oracleScalarDoc({bool nonFinite = false}) =>
+    <String, Object?>{
+      's': 'text',
+      'date': DateTime(2024, 3, 15, 10, 20, 30), // TIMESTAMP7 node
+      'midnight': DateTime(2024, 3, 15),
+      'ts': DateTime(2024, 3, 15, 10, 20, 30, 123, 456), // TIMESTAMP node
+      'micro': DateTime(2024, 3, 15, 10, 20, 30, 0, 1),
+      'tz': OracleTimestampTz(
+        DateTime.utc(2024, 3, 15, 4, 50, 30, 500),
+        offsetMinutes: 330,
+      ),
+      'tzMinus': OracleTimestampTz(
+        DateTime.utc(2024, 3, 15, 19, 50, 30),
+        offsetMinutes: -570,
+      ),
+      'bytes': Uint8List.fromList([0xde, 0xad, 0xbe, 0xef]),
+      'empty': Uint8List(0),
+      if (nonFinite) ...<String, Object?>{
+        'nan': double.nan,
+        'inf': double.infinity,
+        'ninf': double.negativeInfinity,
+      },
+      'huge': 1e200, // beyond NUMBER: travels as BINARY_DOUBLE
+      'tiny': -1e-200, // below NUMBER's smallest magnitude: BINARY_DOUBLE
+      'n': 42,
+      'd': 2.5,
+      'nested': <String, Object?>{
+        'list': <Object?>[
+          DateTime(2000),
+          Uint8List.fromList([1]),
+          null,
+          true,
+          -0.5,
+          if (nonFinite) double.nan,
+        ],
+      },
+    };
 
 /// Deep JSON equality that treats NaN as equal to NaN and pins the Dart type
 /// of every Oracle-specific scalar (a `DateTime` must not come back as a
@@ -1101,8 +1108,8 @@ void main() {
         }
 
         test('INSERT (named and positional) and UPDATE round-trip DateTime, '
-            'OracleTimestampTz, Uint8List, NaN and ±Infinity members as the '
-            'same Dart types', () async {
+            'OracleTimestampTz, Uint8List and out-of-NUMBER-range double '
+            'members as the same Dart types', () async {
           if (skipWithoutNativeJson()) return;
           final named = nextTestId();
           final positional = nextTestId();
@@ -1115,7 +1122,7 @@ void main() {
           final list = <Object?>[
             DateTime(1999, 12, 31, 23, 59, 59),
             Uint8List.fromList([0xca, 0xfe]),
-            double.nan,
+            1e-300,
             OracleTimestampTz(DateTime.utc(2000), offsetMinutes: 840),
           ];
           await connection.execute(
@@ -1128,7 +1135,7 @@ void main() {
           final updated = <String, Object?>{
             'when': DateTime(2025, 6, 1, 8, 0, 0, 1),
             'raw': Uint8List(70000)..fillRange(0, 70000, 0x5a),
-            'neg': double.negativeInfinity,
+            'neg': -1e300,
           };
           final update = await connection.execute(
             'UPDATE $testTable SET doc = :doc WHERE id = :id',
@@ -1146,7 +1153,7 @@ void main() {
             _oracleScalarDoc(),
             <Object?>[
               DateTime(2024),
-              double.infinity,
+              1e300,
               Uint8List.fromList([7]),
             ],
             null,
@@ -1163,20 +1170,38 @@ void main() {
           }
         });
 
-        test('PL/SQL IN OUT carries Oracle scalar members both ways '
-            '(server-side JSON_OBJECT_T keeps their types)', () async {
+        test('PL/SQL IN OUT carries Oracle scalar members both ways — NaN '
+            'and ±Infinity through the allowNonFinite opt-in (DW-12) — and '
+            'server-side JSON_OBJECT_T keeps their types', () async {
           if (skipWithoutNativeJson()) return;
-          final doc = _oracleScalarDoc();
-          final result = await connection.execute(
-            'BEGIN $mutateProc(:doc); END;',
-            {
-              'doc': OracleBind.inOut(
-                value: doc,
-                type: OracleDbType.json,
-                maxSize: 4000,
+          final doc = _oracleScalarDoc(nonFinite: true);
+          // Without the opt-in the same document fails at construction,
+          // naming the member path — never the value.
+          expect(
+            () => OracleBind.inOut(
+              value: doc,
+              type: OracleDbType.json,
+              maxSize: 4000,
+            ),
+            throwsA(
+              isA<ArgumentError>().having(
+                (e) => '${e.message}',
+                'message',
+                contains(
+                  'at value[member #${doc.keys.toList().indexOf('nan') + 1}];',
+                ),
               ),
-            },
+            ),
           );
+          final result = await connection
+              .execute('BEGIN $mutateProc(:doc); END;', {
+                'doc': OracleBind.inOut(
+                  value: doc,
+                  type: OracleDbType.json,
+                  maxSize: 4000,
+                  allowNonFinite: true,
+                ),
+              });
           // JSON_OBJECT_T rebuilds the object in its own member order.
           _expectJsonValue(
             result.outBinds['doc'],
@@ -1202,8 +1227,7 @@ void main() {
             DateTime(2024, 3, 15, 10, 20, 30, 0, 1),
             OracleTimestampTz(DateTime.utc(2024), offsetMinutes: -480),
             Uint8List.fromList([1, 2, 3]),
-            double.nan,
-            double.infinity,
+            1e300,
           ];
           for (final value in scalars) {
             final id = nextTestId();
@@ -1218,6 +1242,46 @@ void main() {
                 });
             _expectJsonValue(result.outBinds['doc'], value, 'out $value');
             _expectJsonValue(await selectDoc(id), value, 'column $value');
+          }
+          // Non-finite scalar roots need the allowNonFinite opt-in (DW-12),
+          // which executeMany bindDefs do not offer.
+          for (final value in [
+            double.nan,
+            double.infinity,
+            double.negativeInfinity,
+          ]) {
+            final id = nextTestId();
+            final result = await connection
+                .execute('BEGIN $insertProc(:id, :doc); END;', {
+                  'id': id,
+                  'doc': OracleBind.inOut(
+                    value: value,
+                    type: OracleDbType.json,
+                    maxSize: 4000,
+                    allowNonFinite: true,
+                  ),
+                });
+            _expectJsonValue(result.outBinds['doc'], value, 'out $value');
+            _expectJsonValue(await selectDoc(id), value, 'column $value');
+            await expectLater(
+              connection.executeMany(
+                'BEGIN INSERT INTO $testTable (id, doc) VALUES (:1, :2); END;',
+                [
+                  [nextTestId(), value],
+                ],
+                OracleExecuteManyOptions(
+                  bindDefs: [
+                    OracleBindDef.input(type: OracleDbType.number),
+                    OracleBindDef.input(type: OracleDbType.json),
+                  ],
+                ),
+              ),
+              throwsA(
+                isA<OracleException>()
+                    .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+                    .having((e) => e.message, 'message', contains('rows[0];')),
+              ),
+            );
           }
 
           final base = nextTestId() * 100;
@@ -1284,33 +1348,62 @@ void main() {
           final doc = fetched.rows.single['V']! as Map<String, Object?>;
           expect(doc['tz'], isA<OracleTimestampTz>());
           expect(doc['r'], isA<Uint8List>());
+          expect((doc['nan']! as double).isNaN, isTrue);
+
+          // DW-12: the server's NaN / ±Infinity members re-bind only through
+          // the IN OUT allowNonFinite opt-in. A DML bind of the whole fetched
+          // document fails at the call site naming the member's position.
+          // The server orders the members itself: name the first non-finite
+          // one by its position in the fetched map.
+          final nanOrdinal =
+              doc.values.toList().indexWhere(
+                (v) => v is double && !v.isFinite,
+              ) +
+              1;
+          await expectLater(
+            connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [nextTestId(), doc],
+            ),
+            throwsA(
+              isA<ArgumentError>().having(
+                (e) => '${e.message}',
+                'message',
+                contains('at bindValues[1][member #$nanOrdinal];'),
+              ),
+            ),
+          );
+          final finite = <String, Object?>{
+            for (final MapEntry(:key, :value) in doc.entries)
+              if (!(value is double && !value.isFinite)) key: value,
+          };
+          expect(finite.keys, isNot(contains('nan')));
 
           final id = nextTestId();
           await connection.execute(
             'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
-            [id, doc],
+            [id, finite],
           );
-          _expectJsonValue(await selectDoc(id), doc);
+          _expectJsonValue(await selectDoc(id), finite);
 
           // ...and through executeMany and IN OUT, still without conversion.
           final manyId = nextTestId();
           await connection.executeMany(
             'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
             [
-              [manyId, doc],
+              [manyId, finite],
             ],
           );
-          _expectJsonValue(await selectDoc(manyId), doc);
-          final inOut = await connection.execute(
-            'BEGIN $mutateProc(:doc); END;',
-            {
-              'doc': OracleBind.inOut(
-                value: doc,
-                type: OracleDbType.json,
-                maxSize: 4000,
-              ),
-            },
-          );
+          _expectJsonValue(await selectDoc(manyId), finite);
+          final inOut = await connection
+              .execute('BEGIN $mutateProc(:doc); END;', {
+                'doc': OracleBind.inOut(
+                  value: doc,
+                  type: OracleDbType.json,
+                  maxSize: 4000,
+                  allowNonFinite: true,
+                ),
+              });
           _expectJsonValue(
             inOut.outBinds['doc'],
             <String, Object?>{...doc, 'status': 'done'},
@@ -1322,6 +1415,12 @@ void main() {
         test('still-unsupported values fail before any wire work and insert '
             'nothing; the connection stays usable', () async {
           if (skipWithoutNativeJson()) return;
+          final cyclic = <String, Object?>{'a': 1};
+          cyclic['self'] = <Object?>[cyclic];
+          Object deep = <Object?>['leaf'];
+          for (var i = 1; i < 1001; i++) {
+            deep = i.isOdd ? <String, Object?>{'k': deep} : <Object?>[deep];
+          }
           final invalid = <Object>[
             <String, Object?>{
               'set': <int>{1},
@@ -1330,7 +1429,13 @@ void main() {
             <Object, Object?>{1: 'non-string key'},
             <String, Object?>{'bce': DateTime(-44, 3, 15)},
             <String, Object?>{'far': DateTime(10000)},
-            <String, Object?>{'k' * 256: 'field name over 255 UTF-8 bytes'},
+            <String, Object?>{'k' * 65536: 'field name over 65535 UTF-8 bytes'},
+            // DW-12: non-finite without the opt-in, cycles, > 1000 levels.
+            <String, Object?>{
+              'n': <Object?>[1, double.nan],
+            },
+            cyclic,
+            deep,
           ];
           final parsesBefore = connection.debugFullParseExecutes;
           final reusesBefore = connection.debugReuseExecutes;
@@ -1401,6 +1506,541 @@ void main() {
           _expectJsonValue(await selectDoc(id), <String, Object?>{
             'ok': DateTime(2024),
           });
+        });
+      });
+
+      // ======================================================================
+      // DW-12 — JSON bind hardening: OSON version-3 long field names (Oracle
+      // 23ai; refused before the wire on older servers), UTC DateTime members
+      // as TIMESTAMP WITH TIME ZONE, the NaN / ±Infinity opt-in, and the
+      // 1000-level nesting cap.
+      // ======================================================================
+      group('JSON bind hardening (DW-12)', () {
+        OracleConnection? connectionHandle;
+        late OracleConnection connection;
+        late int serverVersion;
+        final testTable = uniqueTableName('json_dw12');
+        final insertProc = uniqueTableName('json_dw12_ins');
+
+        setUp(() async {
+          connectionHandle = await connectForTest();
+          connection = connectionHandle!;
+          final version = await connection.execute(
+            'BEGIN :v := DBMS_DB_VERSION.VERSION; END;',
+            {'v': OracleBind.out(type: OracleDbType.number)},
+          );
+          serverVersion = version.outBinds['v']! as int;
+          if (nativeJsonUnavailable != null) return;
+          try {
+            await connection.execute(
+              'CREATE TABLE $testTable (id NUMBER PRIMARY KEY, doc JSON) '
+              'TABLESPACE USERS',
+            );
+          } on OracleException catch (e) {
+            if (e.errorCode != 955) rethrow;
+            await connection.execute('TRUNCATE TABLE $testTable');
+          }
+          await connection.execute('''
+            CREATE OR REPLACE PROCEDURE $insertProc
+              (p_id NUMBER, p IN OUT JSON) AS
+            BEGIN
+              INSERT INTO $testTable (id, doc) VALUES (p_id, p);
+            END;
+          ''');
+        });
+
+        tearDown(() async {
+          final c = connectionHandle;
+          connectionHandle = null;
+          await cleanUpConnection(
+            c,
+            dropStatements: [
+              'DROP PROCEDURE $insertProc',
+              'DROP TABLE $testTable PURGE',
+            ],
+          );
+        });
+
+        Future<Object?> selectDoc(int id) async {
+          final result = await connection.execute(
+            'SELECT doc FROM $testTable WHERE id = :1',
+            [id],
+          );
+          return result.rows.single['DOC'];
+        }
+
+        Future<int> countRows() async {
+          final result = await connection.execute(
+            'SELECT COUNT(*) AS n FROM $testTable',
+          );
+          return result.rows.single['N']! as int;
+        }
+
+        /// `JSON_VALUE(doc, '$."<name>"')` for row [id], evaluated by the
+        /// server — which looks the name up through the document's hash-id
+        /// array, so this proves the server can search what the driver wrote.
+        Future<Object?> serverValue(int id, String name) async {
+          final result = await connection.execute(
+            'SELECT JSON_VALUE(doc, \'\$."$name"\') AS v '
+            'FROM $testTable WHERE id = :1',
+            [id],
+          );
+          return result.rows.single['V'];
+        }
+
+        /// 260..299-byte ASCII names. The pairs used below were chosen (and
+        /// their order measured live from server-encoded documents) for
+        /// their FNV-1a hashes: names 43 / 87 share the low hash byte with
+        /// the longer one holding the smaller second byte, names 1 / 0 order
+        /// differently by low and by second byte, and names 38 / 166 share
+        /// the whole 16-bit hash id.
+        String longName(int i) =>
+            '${'n' * (256 + i % 40)}${i.toString().padLeft(4, '0')}';
+
+        test(
+          'field names of 256..65535 UTF-8 bytes round-trip as OSON '
+          'version 3 on Oracle 23ai — DML, executeMany, IN OUT and a '
+          're-bound fetched document — and the server finds every one',
+          () async {
+            if (skipWithoutNativeJson()) return;
+            if (serverVersion < 23) {
+              markTestSkipped(
+                'OSON version-3 field names need Oracle 23ai; the pre-23 '
+                'refusal is covered by the next test',
+              );
+              return;
+            }
+            final multibyte = 'é' * 150; // 300 bytes in 150 code units
+            final doc = <String, Object?>{
+              'short': 1,
+              longName(43): 'p1x',
+              longName(87): 'p1y',
+              longName(1): 'p2x',
+              longName(0): 'p2y',
+              longName(38): 'p3x',
+              longName(166): 'p3y',
+              multibyte: 'multibyte',
+              'nested': <String, Object?>{
+                'k' * 1000: <Object?>['deep-long', DateTime(2024, 3, 15)],
+              },
+            };
+            final dmlId = nextTestId();
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:id, :doc)',
+              {'id': dmlId, 'doc': doc},
+            );
+            _expectJsonValue(await selectDoc(dmlId), doc);
+            for (final (name, value) in <(String, String)>[
+              (longName(43), 'p1x'),
+              (longName(87), 'p1y'),
+              (longName(1), 'p2x'),
+              (longName(0), 'p2y'),
+              (longName(38), 'p3x'),
+              (longName(166), 'p3y'),
+              (multibyte, 'multibyte'),
+            ]) {
+              expect(
+                await serverValue(dmlId, name),
+                equals(value),
+                reason: 'server lookup of a ${name.length}-unit name',
+              );
+            }
+            expect(await serverValue(dmlId, 'short'), equals('1'));
+            final nested = await connection.execute(
+              'SELECT JSON_VALUE(doc, \'\$.nested."${'k' * 1000}"[0]\') AS v '
+              'FROM $testTable WHERE id = :1',
+              [dmlId],
+            );
+            expect(nested.rows.single['V'], equals('deep-long'));
+
+            // executeMany and IN OUT.
+            final manyIds = [nextTestId(), nextTestId()];
+            await connection.executeMany(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [
+                [manyIds[0], doc],
+                [
+                  manyIds[1],
+                  <String, Object?>{longName(87): 2},
+                ],
+              ],
+            );
+            _expectJsonValue(await selectDoc(manyIds[0]), doc);
+            expect(await serverValue(manyIds[1], longName(87)), equals('2'));
+            final inOutId = nextTestId();
+            final inOut = await connection
+                .execute('BEGIN $insertProc(:id, :doc); END;', {
+                  'id': inOutId,
+                  'doc': OracleBind.inOut(
+                    value: doc,
+                    type: OracleDbType.json,
+                    maxSize: 32000,
+                  ),
+                });
+            _expectJsonValue(inOut.outBinds['doc'], doc);
+            expect(await serverValue(inOutId, longName(166)), equals('p3y'));
+
+            // A document the SERVER encoded with long names (version 3)
+            // fetches, re-binds unchanged, and stays searchable.
+            final serverDoc = await connection.execute(
+              "SELECT JSON_OBJECT('${longName(43)}' VALUE 'a', "
+              "'${longName(87)}' VALUE 'b', 'x' VALUE 1 RETURNING JSON) AS v "
+              'FROM dual',
+            );
+            final fetched = serverDoc.rows.single['V']! as Map<String, Object?>;
+            expect(
+              fetched,
+              equals(<String, Object?>{
+                longName(43): 'a',
+                longName(87): 'b',
+                'x': 1,
+              }),
+            );
+            final rebindId = nextTestId();
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [rebindId, fetched],
+            );
+            _expectJsonValue(await selectDoc(rebindId), fetched);
+            expect(await serverValue(rebindId, longName(87)), equals('b'));
+
+            // The 65535-byte maximum, in a document whose long-name segment
+            // outgrows uint16 offsets.
+            final maxId = nextTestId();
+            final maxDoc = <String, Object?>{
+              'm' * 65535: true,
+              longName(0): <Object?>[1, 2],
+            };
+            await connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [maxId, maxDoc],
+            );
+            _expectJsonValue(await selectDoc(maxId), maxDoc);
+            final maxLookup = await connection.execute(
+              'SELECT JSON_VALUE(doc, \'\$."${longName(0)}"[1]\') AS v '
+              'FROM $testTable WHERE id = :1',
+              [maxId],
+            );
+            expect(maxLookup.rows.single['V'], equals('2'));
+          },
+        );
+
+        test('on a pre-23 server, field names over 255 UTF-8 bytes are refused '
+            'before the wire — Oracle 21c would store a document it cannot '
+            'read — while 255-byte names keep working', () async {
+          if (skipWithoutNativeJson()) return;
+          if (serverVersion >= 23) {
+            markTestSkipped(
+              'Oracle 23ai stores long field names; covered by the previous '
+              'test',
+            );
+            return;
+          }
+          // The server itself cannot build such a name either.
+          await expectLater(
+            connection.execute(
+              "SELECT JSON('{\"${longName(1)}\":1}') AS v FROM dual",
+            ),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'errorCode',
+                40476, // JSON key too long
+              ),
+            ),
+          );
+          const secret = 'hunter2';
+          final doc = <String, Object?>{
+            'pw': secret,
+            'nested': <Object?>[
+              <String, Object?>{'$secret${longName(1)}': 1},
+            ],
+          };
+          final parses = connection.debugFullParseExecutes;
+          final reuses = connection.debugReuseExecutes;
+          final sequence = connection.debugSequence;
+          await expectLater(
+            connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [nextTestId(), doc],
+            ),
+            throwsA(
+              isA<ArgumentError>().having(
+                (e) => '$e',
+                'toString',
+                allOf(
+                  contains('Oracle Database 23ai or later'),
+                  contains('at bindValues[1][member #2][0])'),
+                  isNot(contains(secret)),
+                ),
+              ),
+            ),
+          );
+          await expectLater(
+            connection.executeMany(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [
+                [nextTestId(), doc],
+              ],
+            ),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    allOf(
+                      contains('Oracle Database 23ai or later'),
+                      isNot(contains(secret)),
+                    ),
+                  ),
+            ),
+          );
+          // OracleBind cannot know the server at construction; the execute
+          // refuses it.
+          final bind = OracleBind.inOut(
+            value: doc,
+            type: OracleDbType.json,
+            maxSize: 4000,
+          );
+          await expectLater(
+            connection.execute('BEGIN $insertProc(:id, :doc); END;', {
+              'id': nextTestId(),
+              'doc': bind,
+            }),
+            throwsA(
+              isA<ArgumentError>().having(
+                (e) => '$e',
+                'toString',
+                allOf(
+                  contains('Oracle Database 23ai or later'),
+                  contains('at value[member #2][0])'),
+                  isNot(contains(secret)),
+                ),
+              ),
+            ),
+          );
+          expect(connection.debugFullParseExecutes, equals(parses));
+          expect(connection.debugReuseExecutes, equals(reuses));
+          expect(connection.debugSequence, equals(sequence));
+          expect(await countRows(), equals(0));
+
+          // The OSON version-1 maximum still binds, and the server finds it.
+          final name255 = '${'é' * 127}k'; // 255 bytes
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [
+              id,
+              <String, Object?>{name255: 'ok', 'k' * 255: 1},
+            ],
+          );
+          _expectJsonValue(await selectDoc(id), <String, Object?>{
+            name255: 'ok',
+            'k' * 255: 1,
+          });
+          expect(await serverValue(id, name255), equals('ok'));
+        });
+
+        test('a UTC DateTime member travels as TIMESTAMP WITH TIME ZONE at '
+            '+00:00 and fetches as an OracleTimestampTz holding the same '
+            'instant; a local DateTime keeps its wall clock', () async {
+          if (skipWithoutNativeJson()) return;
+          final utc = DateTime.utc(2024, 3, 15, 10, 20, 30, 123, 456);
+          final utcWhole = DateTime.utc(2024, 3, 15, 10, 20, 30);
+          final local = DateTime(2024, 3, 15, 10, 20, 30);
+          final doc = <String, Object?>{
+            'utc': utc,
+            'utcWhole': utcWhole,
+            'local': local,
+            'bounds': <Object?>[
+              DateTime.utc(1),
+              DateTime.utc(9999, 12, 31, 23, 59, 59, 999, 999),
+            ],
+          };
+          final expected = <String, Object?>{
+            'utc': OracleTimestampTz(utc, offsetMinutes: 0),
+            'utcWhole': OracleTimestampTz(utcWhole, offsetMinutes: 0),
+            'local': local,
+            'bounds': <Object?>[
+              OracleTimestampTz(DateTime.utc(1), offsetMinutes: 0),
+              OracleTimestampTz(
+                DateTime.utc(9999, 12, 31, 23, 59, 59, 999, 999),
+                offsetMinutes: 0,
+              ),
+            ],
+          };
+
+          final dmlId = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [dmlId, doc],
+          );
+          final fetched = await selectDoc(dmlId);
+          _expectJsonValue(fetched, expected);
+          final fetchedUtc =
+              (fetched! as Map<String, Object?>)['utc']! as OracleTimestampTz;
+          expect(fetchedUtc.utc, equals(utc)); // the same instant
+          expect(fetchedUtc.utc.isUtc, isTrue);
+          expect(fetchedUtc.offsetMinutes, equals(0));
+
+          // The server sees a zoned timestamp; the local one stays zone-less.
+          final types = await connection.execute(
+            "SELECT JSON_VALUE(doc, '\$.utc.type()') AS utc_type, "
+            "JSON_VALUE(doc, '\$.local.type()') AS local_type, "
+            'JSON_SERIALIZE(doc) AS text '
+            'FROM $testTable WHERE id = :1',
+            [dmlId],
+          );
+          final row = types.rows.single;
+          expect(row['UTC_TYPE'], equals('timestamp with time zone'));
+          expect(row['LOCAL_TYPE'], equals('timestamp'));
+          expect(
+            row['TEXT'] as String,
+            allOf(
+              contains('"utc":"2024-03-15T10:20:30.123456Z"'),
+              contains('"local":"2024-03-15T10:20:30"'),
+            ),
+          );
+
+          // executeMany and an IN OUT scalar root behave the same.
+          final manyId = nextTestId();
+          await connection.executeMany(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [
+              [manyId, doc],
+            ],
+          );
+          _expectJsonValue(await selectDoc(manyId), expected);
+          final rootId = nextTestId();
+          final root = await connection
+              .execute('BEGIN $insertProc(:id, :doc); END;', {
+                'id': rootId,
+                'doc': OracleBind.inOut(
+                  value: utc,
+                  type: OracleDbType.json,
+                  maxSize: 4000,
+                ),
+              });
+          final rootExpected = OracleTimestampTz(utc, offsetMinutes: 0);
+          _expectJsonValue(root.outBinds['doc'], rootExpected);
+          _expectJsonValue(await selectDoc(rootId), rootExpected);
+        });
+
+        test('NaN / ±Infinity are rejected at the call site by default — '
+            'nothing reaches the server — and stored as BINARY_DOUBLE '
+            'through the IN OUT allowNonFinite opt-in', () async {
+          if (skipWithoutNativeJson()) return;
+          final doc = <String, Object?>{
+            'ok': 1,
+            'nan': double.nan,
+            'inf': <Object?>[double.infinity, double.negativeInfinity],
+          };
+          final sequence = connection.debugSequence;
+          await expectLater(
+            connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [nextTestId(), doc],
+            ),
+            throwsA(
+              isA<ArgumentError>().having(
+                (e) => '$e',
+                'toString',
+                allOf(
+                  contains('not finite'),
+                  contains('at bindValues[1][member #2];'),
+                  contains('allowNonFinite: true'),
+                ),
+              ),
+            ),
+          );
+          await expectLater(
+            connection.executeMany(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [
+                [
+                  nextTestId(),
+                  <Object?>[1, double.infinity],
+                ],
+              ],
+            ),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    contains('at rows[0][1];'),
+                  ),
+            ),
+          );
+          expect(
+            () => OracleBind.inOut(
+              value: doc,
+              type: OracleDbType.json,
+              maxSize: 4000,
+            ),
+            throwsA(isA<ArgumentError>()),
+          );
+          expect(connection.debugSequence, equals(sequence));
+          expect(await countRows(), equals(0));
+
+          final id = nextTestId();
+          final result = await connection
+              .execute('BEGIN $insertProc(:id, :doc); END;', {
+                'id': id,
+                'doc': OracleBind.inOut(
+                  value: doc,
+                  type: OracleDbType.json,
+                  maxSize: 4000,
+                  allowNonFinite: true,
+                ),
+              });
+          _expectJsonValue(result.outBinds['doc'], doc);
+          _expectJsonValue(await selectDoc(id), doc);
+          final types = await connection.execute(
+            "SELECT JSON_VALUE(doc, '\$.nan.type()') AS t FROM $testTable "
+            'WHERE id = :1',
+            [id],
+          );
+          expect(types.rows.single['T'], equals('double'));
+        });
+
+        test('exactly 1000 nesting levels bind and round-trip on the server; '
+            'one more fails before the wire', () async {
+          if (skipWithoutNativeJson()) return;
+          Object nested(int levels) {
+            Object value = <Object?>['leaf'];
+            for (var i = 1; i < levels; i++) {
+              value = i.isOdd
+                  ? <String, Object?>{'k': value}
+                  : <Object?>[value];
+            }
+            return value;
+          }
+
+          final id = nextTestId();
+          final deepest = nested(1000);
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+            [id, deepest],
+          );
+          // `equals` recurses only 100 levels by default.
+          expect(await selectDoc(id), equals(deepest, 2000));
+          await expectLater(
+            connection.execute(
+              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+              [nextTestId(), nested(1001)],
+            ),
+            throwsA(
+              isA<ArgumentError>().having(
+                (e) => '${e.message}',
+                'message',
+                contains('1000 levels'),
+              ),
+            ),
+          );
+          expect(await countRows(), equals(1));
         });
       });
 
@@ -1634,9 +2274,10 @@ void main() {
         // value into the column's storage form, so — measured identically on
         // Oracle 23ai and 21c — a text `IS JSON` column stores Oracle's JSON
         // *text* serialization (dates as ISO-8601 strings, binary as a hex
-        // string, NaN / ±Infinity as the strings "Nan" / "Inf" / "-Inf"),
-        // while an `IS JSON FORMAT OSON` column keeps the OSON scalars and
-        // round-trips every Dart type.
+        // string, and — measured before DW-12 made them an IN OUT-only
+        // opt-in that this DML bind cannot use — NaN / ±Infinity as the
+        // strings "Nan" / "Inf" / "-Inf"), while an `IS JSON FORMAT OSON`
+        // column keeps the OSON scalars and round-trips every Dart type.
         test('a document with Oracle scalars binds into BLOB IS JSON (stored '
             "as Oracle's JSON text) and IS JSON FORMAT OSON (types "
             'preserved)', () async {
@@ -1649,9 +2290,6 @@ void main() {
               offsetMinutes: 330,
             ),
             'r': Uint8List.fromList([0xde, 0xad]),
-            'nan': double.nan,
-            'inf': double.infinity,
-            'ninf': double.negativeInfinity,
             'huge': 1e200,
             'n': 7,
           };
@@ -1667,9 +2305,6 @@ void main() {
               'ts': '2024-03-15T10:20:30.500000',
               'tz': '2024-03-15T10:20:30.500000+05:30',
               'r': 'DEAD',
-              'nan': 'Nan',
-              'inf': 'Inf',
-              'ninf': '-Inf',
               'huge': 1e200,
               'n': 7,
             }),

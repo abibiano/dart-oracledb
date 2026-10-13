@@ -26,10 +26,11 @@
   `TIMESTAMP` (7 bytes with no sub-second part, else 11; written from its
   wall-clock fields like a `DATE` / `TIMESTAMP` column bind), an
   `OracleTimestampTz` as `TIMESTAMP WITH TIME ZONE` (offset preserved), a
-  `Uint8List` as binary (node-oracledb `oson.js` parity), and NaN as
-  `BINARY_DOUBLE` (parity) — as are ±Infinity and doubles outside Oracle
-  `NUMBER`'s range (a non-zero magnitude below 1E-130, or 1E126 and up), a
-  Dart-driver extension: node-oracledb cannot bind those. Every other `num`,
+  `Uint8List` as binary (node-oracledb `oson.js` parity), and doubles outside
+  Oracle `NUMBER`'s range (a non-zero magnitude below 1E-130, or 1E126 and
+  up) as `BINARY_DOUBLE` — a Dart-driver extension: node-oracledb cannot bind
+  those. NaN / ±Infinity travel as `BINARY_DOUBLE` too, but only on opt-in
+  (see the JSON bind hardening entry under Fixes). Every other `num`,
   `0.0` / `-0.0` included, stays `NUMBER`, as before. A finite fetched
   `BINARY_FLOAT` /
   `BINARY_DOUBLE` within `NUMBER`'s range still re-binds as `NUMBER` (equal
@@ -47,7 +48,8 @@
   binds as `VARCHAR2`, `Uint8List` as `RAW`, `DateTime` as `DATE`.
 - **Behavior change:** invalid JSON bind values still fail loudly at the call
   site — `Set`, non-`String` keys, arbitrary objects, field names over 255
-  UTF-8 bytes (previously caught only while encoding), and dates outside
+  UTF-8 bytes (previously caught only while encoding; 65535 on Oracle 23ai,
+  see Fixes), and dates outside
   years 1–9999 — and an `execute()` `Map` / `List` bind is now validated
   while its binds are prepared, before any transport work. The
   `ArgumentError` no longer carries the bind value — no member values and
@@ -121,6 +123,39 @@
   its cached cursor, as CLOB / BLOB queries already did, instead of reusing it
   without fresh defines. The statement-cache slot is kept, and results are
   unchanged.
+- **JSON bind hardening.** JSON bind values (`Map` / `List` DML and
+  `executeMany()` binds, `OracleBind.inOut(type: OracleDbType.json)`) are
+  now validated once per bind (previously up to three walks), and:
+  - **Behavior change:** NaN and ±Infinity are rejected by default — as a
+    member or as a declared scalar root — with an `ArgumentError` naming the
+    member's path but never the value (`OracleException` with
+    `oraBindTypeError` from `executeMany()`), so a stray NaN from an
+    arithmetic bug no longer lands in the database. Opt in per bind with the
+    new `OracleBind.inOut(..., allowNonFinite: true)` (JSON only) to send
+    them as `BINARY_DOUBLE` as before. DML and `executeMany()` binds have no
+    opt-in, so a fetched document holding NaN / ±Infinity re-binds only
+    through a PL/SQL `IN OUT JSON` parameter. Finite doubles outside
+    `NUMBER`'s range still need no opt-in.
+  - A cyclic value (a map or list that contains itself) or one nested deeper
+    than 1000 levels (Oracle's JSON limit) now fails with an `ArgumentError`
+    at the call site instead of overflowing the stack. A sub-document shared
+    by two members is not a cycle.
+  - **Behavior change:** a UTC `DateTime` (`isUtc`) now binds as
+    `TIMESTAMP WITH TIME ZONE` at `+00:00` and fetches back as an
+    `OracleTimestampTz` for the same instant; previously its UTC fields were
+    stored zone-less, as if they were local wall-clock time. Local `DateTime`
+    binds are unchanged, byte for byte.
+  - Field names of 256–65535 UTF-8 bytes now bind on Oracle 23ai (OSON
+    version 3), so a document fetched from 23ai with such a name re-binds.
+    Long names are filed in the order the server searches them (by their
+    16-bit hash id, measured live), so `JSON_VALUE` finds every one. On older
+    servers such names still fail at the call site: Oracle 21c would accept
+    the document but could not read it back (`JSON_SERIALIZE` raises
+    ORA-40441). Names over 65535 bytes always fail.
+  - A declared-JSON `String` root is still a JSON string scalar, never
+    parsed (now documented).
+
+  Validated against Oracle 23ai and Oracle 21c.
 
 ## 1.4.0
 
