@@ -923,6 +923,7 @@ severity: low
 reason: The spec's Never list excludes new options there; the intent says per-query on OracleExecuteOptions. Documented in CHANGELOG/README/dartdoc. A stream caller hitting a lax or empty value cannot get raw bytes.
 status: open
 decision: 2026-10-14 Only fix the hint text — Leave the stream and executeMany signatures unchanged. Change the decode error hint in lib/src/protocol/oson.dart so it points stream callers at execute() with rawJsonBlobs, and document the limitation.
+decision: 2026-10-14 Only fix the hint text — Leave the stream and executeMany signatures unchanged. Change the decode error hint in lib/src/protocol/oson.dart so it points stream callers at execute() with rawJsonBlobs, and document the limitation.
 
 ### DW-127: Numeric JSON literals outside the exact double range can lose precision before the text JSON reviver runs.
 origin: spec-deferred cf5fffe584a5
