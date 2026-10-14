@@ -1828,12 +1828,20 @@ class Transport {
   /// references post-op state rather than stale bytes. Single implementation
   /// shared by [readLobRange], `createTemporaryLob` and the connection's
   /// read/write seams. A differently-sized echo is ignored (never truncates or
-  /// grows the live locator).
+  /// grows the live locator) but logged at WARNING level, since the handle then
+  /// keeps pre-op bytes the server has moved past.
   @internal
   static void copyBackLocator(Uint8List source, Uint8List? updated) {
-    if (updated != null && updated.length == source.length) {
-      source.setRange(0, source.length, updated);
+    if (updated == null) return;
+    if (updated.length != source.length) {
+      _log.warning(
+        'Ignoring server-echoed LOB locator of ${updated.length} bytes; the '
+        'live locator is ${source.length} bytes and is left unchanged '
+        '(it may hold stale post-op state)',
+      );
+      return;
     }
+    source.setRange(0, source.length, updated);
   }
 
   /// Reads [amount] units starting at 1-based [offset] from the LOB [locator]

@@ -13,6 +13,7 @@ library;
 
 import 'dart:typed_data';
 
+import 'package:logging/logging.dart';
 import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/lob_locator.dart';
@@ -466,15 +467,59 @@ void main() {
       },
     );
 
-    test('a differently-sized echo is ignored, never truncating the live '
-        'locator', () async {
-      final live = Uint8List(tnsLobLocatorBufferSize);
-      final t = _ChunkedReadTransport([
-        (data: Uint8List.fromList([1]), amount: 1),
-      ])..echoLocator = Uint8List.fromList([0xAB, 0xCD]);
-      await t.readLobRange(locator: live, offset: 1, amount: 1);
-      expect(live, everyElement(equals(0)));
-      expect(live, hasLength(tnsLobLocatorBufferSize));
+    test('differently-sized echoes never resize the live '
+        'locator and are logged as WARNINGs', () async {
+      final records = <LogRecord>[];
+      final prevLevel = Logger.root.level;
+      Logger.root.level = Level.ALL;
+      final sub = Logger('Transport').onRecord.listen(records.add);
+      try {
+        for (final echoLength in [2, tnsLobLocatorBufferSize + 1]) {
+          final live = Uint8List(tnsLobLocatorBufferSize);
+          final t = _ChunkedReadTransport([
+            (data: Uint8List.fromList([1]), amount: 1),
+          ])..echoLocator = Uint8List(echoLength);
+          await t.readLobRange(locator: live, offset: 1, amount: 1);
+          expect(live, everyElement(equals(0)));
+          expect(live, hasLength(tnsLobLocatorBufferSize));
+        }
+      } finally {
+        await sub.cancel();
+        Logger.root.level = prevLevel;
+      }
+      final warnings = records.where((r) => r.level == Level.WARNING);
+      expect(warnings, hasLength(2));
+      expect(
+        warnings.map((r) => r.message),
+        containsAll([
+          allOf(
+            contains('2 bytes'),
+            contains('$tnsLobLocatorBufferSize bytes'),
+          ),
+          allOf(
+            contains('${tnsLobLocatorBufferSize + 1} bytes'),
+            contains('$tnsLobLocatorBufferSize bytes'),
+          ),
+        ]),
+      );
+    });
+
+    test('equal-length and null echoes log no warning', () {
+      final records = <LogRecord>[];
+      final prevLevel = Logger.root.level;
+      Logger.root.level = Level.ALL;
+      final sub = Logger('Transport').onRecord.listen(records.add);
+      try {
+        final live = Uint8List(4);
+        Transport.copyBackLocator(live, Uint8List.fromList([1, 2, 3, 4]));
+        expect(live, equals([1, 2, 3, 4]));
+        Transport.copyBackLocator(live, null);
+        expect(live, equals([1, 2, 3, 4]));
+      } finally {
+        sub.cancel();
+        Logger.root.level = prevLevel;
+      }
+      expect(records.where((r) => r.level == Level.WARNING), isEmpty);
     });
   });
 

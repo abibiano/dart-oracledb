@@ -252,7 +252,9 @@ archived: 2026-10-09
 origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-env-integration-tests, 2026-07-26)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: ⏳ **`_copyBackLocator` silently drops a differently-sized server-echoed locator** (+ the 12.3 note that the shared `copyBackLocator` now couples an AC6-"frozen" call site). In-area but deliberately NOT in scope for 12.4: the guard was **not** edited, no realistic trigger exists, and the behavior is pinned by a unit test asserting a mismatched echo neither truncates nor grows the live locator. **Epic-exit disposition:** defensive robustness only (log or fail loud on a length mismatch); whoever takes it must re-check `Transport.createTemporaryLob`, which shares the helper. target: Epic 12 follow-up / post-1.4 hardening. [lib/src/transport/transport.dart `copyBackLocator`; lib/src/connection.dart `_copyBackLocator`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-copyback-locator-guard
+resolution-undo: 4912d852181ff84ddd5d44ac470cec2147d8a657aaad8b80344b77f125a07949 2026-10-14 7374617475733a206f70656e
 
 ### DW-32: `OracleResult.closeLobs()` also closes not-yet-delivered handles / an aliased delivered handle. Carried unchanged — documented on both ends in 12.3,…
 
@@ -657,14 +659,18 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 12-1-public-lob-object (2026-07-12, iter 3)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: ⏳ **CARRIED UNCHANGED (reviewed 2026-07-26 by dev-story of 12-3-chunked-streaming-transfer) — in-area but deliberately NOT in scope; the guard's behavior was not touched.** Story 12.3 routes every LOB read through `Transport.readLobRange`, which copies the echoed post-op locator back after EVERY piece, so this guard now runs more often than before — but the streamed paths echo same-size locators, so nothing about the risk changed. The only edit was **de-duplication**: the identical three-line guard existed in `OracleConnection._copyBackLocator` and inline in `Transport.createTemporaryLob`; both now delegate to a single `@internal static Transport.copyBackLocator`, which the new read loop also uses. Behavior is byte-for-byte identical (a differently-sized echo is still silently ignored — pinned by a new unit test asserting the live locator is neither truncated nor grown), and the eventual log-or-fail-loud decision stays with the follow-up. [lib/src/transport/transport.dart `copyBackLocator`; lib/src/connection.dart `_copyBackLocator`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-copyback-locator-guard
+resolution-undo: 4912d852181ff84ddd5d44ac470cec2147d8a657aaad8b80344b77f125a07949 2026-10-14 7374617475733a206f70656e
 
 ### DW-96: `_copyBackLocator` silently drops a differently-sized server-echoed locator.
 
 origin: migrated from legacy ledger ("Deferred from: code review of 12-1-public-lob-object (2026-07-12, iter 3)"), 2026-10-09
 location: connection.dart
 reason: **`_copyBackLocator` silently drops a differently-sized server-echoed locator.** After each LOB READ/WRITE the driver copies the server's echoed post-op locator back into the live buffer only when `updatedLocator.length == sourceLocator.length` (connection.dart:4013-4018), and otherwise ignores it with no log or error. node-oracledb copies the returned locator unconditionally (`lobOp.js processReturnParameter`). If the server ever returned a differently-sized post-op locator the driver should track, the handle would silently retain stale bytes. No realistic trigger today (a LOB op's echoed locator is the same fixed-size locator; the length-guard mirrors the accepted `_createTempClob`/`_createTempBlob` pattern), so deferred as defensive robustness — log or fail-loud on a length mismatch rather than silently keeping stale bytes. target: Epic 12 follow-up. [lib/src/connection.dart:4013-4018]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-copyback-locator-guard
+resolution-undo: 4912d852181ff84ddd5d44ac470cec2147d8a657aaad8b80344b77f125a07949 2026-10-14 7374617475733a206f70656e
 
 ### DW-97: CARRIED (documented 2026-07-26 by dev-story of 12-3-chunked-streaming-transfer) — the staleness window is now documented, and the new read STREAMS…
 
@@ -761,7 +767,9 @@ decision: 2026-10-14 Keep as documented — Both behaviours are documented on cl
 origin: migrated from legacy ledger ("Deferred from: code review of 12-3-chunked-streaming-transfer (2026-07-26)"), 2026-10-09
 location: transport.dart
 reason: **Two AC6/AC7 "do not change" areas were touched by the `copyBackLocator` de-duplication — behaviour-neutral and self-disclosed, logged so the boundaries are not read as untouched.** AC6 lists "any change to `Transport.createTemporaryLob`" as out of scope and AC7's `_copyBackLocator` ledger item says "Do not touch the guard"; the 12.3 diff replaced the inline echo-copy inside `createTemporaryLob` with the new `@internal static Transport.copyBackLocator` (transport.dart:1642) and made `OracleConnection._copyBackLocator` (connection.dart:4699) a one-line delegate to it. The guard predicate is byte-identical (`updated != null && updated.length == source.length`), the change is justified by AC1's explicit anti-duplication mandate, it is flagged in the story's Completion Notes and in this ledger, and a new unit test pins that a differently-sized server echo still neither truncates nor grows the live locator. No action required beyond awareness — but note the shared helper now couples an AC6-"frozen" call site to any future edit of the guard, so whoever finally fixes "silently drops a differently-sized echo" must re-check `createTemporaryLob` too. target: Epic 12 follow-up (folds into the existing `_copyBackLocator` differently-sized-echo entry). [lib/src/transport/transport.dart:632,1642; lib/src/connection.dart:4699]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-copyback-locator-guard
+resolution-undo: 4912d852181ff84ddd5d44ac470cec2147d8a657aaad8b80344b77f125a07949 2026-10-14 7374617475733a206f70656e
 
 ### DW-109: Residual double-queue window for a caller-owned temporary `OracleLob` bound `inOut` under `fetchLobs: false`. Introduced (not pre-existing) by 12.4's…
 
