@@ -109,7 +109,8 @@ origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-
 location: lib/src/protocol/oson.dart:143-200, 544-556; lib/src/oracle_bind.dart:154-159, 351
 severity: medium
 reason: Retro action 6 (F10, F12). The NaN/Infinity default and the String-root behaviour need a Winston/Abibiano decision; the guard, UTC handling and key-length symmetry are plain fixes.
-status: open
+status: done 2026-10-14
+resolution: already resolved: commit 2f8b8c9 (feat(dw-json-bind-validation)) added the depth/cycle guard, allowNonFinite opt-in (lib/src/oracle_bind.dart:122,203,229), UTC DateTime TSTZ handling and OSON v3 long-key rebind in lib/src/protocol/oson.dart, with tests.
 decision (Abibiano, 2026-10-09): reject NaN and +/-Infinity JSON bind members by default with an ArgumentError naming the member path, add an opt-in allowNonFinite; a declared-JSON String root stays a valid JSON string scalar and is documented; depth/cycle guard, UTC DateTime handling and key-length rebind symmetry are plain fixes.
 
 ### DW-13: decodeOson wraps only BufferException, so malformed UTF-8 in a field name or string node escapes as FormatException instead of the documented OracleException.
