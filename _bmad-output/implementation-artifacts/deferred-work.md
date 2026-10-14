@@ -587,14 +587,18 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 11-4-dml-returning-execute-many (2026-07-10)"), 2026-10-09
 location: lib/src/connection.dart
 reason: **OPEN — `bindDefs` direction/position not cross-validated against the actual RETURNING boundary in the SQL text.** `_prepareDmlReturning` trusts each slot's declared `OracleBindDef.direction` (input/output/inputOutput) without checking it agrees with whether that placeholder actually sits before or after `RETURNING` in the SQL. `returningBindReusedName()` only rejects the same bind *name* reused on both sides — it does not catch a caller who mismarks directions (e.g. declares the real RETURNING target as `.input` and a real IN column as `.output`). Not required by any AC or guardrail; a mismatch would very likely surface as an Oracle-side protocol/bind error rather than silently corrupting data, since the SQL parser already knows a placeholder's structural role. Deferred as hardening, not a confirmed live bug. [lib/src/connection.dart:1551-1781]
-status: open
+status: done 2026-10-14
+resolution: closed by human decision: Server rejects mismarked directions with a clear error; no data-corruption risk and parser false-rejection risk outweighs the benefit.
+decision: 2026-10-14 Close as accepted — Server rejects mismarked directions with a clear error; no data-corruption risk and parser false-rejection risk outweighs the benefit.
 
 ### DW-87: OPEN — `dmlReturning` invariant enforced only via `assert`, which is stripped in release/AOT Dart builds.
 
 origin: migrated from legacy ledger ("Deferred from: code review of 11-4-dml-returning-execute-many (2026-07-10)"), 2026-10-09
 location: lib/src/protocol/messages/execute_message.dart
 reason: **OPEN — `dmlReturning` invariant enforced only via `assert`, which is stripped in release/AOT Dart builds.** `ExecuteRequest`'s `!dmlReturning || (!isQuery && !isPlSql)` constructor invariant (and the equivalent on `_ExecuteManyCall`) is an `assert`, not a `throw` — consistent with the existing `batchErrors`/`dmlRowCounts` invariants from Stories 11.1-11.3, so this story only extends an established convention rather than introducing a new one. Switching the whole family to explicit throws is a broader architectural change out of scope for this story. [lib/src/protocol/messages/execute_message.dart:138-140]
-status: open
+status: done 2026-10-14
+resolution: closed by human decision: Invariants guard internal call sites only; connection-layer validation covers public input.
+decision: 2026-10-14 Close as internal-only convention — Invariants guard internal call sites only; connection-layer validation covers public input.
 
 ### DW-88: AC4's literal "cursorId == 0" branch is not directly asserted by new dual-env evidence.
 
@@ -677,14 +681,18 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 12-1-public-lob-object (2026-07-12, iter 3)"), 2026-10-09
 location: connection.dart
 reason: **Lazily-streamed `fetchLobs` LOB handles (nested `CURSOR(...)` columns, REF CURSOR OUT-bind rows, and the top-level `resultSet: true` cursor) — wrap them, with a complete handle lifecycle.** Story 12.1 wraps only the EAGER shapes (top-level SELECT rows + scalar OUT binds) into `OracleLob` handles; every lazily-streamed LOB shape is REJECTED pre-wire (`_rejectCursorEmbeddedLob` for nested-cursor/REF-CURSOR OUT binds; the `resultSet: true` + `fetchLobs: true` rejection at connection.dart) rather than wrapped, because the streamed-handle lifecycle is not yet built. Story 12.3 must (a) wrap CLOB/NCLOB/BLOB columns carried by a nested `CURSOR(...)`, a REF CURSOR OUT bind, and a top-level `resultSet` cursor into `OracleLob` handles (node-oracledb parity — every LOB column wraps uniformly at wire-decode, `ResultSetCursor` per-batch `materializeLobs` gets a `wrapLob` callback), AND (b) complete the handle lifecycle those lazy handles require: force-close the cursor's wrapped-but-undelivered handles when its `OracleResultSet` closes / is pool-reclaimed / a batch-decode throws (an `OracleResultSet.close()` → `_openLobs` reap plus a `ResultSetCursor.close()` that reaps its buffered handles), and extend `OracleResult.closeLobs()` / `_collectLobs` to reach into an `OracleResultSet` OUT bind's buffered handles. Without (b), a `ResultSetCursor` that prefetches a whole batch (up to `_defaultPrefetchRows`), wraps+registers every LOB in `_openLobs`, then has the caller read one row and `close()` the result set, would orphan the undelivered handles in `_openLobs` forever — permanently wedging the connection with no public recovery API. The iter-1 wrap-through-`ResultSetCursor` implementation was REVERSED in 12.1 for exactly this reason; do not re-add wrapping without the lifecycle. Live reachability of the nested-cursor shape is currently also masked by a pre-existing, `fetchLobs`-independent ORA-12547 nested-cursor FETCH-decode limitation (`decodeExecuteResponse`), which 12.3 should confirm resolved before end-to-end validation. target: Story 12.3. [lib/src/connection.dart (_wrapRefCursorOutBinds/_materializeNestedCursorsInBatch/_drainNestedCursor), lib/src/protocol/result_set_cursor.dart, lib/src/result_set.dart, lib/src/result.dart]
-status: open
+status: done 2026-10-14
+resolution: closed by human decision: Cursor-embedded LOBs remain readable with fetchLobs: false; the pre-wire rejection is the documented behaviour.
+decision: 2026-10-14 Keep rejecting, document — Cursor-embedded LOBs remain readable with fetchLobs: false; the pre-wire rejection is the documented behaviour.
 
 ### DW-100: RE-CONFIRMED UNCHANGED 2026-07-26 (dev-story of 12-3-chunked-streaming-transfer) — Story 12.3 does NOT relax the fetched-handle slot rule, so this…
 
 origin: migrated from legacy ledger ("Deferred from: dev-story of 12-2-temporary-lob-lifecycle (2026-07-26)"), 2026-10-09
 location: lib/src/connection.dart
 reason: ⏳ **RE-CONFIRMED UNCHANGED 2026-07-26 (dev-story of 12-3-chunked-streaming-transfer) — Story 12.3 does NOT relax the fetched-handle slot rule, so this entry is explicitly still open (not silently satisfied).** The entry predicted the restriction would lift "once Story 12.3's lazy-handle lifecycle relaxes the fetched-handle slot rule". It does not: AC4 keeps Story 12.1's rule verbatim — an open FETCHED handle (eagerly wrapped OR wrapped per streamed batch) still makes the connection busy, `_rejectConcurrentOperation` is unchanged apart from 12.2's created-temp exemption, and the new streaming result set holds the slot exactly like the eager path (pinned by a unit test AND a dual-env integration case asserting `execute()` is rejected while a streamed handle is open, and succeeds once it closes). Adding a slot exemption for fetched handles is a concurrency-model change with its own lifecycle questions and is not part of this story. The bind unwrap remains category-agnostic, so no bind-code change is expected whenever that decision is taken. target: Epic 12 follow-up. [lib/src/connection.dart `_prepareStatement`/`_rejectConcurrentOperation`]
-status: open
+status: done 2026-10-14
+resolution: closed by human decision: Single in-flight slot semantics stay; the restriction is documented and node-oracledb-compatible enough for this release.
+decision: 2026-10-14 Keep the rule, document — Single in-flight slot semantics stay; the restriction is documented and node-oracledb-compatible enough for this release.
 
 ### DW-101: Binding an `OracleLob` is unreachable for a FETCHED handle in this release (documented consequence, not a defect).
 
@@ -698,7 +706,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: dev-story of 12-2-temporary-lob-lifecycle (2026-07-26)"), 2026-10-09
 location: lib/src/oracle_lob.dart
 reason: **An `IN OUT` `OracleLob` bind CONSUMES the caller's handle, and the driver cannot tell the caller so except in docs.** Measured on 23ai and 21c: passing a handle as `OracleBind.inOut(value: lob, ...)` makes Oracle REPLACE the LOB behind that bind, so the caller's locator no longer references anything — the returned OUT value is correct, but a later `read()` on the bound handle raises ORA-22922 ("LOB value does not exist" on 23ai / "nonexistent LOB value" on 21c; same code, different text). Story 12.2 documents this on `createTemporary*`, on the README, and pins it with dual-env integration tests, and verified the safe part: `close()` on the now-stale handle still queues its locator, and that stale FREE_TEMP piggyback does **not** poison the unrelated statement it rides on (asserted on both versions). What is NOT done: the handle keeps reporting `isClosed == false` and a stale `length` after being consumed, so the failure only surfaces on the next `read()`/`write()`. A future story could mark a handle consumed when it is bound IN OUT (flip it closed, or record a distinct "consumed by an IN OUT bind" state so `read()` fails with a driver-authored message instead of a raw ORA-22922). Deferred rather than done here because it is a behavior/UX addition beyond 12.2's ACs and needs its own lifecycle decision (does a consumed handle still need `close()`? — currently yes, and that is what the tests assert). target: Epic 12 follow-up. [lib/src/oracle_lob.dart; lib/src/connection.dart _validateLobBindValue]
-status: open
+status: done 2026-10-14
+resolution: closed by human decision: Behaviour is measured, documented on createTemporary*, README and pinned by dual-env tests; close() safety is verified.
+decision: 2026-10-14 Keep documented behaviour — Behaviour is measured, documented on createTemporary*, README and pinned by dual-env tests; close() safety is verified.
 
 ### DW-103: RE-CONFIRMED UNCHANGED 2026-07-26 (dev-story of 12-3-chunked-streaming-transfer) — see the same re-confirmation on the dev-story entry above; Story…
 
@@ -734,7 +744,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: dev-story of 12-3-chunked-streaming-transfer (2026-07-26)"), 2026-10-09
 location: lib/src/result.dart
 reason: **`OracleResult.closeLobs()` on a streaming result set also closes handles the caller has NOT retrieved yet — documented, but a sharp edge.** AC5 site 5 required `closeLobs()` to reach an `OracleResultSet`'s buffered handles (otherwise the documented bulk-close remedy is a no-op for the shape holding the most handles), and it now does, via `OracleResultSet.bufferedLobHandles()`. The consequence: calling `closeLobs()` mid-iteration closes the handles sitting in the prefetch buffer, so a later `getRow()` hands back an already-closed handle rather than a live one — whereas `resultSet.close()` reaps exactly the undelivered ones and is the right tool while iterating. Both behaviors are documented on `closeLobs()` and on `OracleResultSet.close()`, and the reap is idempotent so nothing double-frees; but a caller could still surprise themselves. Consider either skipping buffered handles unless the result set is closed, or returning them as a distinct count. target: Epic 12 follow-up (API polish). [lib/src/result.dart `closeLobs`/`_collectLobs`; lib/src/result_set.dart `bufferedLobHandles`]
-status: open
+status: done 2026-10-14
+resolution: closed by human decision: Both behaviours are documented on closeLobs() and OracleResultSet.close(); the reap is idempotent.
+decision: 2026-10-14 Keep as documented — Both behaviours are documented on closeLobs() and OracleResultSet.close(); the reap is idempotent.
 
 ### DW-108: Two AC6/AC7 "do not change" areas were touched by the `copyBackLocator` de-duplication — behaviour-neutral and self-disclosed, logged so the…
 
@@ -872,6 +884,7 @@ source_spec: `spec-dw-8-blob-json-raw-optout.md`
 severity: low
 reason: The spec's Never list excludes new options there; the intent says per-query on OracleExecuteOptions. Documented in CHANGELOG/README/dartdoc. A stream caller hitting a lax or empty value cannot get raw bytes.
 status: open
+decision: 2026-10-14 Only fix the hint text — Leave the stream and executeMany signatures unchanged. Change the decode error hint in lib/src/protocol/oson.dart so it points stream callers at execute() with rawJsonBlobs, and document the limitation.
 
 ### DW-127: Numeric JSON literals outside the exact double range can lose precision before the text JSON reviver runs.
 origin: spec-deferred cf5fffe584a5
@@ -879,4 +892,6 @@ location: lib/src/protocol/oson.dart:1153
 source_spec: `bmad-build-auto-result-oson-decode-hardening.md`
 severity: medium
 reason: Dart jsonDecode rounds 9007199254740993.0 to 9007199254740992.0 before the reviver sees it. The OSON NUMBER decoder also reconstructs through double. Exact numeric semantics need a separate parser and cross-format design.
-status: open
+status: done 2026-10-14
+resolution: closed by human decision: JSON numbers decode as double/int like dart:convert and node-oracledb; the limit is documented rather than redesigned.
+decision: 2026-10-14 Document the double limit — JSON numbers decode as double/int like dart:convert and node-oracledb; the limit is documented rather than redesigned.
