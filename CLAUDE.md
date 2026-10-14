@@ -14,6 +14,8 @@ each one runs in a **different** container runtime. Use the right one:
 21c under Docker Desktop's built-in emulation — it crashes Oracle init.
 
 ### Bring up 23ai (native)
+The 23ai image is **pinned** to `container-registry.oracle.com/database/free:23.9.0.0` (docker-compose.yml and CI). `:latest` now resolves to Oracle 26ai (23.26.1), which would make 23ai results irreproducible. A 26ai profile may be added later as a separate optional profile.
+
 ```bash
 docker context use desktop-linux
 docker compose up -d

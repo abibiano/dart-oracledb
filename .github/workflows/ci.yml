@@ -155,7 +155,7 @@ jobs:
     timeout-minutes: 30
     services:
       oracle:
-        image: container-registry.oracle.com/database/free:latest
+        image: container-registry.oracle.com/database/free:23.9.0.0
         credentials:
           username: ${{ secrets.ORACLE_REGISTRY_USER }}
           password: ${{ secrets.ORACLE_REGISTRY_PASSWORD }}
@@ -189,7 +189,10 @@ jobs:
       # AC4/AC5/AC7). Logs clearly show the failure mode (container vs.
       # listener vs. PDB) if Oracle never becomes ready.
       - name: Wait for Oracle readiness on localhost:1521 (listener + FREEPDB1 session)
-        run: scripts/ci_wait_for_oracle.sh "container-registry.oracle.com/database/free:latest" "FREEPDB1" "Oracle"
+        run: scripts/ci_wait_for_oracle.sh "container-registry.oracle.com/database/free:23.9.0.0" "FREEPDB1" "Oracle"
+
+      - name: Verify Oracle 23.9 release
+        run: scripts/assert_oracle_version.sh "$(docker ps --filter ancestor=container-registry.oracle.com/database/free:23.9.0.0 -q | head -n1)" 23.9.
 
       - name: Run integration tests (Oracle-backed)
         env:

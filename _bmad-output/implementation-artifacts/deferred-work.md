@@ -154,7 +154,9 @@ origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-
 location: docker-compose.yml:13
 severity: medium
 reason: Retro action 11 (F2), a HUMAN DECISION: pin the image or record the 26ai drift as an accepted risk in CLAUDE.md / CONTRIBUTING.md.
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-compose-pin-23ai-image
+resolution-undo: 1b2c7fd97e91fc84b3967607c45fc8c073e89503a05b7850915974640075129f 2026-10-14 7374617475733a206f70656e
 decision (Abibiano, 2026-10-09): pin the primary compose service to the validated 23.9 tag so 23ai results stay reproducible; 26ai may be added later as a separate optional profile.
 
 ### DW-18: Process: no epic-boundary review ran for Epic 13, and the retro review found cross-story defects (REF CURSOR JSON, predicate drift, text/OSON number types) that per-story reviews missed.

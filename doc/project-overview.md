@@ -70,7 +70,7 @@ parsing version strings.
 
 | Target | Image | Service | Auth path | CI / dev port |
 |--------|-------|---------|-----------|---------------|
-| **Oracle 23ai** (primary) | `container-registry.oracle.com/database/free` | `FREEPDB1` | FAST_AUTH (single round trip) | `1521` |
+| **Oracle 23ai** (primary) | `container-registry.oracle.com/database/free:23.9.0.0` (pinned) | `FREEPDB1` | FAST_AUTH (single round trip) | `1521` |
 | **Oracle pre-23 (12c+)** (supported fallback) | `gvenzl/oracle-xe:21` | `XEPDB1` | classical AUTH_PHASE_ONE/TWO | `1522` |
 
 > **Project rule:** every feature and bug fix must pass integration tests on

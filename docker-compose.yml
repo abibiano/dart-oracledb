@@ -10,7 +10,8 @@
 
 services:
   oracle:
-    image: container-registry.oracle.com/database/free:latest
+    # Pinned to the validated 23.9 tag: `:latest` now ships Oracle 26ai (23.26.1).
+    image: container-registry.oracle.com/database/free:23.9.0.0
     container_name: oracle23ai
     ports:
       - "1521:1521"

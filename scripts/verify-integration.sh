@@ -23,6 +23,8 @@ require_up() {
 require_up 1521 23ai 'docker context use desktop-linux && docker compose up -d'
 require_up 1522 21c 'colima start --arch x86_64 --cpu 6 --memory 8 && docker context use colima && docker compose --profile oracle21c up -d oracle21c'
 
+scripts/assert_oracle_version.sh oracle23ai 23.9. desktop-linux
+
 printf 'running: integration tests on Oracle 23ai\n'
 RUN_INTEGRATION_TESTS=true dart test test/integration/
 

@@ -32,7 +32,8 @@ Integration tests require Oracle Database instances running in Docker.
 **Start the databases:**
 
 ```bash
-# Oracle 23ai (primary target)
+# Oracle 23ai (primary target) - image pinned to database/free:23.9.0.0
+# (`:latest` now ships Oracle 26ai; do not unpin without a decision)
 docker compose up -d
 
 # Oracle 21c (secondary target — required for all new features)
@@ -40,6 +41,19 @@ docker compose up -d
 # the service to avoid accidentally spinning up 23ai inside Colima too.
 docker compose --profile oracle21c up -d oracle21c
 ```
+
+If you previously ran `:latest` after it moved to 26ai, its named
+`oracle-data` volume contains a 26ai database. Oracle cannot open that data
+with the pinned 23.9 image. Preserve the old volume and start 23ai with a new
+Compose project name:
+
+```bash
+docker --context desktop-linux compose down
+docker --context desktop-linux compose -p dart-oracledb-23ai up -d oracle
+```
+
+Use `-p dart-oracledb-23ai` for later Compose commands targeting this 23ai
+container. The previous project's volume remains available for recovery.
 
 **Apple Silicon (M-series Macs):** Oracle has no native ARM64 build for 21c, so
 the `gvenzl/oracle-xe:21` image runs under x86_64 emulation. Docker Desktop's
