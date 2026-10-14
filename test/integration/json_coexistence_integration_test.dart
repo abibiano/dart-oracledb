@@ -64,22 +64,6 @@ const _cjk = '\u{4E2D}\u{6587}';
 /// A supplementary-plane character (a UTF-16 surrogate pair). U+1F680 ROCKET.
 const _rocket = '\u{1F680}';
 
-/// Non-null when the probe determined native JSON is unavailable; holds the
-/// server error for the skip reason.
-String? _nativeJsonUnavailable;
-
-/// Skips the current test when the server cannot create native JSON columns.
-/// Returns true when skipped so callers can bail out.
-bool _skipWithoutNativeJson() {
-  final reason = _nativeJsonUnavailable;
-  if (reason == null) return false;
-  markTestSkipped(
-    'Native JSON columns unavailable on this server '
-    '(requires compatible >= 20): $reason',
-  );
-  return true;
-}
-
 /// A document mixing standard members with every Oracle-specific scalar the
 /// driver binds (Story 13.3) and non-ASCII text, nested at several depths.
 ///
@@ -135,60 +119,6 @@ Uint8List _utf8Bytes(String text) => Uint8List.fromList(utf8.encode(text));
 /// The OSON image magic every `IS JSON FORMAT OSON` value starts with.
 const _osonMagic = [0xff, 0x4a, 0x5a];
 
-/// Deep JSON equality that treats NaN as equal to NaN and pins the Dart type
-/// of every Oracle-specific scalar (a `DateTime` must not come back as a
-/// `String`, a `Uint8List` must not come back as a `List<int>`), plus the key
-/// order of every object unless [keyOrder] is false (a server-side
-/// `JSON_OBJECT_T` rebuilds larger objects in its own member order).
-///
-/// Copied from `json_data_type_integration_test.dart` (not imported: that file
-/// is a test entry point, not a library).
-void _expectJsonValue(
-  Object? actual,
-  Object? expected, [
-  String path = r'$',
-  bool keyOrder = true,
-]) {
-  if (expected is double && expected.isNaN) {
-    expect(actual, isA<double>(), reason: path);
-    expect((actual! as double).isNaN, isTrue, reason: path);
-  } else if (expected is Map) {
-    expect(actual, isA<Map<String, Object?>>(), reason: path);
-    final map = actual! as Map<String, Object?>;
-    if (keyOrder) {
-      expect(map.keys.toList(), equals(expected.keys.toList()), reason: path);
-    } else {
-      expect(map.keys.toSet(), equals(expected.keys.toSet()), reason: path);
-    }
-    for (final entry in expected.entries) {
-      _expectJsonValue(
-        map[entry.key],
-        entry.value,
-        '$path.${entry.key}',
-        keyOrder,
-      );
-    }
-  } else if (expected is Uint8List) {
-    expect(actual, isA<Uint8List>(), reason: path);
-    expect(actual, equals(expected), reason: path);
-  } else if (expected is List) {
-    expect(actual, isA<List<Object?>>(), reason: path);
-    final list = actual! as List<Object?>;
-    expect(list, hasLength(expected.length), reason: path);
-    for (var i = 0; i < expected.length; i++) {
-      _expectJsonValue(list[i], expected[i], '$path[$i]', keyOrder);
-    }
-  } else if (expected is DateTime) {
-    expect(actual, isA<DateTime>(), reason: path);
-    expect(actual, equals(expected), reason: path);
-  } else if (expected is OracleTimestampTz) {
-    expect(actual, isA<OracleTimestampTz>(), reason: path);
-    expect(actual, equals(expected), reason: path);
-  } else {
-    expect(actual, equals(expected), reason: path);
-  }
-}
-
 void main() {
   group(
     'Epic 13 JSON closeout (Story 13.4)',
@@ -213,7 +143,7 @@ void main() {
           // ORA-43853 (segment management). Anything else fails loudly.
           const jsonUnavailableCodes = {902, 406, 43853};
           if (!jsonUnavailableCodes.contains(e.errorCode)) rethrow;
-          _nativeJsonUnavailable = 'ORA-${e.errorCode}: ${e.message}';
+          nativeJsonUnavailable = 'ORA-${e.errorCode}: ${e.message}';
         } finally {
           await probe.close();
         }
@@ -232,7 +162,7 @@ void main() {
         setUp(() async {
           connectionHandle = await connectForTest();
           connection = connectionHandle!;
-          if (_nativeJsonUnavailable != null) return;
+          if (nativeJsonUnavailable != null) return;
           // All three storage forms side by side, so ONE row (and one
           // SELECT) can carry a native OSON value, a text-JSON BLOB and an
           // OSON-format BLOB at the same time.
@@ -308,7 +238,7 @@ void main() {
             'query and the transaction boundaries all coexist; rejected binds '
             'mid-sequence leave the connection usable; the anti-wedge finale '
             'succeeds', () async {
-          if (_skipWithoutNativeJson()) return;
+          if (skipWithoutNativeJson()) return;
           expectQuiescent('setUp');
 
           // Statement-cache accounting for the whole sequence, from a
@@ -361,7 +291,7 @@ void main() {
             nativeListId,
             nativeList,
           ]);
-          _expectJsonValue(
+          expectJsonValue(
             (await connection.execute(selectDocSql, [
               nativeId,
             ])).rows.single['DOC'],
@@ -369,7 +299,7 @@ void main() {
           );
           var parses = connection.debugFullParseExecutes;
           var reuses = connection.debugReuseExecutes;
-          _expectJsonValue(
+          expectJsonValue(
             (await connection.execute(selectDocSql, [
               nativeListId,
             ])).rows.single['DOC'],
@@ -433,15 +363,15 @@ void main() {
             textBytesId,
             blobMapId,
           ]);
-          _expectJsonValue(mixed.rows[0]['DOC'], rich);
+          expectJsonValue(mixed.rows[0]['DOC'], rich);
           expect(mixed.rows[0]['BDOC'], isNull);
           expect(mixed.rows[0]['ODOC'], isNull);
           expect(mixed.rows[1]['DOC'], isNull);
-          _expectJsonValue(mixed.rows[1]['BDOC'], storedExpected);
+          expectJsonValue(mixed.rows[1]['BDOC'], storedExpected);
           expect(mixed.rows[1]['ODOC'], isNull);
           expect(mixed.rows[2]['DOC'], isNull);
-          _expectJsonValue(mixed.rows[2]['BDOC'], text);
-          _expectJsonValue(mixed.rows[2]['ODOC'], rich);
+          expectJsonValue(mixed.rows[2]['BDOC'], text);
+          expectJsonValue(mixed.rows[2]['ODOC'], rich);
           expect(
             connection.debugLobReadOps - readOps,
             equals(3),
@@ -469,7 +399,7 @@ void main() {
             reason: 'fetchLobs wraps handles and reads nothing until asked',
           );
           expect(connection.hasOpenLob, isTrue);
-          _expectJsonValue(raw.rows[0]['DOC'], rich);
+          expectJsonValue(raw.rows[0]['DOC'], rich);
           expect(raw.rows[0]['BDOC'], isNull, reason: 'SQL NULL, no handle');
           final textLob = raw.rows[1]['BDOC']! as OracleLob;
           final mapLob = raw.rows[2]['BDOC']! as OracleLob;
@@ -521,7 +451,7 @@ void main() {
               'id': nativeId,
             },
           );
-          _expectJsonValue(stored.outBinds['doc'], rich);
+          expectJsonValue(stored.outBinds['doc'], rich);
           // The IN OUT bind opts in to non-finite numbers (DW-12): they
           // travel as BINARY_DOUBLE and come back unchanged.
           final richNonFinite = <String, Object?>{
@@ -540,7 +470,7 @@ void main() {
                 ),
               });
           // JSON_OBJECT_T rebuilds the object in its own member order.
-          _expectJsonValue(
+          expectJsonValue(
             inOut.outBinds['doc'],
             <String, Object?>{...richNonFinite, 'status': 'done'},
             r'$',
@@ -780,8 +710,8 @@ void main() {
           );
           expect(manyRead.rows.map((r) => r['ID']).toList(), equals(manyIds));
           for (var i = 0; i < manyIds.length; i++) {
-            _expectJsonValue(manyRead.rows[i]['DOC'], manyDocs[i], 'doc[$i]');
-            _expectJsonValue(manyRead.rows[i]['BDOC'], manyText[i], 'bdoc[$i]');
+            expectJsonValue(manyRead.rows[i]['DOC'], manyDocs[i], 'doc[$i]');
+            expectJsonValue(manyRead.rows[i]['BDOC'], manyText[i], 'bdoc[$i]');
           }
           expectQuiescent('step 5 (executeMany)');
           // Two new statements: the array INSERT and its read-back SELECT.
@@ -814,9 +744,9 @@ void main() {
           void expectStreamRow(OracleRow? row, int k, String mode) {
             expect(row, isNotNull, reason: '$mode row $k');
             expect(row!['ID'], equals(streamBase + k), reason: '$mode $k');
-            _expectJsonValue(row['DOC'], streamDoc(k, 'native'), '$mode $k');
-            _expectJsonValue(row['BDOC'], streamDoc(k, 'text'), '$mode $k');
-            _expectJsonValue(row['ODOC'], streamDoc(k, 'oson'), '$mode $k');
+            expectJsonValue(row['DOC'], streamDoc(k, 'native'), '$mode $k');
+            expectJsonValue(row['BDOC'], streamDoc(k, 'text'), '$mode $k');
+            expectJsonValue(row['ODOC'], streamDoc(k, 'oson'), '$mode $k');
           }
 
           final streamSql =
@@ -875,7 +805,7 @@ void main() {
           final rsRaw = streamedRaw.resultSet!;
           final firstRaw = (await rsRaw.getRow())!;
           expect(firstRaw['ID'], equals(streamBase + 1));
-          _expectJsonValue(firstRaw['DOC'], streamDoc(1, 'native'));
+          expectJsonValue(firstRaw['DOC'], streamDoc(1, 'native'));
           final firstText = firstRaw['BDOC']! as OracleLob;
           final firstOson = firstRaw['ODOC']! as OracleLob;
           expect(
@@ -1046,12 +976,12 @@ void main() {
             blobMapId,
             finaleId,
           ]);
-          _expectJsonValue(finale.rows[0]['DOC'], rich);
-          _expectJsonValue(finale.rows[1]['BDOC'], text);
-          _expectJsonValue(finale.rows[1]['ODOC'], rich);
-          _expectJsonValue(finale.rows[2]['DOC'], rich);
-          _expectJsonValue(finale.rows[2]['BDOC'], text);
-          _expectJsonValue(finale.rows[2]['ODOC'], rich);
+          expectJsonValue(finale.rows[0]['DOC'], rich);
+          expectJsonValue(finale.rows[1]['BDOC'], text);
+          expectJsonValue(finale.rows[1]['ODOC'], rich);
+          expectJsonValue(finale.rows[2]['DOC'], rich);
+          expectJsonValue(finale.rows[2]['BDOC'], text);
+          expectJsonValue(finale.rows[2]['ODOC'], rich);
           expectQuiescent('the finale');
           // Three new slots: `SELECT 42`, the finale INSERT, and the mixed
           // SELECT re-cached (step 4c's decode failure invalidated its slot).
@@ -1077,7 +1007,7 @@ void main() {
 
         setUp(() async {
           setupHandle = await connectForTest();
-          if (_nativeJsonUnavailable != null) return;
+          if (nativeJsonUnavailable != null) return;
           try {
             await setupHandle!.execute(
               'CREATE TABLE $poolTable (id NUMBER PRIMARY KEY, doc JSON, '
@@ -1108,7 +1038,7 @@ void main() {
             'releases with an uncommitted JSON row, an open JSON result set, '
             'an open BLOB IS JSON handle, an open lazy implicit result or '
             'right after a rejected bind', () async {
-          if (_skipWithoutNativeJson()) return;
+          if (skipWithoutNativeJson()) return;
           final pool = await OraclePool.create(
             testConnectString,
             user: testUser,
@@ -1143,8 +1073,8 @@ void main() {
             );
             for (final row in all.rows) {
               final want = committed[row['ID']]!;
-              _expectJsonValue(row['DOC'], want.doc, '$when ${row['ID']}');
-              _expectJsonValue(row['BDOC'], want.bdoc, '$when ${row['ID']}');
+              expectJsonValue(row['DOC'], want.doc, '$when ${row['ID']}');
+              expectJsonValue(row['BDOC'], want.bdoc, '$when ${row['ID']}');
             }
           }
 
@@ -1197,7 +1127,7 @@ void main() {
               final parses = conn.debugFullParseExecutes;
               final reuses = conn.debugReuseExecutes;
               final slots = conn.debugCacheSize;
-              _expectJsonValue(
+              expectJsonValue(
                 (await conn.execute(probeSql, [seedId])).rows.single['DOC'],
                 _richDoc(),
               );
@@ -1264,7 +1194,7 @@ void main() {
                   );
                   final first = await r.resultSet!.getRow();
                   expect(first!['ID'], equals(seedId));
-                  _expectJsonValue(first['DOC'], _richDoc());
+                  expectJsonValue(first['DOC'], _richDoc());
                   expect(conn.hasOpenResultSet, isTrue);
                 case 4:
                   // An open BLOB IS JSON handle (fetchLobs raw bytes), kept
@@ -1308,7 +1238,7 @@ void main() {
                   final lazy = r.implicitResults.single as OracleResultSet;
                   final first = await lazy.getRow();
                   expect(first!['ID'], equals(seedId));
-                  _expectJsonValue(first['BDOC'], _textDoc());
+                  expectJsonValue(first['BDOC'], _textDoc());
                   expect(conn.hasOpenResultSet, isTrue);
               }
 

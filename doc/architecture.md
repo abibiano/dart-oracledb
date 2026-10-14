@@ -68,7 +68,7 @@ Owns **TTC message encoding/decoding** and **Oracle data-type codecs**.
 | `protocol_message.dart` | Version / driver-name negotiation |
 | `auth_message.dart` | Classical AUTH_PHASE_ONE (`0x76`) and AUTH_PHASE_TWO (`0x73`) request/response; `VerifierParams` extraction; shared TTC-error parser |
 | `fast_auth_message.dart` | 23ai single-message envelope bundling Protocol + DataTypes + AUTH_PHASE_ONE |
-| `execute_message.dart` (~1767 LOC) | The central RPC: `ExecuteRequest` (parse/bind/execute/fetch options, `al8i4` array, DEFINE mode for LOB prefetch, long-data ordering, OSON binds), `ColumnMetadata`, `BindDir`/`BindMetadata`, `ExecuteResponse`, and the `ttcStreamIsComplete` / `decodeExecuteResponse` decode entry points; `FetchRequest` |
+| `execute_message.dart` | The central RPC: `ExecuteRequest` (parse/bind/execute/fetch options, `al8i4` array, DEFINE mode for LOB prefetch, long-data ordering, OSON binds), `ColumnMetadata`, `BindDir`/`BindMetadata`, `ExecuteResponse`, and the `ttcStreamIsComplete` / `decodeExecuteResponse` decode entry points; `FetchRequest` |
 | `lob_op_message.dart` | LOB READ / WRITE / CREATE_TEMP / FREE_TEMP / GET_LENGTH |
 | `ping_message.dart` | Single-function health check |
 

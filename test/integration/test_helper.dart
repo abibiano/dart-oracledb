@@ -7,10 +7,12 @@ library;
 
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
 import 'package:oracledb/oracledb.dart';
-import 'package:test/test.dart' show markTestSkipped;
+import 'package:test/test.dart'
+    show equals, expect, hasLength, isA, isTrue, markTestSkipped;
 
 /// Oracle host. Override with ORACLE_HOST env var.
 String get testHost => Platform.environment['ORACLE_HOST'] ?? 'localhost';
@@ -337,5 +339,72 @@ Future<void> cleanUpConnection(
   }
   if (primaryError != null) {
     Error.throwWithStackTrace(primaryError, primaryStack!);
+  }
+}
+
+/// Non-null when the probe determined native JSON is unavailable; holds the
+/// server error for the skip reason.
+String? nativeJsonUnavailable;
+
+/// Skips the current test when the server cannot create native JSON columns.
+/// Returns true when skipped so callers can bail out.
+bool skipWithoutNativeJson() {
+  final reason = nativeJsonUnavailable;
+  if (reason == null) return false;
+  markTestSkipped(
+    'Native JSON columns unavailable on this server '
+    '(requires compatible >= 20): $reason',
+  );
+  return true;
+}
+
+/// Deep JSON equality that treats NaN as equal to NaN and pins the Dart type
+/// of every Oracle-specific scalar (a `DateTime` must not come back as a
+/// `String`, a `Uint8List` must not come back as a `List<int>`), plus the key
+/// order of every object unless [keyOrder] is false (a server-side
+/// `JSON_OBJECT_T` rebuilds larger objects in its own member order).
+void expectJsonValue(
+  Object? actual,
+  Object? expected, [
+  String path = r'$',
+  bool keyOrder = true,
+]) {
+  if (expected is double && expected.isNaN) {
+    expect(actual, isA<double>(), reason: path);
+    expect((actual! as double).isNaN, isTrue, reason: path);
+  } else if (expected is Map) {
+    expect(actual, isA<Map<String, Object?>>(), reason: path);
+    final map = actual! as Map<String, Object?>;
+    if (keyOrder) {
+      expect(map.keys.toList(), equals(expected.keys.toList()), reason: path);
+    } else {
+      expect(map.keys.toSet(), equals(expected.keys.toSet()), reason: path);
+    }
+    for (final entry in expected.entries) {
+      expectJsonValue(
+        map[entry.key],
+        entry.value,
+        '$path.${entry.key}',
+        keyOrder,
+      );
+    }
+  } else if (expected is Uint8List) {
+    expect(actual, isA<Uint8List>(), reason: path);
+    expect(actual, equals(expected), reason: path);
+  } else if (expected is List) {
+    expect(actual, isA<List<Object?>>(), reason: path);
+    final list = actual! as List<Object?>;
+    expect(list, hasLength(expected.length), reason: path);
+    for (var i = 0; i < expected.length; i++) {
+      expectJsonValue(list[i], expected[i], '$path[$i]', keyOrder);
+    }
+  } else if (expected is DateTime) {
+    expect(actual, isA<DateTime>(), reason: path);
+    expect(actual, equals(expected), reason: path);
+  } else if (expected is OracleTimestampTz) {
+    expect(actual, isA<OracleTimestampTz>(), reason: path);
+    expect(actual, equals(expected), reason: path);
+  } else {
+    expect(actual, equals(expected), reason: path);
   }
 }

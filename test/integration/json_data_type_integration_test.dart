@@ -24,22 +24,6 @@ import 'package:test/test.dart';
 
 import 'test_helper.dart';
 
-/// Non-null when the probe determined native JSON is unavailable; holds the
-/// server error for the skip reason.
-String? nativeJsonUnavailable;
-
-/// Skips the current test when the server cannot create native JSON columns.
-/// Returns true when skipped so callers can bail out.
-bool skipWithoutNativeJson() {
-  final reason = nativeJsonUnavailable;
-  if (reason == null) return false;
-  markTestSkipped(
-    'Native JSON columns unavailable on this server '
-    '(requires compatible >= 20): $reason',
-  );
-  return true;
-}
-
 /// A document holding every Oracle-specific scalar kind the driver binds
 /// (Story 13.3), nested at several depths alongside standard members. NaN /
 /// ±Infinity members are added only with [nonFinite]: since DW-12 they bind
@@ -81,57 +65,6 @@ Map<String, Object?> _oracleScalarDoc({bool nonFinite = false}) =>
         ],
       },
     };
-
-/// Deep JSON equality that treats NaN as equal to NaN and pins the Dart type
-/// of every Oracle-specific scalar (a `DateTime` must not come back as a
-/// `String`, a `Uint8List` must not come back as a `List<int>`), plus the key
-/// order of every object unless [keyOrder] is false (a server-side
-/// `JSON_OBJECT_T` rebuilds larger objects in its own member order).
-void _expectJsonValue(
-  Object? actual,
-  Object? expected, [
-  String path = r'$',
-  bool keyOrder = true,
-]) {
-  if (expected is double && expected.isNaN) {
-    expect(actual, isA<double>(), reason: path);
-    expect((actual! as double).isNaN, isTrue, reason: path);
-  } else if (expected is Map) {
-    expect(actual, isA<Map<String, Object?>>(), reason: path);
-    final map = actual! as Map<String, Object?>;
-    if (keyOrder) {
-      expect(map.keys.toList(), equals(expected.keys.toList()), reason: path);
-    } else {
-      expect(map.keys.toSet(), equals(expected.keys.toSet()), reason: path);
-    }
-    for (final entry in expected.entries) {
-      _expectJsonValue(
-        map[entry.key],
-        entry.value,
-        '$path.${entry.key}',
-        keyOrder,
-      );
-    }
-  } else if (expected is Uint8List) {
-    expect(actual, isA<Uint8List>(), reason: path);
-    expect(actual, equals(expected), reason: path);
-  } else if (expected is List) {
-    expect(actual, isA<List<Object?>>(), reason: path);
-    final list = actual! as List<Object?>;
-    expect(list, hasLength(expected.length), reason: path);
-    for (var i = 0; i < expected.length; i++) {
-      _expectJsonValue(list[i], expected[i], '$path[$i]', keyOrder);
-    }
-  } else if (expected is DateTime) {
-    expect(actual, isA<DateTime>(), reason: path);
-    expect(actual, equals(expected), reason: path);
-  } else if (expected is OracleTimestampTz) {
-    expect(actual, isA<OracleTimestampTz>(), reason: path);
-    expect(actual, equals(expected), reason: path);
-  } else {
-    expect(actual, equals(expected), reason: path);
-  }
-}
 
 void main() {
   group(
@@ -1129,8 +1062,8 @@ void main() {
             'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
             [positional, list],
           );
-          _expectJsonValue(await selectDoc(named), doc);
-          _expectJsonValue(await selectDoc(positional), list);
+          expectJsonValue(await selectDoc(named), doc);
+          expectJsonValue(await selectDoc(positional), list);
 
           final updated = <String, Object?>{
             'when': DateTime(2025, 6, 1, 8, 0, 0, 1),
@@ -1142,7 +1075,7 @@ void main() {
             {'doc': updated, 'id': named},
           );
           expect(update.rowsAffected, equals(1));
-          _expectJsonValue(await selectDoc(named), updated);
+          expectJsonValue(await selectDoc(named), updated);
         });
 
         test('executeMany array DML binds documents with Oracle scalar '
@@ -1166,7 +1099,7 @@ void main() {
           );
           expect(result.rowsAffected, equals(3));
           for (var i = 0; i < ids.length; i++) {
-            _expectJsonValue(await selectDoc(ids[i]), docs[i]);
+            expectJsonValue(await selectDoc(ids[i]), docs[i]);
           }
         });
 
@@ -1203,7 +1136,7 @@ void main() {
                 ),
               });
           // JSON_OBJECT_T rebuilds the object in its own member order.
-          _expectJsonValue(
+          expectJsonValue(
             result.outBinds['doc'],
             <String, Object?>{...doc, 'status': 'done'},
             r'$',
@@ -1240,8 +1173,8 @@ void main() {
                     maxSize: 4000,
                   ),
                 });
-            _expectJsonValue(result.outBinds['doc'], value, 'out $value');
-            _expectJsonValue(await selectDoc(id), value, 'column $value');
+            expectJsonValue(result.outBinds['doc'], value, 'out $value');
+            expectJsonValue(await selectDoc(id), value, 'column $value');
           }
           // Non-finite scalar roots need the allowNonFinite opt-in (DW-12),
           // which executeMany bindDefs do not offer.
@@ -1261,8 +1194,8 @@ void main() {
                     allowNonFinite: true,
                   ),
                 });
-            _expectJsonValue(result.outBinds['doc'], value, 'out $value');
-            _expectJsonValue(await selectDoc(id), value, 'column $value');
+            expectJsonValue(result.outBinds['doc'], value, 'out $value');
+            expectJsonValue(await selectDoc(id), value, 'column $value');
             await expectLater(
               connection.executeMany(
                 'BEGIN INSERT INTO $testTable (id, doc) VALUES (:1, :2); END;',
@@ -1298,7 +1231,7 @@ void main() {
             ),
           );
           for (var i = 0; i < scalars.length; i++) {
-            _expectJsonValue(
+            expectJsonValue(
               await selectDoc(base + i),
               scalars[i],
               'executeMany ${scalars[i]}',
@@ -1384,7 +1317,7 @@ void main() {
             'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
             [id, finite],
           );
-          _expectJsonValue(await selectDoc(id), finite);
+          expectJsonValue(await selectDoc(id), finite);
 
           // ...and through executeMany and IN OUT, still without conversion.
           final manyId = nextTestId();
@@ -1394,7 +1327,7 @@ void main() {
               [manyId, finite],
             ],
           );
-          _expectJsonValue(await selectDoc(manyId), finite);
+          expectJsonValue(await selectDoc(manyId), finite);
           final inOut = await connection
               .execute('BEGIN $mutateProc(:doc); END;', {
                 'doc': OracleBind.inOut(
@@ -1404,7 +1337,7 @@ void main() {
                   allowNonFinite: true,
                 ),
               });
-          _expectJsonValue(
+          expectJsonValue(
             inOut.outBinds['doc'],
             <String, Object?>{...doc, 'status': 'done'},
             r'$',
@@ -1503,7 +1436,7 @@ void main() {
               <String, Object?>{'ok': DateTime(2024)},
             ],
           );
-          _expectJsonValue(await selectDoc(id), <String, Object?>{
+          expectJsonValue(await selectDoc(id), <String, Object?>{
             'ok': DateTime(2024),
           });
         });
@@ -1629,7 +1562,7 @@ void main() {
               'INSERT INTO $testTable (id, doc) VALUES (:id, :doc)',
               {'id': dmlId, 'doc': doc},
             );
-            _expectJsonValue(await selectDoc(dmlId), doc);
+            expectJsonValue(await selectDoc(dmlId), doc);
             for (final (name, value) in <(String, String)>[
               (longName(43), 'p1x'),
               (longName(87), 'p1y'),
@@ -1665,7 +1598,7 @@ void main() {
                 ],
               ],
             );
-            _expectJsonValue(await selectDoc(manyIds[0]), doc);
+            expectJsonValue(await selectDoc(manyIds[0]), doc);
             expect(await serverValue(manyIds[1], longName(87)), equals('2'));
             final inOutId = nextTestId();
             final inOut = await connection
@@ -1677,7 +1610,7 @@ void main() {
                     maxSize: 32000,
                   ),
                 });
-            _expectJsonValue(inOut.outBinds['doc'], doc);
+            expectJsonValue(inOut.outBinds['doc'], doc);
             expect(await serverValue(inOutId, longName(166)), equals('p3y'));
 
             // A document the SERVER encoded with long names (version 3)
@@ -1701,7 +1634,7 @@ void main() {
               'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
               [rebindId, fetched],
             );
-            _expectJsonValue(await selectDoc(rebindId), fetched);
+            expectJsonValue(await selectDoc(rebindId), fetched);
             expect(await serverValue(rebindId, longName(87)), equals('b'));
 
             // The 65535-byte maximum, in a document whose long-name segment
@@ -1715,7 +1648,7 @@ void main() {
               'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
               [maxId, maxDoc],
             );
-            _expectJsonValue(await selectDoc(maxId), maxDoc);
+            expectJsonValue(await selectDoc(maxId), maxDoc);
             final maxLookup = await connection.execute(
               'SELECT JSON_VALUE(doc, \'\$."${longName(0)}"[1]\') AS v '
               'FROM $testTable WHERE id = :1',
@@ -1835,7 +1768,7 @@ void main() {
               <String, Object?>{name255: 'ok', 'k' * 255: 1},
             ],
           );
-          _expectJsonValue(await selectDoc(id), <String, Object?>{
+          expectJsonValue(await selectDoc(id), <String, Object?>{
             name255: 'ok',
             'k' * 255: 1,
           });
@@ -1877,7 +1810,7 @@ void main() {
             [dmlId, doc],
           );
           final fetched = await selectDoc(dmlId);
-          _expectJsonValue(fetched, expected);
+          expectJsonValue(fetched, expected);
           final fetchedUtc =
               (fetched! as Map<String, Object?>)['utc']! as OracleTimestampTz;
           expect(fetchedUtc.utc, equals(utc)); // the same instant
@@ -1911,7 +1844,7 @@ void main() {
               [manyId, doc],
             ],
           );
-          _expectJsonValue(await selectDoc(manyId), expected);
+          expectJsonValue(await selectDoc(manyId), expected);
           final rootId = nextTestId();
           final root = await connection
               .execute('BEGIN $insertProc(:id, :doc); END;', {
@@ -1923,8 +1856,8 @@ void main() {
                 ),
               });
           final rootExpected = OracleTimestampTz(utc, offsetMinutes: 0);
-          _expectJsonValue(root.outBinds['doc'], rootExpected);
-          _expectJsonValue(await selectDoc(rootId), rootExpected);
+          expectJsonValue(root.outBinds['doc'], rootExpected);
+          expectJsonValue(await selectDoc(rootId), rootExpected);
         });
 
         test('NaN / ±Infinity are rejected at the call site by default — '
@@ -1996,8 +1929,8 @@ void main() {
                   allowNonFinite: true,
                 ),
               });
-          _expectJsonValue(result.outBinds['doc'], doc);
-          _expectJsonValue(await selectDoc(id), doc);
+          expectJsonValue(result.outBinds['doc'], doc);
+          expectJsonValue(await selectDoc(id), doc);
           final types = await connection.execute(
             "SELECT JSON_VALUE(doc, '\$.nan.type()') AS t FROM $testTable "
             'WHERE id = :1',
@@ -2323,7 +2256,7 @@ void main() {
             final result = await connection.execute(
               'SELECT odoc FROM $osonTable WHERE id = 1',
             );
-            _expectJsonValue(result.rows.single['ODOC'], doc);
+            expectJsonValue(result.rows.single['ODOC'], doc);
           } finally {
             await connection.execute('DROP TABLE $osonTable PURGE');
           }

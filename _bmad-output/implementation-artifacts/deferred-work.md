@@ -137,7 +137,9 @@ origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-
 location: _bmad-output/implementation-artifacts/deferred-work.md DW-4, DW-5; doc/architecture.md:71; test/integration/json_data_type_integration_test.dart:33,83 and json_coexistence_integration_test.dart:73,144
 severity: low
 reason: Retro action 9 (F16, F17). DW-4 was medium (unverified) and DW-5 high (unverified) in the 13-2 frontmatter; hoist the helpers into test_helper.dart as Epic 12's 12.4 AC9 did.
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-json-itest-helper-docs
+resolution-undo: feb6d0f9be530d6db8e05749e027c70647931ab6c6612d1c0c954904ae12cc1b 2026-10-14 7374617475733a206f70656e
 
 ### DW-16: sprint-status.yaml epic-13 entry was still backlog although all four stories were done.
 
