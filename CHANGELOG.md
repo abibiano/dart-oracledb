@@ -131,6 +131,19 @@
 
 ### Fixes
 
+- **`executeMany()` now rejects an oversized value in a sized bind before
+  sending anything.** A `varchar` (UTF-8 bytes), `nVarchar` (UTF-16 code
+  units) or `raw` (bytes) value longer than the slot's declared
+  `OracleBindDef.maxSize` throws an `OracleException` (`oraBindTypeError`)
+  naming the row, bind and limit, never the value. It previously reached the
+  server and failed there with an opaque error (ORA-01460 on 23ai and 21c).
+  Slots with no `maxSize` are still sized from the rows.
+- **A multi-iteration PL/SQL `executeMany()` now shares one `timeout`.** Its
+  two round trips (EXECUTE then REEXECUTE) used to each get the full timeout,
+  so the real ceiling was about twice the value passed. The second now waits
+  only for the remaining budget; once it is spent the connection is poisoned
+  and `oraConnectTimeout` is thrown, as for any timed-out call.
+
 - **Streaming LOB text diagnostics.** A byte that can never begin a UTF-8
   sequence in a `textStream` now fails as malformed UTF-8 data instead of being
   reported as a truncated stream, and a READ reply that omits its unit count

@@ -942,6 +942,24 @@ class Transport {
     _debugLobReadPieceUnits = units;
   }
 
+  Future<void> Function()? _debugBeforePlSqlReExecute;
+  Future<void> Function()? _debugAfterFirstPlSqlBatchSend;
+
+  /// TEST-ONLY: consumes time between the first batch send and its reply wait.
+  @visibleForTesting
+  set debugAfterFirstPlSqlBatchSend(Future<void> Function()? hook) =>
+      _debugAfterFirstPlSqlBatchSend = hook;
+
+  /// TEST-ONLY: awaited after the first RPC (EXECUTE) of an N>1 PL/SQL
+  /// executeMany succeeds and before its REEXECUTE budget check, so a test can
+  /// consume the shared batch deadline deterministically (DW-85) — a fake
+  /// server cannot otherwise land the first reply exactly at the deadline.
+  /// `null` (the default) adds nothing to the production path. Not part of the
+  /// public API.
+  @visibleForTesting
+  set debugBeforePlSqlReExecute(Future<void> Function()? hook) =>
+      _debugBeforePlSqlReExecute = hook;
+
   Future<ExecuteResponse> sendExecute(
     String sql, {
     required bool isQuery,
@@ -1107,9 +1125,29 @@ class Transport {
       requestData = builder.toBytes();
     }
 
-    await sendData(requestData);
+    // An N>1 PL/SQL executeMany spends ONE caller deadline across its two RPCs
+    // (EXECUTE here, then the REEXECUTE in _reExecutePlSqlBatch): the clock
+    // starts before the first send, and the REEXECUTE gets only what is left.
+    // Without it each RPC got the full [timeout], so the real ceiling was ~2x
+    // (DW-85). Every other execute shape is a single RPC and keeps its
+    // per-RPC [timeout] unchanged.
+    final batchClock = Stopwatch()..start();
+    final sharedBatchDeadline = plSqlExecuteMany && executeManyIters > 1;
+    if (sharedBatchDeadline) {
+      await _sendBatchDataWithinDeadline(requestData, timeout, batchClock);
+    } else {
+      await sendData(requestData);
+    }
+    if (sharedBatchDeadline) {
+      final afterSend = _debugAfterFirstPlSqlBatchSend;
+      if (afterSend != null) await afterSend();
+    }
+    final firstReplyBudget = sharedBatchDeadline && timeout != null
+        ? _remainingBatchBudget(timeout, batchClock)
+        : timeout;
     final payload = await _receiveDataWithTimeout(
-      timeout,
+      firstReplyBudget,
+      reportedTimeout: sharedBatchDeadline ? timeout : null,
       expectedColumns: expectedColumns,
       bindMetadata: bindMetadata,
       plSqlExecuteMany: plSqlExecuteMany,
@@ -1171,6 +1209,8 @@ class Transport {
     // per-iteration OUT rows. A failed first iteration skips this — its
     // error propagates through the normal path below.
     if (plSqlExecuteMany && executeManyIters > 1 && response.isSuccess) {
+      final beforeReExecute = _debugBeforePlSqlReExecute;
+      if (beforeReExecute != null) await beforeReExecute();
       return _reExecutePlSqlBatch(
         firstResponse: response,
         binds: effectiveBinds,
@@ -1179,6 +1219,7 @@ class Transport {
         bindMetadata: bindMetadata,
         preserveTimestampTimeZone: preserveTimestampTimeZone,
         timeout: timeout,
+        batchClock: batchClock,
       );
     }
 
@@ -1286,6 +1327,16 @@ class Transport {
   /// ROW_DATA payloads **without** a fresh IO_VECTOR — the OUT bind order is
   /// seeded from the first response. The merged response reports the first
   /// execution's cursor id and the full N-row [ExecuteResponse.outBindRows].
+  ///
+  /// **Shared deadline (DW-85).** [timeout] is the caller's budget for the
+  /// WHOLE batch and [batchClock] has been running since the first EXECUTE was
+  /// sent, so the REEXECUTE waits only for the remaining budget. If nothing is
+  /// left, the REEXECUTE is never sent; either way an expired budget poisons
+  /// the transport and throws [oraConnectTimeout] reporting the caller's total
+  /// [timeout] — the same contract as a single timed-out RPC. (Unlike the
+  /// between-pieces stop in [readLobRange], the batch is stranded half-applied
+  /// on a cursor held open with NO_IMPL_REL, so the connection is not handed
+  /// back as reusable.) A `null` [timeout] stays unbounded.
   Future<ExecuteResponse> _reExecutePlSqlBatch({
     required ExecuteResponse firstResponse,
     required List<Object?>? binds,
@@ -1294,6 +1345,7 @@ class Transport {
     required List<BindMetadata>? bindMetadata,
     required bool preserveTimestampTimeZone,
     required Duration? timeout,
+    required Stopwatch batchClock,
   }) async {
     final reExecCursorId = firstResponse.cursorId;
     if (reExecCursorId == 0) {
@@ -1328,6 +1380,12 @@ class Transport {
       }
     }
 
+    // Budget exhausted by the first RPC: never send the REEXECUTE.
+    if (timeout != null && batchClock.elapsed >= timeout) {
+      _poison();
+      throw _rpcTimeoutException('Query', timeout);
+    }
+
     final request = ReExecuteRequest(
       cursorId: reExecCursorId,
       numIters: numIters - 1,
@@ -1336,9 +1394,13 @@ class Transport {
       ttcFieldVersion: _ttcFieldVersion,
       sequence: nextSequence(),
     );
-    await sendData(request.toBytes());
+    await _sendBatchDataWithinDeadline(request.toBytes(), timeout, batchClock);
+    final remaining = timeout == null
+        ? null
+        : _remainingBatchBudget(timeout, batchClock);
     final payload = await _receiveDataWithTimeout(
-      timeout,
+      remaining,
+      reportedTimeout: timeout,
       bindMetadata: bindMetadata,
       plSqlExecuteMany: true,
       presetOutBindIndices: firstResponse.outBindIndices,
@@ -2905,8 +2967,17 @@ class Transport {
     );
   }
 
+  /// Receives one TTC response, bounded by [timeout] (`null` = unbounded).
+  ///
+  /// On timeout the transport is poisoned and an [oraConnectTimeout]
+  /// [OracleException] is thrown. [reportedTimeout], when given, is the
+  /// duration the error message reports instead of [timeout]: a multi-RPC
+  /// operation sharing one caller deadline (both PL/SQL executeMany RPCs)
+  /// waits only for the REMAINING budget but must report the caller's TOTAL
+  /// timeout, which is what actually elapsed.
   Future<Uint8List> _receiveDataWithTimeout(
     Duration? timeout, {
+    Duration? reportedTimeout,
     String operation = 'Query',
     List<ColumnMetadata>? expectedColumns,
     List<BindMetadata>? bindMetadata,
@@ -2939,13 +3010,47 @@ class Transport {
         // message carries the operation name and elapsed wait; the
         // poisoned state makes every subsequent send/receive fail fast.
         _poison();
-        throw OracleException(
-          errorCode: oraConnectTimeout,
-          message:
-              '$operation timed out after ${timeout.inMilliseconds}ms; '
-              'transport poisoned — no further RPCs are permitted on this '
-              'connection',
-        );
+        throw _rpcTimeoutException(operation, reportedTimeout ?? timeout);
+      },
+    );
+  }
+
+  /// The [oraConnectTimeout] error raised when an RPC exceeds its caller's
+  /// timeout. Every raise site poisons the transport first, so the message
+  /// states that no further RPCs are permitted.
+  static OracleException _rpcTimeoutException(
+    String operation,
+    Duration timeout,
+  ) => OracleException(
+    errorCode: oraConnectTimeout,
+    message:
+        '$operation timed out after ${timeout.inMilliseconds}ms; '
+        'transport poisoned — no further RPCs are permitted on this '
+        'connection',
+  );
+
+  Duration _remainingBatchBudget(Duration timeout, Stopwatch clock) {
+    final remaining = timeout - clock.elapsed;
+    if (remaining > Duration.zero) return remaining;
+    _poison();
+    throw _rpcTimeoutException('Query', timeout);
+  }
+
+  Future<void> _sendBatchDataWithinDeadline(
+    Uint8List data,
+    Duration? timeout,
+    Stopwatch clock,
+  ) async {
+    if (timeout == null) {
+      await sendData(data);
+      return;
+    }
+    final remaining = _remainingBatchBudget(timeout, clock);
+    await sendData(data).timeout(
+      remaining,
+      onTimeout: () {
+        _poison();
+        throw _rpcTimeoutException('Query', timeout);
       },
     );
   }

@@ -3102,6 +3102,17 @@ class OracleConnection {
   /// the call site instead of as a cast error mid-encode. Never includes the
   /// bind value in the error message. `null` is always valid (SQL NULL input
   /// or an OUT placeholder).
+  ///
+  /// A sized slot ([OracleDbType.varchar], [OracleDbType.nVarchar],
+  /// [OracleDbType.raw]) with an explicit [OracleBindDef.maxSize] also rejects
+  /// a value longer than that declared size (DW-84; node-oracledb NJS-058
+  /// parity): the declared size is the wire buffer for every iteration, so an
+  /// oversized value would otherwise reach the server and fail there with an
+  /// opaque error naming no row or bind (live, an oversized IN OUT varchar
+  /// draws ORA-01460 on both 23ai and 21c). Units follow the [OracleBindDef]
+  /// docs — UTF-8 bytes for
+  /// varchar, bytes for raw, UTF-16 code units for nVarchar. A slot without a
+  /// maxSize (input-only) is sized from the rows, so it is never checked.
   void _validateDefValue(
     OracleBindDef def,
     Object? value, {
@@ -3122,6 +3133,25 @@ class OracleConnection {
           'OracleDbType.${def.type.name} but the value is '
           '${value.runtimeType}; expected $expected or null.',
     );
+    // Value-free: names the row, slot, declared limit and the value's LENGTH
+    // in the slot's units — never the value itself.
+    void checkDeclaredMaxSize(int length, String units) {
+      final maxSize = def.maxSize;
+      if (maxSize == null || length <= maxSize) return;
+      final omitHint = def.direction == BindDir.input
+          ? ' (or omit it on this input-only bind to size the slot from the '
+                'rows)'
+          : '';
+      throw OracleException(
+        errorCode: oraBindTypeError,
+        message:
+            'executeMany() row $rowIndex, $slotLabel value is $length $units '
+            'long, which exceeds the declared OracleBindDef maxSize of '
+            '$maxSize $units for OracleDbType.${def.type.name}; raise maxSize '
+            'to cover the largest value across the rows$omitHint.',
+      );
+    }
+
     switch (def.type) {
       case OracleDbType.number:
         if (value is! num) mismatch('int or double');
@@ -3148,11 +3178,16 @@ class OracleConnection {
                 'instead.',
           );
         }
+        checkDeclaredMaxSize(len, 'bytes');
       case OracleDbType.nVarchar:
+        if (value is! String) mismatch('String');
+        checkDeclaredMaxSize(value.length, 'characters (UTF-16 code units)');
       case OracleDbType.clob:
       case OracleDbType.nClob:
         if (value is! String) mismatch('String');
       case OracleDbType.raw:
+        if (value is! Uint8List) mismatch('Uint8List');
+        checkDeclaredMaxSize(value.length, 'bytes');
       case OracleDbType.blob:
         if (value is! Uint8List) mismatch('Uint8List');
       case OracleDbType.date:

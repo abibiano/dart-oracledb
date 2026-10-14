@@ -542,6 +542,14 @@ int oracleTypeCodeFor(OracleDbType type) {
 /// [OracleBindDef.inputOutput]); for [OracleBindDef.input] it is optional —
 /// the driver sizes input slots from the largest value across the rows.
 ///
+/// When [maxSize] IS declared on a [OracleDbType.varchar],
+/// [OracleDbType.nVarchar], or [OracleDbType.raw] bind that takes input
+/// ([OracleBindDef.input] / [OracleBindDef.inputOutput]), it is the bind's
+/// size for every iteration: a row value longer than it (in the units above)
+/// fails with an [OracleException] ([oraBindTypeError]) before any wire round
+/// trip, naming the row, the bind and the limit but never the value. LOB and
+/// JSON input values are not length-checked against [maxSize].
+///
 /// [OracleDbType.cursor] is rejected: SYS_REFCURSOR binds are not supported
 /// under `executeMany()` (a connection owns a single lazy cursor handle);
 /// use `execute()` with `OracleBind.out(type: OracleDbType.cursor)` instead.
@@ -569,8 +577,9 @@ class OracleBindDef {
   /// The Oracle type expected on the wire.
   final OracleDbType type;
 
-  /// Maximum returned-value bound. See the class docs for units and when it
-  /// is required.
+  /// Maximum returned-value bound — and, for a declared varchar / nVarchar /
+  /// raw input, the maximum input value length. See the class docs for units
+  /// and when it is required.
   final int? maxSize;
 
   /// Direction on the wire, set by the named constructor used.

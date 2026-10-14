@@ -582,6 +582,62 @@ END;''');
       ]);
     });
 
+    test(
+      'an oversized IN OUT varchar value fails before any wire round trip, '
+      'without echoing it, and the connection stays usable (DW-84)',
+      () async {
+        final parseBefore = conn.debugFullParseExecutes;
+        final reuseBefore = conn.debugReuseExecutes;
+        // 50 ASCII bytes against a declared 40-byte IN OUT slot. Without the
+        // client-side check this reaches the server and fails with an opaque
+        // ORA-01460 (observed on both 23ai and 21c) naming no row or bind.
+        final oversized = 'SECRET-${'v' * 43}';
+        expect(oversized.length, equals(50));
+        OracleExecuteManyOptions defs() => OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.inputOutput(type: OracleDbType.number),
+            OracleBindDef.inputOutput(type: OracleDbType.varchar, maxSize: 40),
+          ],
+        );
+        await expectLater(
+          () => conn.executeMany('BEGIN $procInOut(:1, :2); END;', [
+            [1, 'ok'],
+            [2, oversized],
+          ], defs()),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  allOf(
+                    contains('row 1, bind :2'),
+                    contains('maxSize of 40 bytes'),
+                    isNot(contains('SECRET')),
+                  ),
+                ),
+          ),
+        );
+        expect(conn.debugFullParseExecutes, equals(parseBefore));
+        expect(conn.debugReuseExecutes, equals(reuseBefore));
+
+        // Same connection, values that fit (a multi-byte value is measured in
+        // UTF-8 bytes): the batch runs normally.
+        final result = await conn.executeMany(
+          'BEGIN $procInOut(:1, :2); END;',
+          [
+            [1, 'más'],
+            [2, 'x' * 39],
+          ],
+          defs(),
+        );
+        expect(result.outBinds.toList(), [
+          [2, 'más+'],
+          [3, '${'x' * 39}+'],
+        ]);
+      },
+    );
+
     test('positive numIterations runs an all-OUT block once per iteration '
         'in order', () async {
       final result = await conn.executeMany(

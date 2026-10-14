@@ -1803,6 +1803,250 @@ void main() {
     });
   });
 
+  // DW-84: a declared maxSize on a sized slot bounds every iteration's value;
+  // an oversized value fails before the wire (never as a server ORA-06502)
+  // and the error never echoes the value. Units: UTF-8 bytes for varchar,
+  // bytes for raw, UTF-16 code units for nVarchar.
+  group('executeMany() declared maxSize length check (DW-84)', () {
+    const secret = 'SECRET-VALUE-';
+
+    Future<void> expectOversized(
+      Future<OracleResult> Function() call, {
+      required List<String> fragments,
+      required String leaked,
+    }) async {
+      await expectLater(
+        call,
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+              .having(
+                (e) => e.message,
+                'message',
+                allOf([
+                  for (final f in fragments) contains(f),
+                  isNot(contains(leaked)),
+                ]),
+              ),
+        ),
+      );
+      expect(
+        transport.executeCalls,
+        equals(0),
+        reason: 'validation must fail before any wire round trip',
+      );
+    }
+
+    test('an oversized IN OUT varchar value is rejected before wire, naming '
+        'row, slot and limit but not the value', () async {
+      final big = (secret * 4).substring(0, 50); // 50 ASCII chars = 50 bytes
+      await expectOversized(
+        () => conn.executeMany(
+          'BEGIN story_tag(:1); END;',
+          [
+            ['ok'],
+            [big],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [
+              OracleBindDef.inputOutput(
+                type: OracleDbType.varchar,
+                maxSize: 40,
+              ),
+            ],
+          ),
+        ),
+        fragments: [
+          'row 1, bind :1',
+          '50 bytes',
+          'maxSize of 40 bytes',
+          'OracleDbType.varchar',
+        ],
+        leaked: 'SECRET',
+      );
+    });
+
+    test('an IN OUT slot gets no "omit maxSize" hint; an input-only slot '
+        'does', () async {
+      final defsInOut = OracleExecuteManyOptions(
+        bindDefs: {
+          'v': OracleBindDef.inputOutput(
+            type: OracleDbType.varchar,
+            maxSize: 3,
+          ),
+        },
+      );
+      await expectOversized(
+        () => conn.executeMany('BEGIN story_tag(:v); END;', [
+          {'v': '${secret}x'},
+        ], defsInOut),
+        fragments: ['row 0, bind ":v"', 'maxSize of 3'],
+        leaked: 'SECRET',
+      );
+      try {
+        await conn.executeMany('BEGIN story_tag(:v); END;', [
+          {'v': '${secret}x'},
+        ], defsInOut);
+        fail('expected OracleException');
+      } on OracleException catch (e) {
+        expect(e.message, isNot(contains('omit')));
+      }
+      await expectOversized(
+        () => conn.executeMany(
+          'BEGIN story_take(:1); END;',
+          [
+            ['${secret}x'],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [
+              OracleBindDef.input(type: OracleDbType.varchar, maxSize: 3),
+            ],
+          ),
+        ),
+        fragments: ['maxSize of 3', 'omit it on this input-only bind'],
+        leaked: 'SECRET',
+      );
+    });
+
+    test('varchar is measured in UTF-8 bytes: a 4-byte multi-byte value fits '
+        'maxSize 4, a 5-byte one does not', () async {
+      OracleExecuteManyOptions defs() => OracleExecuteManyOptions(
+        bindDefs: [
+          OracleBindDef.inputOutput(type: OracleDbType.varchar, maxSize: 4),
+        ],
+      );
+      // 'más' is 3 characters but 4 UTF-8 bytes: an exact fit.
+      await conn.executeMany('BEGIN story_tag(:1); END;', [
+        ['más'],
+      ], defs());
+      expect(transport.executeCalls, equals(1));
+      transport.executeCalls = 0;
+      // 'máss' is only 4 characters but 5 UTF-8 bytes: rejected.
+      await expectOversized(
+        () => conn.executeMany('BEGIN story_tag(:1); END;', [
+          ['máss'],
+        ], defs()),
+        fragments: ['5 bytes', 'maxSize of 4 bytes'],
+        leaked: 'máss',
+      );
+    });
+
+    test('an oversized raw value is rejected before wire', () async {
+      await expectOversized(
+        () => conn.executeMany(
+          'BEGIN story_take_raw(:1); END;',
+          [
+            [Uint8List(3)],
+            [
+              Uint8List.fromList([17, 34, 51, 68]),
+            ],
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: [
+              OracleBindDef.inputOutput(type: OracleDbType.raw, maxSize: 3),
+            ],
+          ),
+        ),
+        fragments: [
+          'row 1, bind :1',
+          '4 bytes',
+          'maxSize of 3 bytes',
+          'OracleDbType.raw',
+        ],
+        leaked: '[17, 34, 51, 68]',
+      );
+    });
+
+    test(
+      'nVarchar is measured in UTF-16 code units, not UTF-8 bytes',
+      () async {
+        OracleExecuteManyOptions defs(int maxSize) => OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.inputOutput(
+              type: OracleDbType.nVarchar,
+              maxSize: maxSize,
+            ),
+          ],
+        );
+        // 'ñññ' is 3 UTF-16 code units (6 UTF-8 bytes): fits maxSize 3.
+        await conn.executeMany('BEGIN story_ntag(:1); END;', [
+          ['ñññ'],
+        ], defs(3));
+        expect(transport.executeCalls, equals(1));
+        transport.executeCalls = 0;
+        // A 4-character value exceeds maxSize 3.
+        await expectOversized(
+          () => conn.executeMany('BEGIN story_ntag(:1); END;', [
+            ['${secret}x'],
+          ], defs(3)),
+          fragments: ['characters (UTF-16 code units)', 'maxSize of 3'],
+          leaked: 'SECRET',
+        );
+        // An astral character is ONE rune but TWO UTF-16 code units.
+        await expectOversized(
+          () => conn.executeMany('BEGIN story_ntag(:1); END;', [
+            ['\u{1F600}'],
+          ], defs(1)),
+          fragments: ['value is 2 characters (UTF-16 code units)'],
+          leaked: '\u{1F600}',
+        );
+      },
+    );
+
+    test('an exact fit, an input-only def without maxSize, null, and LOB / '
+        'JSON slots are never length-checked', () async {
+      await conn.executeMany(
+        'BEGIN story_take(:1, :2, :3, :4, :5); END;',
+        [
+          [
+            'abcde', // == maxSize 5
+            'x' * 5000, // no maxSize: auto-sized from the rows
+            'y' * 100, // clob maxSize 10 is not an input bound
+            Uint8List(100), // blob maxSize 10 is not an input bound
+            {'k': 'z' * 100}, // json maxSize 10 is not an input bound
+          ],
+          [null, null, null, null, null],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.inputOutput(type: OracleDbType.varchar, maxSize: 5),
+            OracleBindDef.input(type: OracleDbType.varchar),
+            OracleBindDef.input(type: OracleDbType.clob, maxSize: 10),
+            OracleBindDef.input(type: OracleDbType.blob, maxSize: 10),
+            OracleBindDef.input(type: OracleDbType.json, maxSize: 10),
+          ],
+        ),
+      );
+      expect(transport.executeCalls, equals(1));
+      final slots = transport.lastBindValues!.cast<BindVariable>();
+      expect(slots[0].maxSize, equals(5), reason: 'declared size wins');
+      expect(slots[1].maxSize, equals(5000), reason: 'auto-sized from rows');
+    });
+
+    test('the DML RETURNING path applies the same check', () async {
+      await expectOversized(
+        () => conn.executeMany(
+          'INSERT INTO t (name) VALUES (:name) RETURNING id INTO :id',
+          [
+            {'name': 'ok'},
+            {'name': '${secret}x'},
+          ],
+          OracleExecuteManyOptions(
+            bindDefs: {
+              'name': OracleBindDef.input(
+                type: OracleDbType.varchar,
+                maxSize: 5,
+              ),
+              'id': OracleBindDef.output(type: OracleDbType.number),
+            },
+          ),
+        ),
+        fragments: ['row 1, bind ":name"', '14 bytes', 'maxSize of 5 bytes'],
+        leaked: 'SECRET',
+      );
+    });
+  });
+
   group('executeMany() bindDefs are rejected for non-returning DML', () {
     test('plain INSERT with bindDefs fails before wire', () async {
       await expectRejectedBeforeWire(

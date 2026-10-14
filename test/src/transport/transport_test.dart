@@ -919,6 +919,187 @@ void main() {
           await server.close();
         },
       );
+
+      // DW-85: an N>1 PL/SQL executeMany is two RPCs (EXECUTE, then a
+      // REEXECUTE for iterations 2..N) that share ONE caller deadline. The
+      // fake server answers request #1 (the EXECUTE) with a successful
+      // end-of-call ERROR (num 0) naming an open cursor, and request #2 (the
+      // REEXECUTE) only when [answerReExecute] is set.
+      const batchCursorId = 9;
+      final batchReply = <int>[
+        0x00, 0x00, // data flags
+        ..._ttcErrorMessage(errorNum: 0, cursorId: batchCursorId),
+      ];
+      Future<(Transport, ServerSocket, int Function())> startBatchServer({
+        Duration firstReplyDelay = Duration.zero,
+        bool answerReExecute = false,
+      }) async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        var requestsSeen = 0;
+        void reply(Socket s) {
+          final packetLen = tnsHeaderSize + batchReply.length;
+          s.add(<int>[
+            (packetLen >> 8) & 0xFF, packetLen & 0xFF, // length (BE)
+            0x00, 0x00, // checksum
+            tnsPacketData, // type = 6
+            0x00, // marker
+            0x00, 0x00, // header checksum
+            ...batchReply,
+          ]);
+        }
+
+        server.listen((s) {
+          // The client destroys the socket when it poisons; swallow the
+          // resulting write/close errors on the server side.
+          unawaited(s.done.catchError((_) {}));
+          s.listen((_) {
+            final n = ++requestsSeen;
+            if (n == 1) {
+              Timer(firstReplyDelay, () {
+                try {
+                  reply(s);
+                } on Object catch (_) {}
+              });
+            } else if (answerReExecute) {
+              reply(s);
+            }
+          }, onError: (_) {});
+        });
+        final transport = Transport();
+        await transport.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
+        return (transport, server, () => requestsSeen);
+      }
+
+      Future<ExecuteResponse> runBatch(Transport t, Duration? timeout) =>
+          t.sendExecute(
+            'BEGIN story_bump; END;',
+            isQuery: false,
+            isPlSql: true,
+            executeManyIters: 3,
+            timeout: timeout,
+          );
+
+      test(
+        'time spent after the first batch send reduces its reply budget',
+        () async {
+          final (transport, server, requestsSeen) = await startBatchServer(
+            firstReplyDelay: const Duration(milliseconds: 1200),
+          );
+          transport.debugAfterFirstPlSqlBatchSend = () =>
+              Future<void>.delayed(const Duration(milliseconds: 600));
+          final clock = Stopwatch()..start();
+          await expectLater(
+            runBatch(transport, const Duration(milliseconds: 1000)),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraConnectTimeout)
+                  .having((e) => e.message, 'message', contains('1000ms')),
+            ),
+          );
+          clock.stop();
+          expect(clock.elapsed, lessThan(const Duration(milliseconds: 1150)));
+          expect(requestsSeen(), equals(1));
+          expect(transport.isCorrupted, isTrue);
+          await transport.disconnect();
+          await server.close();
+        },
+      );
+
+      test('PL/SQL executeMany REEXECUTE waits only for the remaining batch '
+          'budget, so the batch times out at ~T, not ~2T (DW-85)', () async {
+        // The EXECUTE reply lands after 600ms of a 1000ms budget; the server
+        // never answers the REEXECUTE. Per-RPC timeouts would fail at ~1600ms;
+        // the shared deadline fails at ~1000ms.
+        final (transport, server, requestsSeen) = await startBatchServer(
+          firstReplyDelay: const Duration(milliseconds: 600),
+        );
+        final clock = Stopwatch()..start();
+        await expectLater(
+          runBatch(transport, const Duration(milliseconds: 1000)),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraConnectTimeout)
+                // The caller's TOTAL timeout is reported, not the remainder.
+                .having((e) => e.message, 'message', contains('1000ms'))
+                .having((e) => e.message, 'message', contains('poisoned')),
+          ),
+        );
+        clock.stop();
+        expect(requestsSeen(), equals(2), reason: 'EXECUTE + REEXECUTE sent');
+        expect(
+          clock.elapsed,
+          greaterThanOrEqualTo(const Duration(milliseconds: 900)),
+          reason: 'the batch still gets its whole budget',
+        );
+        expect(
+          clock.elapsed,
+          lessThan(const Duration(milliseconds: 1450)),
+          reason:
+              'the REEXECUTE must get only the ~400ms left, not a fresh '
+              '1000ms (which would end the batch at ~1600ms)',
+        );
+        expect(transport.isCorrupted, isTrue);
+        expect(transport.isConnected, isFalse);
+
+        await transport.disconnect();
+        await server.close();
+      });
+
+      test('an exhausted batch budget sends no REEXECUTE, poisons the '
+          'transport and reports the total timeout (DW-85)', () async {
+        final (transport, server, requestsSeen) = await startBatchServer(
+          answerReExecute: true,
+        );
+        // Deterministically burn the whole 200ms budget between the RPCs.
+        transport.debugBeforePlSqlReExecute = () =>
+            Future<void>.delayed(const Duration(milliseconds: 300));
+        await expectLater(
+          runBatch(transport, const Duration(milliseconds: 200)),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraConnectTimeout)
+                .having((e) => e.message, 'message', contains('200ms'))
+                .having((e) => e.message, 'message', contains('poisoned')),
+          ),
+        );
+        expect(transport.isCorrupted, isTrue);
+        expect(transport.isConnected, isFalse);
+        // Give a (wrongly) sent REEXECUTE time to reach the server.
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(
+          requestsSeen(),
+          equals(1),
+          reason: 'no REEXECUTE may be sent once the budget is spent',
+        );
+
+        await transport.disconnect();
+        await server.close();
+      });
+
+      test('a batch within budget completes; a null timeout stays unbounded '
+          '(DW-85)', () async {
+        for (final timeout in [const Duration(seconds: 5), null]) {
+          final (transport, server, requestsSeen) = await startBatchServer(
+            answerReExecute: true,
+          );
+          // Time spent between the RPCs is charged to the batch, but 50ms of a
+          // 5s (or unbounded) budget leaves plenty for the REEXECUTE.
+          transport.debugBeforePlSqlReExecute = () =>
+              Future<void>.delayed(const Duration(milliseconds: 50));
+          final response = await runBatch(transport, timeout);
+          expect(response.isSuccess, isTrue, reason: 'timeout: $timeout');
+          expect(response.cursorId, equals(batchCursorId));
+          expect(requestsSeen(), equals(2), reason: 'timeout: $timeout');
+          expect(transport.isCorrupted, isFalse, reason: 'timeout: $timeout');
+
+          await transport.disconnect();
+          await server.close();
+        }
+      });
     });
 
     group('sendData DATA-flags contract', () {
@@ -1793,7 +1974,15 @@ List<int> _ubN(int v) {
 /// transport's pre-negotiation default, 24), mirroring the layout
 /// `decodeTtcErrorBody` reads (and the `_errorMessage` fixture in
 /// execute_message_test.dart).
-List<int> _ttcErrorMessage({required int errorNum, required String message}) {
+///
+/// `errorNum: 0` is the successful end-of-call ERROR a non-query execute ends
+/// with; like the decoder, it then carries no message text. [cursorId] is the
+/// server cursor the call opened (e.g. a PL/SQL executeMany's first EXECUTE).
+List<int> _ttcErrorMessage({
+  required int errorNum,
+  String message = '',
+  int cursorId = 0,
+}) {
   final codes = message.codeUnits;
   return <int>[
     ttcMsgTypeError,
@@ -1803,7 +1992,7 @@ List<int> _ttcErrorMessage({required int errorNum, required String message}) {
     ..._ubN(0), // err num short
     ..._ubN(0), // array elem
     ..._ubN(0), // array elem
-    ..._ubN(0), // cursor id
+    ..._ubN(cursorId), // cursor id
     ..._ubN(0), // error position
     0, 0, 0, 0, 0, 0, // sql type, fatal, flags, cursor opts, UPI, warning
     ..._ubN(0), ..._ubN(0), 0, ..._ubN(0), ..._ubN(0), // rowid (all zero)
@@ -1819,6 +2008,6 @@ List<int> _ttcErrorMessage({required int errorNum, required String message}) {
     0, // extended row count (UB8 0)
     ..._ubN(0), // 20.1 sql type
     ..._ubN(0), // 20.1 checksum
-    codes.length, ...codes, // error message
+    if (errorNum != 0) ...[codes.length, ...codes], // error message
   ];
 }

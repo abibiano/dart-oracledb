@@ -588,14 +588,18 @@ archived: 2026-10-09
 origin: migrated from legacy ledger ("Deferred from: code review of 11-2-bulk-plsql-array-binds (2026-07-03)"), 2026-10-09
 location: lib/src/connection.dart
 reason: **IN OUT / explicit-`maxSize` IN value length not validated against declared `maxSize` before wire (low-priority hardening).** `_validateDefValue` checks the Dart runtime type and the 32767-byte PL/SQL cap, but never compares a per-iteration value's length to `def.maxSize`. An oversized value — e.g. a 50-char value bound to an `OracleBindDef.inputOutput(type: OracleDbType.varchar, maxSize: 40)` (also `raw`/`nVarchar` IN OUT, or an IN bind given an explicit smaller `maxSize`) — reaches the server and surfaces as ORA-06502 ("character string buffer too small") mid-execute, rather than a clean value-free client-side rejection. Fails safe (clear server error, no corruption) and is NOT an AC requirement (AC2 only mandates that a *missing* maxSize on a returned type fails before wire), so deferred. node-oracledb validates value length against `bindDefs` maxSize before the round trip. Fix would add a length check in `_validateDefValue` for sized varchar/nVarchar/raw slots. [lib/src/connection.dart:2016]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-executemany-bind-timeout-hardening
+resolution-undo: 6ec8fb45b585c23353d52108dad8600b5529aa478ed729599c2df64ea8491a2c 2026-10-14 7374617475733a206f70656e
 
 ### DW-85: Two-RPC PL/SQL `executeMany` can consume up to ~2× the caller's `timeout` (low-priority).
 
 origin: migrated from legacy ledger ("Deferred from: code review of 11-2-bulk-plsql-array-binds (2026-07-03)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: **Two-RPC PL/SQL `executeMany` can consume up to ~2× the caller's `timeout` (low-priority).** A single logical N>1 PL/SQL `executeMany` issues two RPCs (EXECUTE + REEXECUTE); `_reExecutePlSqlBatch` passes the *same* `timeout` to its own `_receiveDataWithTimeout` as the first RPC used. A slow server can make each RPC consume nearly the full budget, so the operation's real wall-clock ceiling is roughly double the timeout the caller set — a minor behavioral deviation from single-RPC `execute()` / array-DML timeout semantics. [lib/src/transport/transport.dart:861]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-executemany-bind-timeout-hardening
+resolution-undo: 6ec8fb45b585c23353d52108dad8600b5529aa478ed729599c2df64ea8491a2c 2026-10-14 7374617475733a206f70656e
 
 ### DW-86: OPEN — `bindDefs` direction/position not cross-validated against the actual RETURNING boundary in the SQL text.
 
