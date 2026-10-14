@@ -635,28 +635,36 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 11-5-dual-env-integration-tests (2026-07-10)"), 2026-10-09
 location: test/integration/test_helper.dart
 reason: **`uniqueObjectName()` inherits `uniqueTableName()`'s existing validation gaps.** The 30-byte length guard throws during test-tree construction (inside the `group()` callback body, at the point the name is declared) rather than inside `setUp`/a test body, so one over-length base name would abort building the entire test file rather than just the offending group. It also never validates that `base` is itself a legal Oracle identifier fragment (leading digit, hyphen, non-ASCII), and measures length in UTF-16 code units (`name.length`) rather than UTF-8 bytes, so a non-ASCII base could pass the guard while still exceeding the true 30-byte limit. The doc comment's "never collide" language is also probabilistic (a 32-bit random suffix), not absolute. None of this is new: it is identical to `uniqueTableName()`'s already-accepted convention, which this story deliberately mirrored. [test/integration/test_helper.dart:138-175]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-itest-helper-hardening
+resolution-undo: a31e8897187448d0b517c58c1990a0e7daf39b988bf5b6a0df77cca9c47ccb1c 2026-10-15 7374617475733a206f70656e
 
 ### DW-90: Derived/suffixed identifiers are never re-validated against the 30-byte limit after the base name's own check.
 
 origin: migrated from legacy ledger ("Deferred from: code review of 11-5-dual-env-integration-tests (2026-07-10)"), 2026-10-09
 location: test/integration/execute_many_integration_test.dart
 reason: **Derived/suffixed identifiers are never re-validated against the 30-byte limit after the base name's own check.** E.g. `${coex}_uk` (the new cross-feature-coexistence group's UNIQUE constraint name) adds 3 more characters on top of an already-validated `uniqueTableName()` result with no second length check. Currently safe for every base name in use (well under 30 bytes even with the suffix), but the same gap already exists in the untouched, pre-existing Story 11.4 `${t}_uc` constraint name, so this is not a new risk introduced by this story. [test/integration/execute_many_integration_test.dart:1523]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-itest-helper-hardening
+resolution-undo: a31e8897187448d0b517c58c1990a0e7daf39b988bf5b6a0df77cca9c47ccb1c 2026-10-15 7374617475733a206f70656e
 
 ### DW-91: The new JSON group's `setUpAll` probe can leak its probe table, and the row-major `returned()` helper casts `outBinds` entries without a type guard.
 
 origin: migrated from legacy ledger ("Deferred from: code review of 11-5-dual-env-integration-tests (2026-07-10)"), 2026-10-09
 location: json_data_type_integration_test.dart
 reason: **The new JSON group's `setUpAll` probe can leak its probe table, and the row-major `returned()` helper casts `outBinds` entries without a type guard.** If `DROP TABLE $probeTable PURGE` itself throws inside the probe's `try`, the exception is rethrown from the `catch` block before cleanup runs, leaving the just-created probe table behind; and `returned()`'s `entry is Map ? entry[bind] : (entry as List)[...]` would throw an undiagnosable `TypeError` (rather than a clear assertion) if `outBinds[row]` were ever null or an unexpected shape. Both are exact structural copies of already-established, pre-existing code: the probe mirrors `json_data_type_integration_test.dart`'s feature-probe pattern verbatim, and `returned()` mirrors the pre-existing Story 11.4 helper. [test/integration/execute_many_integration_test.dart:1918-1940,1966-1970]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-itest-helper-hardening
+resolution-undo: a31e8897187448d0b517c58c1990a0e7daf39b988bf5b6a0df77cca9c47ccb1c 2026-10-15 7374617475733a206f70656e
 
 ### DW-92: The 256-row scale test's title claims it "crosses packet boundaries" but nothing in the test directly measures packet/frame counts.
 
 origin: migrated from legacy ledger ("Deferred from: code review of 11-5-dual-env-integration-tests (2026-07-10)"), 2026-10-09
 location: test/integration/execute_many_integration_test.dart
 reason: **The 256-row scale test's title claims it "crosses packet boundaries" but nothing in the test directly measures packet/frame counts.** The claim rests on payload volume (256 rows × ~300 bytes ≈ 76,800 bytes, well past typical Oracle TNS packet sizes) rather than direct instrumentation. Proving it directly would require new production-side packet-count instrumentation, which is out of scope for this test-only, zero-production-change story (AC9). [test/integration/execute_many_integration_test.dart:1817-1836]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-itest-helper-hardening
+resolution-undo: a31e8897187448d0b517c58c1990a0e7daf39b988bf5b6a0df77cca9c47ccb1c 2026-10-15 7374617475733a206f70656e
 
 ### DW-93: RESOLVED 2026-07-26 (dev-story of 12-2-temporary-lob-lifecycle) — Fetched server-expression LOBs (e.g. `SELECT TO_CLOB(...)`) may allocate…
 

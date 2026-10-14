@@ -1,0 +1,158 @@
+diff --git a/test/integration/execute_many_integration_test.dart b/test/integration/execute_many_integration_test.dart
+index 687df54..6d9d418 100644
+--- a/test/integration/execute_many_integration_test.dart
++++ b/test/integration/execute_many_integration_test.dart
+@@ -1178,7 +1178,7 @@ END;''');
+           'n NUMBER, '
+           'c CLOB, '
+           'b BLOB, '
+-          'CONSTRAINT ${t}_uc UNIQUE (code))',
++          'CONSTRAINT ${checkedIdentifier('${t}_uc')} UNIQUE (code))',
+         ),
+         const [955], // ORA-00955: name already used
+       );
+@@ -1579,7 +1579,7 @@ END;''');
+           'id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, '
+           'k NUMBER, '
+           'v VARCHAR2(100), '
+-          'CONSTRAINT ${coex}_uk UNIQUE (k))',
++          'CONSTRAINT ${checkedIdentifier('${coex}_uk')} UNIQUE (k))',
+         ),
+         const [955], // ORA-00955: name already used
+       );
+@@ -1951,8 +1951,8 @@ END;''');
+       );
+     });
+ 
+-    test('a 256-row batch crosses packet boundaries; total and sampled rows '
+-        'round-trip in order (AC3)', () async {
++    test('a 256-row ~77 KB batch (large payload volume); total and sampled '
++        'rows round-trip in order (AC3)', () async {
+       const rowCount = 256;
+       // A reserved block that no other nextTestId() call can reproduce.
+       final base = nextTestId() * 1000;
+@@ -2052,11 +2052,12 @@ END;''');
+       // columns on both fixtures. Skip only for the "no native JSON" codes.
+       final probe = await connectForTest();
+       final probeTable = uniqueTableName('s115jp');
++      var probeCreated = false;
+       try {
+         await probe.execute(
+           'CREATE TABLE $probeTable (doc JSON) TABLESPACE USERS',
+         );
+-        await probe.execute('DROP TABLE $probeTable PURGE');
++        probeCreated = true;
+       } on OracleException catch (e) {
+         // Skip only for the errors that mean "this server cannot create
+         // native JSON columns": ORA-00902 (invalid datatype, pre-21c
+@@ -2069,7 +2070,13 @@ END;''');
+         if (!jsonUnavailableCodes.contains(e.errorCode)) rethrow;
+         jsonUnavailable = 'ORA-${e.errorCode}: ${e.message}';
+       } finally {
+-        await probe.close();
++        try {
++          if (probeCreated) {
++            await probe.execute('DROP TABLE $probeTable PURGE');
++          }
++        } finally {
++          await probe.close();
++        }
+       }
+     });
+ 
+diff --git a/test/integration/test_helper.dart b/test/integration/test_helper.dart
+index 2ae8946..cd95f6c 100644
+--- a/test/integration/test_helper.dart
++++ b/test/integration/test_helper.dart
+@@ -5,6 +5,7 @@
+ /// docker-compose.yml setup (Oracle 23ai on port 1521, service FREEPDB1).
+ library;
+ 
++import 'dart:convert';
+ import 'dart:io';
+ import 'dart:math';
+ import 'dart:typed_data';
+@@ -142,15 +143,47 @@ final Random _random = Random();
+ /// 21c's 30-byte identifier limit (23ai allows 128, but the dual-environment
+ /// rule targets the stricter bound).
+ String uniqueObjectName(String base) {
++  if (!_identifierFragment.hasMatch(base)) {
++    throw ArgumentError.value(
++      base,
++      'base',
++      'uniqueObjectName("$base"): base must be an ASCII Oracle identifier '
++          'fragment (a letter followed by letters, digits, "_", "\$" or "#")',
++    );
++  }
+   final suffix = _random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
+   final name = '${base}_$suffix';
+-  if (name.length > 30) {
++  final byteLength = utf8.encode(name).length;
++  if (byteLength > _maxIdentifierBytes) {
+     throw ArgumentError.value(
+       base,
+       'base',
+       'uniqueObjectName("$base") yields "$name" '
+-          '(${name.length} chars) — exceeds the 30-byte Oracle 21c '
+-          'identifier limit; shorten the base name',
++          '($byteLength bytes) — exceeds the $_maxIdentifierBytes-byte Oracle '
++          '21c identifier limit; shorten the base name',
++    );
++  }
++  return name;
++}
++
++/// Oracle 21c's identifier limit in bytes (23ai allows 128).
++const int _maxIdentifierBytes = 30;
++
++final RegExp _identifierFragment = RegExp(r'^[A-Za-z][A-Za-z0-9_$#]*$');
++
++/// Returns [name] after asserting its UTF-8 byte length fits Oracle 21c's
++/// 30-byte identifier limit.
++///
++/// [uniqueObjectName] only validates the base name it is given; use this for
++/// identifiers derived from its result by appending a suffix (e.g. `${t}_uk`).
++String checkedIdentifier(String name) {
++  final byteLength = utf8.encode(name).length;
++  if (byteLength > _maxIdentifierBytes) {
++    throw ArgumentError.value(
++      name,
++      'name',
++      'identifier "$name" is $byteLength bytes — exceeds the '
++          '$_maxIdentifierBytes-byte Oracle 21c identifier limit',
+     );
+   }
+   return name;
+@@ -170,8 +203,30 @@ String uniqueTableName(String base) => uniqueObjectName('t_$base');
+ /// named entry is a `Map` keyed by OUT bind name.
+ List<Object?> returned(OracleResult r, int row, Object bind) {
+   final entry = r.outBinds[row];
+-  final cell = entry is Map ? entry[bind] : (entry as List)[bind as int];
+-  return (cell as List).cast<Object?>();
++  final Object? cell;
++  if (entry is Map) {
++    cell = entry[bind];
++  } else if (entry is List) {
++    if (bind is! int) {
++      throw StateError(
++        'returned(): row $row has a positional outBinds entry but bind '
++        '$bind is not an int index',
++      );
++    }
++    cell = entry[bind];
++  } else {
++    throw StateError(
++      'returned(): outBinds[$row] must be a Map or List, got '
++      '${entry.runtimeType}',
++    );
++  }
++  if (cell is! List) {
++    throw StateError(
++      'returned(): outBinds[$row][$bind] must be a List of returned values, '
++      'got ${cell.runtimeType}',
++    );
++  }
++  return cell.cast<Object?>();
+ }
+ 
+ /// Monotonically increasing primary-key generator seeded from a random base.

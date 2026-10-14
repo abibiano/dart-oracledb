@@ -1917,9 +1917,10 @@ END;''');
 
   // -------------------------------------------------------------------------
   // Story 11.5 — scale and long-data evidence (AC3). Closes the two Story 11.1
-  // deferred coverage gaps at the integration level: a high-volume batch whose
-  // row data spans multiple network packets, and a shared bind slot that mixes
-  // a short string with a >32767-byte value routed into a large column (CLOB).
+  // deferred coverage gaps at the integration level: a high-volume batch with a
+  // large total payload (packet counts are not instrumented), and a shared bind
+  // slot that mixes a short string with a >32767-byte value routed into a large
+  // column (CLOB).
   // -------------------------------------------------------------------------
   group('executeMany() scale and long-data (Story 11.5)', () {
     OracleConnection? connHandle;
