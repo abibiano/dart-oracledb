@@ -22,7 +22,7 @@ A pure Dart Oracle Database driver implementing the thin-mode TNS/TTC wire proto
 - **PL/SQL** — stored procedures and functions with OUT / IN OUT bind parameters
 - **Result sets & streaming** — consume large queries incrementally via `OracleResultSet` or `queryStream()` / `executeStream()` instead of materializing every row
 - **REF CURSOR & implicit results** — PL/SQL `SYS_REFCURSOR` OUT binds, `DBMS_SQL.RETURN_RESULT` implicit result sets (including rows that carry CLOB/NCLOB/BLOB/JSON columns), and nested `CURSOR()` columns (nested-cursor and REF CURSOR rows must not carry a CLOB/NCLOB/BLOB column — see [Known Limitations](#known-limitations))
-- **LOB streaming & temporary LOBs** — `OracleExecuteOptions(fetchLobs: true)` returns a server-backed `OracleLob` with bounded `read()`/`write()`, `textStream()`/`byteStream()`/`writeStream()` for piece-by-piece transfer, and `createTemporaryClob()`/`createTemporaryNClob()`/`createTemporaryBlob()` for session-duration temporary LOBs
+- **LOB streaming & temporary LOBs** — `OracleExecuteOptions(fetchLobs: true)` returns a server-backed `OracleLob` with bounded `read()`/`write()`, `trim()`, `refresh()` of the cached `length`/`chunkSize`, `textStream()`/`byteStream()`/`writeStream()` for piece-by-piece transfer, and `createTemporaryClob()`/`createTemporaryNClob()`/`createTemporaryBlob()` for session-duration temporary LOBs
 - **Transactions** — commit, rollback, and transaction helper
 - **TIMESTAMP WITH TIME ZONE** — decoded as UTC `DateTime`, or as `OracleTimestampTz` preserving the original offset (opt-in)
 - **Statement caching** — transparent prepared-statement cache
@@ -714,6 +714,19 @@ try {
   measured: `ORA-22920`, with the handle and connection left usable). Writing
   past `length + 1` extends the LOB and the server fills the gap; the local
   `length` advance matches the server's own `DBMS_LOB.GETLENGTH`.
+- **Trimming** — `trim(newSize)` shortens the LOB to `newSize` units (same
+  units as `length`) in one round trip and sets `length`; `trim(0)` empties it
+  (an empty LOB, not `NULL`). It needs a writable locator like `write()`, and
+  on a persistent LOB the change is part of the current transaction. The server
+  rejects a `newSize` past the end (`ORA-22926`), a read-only locator
+  (`ORA-22920`) and a CLOB/NCLOB size that would split a surrogate pair
+  (`ORA-22831`), leaving the handle, its `length` and the connection usable; a
+  negative `newSize` throws `ArgumentError` before any round trip.
+- **`length` and `chunkSize` are cached** — seeded from the fetch, advanced by
+  `write()`, set by `trim()`. `refresh()` re-reads both from the server (one
+  GET_LENGTH and one GET_CHUNK_SIZE round trip), and a `read()` that starts
+  past the cached `length` always asks the server instead of the cache — see
+  [Cached `length`](#temporary-lobs-you-create-fill-and-bind) below.
 - **Lifecycle** — each open handle holds the connection's single in-flight slot:
   the connection rejects other operations (and the pool force-closes any
   still-open handle on release) until every handle is `close()`d. `close()` is
@@ -757,7 +770,7 @@ To get an `OracleLob` handle, project the LOB outside the cursor. See
 `resultSet: true` + `fetchLobs: true`
 on a **PL/SQL block** (whose implicit results come back as a group of lazy result
 sets) also throws before any wire round trip; use the eager `execute()` path
-there. Still not available: BFILE and `trim()`.
+there. Still not available: BFILE.
 
 #### Streaming a LOB in and out
 
@@ -800,19 +813,21 @@ try {
 - **Units** are the type's native ones: characters (UCS-2 code units) for
   CLOB/NCLOB, bytes for BLOB — same as `read` / `write` / `length`.
 - **`pieceSize`** defaults to `chunkSize` when the server reported one and
-  otherwise to `defaultLobStreamPieceSize`; a multiple of `chunkSize` is
-  recommended. The concatenation of the emitted pieces equals
+  otherwise to `OracleLob.defaultStreamPieceSize` (32,768; the top-level
+  `defaultLobStreamPieceSize` is a deprecated alias); a multiple of `chunkSize`
+  is recommended. The concatenation of the emitted pieces equals
   `read(offset: offset)` exactly — for a LOB whose length has not changed since
-  the handle was fetched (see the next bullet for the one case where they
-  deliberately differ).
+  the handle was fetched or last `refresh()`ed (see the next bullet for the one
+  case where they deliberately differ).
 - **A read stream ends when a READ returns no data**, not when the cached
   `length` is reached — so it is immune to a `length` that went stale after the
   fetch, and it never loops past the end. That terminating empty READ costs one
   extra round trip, and an **empty** LOB yields no pieces at all. This is also
   the one case where a stream and `read()` disagree, and the stream is the
-  accurate one: for a LOB that **grew** server-side after the fetch, `read()`
-  caps its request at the cached `length` and returns a stale prefix, while the
-  stream keeps going to the real end and so returns strictly more.
+  accurate one: for a LOB that **grew** server-side after the fetch, a `read()`
+  starting inside the cached `length` caps its request there and returns a
+  stale prefix, while the stream keeps going to the real end and so returns
+  strictly more. Call `refresh()` before the `read()` to close that gap.
 - **Emitted CLOB pieces are not guaranteed whole-character-aligned** (the driver
   picks the boundaries), but they are never corrupt: a split encoding sequence or
   a trailing unpaired high surrogate is held back and joined to the next piece, so
@@ -944,22 +959,34 @@ try {
   raises `ORA-22922`. Read the returned value (a `String` / `Uint8List`, or a
   fresh `OracleLob` under `fetchLobs: true`) and treat the bound handle as spent;
   you still `close()` it. A plain **IN** bind leaves the handle fully usable.
-- **Cached `length`** — `length` is seeded from the locator's prefetch metadata
-  and advanced locally by `write()`; it is never re-read from the server
-  (node-oracledb parity). So if the LOB grew server-side after the handle was
-  fetched, `read()` stops at the cached length, and `read(offset: length + 1)`
-  returns the empty value **without any round trip**. The remedy for that
-  direction is to **re-select** the value: an explicit `amount` is still capped
-  at the cached length (it can only make a read shorter), so it guards the
-  opposite direction — a LOB that shrank, where a read for the full cached length
-  **can** fail loud (a length mismatch, or `"LOB read made no progress"`,
-  depending on whether the server reports the units it actually delivered) and
-  asking only for units you know exist avoids it. `textStream()` / `byteStream()` are immune by construction:
-  they never consult `length` and stop on the server's empty READ. Measured on
-  Oracle 23ai and 21c: because a LOB locator is read-consistent, a handle fetched
-  before another session's committed update keeps seeing the *old* value in full
-  — correct data, never silently truncated — in **both** directions, so the
-  shrunk-direction mismatch was not reproducible live on either fixture.
+- **Cached `length`** — `length` (and `chunkSize`) are seeded from the
+  locator's prefetch metadata, advanced locally by `write()` and set by
+  `trim()`; only `refresh()` re-reads them from the server. How `read()` uses
+  the cached `length` depends on where it starts:
+  - **past the cached end** (`offset > length`, including any read of an empty
+    handle): the server is asked, never the cache. If the LOB really ends there
+    the empty value comes back after **one** READ round trip; if it grew, the
+    read continues piece by piece (like the streams) until the requested
+    `amount` arrives or the server reports the end, returns the new data, and
+    advances `length`. (1.4.0 returned the empty value here without asking —
+    silently wrong for a LOB that had grown.)
+  - **inside the cached range**: the request is capped at the cached `length`,
+    so for a LOB that grew the read returns the prefix up to the stale end (no
+    error), and for one that shrank a read for the full cached length **can**
+    fail loud (a length mismatch, or `"LOB read made no progress"`) rather than
+    return short data. The
+    remedy for both is **`refresh()`** before the read (or a re-select).
+
+  `textStream()` / `byteStream()` never consult `length` and stop on the
+  server's empty READ. Measured on Oracle 23ai and 21c: because a LOB locator is
+  read-consistent, a handle fetched before another session's committed update
+  keeps seeing the *old* value in full — correct data, never silently truncated
+  — in **both** directions, its READ past the old end comes back empty, and
+  `refresh()` reports the old length too, so `length` and `read()` always
+  agree; a re-select is what surfaces the new value. `refresh()` and `trim()`
+  fail with `ORA-22275` on the locator of an `EMPTY_CLOB()` / `EMPTY_BLOB()`
+  value that was never stored (`SELECT EMPTY_CLOB() FROM dual`, or a PL/SQL
+  `:out := EMPTY_CLOB()`), which `read()` handles fine.
 
 `OracleLob.isTemporary` reports whether a handle references a temporary LOB —
 always `true` for a created one, and `true` for a fetched locator that carries

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:mirrors';
 import 'dart:typed_data';
 
 import 'package:oracledb/oracledb.dart';
@@ -78,6 +79,14 @@ class _FakeLobTransport extends Transport {
 
   /// Every `operation` code passed to `sendLobOp`, in order.
   final List<int> sentOperations = <int>[];
+
+  /// Every successfully sent op's `operation` / `sendAmount` / `amount`, in
+  /// order — the seam the TRIM / GET_LENGTH / GET_CHUNK_SIZE tests assert the
+  /// request shape through.
+  final List<({int operation, bool sendAmount, int amount})> opRequests =
+      <({int operation, bool sendAmount, int amount})>[];
+
+  int trimCalls = 0;
 
   /// Recorded CREATE_TEMP arguments (charset form, Oracle type, duration).
   int? createTempCsfrm;
@@ -164,6 +173,11 @@ class _FakeLobTransport extends Transport {
       );
     }
     sentOperations.add(operation);
+    opRequests.add((
+      operation: operation,
+      sendAmount: sendAmount,
+      amount: amount,
+    ));
     if (sourceLocator != null) {
       sentLocators.add(Uint8List.fromList(sourceLocator));
     }
@@ -174,12 +188,22 @@ class _FakeLobTransport extends Transport {
       createTempDuration = destLength;
       return LobOpResponse(isSuccess: true, updatedLocator: echo);
     }
-    if (operation == tnsLobOpGetChunkSize) {
-      chunkSizeSentAmount = sendAmount;
+    if (operation == tnsLobOpGetChunkSize || operation == tnsLobOpGetLength) {
+      if (operation == tnsLobOpGetChunkSize) chunkSizeSentAmount = sendAmount;
       return LobOpResponse(
         isSuccess: true,
         updatedLocator: echo,
         amount: opAmount[operation],
+      );
+    }
+    if (operation == tnsLobOpTrim) {
+      trimCalls++;
+      // node-oracledb's TRIM reply carries an SB8 amount (sendAmount: true);
+      // the driver ignores it. Echo the requested size like a real server.
+      return LobOpResponse(
+        isSuccess: true,
+        updatedLocator: echo,
+        amount: amount,
       );
     }
     if (operation == tnsLobOpRead) {
@@ -427,53 +451,358 @@ void main() {
       await lob.close();
     });
 
-    test('an empty CLOB returns "" with no wire round trip', () async {
+    // DW-28: a read past the CACHED length is answered by the server, never by
+    // the cache. These replace the 1.4.0 "short-circuits with no round trip"
+    // tests — that silent empty was the footgun for a LOB that grew.
+    test('an empty CLOB read() asks the server once and returns ""', () async {
       final (conn, t, lob) = await _fetchLob(_clob(0));
       final value = await lob.read();
       expect(value, equals(''));
-      expect(t.lobReadCalls, equals(0));
+      // offset 1 > cached length 0: one READ, for the default piece size
+      // (the handle's chunkSize), which the server answers with no data.
+      expect(t.readRequests, equals([(offset: 1, amount: 8132)]));
+      expect(lob.length, equals(0));
       await lob.close();
     });
 
-    test(
-      'an empty BLOB returns an empty Uint8List with no wire round trip',
-      () async {
-        final (conn, t, lob) = await _fetchLob(_blob(0));
-        final value = await lob.read();
-        expect(value, isA<Uint8List>());
-        expect((value as Uint8List), isEmpty);
-        expect(t.lobReadCalls, equals(0));
-        await lob.close();
-      },
-    );
+    test('an empty BLOB read() asks the server once and returns an empty '
+        'Uint8List', () async {
+      final (conn, t, lob) = await _fetchLob(_blob(0));
+      final value = await lob.read();
+      expect(value, isA<Uint8List>());
+      expect((value as Uint8List), isEmpty);
+      expect(t.lobReadCalls, equals(1));
+      await lob.close();
+    });
 
-    test(
-      'reading at/past the end (null amount) short-circuits to empty',
-      () async {
-        final (conn, t, lob) = await _fetchLob(_clob(5));
-        final value = await lob.read(offset: 6); // offset == length + 1
-        expect(value, equals(''));
-        expect(t.lobReadCalls, equals(0));
-        await lob.close();
-      },
-    );
-
-    test('reading past the end with an EXPLICIT amount also short-circuits '
-        '(no needless READ past end)', () async {
+    test('a past-end read (null amount) of a LOB that really ends issues '
+        'exactly ONE READ and returns the empty value', () async {
       final (conn, t, lob) = await _fetchLob(_clob(5));
-      // offset 6 == length + 1, explicit amount 10: nothing to fetch. Must not
-      // issue a READ (parity with the null-amount path).
-      final value = await lob.read(offset: 6, amount: 10);
+      final value = await lob.read(offset: 6); // offset == length + 1
       expect(value, equals(''));
-      expect(t.lobReadCalls, equals(0));
-      // Same for a BLOB.
+      expect(t.readRequests, equals([(offset: 6, amount: 8132)]));
+      expect(lob.length, equals(5), reason: 'nothing found: length unchanged');
+      // getData() is the same path.
+      expect(await lob.getData(9), equals(''));
+      expect(t.lobReadCalls, equals(2));
+      await lob.close();
+    });
+
+    test('a past-end read with an EXPLICIT amount issues one READ for exactly '
+        'that amount (CLOB and BLOB)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      expect(await lob.read(offset: 6, amount: 10), equals(''));
+      expect(t.readRequests, equals([(offset: 6, amount: 10)]));
       final (conn2, t2, blob) = await _fetchLob(_blob(4));
       final bytes = await blob.read(offset: 5, amount: 8);
       expect(bytes, isA<Uint8List>());
       expect(bytes as Uint8List, isEmpty);
-      expect(t2.lobReadCalls, equals(0));
+      expect(t2.readRequests, equals([(offset: 5, amount: 8)]));
+      expect(blob.length, equals(4));
       await lob.close();
       await blob.close();
+    });
+
+    test(
+      'a past-end read of a LOB that GREW (stale cached length) returns the '
+      'new data and advances length — null amount reads to the server end',
+      () async {
+        final (conn, t, lob) = await _fetchLob(_clob(5)); // stale: really 10
+        t.lobReadReplies.add((
+          data: Uint8List.fromList(utf8.encode('fghij')),
+          amount: 5,
+        ));
+        // Past the queue the fake answers "no data" — the server's end of LOB.
+        final value = await lob.read(offset: 6); // offset == staleLength + 1
+        expect(value, equals('fghij'));
+        expect(
+          lob.length,
+          equals(10),
+          reason: 'length advances to the end read',
+        );
+        // One data piece, then the terminating empty READ at the advanced
+        // offset — exactly the streams' end-of-data rule.
+        expect(
+          t.readRequests,
+          equals([(offset: 6, amount: 8132), (offset: 11, amount: 8132)]),
+        );
+        // With the length advanced, a whole read is now an ordinary in-range
+        // read for all 10 units. (Clearing the reply queue hands READs back to
+        // the single canned `lobReadData` payload.)
+        t.lobReadReplies.clear();
+        t.lobReadData = Uint8List.fromList(utf8.encode('abcdefghij'));
+        expect(await lob.read(), equals('abcdefghij'));
+        expect(t.readRequests.last, equals((offset: 1, amount: 10)));
+        await lob.close();
+      },
+    );
+
+    test(
+      'a past-end read of a grown LOB with an EXPLICIT amount stops once the '
+      'amount is delivered (no terminating READ)',
+      () async {
+        final (conn, t, lob) = await _fetchLob(_clob(5));
+        t.lobReadReplies.add((
+          data: Uint8List.fromList(utf8.encode('fgh')),
+          amount: 3,
+        ));
+        expect(await lob.read(offset: 6, amount: 3), equals('fgh'));
+        expect(t.readRequests, equals([(offset: 6, amount: 3)]));
+        expect(lob.length, equals(8));
+        await lob.close();
+      },
+    );
+
+    test('a past-end read whose explicit amount overshoots the growth reads to '
+        'the server end: a short piece, then the empty READ', () async {
+      final (conn, t, blob) = await _fetchLob(_blob(4));
+      t.lobReadReplies.add((data: Uint8List.fromList([5, 6]), amount: 2));
+      final bytes = await blob.read(offset: 5, amount: 10);
+      expect(bytes, equals([5, 6]));
+      // The continuation asks only for what is still outstanding.
+      expect(
+        t.readRequests,
+        equals([(offset: 5, amount: 10), (offset: 7, amount: 8)]),
+      );
+      expect(blob.length, equals(6));
+      await blob.close();
+    });
+
+    test(
+      'a past-end read caps each piece request at 2^32 units, so an absurd '
+      'explicit amount reads to the end instead of tripping ORA-22925',
+      () async {
+        final (conn, t, lob) = await _fetchLob(_clob(5));
+        t.lobReadReplies.add((
+          data: Uint8List.fromList(utf8.encode('fg')),
+          amount: 2,
+        ));
+        expect(await lob.read(offset: 6, amount: 1 << 62), equals('fg'));
+        expect(
+          t.readRequests,
+          equals([(offset: 6, amount: 1 << 32), (offset: 8, amount: 1 << 32)]),
+        );
+        expect(lob.length, equals(7));
+        await lob.close();
+      },
+    );
+
+    test('a past-end read starting beyond length + 1 advances length to the '
+        'end of what it read', () async {
+      final (conn, t, blob) = await _fetchLob(_blob(4));
+      t.lobReadReplies.add((data: Uint8List.fromList([1, 2, 3]), amount: 3));
+      expect(await blob.read(offset: 10), equals([1, 2, 3]));
+      expect(blob.length, equals(12)); // offset 10..12
+      await blob.close();
+    });
+
+    test('a past-end read assembles its pieces and decodes ONCE: a surrogate '
+        'pair split across two READs comes back whole (NCLOB)', () async {
+      final (conn, t, lob) = await _fetchLob(_nclob(0));
+      final pair = encodeUtf16Be('\u{1F600}'); // 4 bytes, 2 UCS-2 units
+      t.lobReadReplies.addAll([
+        // The server delivers only the high surrogate first...
+        (data: Uint8List.sublistView(pair, 0, 2), amount: 1),
+        // ...then the low surrogate plus two more units.
+        (
+          data: Uint8List.fromList([
+            ...pair.sublist(2),
+            ...encodeUtf16Be('ab'),
+          ]),
+          amount: 3,
+        ),
+      ]);
+      final value = await lob.read(offset: 1, amount: 4);
+      expect(value, equals('\u{1F600}ab'));
+      expect(
+        t.readRequests,
+        equals([(offset: 1, amount: 4), (offset: 2, amount: 3)]),
+      );
+      expect(lob.length, equals(4));
+      await lob.close();
+    });
+
+    test('a past-end read with no amount and no server chunk size uses '
+        'OracleLob.defaultStreamPieceSize per piece', () async {
+      final (conn, t, lob) = await _fetchLob(_nclob(0)); // chunkSize 0
+      expect(lob.chunkSize, equals(0));
+      expect(await lob.read(), equals(''));
+      expect(
+        t.readRequests.single.amount,
+        equals(OracleLob.defaultStreamPieceSize),
+      );
+      await lob.close();
+    });
+
+    test('a past-end READ reply that reports units but ships no payload fails '
+        'loud instead of reading as end of LOB', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      t.lobReadReplies.add((data: null, amount: 4));
+      await expectLater(
+        lob.read(offset: 6),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('internally inconsistent'),
+          ),
+        ),
+      );
+      expect(lob.length, equals(5));
+      await lob.close();
+    });
+
+    test(
+      'a past-end READ reply that over-reports its units fails loud',
+      () async {
+        final (conn, t, lob) = await _fetchLob(_clob(5));
+        t.lobReadReplies.add((
+          data: Uint8List.fromList(utf8.encode('fgh')),
+          amount: 3,
+        ));
+        await expectLater(
+          lob.read(offset: 6, amount: 2),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              contains('overshot'),
+            ),
+          ),
+        );
+        expect(lob.length, equals(5));
+        await lob.close();
+      },
+    );
+
+    test('a past-end READ reply with data but zero units fails loud (never '
+        'loops)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      t.lobReadReplies.add((
+        data: Uint8List.fromList(utf8.encode('fgh')),
+        amount: 0,
+      ));
+      await expectLater(
+        lob.read(offset: 6),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('made no progress'),
+          ),
+        ),
+      );
+      expect(t.lobReadCalls, equals(1));
+      await lob.close();
+    });
+
+    test('a past-end read whose decoded text is shorter than the units the '
+        'server reported fails loud (truncation guard)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      t.lobReadReplies.add((
+        data: Uint8List.fromList(utf8.encode('fg')), // 2 chars...
+        amount: 3, // ...reported as 3 units
+      ));
+      await expectLater(
+        lob.read(offset: 6, amount: 3),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            allOf(
+              contains('length mismatch'),
+              contains('past the cached length'),
+            ),
+          ),
+        ),
+      );
+      expect(lob.length, equals(5), reason: 'a failed read advances nothing');
+      await lob.close();
+    });
+
+    test('a past-end READ reply that omits its SB8 unit count falls back to '
+        'units derived from the payload BYTES', () async {
+      // BLOB: bytes ARE units. Null amount => continue to the empty READ.
+      final (conn, t, blob) = await _fetchLob(_blob(4));
+      t.lobReadReplies.add((data: Uint8List.fromList([7, 8, 9]), amount: null));
+      expect(await blob.read(offset: 5), equals([7, 8, 9]));
+      expect(t.readRequests[1].offset, equals(8), reason: 'advanced by 3');
+      expect(blob.length, equals(7));
+      // UTF-16BE NCLOB: two bytes per unit.
+      final (conn2, t2, nclob) = await _fetchLob(_nclob(2));
+      t2.lobReadReplies.add((data: encodeUtf16Be('xéz'), amount: null));
+      expect(await nclob.read(offset: 3, amount: 3), equals('xéz'));
+      expect(t2.readRequests, hasLength(1));
+      expect(nclob.length, equals(5));
+      // UTF-8 CLOB: units of the complete UTF-8 sequences.
+      final (conn3, t3, clob) = await _fetchLob(_clob(1));
+      t3.lobReadReplies.add((
+        data: Uint8List.fromList(utf8.encode('é\u{1F600}')),
+        amount: null,
+      ));
+      expect(await clob.read(offset: 2, amount: 3), equals('é\u{1F600}'));
+      expect(clob.length, equals(4));
+      await blob.close();
+      await nclob.close();
+      await clob.close();
+    });
+
+    test(
+      'a past-end READ with no unit count cannot exceed the request',
+      () async {
+        final (_, t, lob) = await _fetchLob(_blob(0));
+        t.lobReadReplies.add((
+          data: Uint8List.fromList([1, 2, 3]),
+          amount: null,
+        ));
+        await expectLater(
+          lob.read(offset: 1, amount: 2),
+          throwsA(isA<OracleException>()),
+        );
+        await lob.close();
+      },
+    );
+
+    test(
+      'closing the handle during the final past-end READ fails loud',
+      () async {
+        final (_, t, lob) = await _fetchLob(_blob(0));
+        t.lobReadReplies.add((data: Uint8List.fromList([7]), amount: 1));
+        final gate = Completer<void>();
+        t.lobOpGate = gate;
+        final pending = lob.read(offset: 1, amount: 1);
+        await Future<void>.delayed(Duration.zero);
+        await lob.close();
+        gate.complete();
+        await expectLater(pending, throwsA(isA<OracleException>()));
+        expect(lob.length, equals(0));
+      },
+    );
+
+    test('closing the handle while a past-end read is between pieces fails the '
+        'read loud instead of truncating it', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(0));
+      t.lobReadReplies.add((
+        data: Uint8List.fromList(utf8.encode('abc')),
+        amount: 3,
+      ));
+      final gate = Completer<void>();
+      t.lobOpGate = gate;
+      final pending = lob.read(); // parks inside the FIRST READ
+      await Future<void>.delayed(Duration.zero);
+      await lob.close();
+      gate.complete();
+      await expectLater(
+        pending,
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('closed'),
+          ),
+        ),
+      );
+      expect(t.lobReadCalls, equals(1), reason: 'no READ after the close');
     });
 
     test('a legitimate in-range READ that returns no data fails loud', () async {
@@ -904,21 +1233,22 @@ void main() {
       expect(lob.isClosed, isTrue);
     });
 
-    test('an empty/past-end read short-circuit still fails loud after '
-        'connection.close() (AC5)', () async {
-      // The empty-LOB / past-end read short-circuits return BEFORE the wire
-      // round trip; connection.close() must still make them fail loud rather
-      // than silently returning '' / Uint8List(0).
+    test('an empty/past-end read still fails loud after connection.close(), '
+        'before any wire round trip (AC5)', () async {
+      // An empty-LOB / past-end read used to short-circuit before the wire
+      // round trip (1.4.0) and now asks the server (DW-28); either way
+      // connection.close() must make it fail loud, never return '' /
+      // Uint8List(0) — and before any READ is sent.
       final (conn, t, lob) = await _fetchLob(_clob(0)); // empty CLOB
       await conn.close();
       await expectLater(
-        lob.read(), // would short-circuit to '' on an open handle
+        lob.read(), // past the cached length 0
         throwsA(isA<OracleException>()),
       );
       final (conn2, t2, blob) = await _fetchLob(_blob(4));
       await conn2.close();
       await expectLater(
-        blob.read(offset: 5, amount: 8), // past-end short-circuit
+        blob.read(offset: 5, amount: 8), // past the cached length
         throwsA(isA<OracleException>()),
       );
       expect(t.lobReadCalls, equals(0));
@@ -966,18 +1296,18 @@ void main() {
     });
 
     test(
-      'empty/past-end read short-circuits fail loud on a broken transport',
+      'empty/past-end reads fail loud on a broken transport, before any READ',
       () async {
         final (conn, t, lob) = await _fetchLob(_clob(0)); // empty CLOB
         t.connected = false;
         await expectLater(
-          lob.read(), // would short-circuit to '' on a live connection
+          lob.read(), // past the cached length 0
           throwsA(isA<OracleException>()),
         );
         final (conn2, t2, blob) = await _fetchLob(_blob(4));
         t2.connected = false;
         await expectLater(
-          blob.read(offset: 5, amount: 8), // past-end short-circuit
+          blob.read(offset: 5, amount: 8), // past the cached length
           throwsA(isA<OracleException>()),
         );
         expect(t.lobReadCalls, equals(0));
@@ -1464,9 +1794,10 @@ void main() {
         final t = _tempCapableTransport();
         final conn = _connFor(t);
         final lob = await conn.createTemporaryClob();
-        // A freshly created temp LOB is empty: read() short-circuits.
+        // A freshly created temp LOB is empty: read() asks the server (one
+        // READ past the cached length 0), which reports no data.
         expect(await lob.read(), equals(''));
-        expect(t.lobReadCalls, equals(0));
+        expect(t.lobReadCalls, equals(1));
         await lob.write(1, 'hello');
         expect(lob.length, equals(5));
         t.lobReadData = Uint8List.fromList(utf8.encode('hello'));
@@ -2421,8 +2752,22 @@ void main() {
       final (conn2, t2, nclob) = await _fetchLob(_nclob(2)); // chunkSize 0
       t2.lobReadReplies.add((data: encodeUtf16Be('hi'), amount: 2));
       await nclob.textStream().toList();
-      expect(t2.readRequests.first.amount, equals(defaultLobStreamPieceSize));
+      expect(
+        t2.readRequests.first.amount,
+        equals(OracleLob.defaultStreamPieceSize),
+      );
       await nclob.close();
+    });
+
+    test('pieceSize follows a refreshed chunkSize', () async {
+      final (conn, t, lob) = await _fetchLob(_nclob(2)); // chunkSize 0
+      t.opAmount[tnsLobOpGetLength] = 2;
+      t.opAmount[tnsLobOpGetChunkSize] = 4066;
+      await lob.refresh();
+      t.lobReadReplies.add((data: encodeUtf16Be('hi'), amount: 2));
+      await lob.textStream().toList();
+      expect(t.readRequests.first.amount, equals(4066));
+      await lob.close();
     });
 
     group('synchronous validation (never a delayed stream error)', () {
@@ -3196,6 +3541,362 @@ void main() {
       );
       expect(t.lobWriteCalls, equals(0));
     });
+  });
+
+  group('OracleLob.trim', () {
+    test('issues ONE TRIM carrying the new size as its amount, and sets length '
+        'to it', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(10));
+      await lob.trim(3);
+      expect(t.sentOperations, equals([tnsLobOpTrim]));
+      expect(
+        t.opRequests.single,
+        equals((operation: tnsLobOpTrim, sendAmount: true, amount: 3)),
+      );
+      expect(lob.length, equals(3));
+      expect(t.lobReadCalls, equals(0));
+      expect(t.lobWriteCalls, equals(0));
+      // The next whole read asks for exactly the trimmed size.
+      t.lobReadData = Uint8List.fromList(utf8.encode('abc'));
+      expect(await lob.read(), equals('abc'));
+      expect(t.readRequests.single, equals((offset: 1, amount: 3)));
+      await lob.close();
+    });
+
+    test(
+      'BLOB units are bytes; trim(0) empties the LOB and a later read() asks '
+      'the server',
+      () async {
+        final (conn, t, blob) = await _fetchLob(_blob(8));
+        await blob.trim(0);
+        expect(t.opRequests.single.amount, equals(0));
+        expect(blob.length, equals(0));
+        expect(await blob.read(), isEmpty);
+        expect(t.lobReadCalls, equals(1));
+        await blob.close();
+      },
+    );
+
+    test('the round trip is issued even when newSize equals the cached length '
+        '(the cache may be stale; the server decides)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      await lob.trim(5);
+      expect(t.trimCalls, equals(1));
+      expect(lob.length, equals(5));
+      await lob.close();
+    });
+
+    test(
+      'a created temporary handle trims too, and stays non-blocking',
+      () async {
+        final t = _tempCapableTransport();
+        final conn = _connFor(t);
+        final lob = await conn.createTemporaryBlob();
+        await lob.write(1, Uint8List.fromList([1, 2, 3, 4, 5, 6]));
+        await lob.trim(2);
+        expect(lob.length, equals(2));
+        expect(conn.isExecuting, isFalse);
+        // Still open, still not blocking: an unrelated statement runs.
+        t.nextResponses.add(ExecuteResponse(isSuccess: true, cursorId: 0));
+        await conn.execute('SELECT 1 FROM dual');
+        await lob.close();
+      },
+    );
+
+    test(
+      'a negative newSize throws ArgumentError before any wire round trip',
+      () async {
+        final (conn, t, lob) = await _fetchLob(_clob(5));
+        expect(() => lob.trim(-1), throwsArgumentError);
+        expect(t.trimCalls, equals(0));
+        expect(t.sentOperations, isEmpty);
+        expect(lob.length, equals(5));
+        await lob.close();
+      },
+    );
+
+    test('a closed handle, a closed connection and a broken transport all fail '
+        'loud before any wire round trip', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      await lob.close();
+      await expectLater(
+        lob.trim(1),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('closed'),
+          ),
+        ),
+      );
+      final (conn2, t2, lob2) = await _fetchLob(_clob(5));
+      await conn2.close();
+      await expectLater(lob2.trim(1), throwsA(isA<OracleException>()));
+      final (conn3, t3, lob3) = await _fetchLob(_clob(5));
+      t3.connected = false;
+      await expectLater(lob3.trim(1), throwsA(isA<OracleException>()));
+      expect(t.trimCalls + t2.trimCalls + t3.trimCalls, equals(0));
+    });
+
+    test('a server rejection propagates, leaves length unchanged and the '
+        'connection usable', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(10));
+      t.failOperations.add(tnsLobOpTrim);
+      await expectLater(lob.trim(2), throwsA(isA<OracleException>()));
+      expect(lob.length, equals(10), reason: 'only a successful TRIM sets it');
+      expect(conn.isExecuting, isFalse, reason: 'the bracket was released');
+      t.failOperations.clear();
+      await lob.trim(2);
+      expect(lob.length, equals(2));
+      await lob.close();
+    });
+
+    test(
+      'copies the server-echoed locator back into the live buffer',
+      () async {
+        final (conn, t, lob) = await _fetchLob(_clob(10));
+        final echoed = Uint8List(tnsLobLocatorBufferSize)
+          ..fillRange(0, tnsLobLocatorBufferSize, 0x3C);
+        t.opUpdatedLocator[tnsLobOpTrim] = echoed;
+        await lob.trim(3);
+        t.lobReadData = Uint8List.fromList(utf8.encode('abc'));
+        await lob.read();
+        expect(t.sentLocators.last, equals(echoed));
+        await lob.close();
+      },
+    );
+
+    test('an in-flight read rejects an overlapping trim (one LOB round trip at '
+        'a time)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(3));
+      t.lobReadData = Uint8List.fromList(utf8.encode('abc'));
+      final gate = Completer<void>();
+      t.lobOpGate = gate;
+      final first = lob.read();
+      await Future<void>.delayed(Duration.zero);
+      await expectLater(
+        lob.trim(1),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('Concurrent operation'), contains('trim()')),
+          ),
+        ),
+      );
+      gate.complete();
+      expect(await first, equals('abc'));
+      expect(t.trimCalls, equals(0));
+      expect(lob.length, equals(3));
+      await lob.close();
+    });
+  });
+
+  group('OracleLob.refresh', () {
+    test('re-reads length and chunkSize from the server: one GET_LENGTH then '
+        'one GET_CHUNK_SIZE, both sendAmount', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5)); // cached 5 / 8132
+      t.opAmount[tnsLobOpGetLength] = 42;
+      t.opAmount[tnsLobOpGetChunkSize] = 16264;
+      await lob.refresh();
+      expect(lob.length, equals(42));
+      expect(lob.chunkSize, equals(16264));
+      expect(
+        t.opRequests,
+        equals([
+          (operation: tnsLobOpGetLength, sendAmount: true, amount: 0),
+          (operation: tnsLobOpGetChunkSize, sendAmount: true, amount: 0),
+        ]),
+      );
+      expect(t.lobReadCalls, equals(0));
+      await lob.close();
+    });
+
+    test('a refreshed (GROWN) length makes an in-range read() cover the whole '
+        'current value', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      t.opAmount[tnsLobOpGetLength] = 10;
+      t.opAmount[tnsLobOpGetChunkSize] = 8132;
+      await lob.refresh();
+      t.lobReadData = Uint8List.fromList(utf8.encode('abcdefghij'));
+      expect(await lob.read(), equals('abcdefghij'));
+      expect(t.readRequests.single, equals((offset: 1, amount: 10)));
+      await lob.close();
+    });
+
+    test('the SHRUNK remedy: after refresh() a whole read() succeeds where the '
+        'stale cached length would fail loud', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(40)); // stale: really 10
+      t.lobReadData = Uint8List.fromList(utf8.encode('0123456789'));
+      await expectLater(lob.read(), throwsA(isA<OracleException>()));
+      t.opAmount[tnsLobOpGetLength] = 10;
+      t.opAmount[tnsLobOpGetChunkSize] = 8132;
+      await lob.refresh();
+      expect(lob.length, equals(10));
+      expect(await lob.read(), equals('0123456789'));
+      expect(t.readRequests.last, equals((offset: 1, amount: 10)));
+      await lob.close();
+    });
+
+    test('a created temporary handle refreshes too', () async {
+      final t = _tempCapableTransport(chunkSize: 8132);
+      final conn = _connFor(t);
+      final lob = await conn.createTemporaryClob();
+      await lob.write(1, 'hello');
+      t.opAmount[tnsLobOpGetLength] = 5;
+      t.opAmount[tnsLobOpGetChunkSize] = 8132;
+      await lob.refresh();
+      expect(lob.length, equals(5));
+      expect(lob.chunkSize, equals(8132));
+      await lob.close();
+    });
+
+    test(
+      'a GET_LENGTH reply with no amount fails loud and changes nothing',
+      () async {
+        final (conn, t, lob) = await _fetchLob(_clob(5));
+        t.opAmount[tnsLobOpGetChunkSize] = 16264; // GET_LENGTH left unset
+        await expectLater(
+          lob.refresh(),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('GET_LENGTH returned no amount'),
+                ),
+          ),
+        );
+        expect(lob.length, equals(5));
+        expect(lob.chunkSize, equals(8132));
+        expect(conn.isExecuting, isFalse);
+        expect(t.sentOperations, equals([tnsLobOpGetLength]));
+        await lob.close();
+      },
+    );
+
+    test('a negative amount fails loud', () async {
+      final (conn, t, lob) = await _fetchLob(_blob(5));
+      t.opAmount[tnsLobOpGetLength] = 5;
+      t.opAmount[tnsLobOpGetChunkSize] = -1;
+      await expectLater(
+        lob.refresh(),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('GET_CHUNK_SIZE returned a negative amount'),
+          ),
+        ),
+      );
+      expect(lob.chunkSize, equals(8132));
+      await lob.close();
+    });
+
+    test('a failed GET_CHUNK_SIZE leaves BOTH cached values unchanged (never a '
+        'half-applied refresh)', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      t.opAmount[tnsLobOpGetLength] = 99;
+      t.failOperations.add(tnsLobOpGetChunkSize);
+      await expectLater(lob.refresh(), throwsA(isA<OracleException>()));
+      expect(lob.length, equals(5), reason: 'not the 99 GET_LENGTH reported');
+      expect(lob.chunkSize, equals(8132));
+      expect(conn.isExecuting, isFalse);
+      await lob.close();
+    });
+
+    test('a closed handle, a closed connection and a broken transport all fail '
+        'loud before any wire round trip', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      await lob.close();
+      await expectLater(
+        lob.refresh(),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('closed'),
+          ),
+        ),
+      );
+      final (conn2, t2, lob2) = await _fetchLob(_clob(5));
+      await conn2.close();
+      await expectLater(lob2.refresh(), throwsA(isA<OracleException>()));
+      final (conn3, t3, lob3) = await _fetchLob(_clob(5));
+      t3.connected = false;
+      await expectLater(lob3.refresh(), throwsA(isA<OracleException>()));
+      expect([
+        ...t.sentOperations,
+        ...t2.sentOperations,
+        ...t3.sentOperations,
+      ], isEmpty);
+    });
+
+    test('a pool-reclaimed handle surfaces the pool-reclaim error', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      await conn.forceCloseOpenLobs(reclaimedByPool: true);
+      await expectLater(
+        lob.refresh(),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('pool reclaimed'),
+          ),
+        ),
+      );
+      await expectLater(
+        lob.trim(0),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.message,
+            'message',
+            contains('pool reclaimed'),
+          ),
+        ),
+      );
+      expect(t.sentOperations, isEmpty);
+    });
+
+    test('each round trip copies the server-echoed locator back, so the '
+        'GET_CHUNK_SIZE already ships the GET_LENGTH echo', () async {
+      final (conn, t, lob) = await _fetchLob(_clob(5));
+      final echoed = Uint8List(tnsLobLocatorBufferSize)
+        ..fillRange(0, tnsLobLocatorBufferSize, 0x7E);
+      t.opUpdatedLocator[tnsLobOpGetLength] = echoed;
+      t.opAmount[tnsLobOpGetLength] = 5;
+      t.opAmount[tnsLobOpGetChunkSize] = 8132;
+      await lob.refresh();
+      expect(t.sentLocators, hasLength(2));
+      expect(t.sentLocators[1], equals(echoed));
+      await lob.close();
+    });
+  });
+
+  group('OracleLob.defaultStreamPieceSize (DW-115)', () {
+    test('is 32768, on the class', () {
+      expect(OracleLob.defaultStreamPieceSize, equals(32768));
+    });
+
+    test(
+      'the top-level defaultLobStreamPieceSize is a @Deprecated alias of the '
+      'same value',
+      () {
+        expect(
+          // ignore: deprecated_member_use_from_same_package
+          defaultLobStreamPieceSize,
+          equals(OracleLob.defaultStreamPieceSize),
+        );
+        final library = currentMirrorSystem()
+            .libraries[Uri.parse('package:oracledb/src/oracle_lob.dart')]!;
+        final declaration = library.declarations[#defaultLobStreamPieceSize]!;
+        expect(
+          declaration.metadata.map((m) => m.reflectee),
+          contains(isA<Deprecated>()),
+        );
+      },
+    );
   });
 }
 

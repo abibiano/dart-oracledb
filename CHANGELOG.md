@@ -99,6 +99,35 @@
   because those rows cannot return LOB handles. `queryStream()` /
   `executeStream()` take no options and always decode.
   Validated against Oracle 23ai and Oracle 21c.
+- **`OracleLob.trim(newSize)`** shortens a LOB to `newSize` units (characters
+  for CLOB/NCLOB, bytes for BLOB) in one round trip and sets `length`
+  (node-oracledb `lob.trim()` parity, except that `newSize` is required). It
+  needs a writable locator — a created temporary LOB, a LOB OUT / IN OUT bind,
+  or a `SELECT ... FOR UPDATE` locator — and on a persistent LOB the change is
+  part of the current transaction. The server's own errors surface unchanged
+  (`ORA-22926` past the end, `ORA-22920` read-only locator, `ORA-22831` for a
+  CLOB size that would split a surrogate pair), leaving the handle and the
+  connection usable; a negative size throws `ArgumentError` before any round
+  trip.
+- **`OracleLob.refresh()`** re-reads the cached `length` and `chunkSize` from
+  the server (one GET_LENGTH and one GET_CHUNK_SIZE round trip) — a
+  Dart-driver addition, node-oracledb has none. A failed refresh changes
+  neither value. On a read-consistent fetched locator the server reports the
+  length the handle actually reads, so `length` and `read()` always agree.
+- **`OracleLob.defaultStreamPieceSize`** (32,768) is the stream fallback piece
+  size, now on the class. The top-level `defaultLobStreamPieceSize` export is
+  `@Deprecated` and will be removed in a future major release.
+- **Behavior change:** `OracleLob.read()` / `getData()` starting **past the
+  cached `length`** — including any read of a handle whose cached length is
+  `0`, such as an empty LOB or a fresh `createTemporary*()` handle — now asks
+  the server instead of returning the empty value with no round trip. A LOB
+  that really ends there costs one READ and still returns the empty value; a
+  LOB that grew since the handle was fetched now returns the new data (read
+  piece by piece until the requested `amount` or the server's end of data) and
+  advances `length`, where 1.4.0 silently returned nothing. Reads that start
+  inside the cached `length` are unchanged.
+
+  Validated against Oracle 23ai and Oracle 21c.
 
 ### Fixes
 

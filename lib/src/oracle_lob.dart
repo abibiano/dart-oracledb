@@ -24,17 +24,17 @@ import 'oracle_bind.dart';
 import 'protocol/constants.dart';
 import 'protocol/lob_locator.dart';
 
-/// Piece size (in the LOB's native units) that [OracleLob.textStream] and
-/// [OracleLob.byteStream] fall back to when the handle reports no server chunk
-/// size (`chunkSize == 0`).
+/// Deprecated top-level alias of [OracleLob.defaultStreamPieceSize] (same
+/// value, 32,768).
 ///
-/// The default is [OracleLob.chunkSize] whenever the server reported one —
-/// node-oracledb `lob.pieceSize` parity, whose default is also `chunkSize`, with
-/// a multiple of `chunkSize` recommended for efficiency. Every fetched and
-/// created-temporary handle carries a real chunk size (measured: 8,132 units for
-/// a table LOB, 32,600 for a temporary one), so this constant is only reached by
-/// a handle whose prefetch metadata omitted it.
-const int defaultLobStreamPieceSize = 32768;
+/// It was the only bare, un-prefixed name among the package's exports; the
+/// value now lives on the class it describes. Kept so 1.4.0 code keeps
+/// compiling — switch to [OracleLob.defaultStreamPieceSize].
+@Deprecated(
+  'Use OracleLob.defaultStreamPieceSize instead. This top-level alias will be '
+  'removed in a future major release.',
+)
+const int defaultLobStreamPieceSize = OracleLob.defaultStreamPieceSize;
 
 /// A handle to a CLOB / NCLOB / BLOB value that reads and writes its data in
 /// bounded pieces, holding its connection open until [close]d.
@@ -87,6 +87,14 @@ const int defaultLobStreamPieceSize = 32768;
 ///   [length]); [writeStream] writes one piece per caller chunk at the running
 ///   offset.
 ///
+/// ## Cached length, trim and refresh
+///
+/// [length] and [chunkSize] are cached on the handle (seeded from the
+/// locator's prefetch metadata, advanced locally by [write]). [refresh]
+/// re-reads both from the server, [trim] shortens the LOB and sets [length],
+/// and a [read] that starts past the cached [length] always asks the server
+/// rather than answering from the cache.
+///
 /// ## One operation at a time
 ///
 /// An open **fetched** [OracleLob] owns its connection's single TTC byte stream,
@@ -99,9 +107,9 @@ const int defaultLobStreamPieceSize = 32768;
 /// A handle from `createTemporaryClob()` / `createTemporaryNClob()` /
 /// `createTemporaryBlob()` is the deliberate exception: it owns no cursor and no
 /// fetch state, and binding it into a statement is its whole purpose, so it does
-/// **not** make the connection busy. Each individual [read] / [write] round trip
-/// is still serialized — two overlapping LOB ops, or a LOB op overlapping an
-/// in-flight `execute()`, still fail fast.
+/// **not** make the connection busy. Each individual [read] / [write] / [trim] /
+/// [refresh] round trip is still serialized — two overlapping LOB ops, or a LOB
+/// op overlapping an in-flight `execute()`, still fail fast.
 class OracleLob {
   /// Internal constructor used by `OracleConnection` to wrap a fetched
   /// [LobLocator], or a temporary one the driver just created. Not for external
@@ -120,13 +128,32 @@ class OracleLob {
   }) : _connection = connection,
        _locator = locator,
        _length = locator.length,
+       _chunkSize = locator.chunkSize,
        _createdTemporary = createdTemporary;
+
+  /// Piece size, in the LOB's native units, used when a handle reports no
+  /// server chunk size (`chunkSize == 0`): the default `pieceSize` of
+  /// [textStream] / [byteStream], and the piece size of a [read] that starts
+  /// past the cached [length] with no `amount`.
+  ///
+  /// Those defaults are [chunkSize] whenever the server reported one —
+  /// node-oracledb `lob.pieceSize` parity, whose default is also `chunkSize`,
+  /// with a multiple of `chunkSize` recommended for efficiency. Fetched and
+  /// created-temporary handles normally carry a real chunk size (measured on
+  /// Oracle 23ai and 21c: 8,132 units for a table LOB and a created temporary
+  /// one, 32,600 for a fetched `TO_CLOB(...)`-style expression LOB), so this
+  /// constant is only reached by a handle whose metadata reports none — e.g.
+  /// the locator of an `EMPTY_CLOB()` value that was never stored.
+  ///
+  /// Replaces the deprecated top-level `defaultLobStreamPieceSize`.
+  static const int defaultStreamPieceSize = 32768;
 
   final OracleConnection _connection;
 
   /// The wrapped internal locator. Its raw bytes are the server reference used
-  /// for every READ/WRITE round trip; its metadata drives [type], [chunkSize],
-  /// and the charset decode/encode path.
+  /// for every LOB round trip; its metadata drives [type] and the charset
+  /// decode/encode path, and seeds the cached [length] / [chunkSize] (the
+  /// locator's own immutable copies are never updated afterwards).
   final LobLocator _locator;
 
   /// Whether this handle wraps a temporary LOB THIS driver created for the
@@ -148,10 +175,16 @@ class OracleLob {
   bool get isCreatedTemporary => _createdTemporary;
 
   /// Cached LOB length in the type's native units (characters for CLOB/NCLOB,
-  /// bytes for BLOB). Seeded from the locator's prefetch metadata and advanced
-  /// locally after a [write] (node-oracledb `write()` parity — there is no
-  /// server round trip to re-verify it).
+  /// bytes for BLOB). Seeded from the locator's prefetch metadata, advanced
+  /// locally after a [write] (node-oracledb `write()` parity — no round trip
+  /// re-verifies it) and after a [read] that found data past it, set to the
+  /// new size by [trim], and replaced by the server's answer on [refresh].
   int _length;
+
+  /// Cached server chunk size, same units as [_length]. Seeded from the
+  /// locator's prefetch metadata (or the GET_CHUNK_SIZE a created-temporary
+  /// handle issues), replaced by the server's answer on [refresh].
+  int _chunkSize;
 
   bool _closed = false;
 
@@ -171,7 +204,12 @@ class OracleLob {
   }
 
   /// The LOB length in the type's native units — characters (UCS-2 code units)
-  /// for CLOB/NCLOB, bytes for BLOB. Advanced locally after a [write].
+  /// for CLOB/NCLOB, bytes for BLOB.
+  ///
+  /// A **cached** value: seeded from the locator's prefetch metadata, advanced
+  /// locally after a [write] (and after a [read] past it that found data), set
+  /// by [trim], and re-read from the server only by [refresh]. See [read]'s
+  /// "Cached length" section for what a stale value does and does not affect.
   int get length => _length;
 
   /// The server LOB-prefetch chunk size in the same units as [length]
@@ -182,14 +220,17 @@ class OracleLob {
   /// and a multiple of it is the recommended explicit `pieceSize`: Oracle stores
   /// and transfers a LOB in chunks, so piece boundaries aligned to them avoid
   /// re-reading a partially consumed chunk. When it is `0` the streams fall back
-  /// to [defaultLobStreamPieceSize].
+  /// to [defaultStreamPieceSize].
   ///
   /// A handle from `OracleConnection.createTemporary*()` seeds this from a real
   /// server GET_CHUNK_SIZE issued right after creation (node-oracledb
-  /// `lob.js create()` parity), so it is `> 0` there. Measured values: 8,132
-  /// units for a table LOB and 32,600 for a temporary one, on both Oracle 23ai
-  /// and 21c.
-  int get chunkSize => _locator.chunkSize;
+  /// `lob.js create()` parity), so it is `> 0` there. Measured values, on both
+  /// Oracle 23ai and 21c: 8,132 units for a table LOB and for a created
+  /// temporary one, 32,600 for a fetched `TO_CLOB(...)`-style expression LOB,
+  /// and `0` for the locator of an `EMPTY_CLOB()` / `EMPTY_BLOB()` value that
+  /// was never stored. Cached like [length]; [refresh] re-reads it from the
+  /// server (measured: the same values as the prefetch metadata).
+  int get chunkSize => _chunkSize;
 
   /// Whether this handle references a **temporary** LOB — one occupying session
   /// temp-LOB space (visible in `V$TEMPORARY_LOBS`) that must be freed rather
@@ -267,30 +308,38 @@ class OracleLob {
   /// common case costs one round trip. Use [textStream] / [byteStream] instead
   /// when the point is to avoid holding the whole value in memory.
   ///
-  /// **Cached-length caveat.** The LOB's [length] is seeded from the locator's
-  /// prefetch metadata when the handle is created and is never re-read from the
-  /// server (node-oracledb parity). Because a `fetchLobs` handle reads lazily —
-  /// well after the SELECT/FETCH that produced it — a plain (non-`FOR UPDATE`)
-  /// locator whose LOB another session modifies and commits in between can leave
-  /// that cached length stale in either direction: a since-shrunk LOB can make
-  /// this method fail loud (a length mismatch, or "made no progress"), and for a
-  /// since-grown LOB a `read(offset: staleLength + 1)` short-circuits to the
-  /// empty value **without a round trip**.
+  /// **Cached length.** [length] is a cached value (see [length]), and how this
+  /// method uses it depends on where [offset] falls:
+  /// - **At or before the cached end** (`offset <= length`): the request is
+  ///   capped at the units the cached [length] says remain from [offset]. An
+  ///   explicit [amount] that overshoots reads to that end rather than failing
+  ///   (node-oracledb `getData(offset, amount)` parity).
+  /// - **Past the cached end** (`offset > length` — which includes every read
+  ///   of a handle whose cached [length] is `0`): the cache is not trusted, the
+  ///   server is asked. One READ goes out at [offset]; if the LOB really ends
+  ///   before it, that single round trip returns the empty value. If the LOB
+  ///   grew, the read continues piece by piece — the rest of an explicit
+  ///   [amount], or the [textStream] / [byteStream] default piece size when
+  ///   [amount] is `null` — until [amount] is met or a READ comes back empty
+  ///   (so a `null`-amount read pays one terminating empty READ, exactly like
+  ///   the streams), returns the new data, and advances [length] to the end of
+  ///   what it read.
   ///
-  /// The two directions have DIFFERENT remedies (measured on Oracle 23ai and
-  /// 21c, Story 12.4):
-  /// - **Grown:** re-**select** the value. An explicit [amount] does not help
-  ///   here — it is still capped at the units remaining from the cached [length],
-  ///   so it can only make a read shorter, never reach past the stale end.
-  /// - **Shrunk:** pass an explicit [amount] covering only units you know exist,
-  ///   so a read cannot ask for units that are gone.
+  /// So a stale cached length can only affect a read that starts inside the
+  /// cached range: for a since-grown LOB it returns the prefix up to the stale
+  /// end (no error), and for a since-shrunk LOB it can fail loud (a length
+  /// mismatch, or "made no progress") rather than return short data. The remedy for both directions is
+  /// [refresh] before the read (or a re-select); for the grown direction,
+  /// continuing with `read(offset: length + 1)` also reaches the new data, and
+  /// for the shrunk one an explicit [amount] covering only units that still
+  /// exist avoids the failure.
   ///
-  /// In practice a fetched locator is read-CONSISTENT, so a handle fetched before
-  /// another session's committed update was measured to keep returning the OLD
-  /// value in full on both fixtures — correct data, never silently truncated —
-  /// and a re-`SELECT` is what surfaces the new value. [textStream] /
-  /// [byteStream] are immune by construction: they stop on an empty server READ
-  /// rather than at the cached [length].
+  /// In practice a fetched locator is read-CONSISTENT: measured on Oracle 23ai
+  /// and 21c, a handle fetched before another session's committed update keeps
+  /// returning the OLD value in full, its READ past the old end comes back
+  /// empty, and [refresh] reports the OLD length too — correct, self-consistent
+  /// data in both directions. A re-`SELECT` is what surfaces the new value.
+  /// [textStream] / [byteStream] never consult the cached [length] at all.
   ///
   /// **Supplemental-character caveat (CLOB/NCLOB):** a UCS-2 code unit is
   /// equivalent to a character for all but supplemental (astral) characters,
@@ -312,21 +361,15 @@ class OracleLob {
   Future<Object> read({int offset = 1, int? amount}) async {
     _ensureOpen();
     _validateOffsetAmount(offset, amount);
-    // A null amount reads from offset to the end of the LOB. A read that starts
-    // at or past the end (or an empty LOB) has nothing to fetch — return the
-    // empty value without a wire round trip, matching the internal materialize
-    // path's EMPTY_CLOB()/EMPTY_BLOB() short-circuit.
+    // A read starting past the CACHED end — which includes every read of a
+    // handle whose cached length is 0 — is answered by the server, never by
+    // the cache: the cached length may be stale, and an empty value the server
+    // was never asked for would be a silent lie for a LOB that grew (DW-28).
+    if (offset > _length) return _readPastCachedEnd(offset, amount);
+    // In range: `offset <= _length`, so `_length >= 1` and a null amount (read
+    // from offset to the end) resolves to at least one unit; an explicit
+    // amount was validated `> 0` above.
     final effectiveAmount = amount ?? (_length - offset + 1);
-    // Nothing to read: an empty LOB, a read starting at or past the end, or a
-    // range that resolves to zero units. Short-circuit without a wire round
-    // trip, matching the internal materialize path's EMPTY_CLOB()/EMPTY_BLOB()
-    // behavior. The `offset > _length` guard applies to an EXPLICIT `amount`
-    // too: an offset past the end has nothing to fetch, so it must not issue a
-    // needless READ past end — parity with the null-amount path (which resolves
-    // to `effectiveAmount <= 0` for the same offset).
-    if (_length == 0 || offset > _length || effectiveAmount <= 0) {
-      return _isBlob ? Uint8List(0) : '';
-    }
     // The number of units the in-range request should yield: the caller's
     // requested amount, capped at what actually remains from [offset]
     // (`_length - offset + 1`). An EXPLICIT `amount` may deliberately overshoot
@@ -349,10 +392,10 @@ class OracleLob {
       amount: expectedUnits,
     )).bytes;
     // A legitimate in-range READ that comes back empty is a fault, not a valid
-    // empty value (the empty cases were short-circuited above) — fail loud
-    // rather than silently substituting an empty result, the same policy the
-    // internal single-read materialize path enforces ("CLOB read returned no
-    // data").
+    // empty value (a read that cannot be in range went to
+    // `_readPastCachedEnd` above) — fail loud rather than silently substituting
+    // an empty result, the same policy the internal single-read materialize
+    // path enforces ("CLOB read returned no data").
     if (bytes.isEmpty) {
       throw OracleException(
         errorCode: oraProtocolError,
@@ -361,6 +404,96 @@ class OracleLob {
             '$offset, amount $effectiveAmount)',
       );
     }
+    return _decodeExact(
+      bytes,
+      expectedUnits: expectedUnits,
+      request: 'the in-range request (offset $offset, amount $effectiveAmount)',
+    );
+  }
+
+  /// The [read] path for an [offset] past the cached [length]: asks the
+  /// server instead of trusting the cache.
+  ///
+  /// Issues one raw READ at [offset] (the same single-READ seam the streams
+  /// use, where an empty reply means end of data rather than a fault). An empty
+  /// reply means the LOB really ends before [offset]: the empty value is
+  /// returned after that one round trip. Otherwise the LOB grew past the cached
+  /// [length], and the read continues piece by piece — each piece asks for the
+  /// rest of an explicit [amount], or for the stream piece size when [amount]
+  /// is `null` — until the explicit [amount] is delivered or a READ comes back
+  /// empty. The pieces' bytes are assembled and decoded **once**, so a piece
+  /// boundary inside a multi-byte sequence or surrogate pair cannot corrupt the
+  /// value, and the cached [length] advances to the end of what was read.
+  ///
+  /// Every piece goes through the same reply cross-checks as the streams
+  /// (units without payload, an over-reporting reply, data with no progress),
+  /// and liveness is re-checked before every piece after the first.
+  ///
+  /// A piece never asks for more than [_maxPastEndPieceUnits]: unlike the
+  /// in-range path, nothing here can cap an overshooting [amount] at a known
+  /// end, and the server rejects a READ whose amount runs past the maximum LOB
+  /// size (`ORA-22925`, measured on 23ai and 21c with `1 << 62`) — so an
+  /// absurd [amount] reads to the end like any other overshoot instead.
+  Future<Object> _readPastCachedEnd(int offset, int? amount) async {
+    final pieceUnits = amount ?? _defaultPieceUnits;
+    final assembled = BytesBuilder(copy: false);
+    var next = offset;
+    var delivered = 0;
+    while (amount == null || delivered < amount) {
+      // `read()` already checked liveness for the first piece (synchronously,
+      // before any await); re-check before each continuation, like the
+      // streams, so a handle closed mid-read fails loud instead of truncating.
+      if (next != offset) _ensureOpen();
+      final outstanding = amount == null ? pieceUnits : amount - delivered;
+      final request = outstanding < _maxPastEndPieceUnits
+          ? outstanding
+          : _maxPastEndPieceUnits;
+      final piece = await _connection.runLobReadPiece(
+        sourceLocator: _locator.locator,
+        offset: next,
+        amount: request,
+      );
+      _ensureOpen();
+      if (piece.bytes.isEmpty) {
+        _requirePayloadForUnits(piece.units, next, request);
+        break; // the server has nothing at `next`: the LOB ends here
+      }
+      final units = _requireProgress(
+        _requireWithinRequest(
+          piece.units ?? _payloadUnits(piece.bytes),
+          request,
+          next,
+        )!,
+        next,
+      );
+      assembled.add(piece.bytes);
+      delivered += units;
+      next += units;
+    }
+    if (delivered == 0) return _isBlob ? Uint8List(0) : '';
+    final value = _decodeExact(
+      assembled.takeBytes(),
+      expectedUnits: delivered,
+      request:
+          'the read past the cached length (offset $offset, amount '
+          '${amount ?? 'to end'})',
+    );
+    // `offset > _length`, so any delivered unit lies past the cached end: the
+    // LOB is now known to be at least this long. With a null amount the read
+    // ran to the server's end of data, so this is the LOB's actual length.
+    _length = offset - 1 + delivered;
+    return value;
+  }
+
+  /// Decodes a fully assembled READ payload ([Uint8List] for a BLOB, strict
+  /// UTF-16BE / UTF-8 `String` for a CLOB/NCLOB) and enforces that it holds
+  /// exactly [expectedUnits] units. [request] describes the read for the error
+  /// message.
+  Object _decodeExact(
+    Uint8List bytes, {
+    required int expectedUnits,
+    required String request,
+  }) {
     if (_isBlob) {
       // Strict truncation guard over the COMPLETED (possibly multi-piece) read,
       // mirroring the materialize path's `verifyBlobReadLength`: a short
@@ -374,8 +507,7 @@ class OracleLob {
           errorCode: oraProtocolError,
           message:
               'BLOB read length mismatch: expected $expectedUnits bytes '
-              'for the in-range request (offset $offset, amount '
-              '$effectiveAmount) but ${bytes.length} were received',
+              'for $request but ${bytes.length} were received',
         );
       }
       return bytes;
@@ -404,12 +536,36 @@ class OracleLob {
         errorCode: oraProtocolError,
         message:
             'CLOB read length mismatch: expected $expectedUnits chars for '
-            'the in-range request (offset $offset, amount $effectiveAmount) but '
-            '${text.length} were received',
+            '$request but ${text.length} were received',
       );
     }
     return text;
   }
+
+  /// Units a READ payload represents when the reply omits its SB8 unit count
+  /// (never observed for a `sendAmount` READ on 23ai or 21c) — derived from
+  /// the delivered BYTES, never from decoded text: bytes for a BLOB, two bytes
+  /// per UCS-2 unit for UTF-16BE, and the units of the complete UTF-8
+  /// sequences otherwise. [_decodeExact]'s final unit check still guards the
+  /// assembled value, so a wrong guess fails loud rather than truncating.
+  int _payloadUnits(Uint8List bytes) {
+    if (_isBlob) return bytes.length;
+    if (_isUtf16) return bytes.length >> 1;
+    return _LobTextDecoder._scanUtf8(bytes).units;
+  }
+
+  /// The piece size the streams default to, and that a [read] past the cached
+  /// [length] with no `amount` uses: [chunkSize] when the server reported one,
+  /// otherwise [defaultStreamPieceSize].
+  int get _defaultPieceUnits =>
+      _chunkSize > 0 ? _chunkSize : defaultStreamPieceSize;
+
+  /// Largest amount a single READ past the cached [length] asks for (2^32
+  /// units). Measured on Oracle 23ai and 21c: READ amounts of 2^31, 2^32 + 5
+  /// and 2^40 are accepted (the server returns what exists), `1 << 62` fails
+  /// with `ORA-22925`. Far above any value one READ was ever measured to
+  /// deliver (32 MB), so it never splits a realistic read.
+  static const int _maxPastEndPieceUnits = 1 << 32;
 
   /// Alias of [read] with positional arguments, matching node-oracledb
   /// `lob.getData(offset = 1, amount)`.
@@ -441,15 +597,16 @@ class OracleLob {
   /// ```
   ///
   /// * **Exactness.** For a LOB whose length has not changed since this handle
-  ///   was fetched, the concatenation of every emitted piece equals
-  ///   `read(offset: offset)` character for character. The two DIVERGE for a LOB
-  ///   that grew server-side afterwards, and the stream is the accurate one:
-  ///   [read] caps its request at the cached [length] and so returns a stale
-  ///   prefix, while the stream ends only on the server's empty READ (see the
-  ///   round-trip bullet below) and therefore returns strictly MORE. That is the
-  ///   same stale-length immunity, stated as the trade-off it is.
+  ///   was fetched (or last [refresh]ed), the concatenation of every emitted
+  ///   piece equals `read(offset: offset)` character for character. The two
+  ///   DIVERGE for a LOB that grew server-side afterwards, and the stream is the
+  ///   accurate one: a [read] starting at or before the cached [length] caps its
+  ///   request there and so returns a stale prefix, while the stream ends only
+  ///   on the server's empty READ (see the round-trip bullet below) and
+  ///   therefore returns strictly MORE. That is the same stale-length immunity,
+  ///   stated as the trade-off it is; [refresh] before the [read] closes the gap.
   /// * **[pieceSize]** defaults to [chunkSize] when the server reported one
-  ///   (`> 0`) and otherwise to [defaultLobStreamPieceSize]. A multiple of
+  ///   (`> 0`) and otherwise to [defaultStreamPieceSize]. A multiple of
   ///   [chunkSize] is recommended for efficiency (node-oracledb `lob.pieceSize`
   ///   parity, whose default is also `chunkSize`). Units are characters — the
   ///   type's native units, exactly as for [read] and [length].
@@ -517,11 +674,11 @@ class OracleLob {
   /// applies here with bytes as the unit (BLOB offsets, amounts and [length] are
   /// byte counts), minus the character-boundary caveat — raw bytes have none:
   /// the concatenation of the emitted pieces equals `read(offset: offset)` byte
-  /// for byte for a LOB whose length has not changed since it was fetched (a LOB
-  /// that grew server-side afterwards streams strictly more than [read]'s
-  /// stale-length prefix — same trade-off as [textStream]), [pieceSize] defaults
-  /// to [chunkSize] (or
-  /// [defaultLobStreamPieceSize] when unknown), the stream ends on an empty
+  /// for byte for a LOB whose length has not changed since it was fetched or
+  /// last [refresh]ed (a LOB that grew server-side afterwards streams strictly
+  /// more than [read]'s stale-length prefix — same trade-off as [textStream]),
+  /// [pieceSize] defaults to [chunkSize] (or [defaultStreamPieceSize] when
+  /// unknown), the stream ends on an empty
   /// server READ, liveness is re-checked per piece, and cancelling leaves the
   /// connection immediately reusable.
   ///
@@ -567,11 +724,9 @@ class OracleLob {
             'handle chunkSize (or the driver default when unknown)',
       );
     }
-    if (pieceSize != null) return pieceSize;
     // node-oracledb `lob.pieceSize` defaults to `chunkSize`; fall back to the
     // documented driver constant only when the server reported none.
-    final chunk = _locator.chunkSize;
-    return chunk > 0 ? chunk : defaultLobStreamPieceSize;
+    return pieceSize ?? _defaultPieceUnits;
   }
 
   /// The [byteStream] generator: one raw READ per piece, terminating on the
@@ -895,16 +1050,16 @@ class OracleLob {
   ///
   /// After a successful write the cached [length] is advanced locally to
   /// `max(length, (offset - 1) + writtenUnits)` (node-oracledb `write()`
-  /// parity); no server round trip re-verifies it. `writtenUnits` is the
-  /// character count for CLOB/NCLOB and the byte count for BLOB.
+  /// parity); no server round trip re-verifies it ([refresh] does, on demand).
+  /// `writtenUnits` is the character count for CLOB/NCLOB and the byte count
+  /// for BLOB. To shorten a LOB — writing never does — use [trim].
   ///
   /// An **empty** [data] (an empty `String`, or empty bytes) is a deliberate
   /// no-op: no wire round trip is issued and [length] is left unchanged. This
   /// is an intentional deviation from node-oracledb, which runs the
   /// `max(length, (offset - 1) + writtenUnits)` formula unconditionally and so
-  /// could advance the length on an empty write past the current end; here a
-  /// zero-length write changes nothing (there is no `trim()` in this release to
-  /// undo an accidental extension either, so the no-op is the safer choice).
+  /// could advance the cached length on an empty write past the current end;
+  /// here a zero-length write changes nothing, which is the safer choice.
   ///
   /// Throws [ArgumentError] before any wire round trip if [offset] `<= 0` or
   /// [data] is the wrong type for this LOB. Throws [OracleException] if the
@@ -979,6 +1134,90 @@ class OracleLob {
     );
     final end = (offset - 1) + writtenUnits;
     if (end > _length) _length = end;
+  }
+
+  /// Trims (shortens) the LOB to [newSize] units — characters (UCS-2 code
+  /// units) for CLOB/NCLOB, bytes for BLOB — in one TTC LOB TRIM round trip
+  /// (node-oracledb `lob.trim(newSize)` parity), then sets [length] to
+  /// [newSize].
+  ///
+  /// `trim(0)` empties the LOB (it becomes an empty LOB, not SQL `NULL`). The
+  /// round trip is always issued — even when [newSize] equals the cached
+  /// [length], which may be stale — so the server, not the cache, decides.
+  /// Unlike node-oracledb, [newSize] is required (no silent default of `0`).
+  ///
+  /// Like [write], trimming needs a **writable** locator: a created temporary
+  /// LOB, a LOB OUT / IN OUT bind, or a `SELECT ... FOR UPDATE` locator.
+  /// Trimming a persistent LOB changes the stored value inside the current
+  /// transaction (commit or roll back as usual). The server — not this method —
+  /// rejects the cases below; each surfaces as an [OracleException] carrying
+  /// the server's error and leaves [length], the handle and the connection
+  /// unchanged and usable (measured on Oracle 23ai and 21c):
+  /// - a read-only plain-`SELECT` locator: `ORA-22920`;
+  /// - a [newSize] greater than the LOB's current length: `ORA-22926`;
+  /// - a CLOB/NCLOB [newSize] that would split a surrogate pair (a
+  ///   supplemental character's two UCS-2 code units): `ORA-22831`;
+  /// - the locator of an `EMPTY_CLOB()` / `EMPTY_BLOB()` value that was never
+  ///   stored (e.g. `SELECT EMPTY_CLOB() FROM dual`, or a PL/SQL
+  ///   `:out := EMPTY_CLOB()`; such a handle reports `chunkSize == 0`):
+  ///   `ORA-22275`. A stored empty LOB trims normally.
+  ///
+  /// Throws [ArgumentError] before any wire round trip if [newSize] is
+  /// negative, and [OracleException] if the handle is closed or the connection
+  /// is closed/broken.
+  Future<void> trim(int newSize) async {
+    _ensureOpen();
+    if (newSize < 0) {
+      throw ArgumentError.value(
+        newSize,
+        'newSize',
+        'must be >= 0 (the new LOB length in characters for CLOB/NCLOB, '
+            'bytes for BLOB)',
+      );
+    }
+    await _connection.runLobTrim(
+      sourceLocator: _locator.locator,
+      newSize: newSize,
+    );
+    _length = newSize;
+  }
+
+  /// Re-reads [length] and [chunkSize] from the server, replacing the cached
+  /// values: one GET_LENGTH and one GET_CHUNK_SIZE round trip.
+  ///
+  /// [length] is otherwise a cached value (seeded at fetch time, advanced
+  /// locally — see [read]'s "Cached length" section), so call this when the
+  /// LOB may have changed through something other than this handle, before a
+  /// [read] whose range should reflect the LOB's current size. node-oracledb has
+  /// no equivalent (its `lob.length` is cached too); this is a Dart-driver
+  /// addition.
+  ///
+  /// The server answers for the LOB **as this handle sees it**: measured on
+  /// Oracle 23ai and 21c, a fetched locator is read-consistent, so after
+  /// another session commits a change to the row a refresh still reports the
+  /// length the handle reads (the old one) — [length] and [read] never
+  /// disagree. A re-`SELECT` is what observes the committed change.
+  ///
+  /// The cached values are replaced only once BOTH answers arrive, so a failed
+  /// refresh leaves [length] and [chunkSize] exactly as they were. Measured on
+  /// 23ai and 21c, the server rejects GET_LENGTH with `ORA-22275` for the
+  /// locator of an `EMPTY_CLOB()` / `EMPTY_BLOB()` value that was never stored
+  /// (see [trim]); [read] works on such a handle.
+  ///
+  /// Throws [OracleException] if the handle is closed, the connection is
+  /// closed/broken, or either round trip fails.
+  Future<void> refresh() async {
+    _ensureOpen();
+    final length = await _connection.runLobGetLength(
+      sourceLocator: _locator.locator,
+    );
+    // Liveness between the two round trips, as the streams re-check per piece.
+    _ensureOpen();
+    final chunkSize = await _connection.runLobGetChunkSize(
+      sourceLocator: _locator.locator,
+    );
+    _length = length;
+    _chunkSize = chunkSize;
   }
 
   /// Closes the handle, releasing the connection's in-flight slot once no

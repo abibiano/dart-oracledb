@@ -26,9 +26,10 @@
 ///     pair still decoding correctly (the live proof that pieces are joined as
 ///     BYTES and decoded exactly once), the empty-LOB and exact-multiple
 ///     boundaries, and the default single-READ fast path asserted unchanged;
-///   * **AC6** — the cached-`length` asymmetry pinned deterministically:
-///     `read(offset: length + 1)` short-circuits with **no** round trip while
-///     `textStream`/`byteStream` at the same offset issue a real READ; plus the
+///   * **AC6** — the cached-`length` behavior pinned deterministically (since
+///     the LOB API parity work, DW-28): `read(offset: length + 1)` asks the
+///     server with exactly one READ, just like `textStream`/`byteStream` at the
+///     same offset (1.4.0 short-circuited it with no round trip); plus the
 ///     genuinely concurrent direction MEASURED (never force-asserted) with only
 ///     the "correct data or fail-loud, never silently wrong data" invariant
 ///     asserted;
@@ -1665,14 +1666,14 @@ void main() {
           expect(await emptyClob.read(), equals(''));
           expect(
             connection.debugLobReadOps - before,
-            equals(0),
+            equals(1),
             reason:
-                'an empty LOB short-circuits before the loop, capped or '
-                'not — no useless READ',
+                'an empty LOB (cached length 0) asks the server with exactly '
+                'ONE READ since DW-28, capped or not — never a useless loop',
           );
           before = connection.debugLobReadOps;
           expect(await emptyClob.read(offset: 1, amount: 4), equals(''));
-          expect(connection.debugLobReadOps - before, equals(0));
+          expect(connection.debugLobReadOps - before, equals(1));
         } finally {
           connection.debugLobReadPieceUnits = null;
           await emptyClob.close();
@@ -1768,78 +1769,85 @@ void main() {
         return r.rows.single[column.toUpperCase()]! as OracleLob;
       }
 
-      test('read(offset: length + 1) returns empty with NO round trip while '
-          'textStream/byteStream at the SAME offset issue a real READ and '
-          'terminate cleanly', () async {
-        final text = risingText(40);
-        final bytes = risingBytes(24);
-        final id = nextTestId();
-        await connection.execute(
-          'INSERT INTO $testTable (id, doc, bin) VALUES (:i, :d, :b)',
-          {'i': id, 'd': text, 'b': bytes},
-        );
-        await connection.commit();
-
-        final clob = await lobFor('doc', id);
-        try {
-          expect(clob.length, equals(40));
-
-          // read(): the documented footgun — the cached length alone decides,
-          // so NOT ONE wire trip happens.
-          var before = connection.debugLobReadOps;
-          expect(await clob.read(offset: clob.length + 1), equals(''));
-          expect(
-            connection.debugLobReadOps - before,
-            equals(0),
-            reason:
-                'read() short-circuits past the CACHED length with no '
-                'round trip — exactly what the dartdoc warns about',
+      // DW-28 (LOB API parity): this test pinned the 1.4.0 asymmetry — read()
+      // answered a past-end offset from the cached length with NO round trip
+      // while the streams asked the server. The short-circuit is gone, so it
+      // now pins the symmetry: both go to the server, one READ each.
+      test(
+        'read(offset: length + 1) asks the server — exactly ONE READ, like '
+        'textStream/byteStream at the SAME offset — and returns empty',
+        () async {
+          final text = risingText(40);
+          final bytes = risingBytes(24);
+          final id = nextTestId();
+          await connection.execute(
+            'INSERT INTO $testTable (id, doc, bin) VALUES (:i, :d, :b)',
+            {'i': id, 'd': text, 'b': bytes},
           );
-          // Even with an explicit amount: the offset guard applies too.
-          before = connection.debugLobReadOps;
-          expect(
-            await clob.read(offset: clob.length + 1, amount: 5),
-            equals(''),
-          );
-          expect(connection.debugLobReadOps - before, equals(0));
+          await connection.commit();
 
-          // textStream(): never consults the cached length — it asks the
-          // server and stops on the server's empty reply.
-          before = connection.debugLobReadOps;
-          final pieces = await clob
-              .textStream(offset: clob.length + 1)
-              .toList();
-          expect(pieces, isEmpty, reason: 'nothing past the end to deliver');
-          expect(
-            connection.debugLobReadOps - before,
-            equals(1),
-            reason:
-                'the stream DID go to the server — that is the whole '
-                'asymmetry — and terminated on its empty READ',
-          );
-        } finally {
-          await clob.close();
-        }
+          final clob = await lobFor('doc', id);
+          try {
+            expect(clob.length, equals(40));
 
-        final blob = await lobFor('bin', id);
-        try {
-          var before = connection.debugLobReadOps;
-          expect(await blob.read(offset: blob.length + 1), isEmpty);
-          expect(connection.debugLobReadOps - before, equals(0));
-          before = connection.debugLobReadOps;
-          final pieces = await blob
-              .byteStream(offset: blob.length + 1)
-              .toList();
-          expect(pieces, isEmpty);
-          expect(
-            connection.debugLobReadOps - before,
-            equals(1),
-            reason: 'byteStream is immune to the cached length too',
-          );
-        } finally {
-          await blob.close();
-        }
-      });
+            // read(): the cached length no longer decides — the server does.
+            var before = connection.debugLobReadOps;
+            expect(await clob.read(offset: clob.length + 1), equals(''));
+            expect(
+              connection.debugLobReadOps - before,
+              equals(1),
+              reason:
+                  'a read past the CACHED length issues one READ; the server '
+                  'reports no data, so the LOB really ends there',
+            );
+            expect(clob.length, equals(40), reason: 'nothing found, unchanged');
+            // An explicit amount: the same single READ.
+            before = connection.debugLobReadOps;
+            expect(
+              await clob.read(offset: clob.length + 1, amount: 5),
+              equals(''),
+            );
+            expect(connection.debugLobReadOps - before, equals(1));
+
+            // textStream(): never consults the cached length — it asks the
+            // server and stops on the server's empty reply.
+            before = connection.debugLobReadOps;
+            final pieces = await clob
+                .textStream(offset: clob.length + 1)
+                .toList();
+            expect(pieces, isEmpty, reason: 'nothing past the end to deliver');
+            expect(
+              connection.debugLobReadOps - before,
+              equals(1),
+              reason:
+                  'the stream goes to the server too, and terminates on its '
+                  'empty READ',
+            );
+          } finally {
+            await clob.close();
+          }
+
+          final blob = await lobFor('bin', id);
+          try {
+            var before = connection.debugLobReadOps;
+            expect(await blob.read(offset: blob.length + 1), isEmpty);
+            expect(connection.debugLobReadOps - before, equals(1));
+            expect(blob.length, equals(24));
+            before = connection.debugLobReadOps;
+            final pieces = await blob
+                .byteStream(offset: blob.length + 1)
+                .toList();
+            expect(pieces, isEmpty);
+            expect(
+              connection.debugLobReadOps - before,
+              equals(1),
+              reason: 'byteStream is immune to the cached length too',
+            );
+          } finally {
+            await blob.close();
+          }
+        },
+      );
 
       test(
         'the documented remedies work: an explicit amount that overshoots the '

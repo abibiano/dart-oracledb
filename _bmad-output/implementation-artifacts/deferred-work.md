@@ -216,7 +216,9 @@ archived: 2026-10-09
 origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-env-integration-tests, 2026-07-26)"), 2026-10-09
 location: lib/src/oracle_lob.dart
 reason: ⏳ **CARRIED — the node-oracledb LOB parity surface Epic 12 deliberately did NOT implement.** Consolidated here from story-AC and README prose (previously trackable nowhere), verified against the local `reference/node-oracledb` 7.0.1 submodule: **`trim(newSize)`** (`lib/lob.js`, `lib/thin/lob.js`); the **BFILE family** (`getDirFileName` / `setDirFileName` / `fileExists` / `openFile` / `closeFile` / `isFileOpen`, plus `DB_TYPE_BFILE` fetch support); a **mutable `pieceSize` property** (node exposes a get AND set; this driver takes `pieceSize` per stream call only, and `read()` has no caller-facing piece size at all — the 12.4 cap is test-only and must stay so); an **`autoCloseLob`-style auto-close** (node closes a `Lob` when its stream finishes or is destroyed; here every handle is closed explicitly, which is what `OracleResult.closeLobs()` and the pool-reclaim force-close exist for); and a **server `length`/`chunkSize` refresh API** (node has none either — `getLength()` returns the cached value — so this one is a genuine gap in BOTH drivers and pairs with the cached-length item below). None is a correctness gap in what 1.4.0 ships; each is additive surface. **Epic-exit disposition:** these are API-surface features, not protocol work, and are independent of one another — take them as one small "LOB API parity" story (or drop the ones with no demand) rather than as Epic 12 leftovers. target: post-1.4 LOB API parity story. [lib/src/oracle_lob.dart; reference/node-oracledb lib/lob.js, lib/thin/lob.js]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-api-parity
+resolution-undo: 352cf5740079898d7f88b7d6fe309227e06c733acb2c01c7a263b8c242fb787d 2026-10-14 7374617475733a206f70656e
 decision: 2026-10-09 Keep open
 decision: 2026-10-09 Build a LOB API parity story — Add OracleLob.trim(newSize) and a length/chunkSize refresh API in lib/src/oracle_lob.dart, with dual-env tests; leave BFILE and autoClose out.
 
@@ -225,7 +227,9 @@ decision: 2026-10-09 Build a LOB API parity story — Add OracleLob.trim(newSize
 origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-env-integration-tests, 2026-07-26)"), 2026-10-09
 location: lib/src/oracle_lob.dart
 reason: ⏳ **CARRIED — `read()`'s cached-`length` BEHAVIOR (the length-refresh decision).** The evidence half is closed above; what remains is the actual behavior change. Now decidable on evidence rather than speculation: a locator is read-consistent, so a stale length never yields corrupt data — only a `read()` that stops at the stale end, and a silent empty return for `read(offset: staleLength + 1)`. So the options are (a) leave it (node-oracledb parity — node's `getLength()` is cached too), (b) drop the no-round-trip short-circuit so a past-end read asks the server like the streams do, or (c) add an explicit refresh API (which node lacks). **Epic-exit disposition:** (b) is the cheap half-step that removes the footgun without new API and would cost one round trip on a genuinely-empty read; pair the decision with the parity entry above, since (c) is the same work as the `length`/`chunkSize` refresh gap. target: post-1.4 LOB API parity story. [lib/src/oracle_lob.dart `read`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-api-parity
+resolution-undo: 352cf5740079898d7f88b7d6fe309227e06c733acb2c01c7a263b8c242fb787d 2026-10-14 7374617475733a206f70656e
 decision: 2026-10-09 Drop the short-circuit — Remove the no-round-trip short-circuit in OracleLob.read so a past-end read asks the server like the streams do; update tests and docs.
 decision: 2026-10-09 Drop the short-circuit — Remove the no-round-trip short-circuit in OracleLob.read so a past-end read asks the server like the streams do; update tests and docs.
 
@@ -667,14 +671,18 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 12-1-public-lob-object (2026-07-12, iter 3)"), 2026-10-09
 location: lib/src/oracle_lob.dart
 reason: ⏳ **CARRIED (documented 2026-07-26 by dev-story of 12-3-chunked-streaming-transfer) — the staleness window is now documented, and the new read STREAMS are immune to it by construction; the entry stays targeted at the Epic 12 follow-up.** Story 12.3 AC7 does the documentation half the entry asked for: `OracleLob.read`'s dartdoc gained a "Cached-length caveat" paragraph spelling out both directions (a since-shrunk LOB fails loud; a since-grown LOB makes `read(offset: staleLength + 1)` short-circuit to empty **with no round trip**) and pointing at the remedies (an explicit `amount`, or re-select). `textStream()` / `byteStream()` deliberately do NOT consult `_length` at all — they stop when a READ returns no data (node-oracledb `lob.js _read()` parity; measured: a READ past the end returns `amount: 0` with no payload and no error on 23ai and 21c) — so they are immune, and a unit test pins that a stream over a handle whose cached length UNDER-reports still delivers everything the server sends. What remains for the follow-up is the actual behavior change (a length refresh, or dropping the short-circuit), which is out of 12.3's scope. [lib/src/oracle_lob.dart `read`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-api-parity
+resolution-undo: 352cf5740079898d7f88b7d6fe309227e06c733acb2c01c7a263b8c242fb787d 2026-10-14 7374617475733a206f70656e
 
 ### DW-98: `read()` trusts the once-seeded prefetched `_length` with no re-verification against the server.
 
 origin: migrated from legacy ledger ("Deferred from: code review of 12-1-public-lob-object (2026-07-12, iter 3)"), 2026-10-09
 location: oracle_lob.dart
 reason: **`read()` trusts the once-seeded prefetched `_length` with no re-verification against the server.** `_length` is seeded from the locator's prefetch metadata at fetch time and never re-checked; the empty/past-end short-circuit and the truncation guard both rely on it (oracle_lob.dart:149-166). Because `fetchLobs` reads are lazy (issued well after the original SELECT/FETCH), a plain non-`FOR UPDATE` locator whose underlying LOB is concurrently modified and committed by another session between fetch and `read()` can go stale in either direction — a since-shrunk LOB triggers a spurious length-mismatch/"returned no data" throw, a since-grown LOB can short-circuit `read(offset: staleLen+1)` to empty instead of issuing the READ. This is node-oracledb-parity cached-length behavior (`getData(offset=1, len=this._length)`), but the silent-empty case is a footgun. Deferred as minor; document the staleness window in the `read()`/`fetchLobs` dartdoc. target: Epic 12 follow-up. [lib/src/oracle_lob.dart:149-166]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-api-parity
+resolution-undo: 352cf5740079898d7f88b7d6fe309227e06c733acb2c01c7a263b8c242fb787d 2026-10-14 7374617475733a206f70656e
 
 ### DW-99: Lazily-streamed `fetchLobs` LOB handles (nested `CURSOR(...)` columns, REF CURSOR OUT-bind rows, and the top-level `resultSet: true` cursor) — wrap…
 
@@ -802,7 +810,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 (2026-07-26)"), 2026-10-09
 location: lib/oracledb.dart
 reason: **`defaultLobStreamPieceSize` is exported into the public namespace as a bare, un-prefixed top-level constant.** It is the only such name among `lib/oracledb.dart`'s exports, which are otherwise uniformly `Oracle*`-prefixed types — a plausible collision in downstream code, and a second naming convention introduced for a need ("a caller reasoning about round-trip counts needs to be able to name it") that a static getter on `OracleLob` would satisfy without touching the global namespace. Note the window to change this without a breaking change closes when 1.4.0 ships. Fix: expose it as `OracleLob.defaultStreamPieceSize` (static getter) and drop the top-level export. target: Epic 12 follow-up (public API surface, ideally before 1.4.0 release). [lib/oracledb.dart; lib/src/oracle_lob.dart]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-api-parity
+resolution-undo: 352cf5740079898d7f88b7d6fe309227e06c733acb2c01c7a263b8c242fb787d 2026-10-14 7374617475733a206f70656e
 decision: 2026-10-09 Move to OracleLob static getter — Expose OracleLob.defaultStreamPieceSize, keep the top-level export as @Deprecated alias, update docs and tests.
 decision: 2026-10-09 Move to OracleLob static getter — Expose OracleLob.defaultStreamPieceSize, keep the top-level export as @Deprecated alias, update docs and tests.
 

@@ -67,11 +67,19 @@ const int ttcLobOp = 0x60; // 96
 // LOB Operation Codes (TNS_LOB_OP_* in node-oracledb constants.js)
 // ============================================================================
 
-/// LOB operation: get LOB length.
+/// LOB operation: get the LOB's current server-side length, in the LOB's
+/// native units (characters for CLOB/NCLOB, bytes for BLOB). Sent with
+/// `sendAmount: true`; the length comes back as the reply's SB8 amount.
 const int tnsLobOpGetLength = 0x0001;
 
 /// LOB operation: read data from a LOB.
 const int tnsLobOpRead = 0x0002;
+
+/// LOB operation: trim (shorten) a LOB to a new length, in the LOB's native
+/// units (characters for CLOB/NCLOB, bytes for BLOB). The new length travels
+/// in the amount field (node-oracledb `TNS_LOB_OP_TRIM`, `lib/thin/lob.js
+/// trim()`).
+const int tnsLobOpTrim = 0x0020;
 
 /// LOB operation: write data to a LOB.
 const int tnsLobOpWrite = 0x0040;

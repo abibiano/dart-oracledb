@@ -5112,6 +5112,90 @@ class OracleConnection {
     });
   }
 
+  /// Trims (shortens) the LOB behind [sourceLocator] to [newSize] units —
+  /// characters for CLOB/NCLOB, bytes for BLOB — in one `tnsLobOpTrim` round
+  /// trip, node-oracledb `lib/thin/lob.js trim()` parity: the new size travels
+  /// in the amount field (`sendAmount: true`).
+  ///
+  /// Argument validation (a negative [newSize]) is the [OracleLob]'s job; the
+  /// server rejects a [newSize] beyond the LOB's current length and a
+  /// read-only locator, and that error propagates as an [OracleException].
+  /// Keeps the [_runLobOp] bracket and the post-op locator echo.
+  /// Package-internal seam for `oracle_lob.dart`.
+  @internal
+  Future<void> runLobTrim({
+    required Uint8List sourceLocator,
+    required int newSize,
+  }) {
+    return _runLobOp(() async {
+      final response = await _transport.sendLobOp(
+        operation: oc.tnsLobOpTrim,
+        sourceLocator: sourceLocator,
+        sendAmount: true,
+        amount: newSize,
+      );
+      _copyBackLocator(sourceLocator, response.updatedLocator);
+    });
+  }
+
+  /// Asks the server for the CURRENT length of the LOB behind [sourceLocator]
+  /// — characters (UCS-2 code units) for CLOB/NCLOB, bytes for BLOB — in one
+  /// `tnsLobOpGetLength` round trip. Package-internal seam for
+  /// `OracleLob.refresh()`.
+  ///
+  /// Throws [OracleException] if the reply carries no (or a negative) amount:
+  /// a length the driver would have to guess is never substituted.
+  @internal
+  Future<int> runLobGetLength({required Uint8List sourceLocator}) =>
+      _runLobAmountOp(
+        operation: oc.tnsLobOpGetLength,
+        sourceLocator: sourceLocator,
+        what: 'GET_LENGTH',
+      );
+
+  /// Asks the server for the chunk size of the LOB behind [sourceLocator] in
+  /// one `tnsLobOpGetChunkSize` round trip (the same operation
+  /// `createTemporary*()` issues right after CREATE_TEMP, node-oracledb
+  /// `_getChunkSizeAsync()`). Package-internal seam for
+  /// `OracleLob.refresh()`.
+  ///
+  /// Throws [OracleException] if the reply carries no (or a negative) amount.
+  @internal
+  Future<int> runLobGetChunkSize({required Uint8List sourceLocator}) =>
+      _runLobAmountOp(
+        operation: oc.tnsLobOpGetChunkSize,
+        sourceLocator: sourceLocator,
+        what: 'GET_CHUNK_SIZE',
+      );
+
+  /// Shared body of the two metadata seams: one `sendAmount: true` LOB op whose
+  /// answer is the reply's SB8 amount, inside the [_runLobOp] bracket, with the
+  /// post-op locator echo copied back like every other LOB op.
+  Future<int> _runLobAmountOp({
+    required int operation,
+    required Uint8List sourceLocator,
+    required String what,
+  }) {
+    return _runLobOp(() async {
+      final response = await _transport.sendLobOp(
+        operation: operation,
+        sourceLocator: sourceLocator,
+        sendAmount: true,
+      );
+      _copyBackLocator(sourceLocator, response.updatedLocator);
+      final amount = response.amount;
+      if (amount == null || amount < 0) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'LOB $what returned '
+              '${amount == null ? 'no amount' : 'a negative amount ($amount)'}',
+        );
+      }
+      return amount;
+    });
+  }
+
   /// Copies the server's echoed (post-op) locator bytes back into the handle's
   /// live locator buffer, in place, after a LOB READ/WRITE round trip.
   ///
@@ -5131,7 +5215,8 @@ class OracleConnection {
   void _copyBackLocator(Uint8List sourceLocator, Uint8List? updatedLocator) =>
       Transport.copyBackLocator(sourceLocator, updatedLocator);
 
-  /// Brackets one [OracleLob] read/write round trip with the connection's
+  /// Brackets one [OracleLob] round trip (READ, WRITE, TRIM, GET_LENGTH,
+  /// GET_CHUNK_SIZE, or the temporary-LOB creation pair) with the connection's
   /// in-flight guard — mirroring [runResultSetFetch] — so a concurrent
   /// operation is rejected, a mid-op failure poisons cleanly, and
   /// [_executeInProgress] is never left stuck. The handle's own closed /
@@ -5144,8 +5229,8 @@ class OracleConnection {
         message:
             'Concurrent operation on a single OracleConnection is not '
             'supported: a wire round trip is already in progress. Await the '
-            'previous LOB read()/write() (or other operation) before starting '
-            'another.',
+            'previous LOB read()/write()/trim()/refresh() (or other operation) '
+            'before starting another.',
       );
     }
     _executeInProgress = true;

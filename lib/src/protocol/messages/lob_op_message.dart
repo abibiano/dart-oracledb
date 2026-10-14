@@ -1,9 +1,12 @@
 /// TTC LOB operation message (RPC function 96, `TNS_FUNC_LOB_OP`).
 ///
-/// Implements the subset of node-oracledb's thin `LobOpMessage` needed for
-/// Stories 4.1/4.2 CLOB and BLOB support: READ, WRITE, and CREATE_TEMP
-/// (FREE_TEMP travels as a piggyback built by the transport, mirroring
-/// node-oracledb `writeCloseTempLobsPiggyback`). The wire format follows
+/// Implements the subset of node-oracledb's thin `LobOpMessage` this driver
+/// uses: READ, WRITE and CREATE_TEMP (Stories 4.1/4.2), GET_CHUNK_SIZE (12.2),
+/// and TRIM / GET_LENGTH (`OracleLob.trim()` / `refresh()`) — the last three
+/// are plain `sendAmount` operations whose SB8 amount rides the
+/// RETURN_PARAMETER reply. FREE_TEMP travels as a piggyback built by the
+/// transport, mirroring node-oracledb `writeCloseTempLobsPiggyback`. The wire
+/// format follows
 /// `reference/node-oracledb/lib/thin/protocol/messages/lobOp.js` byte for
 /// byte. Offsets and amounts are characters for CLOB and bytes for BLOB;
 /// BLOB data payloads pass through unchanged (no charset conversion).

@@ -115,8 +115,12 @@ void main() {
             reason: 'CREATE_TEMP must be followed by a real GET_CHUNK_SIZE',
           );
 
-          // An empty temp LOB reads as '' without a wire round trip.
+          // An empty temp LOB reads as ''. Since DW-28 that costs one READ (a
+          // read past the cached length 0 asks the server rather than the
+          // cache), which a real server answers with no data.
+          final before = connection.debugLobReadOps;
           expect(await lob.read(), equals(''));
+          expect(connection.debugLobReadOps - before, equals(1));
 
           const text = 'temp clob written and read on one live handle';
           await lob.write(1, text);
