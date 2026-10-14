@@ -1,1 +1,11 @@
-{}
+{
+  "DW-126": {
+    "answered_at": "2026-10-14",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Leave the stream and executeMany signatures unchanged. Change the decode error hint in lib/src/protocol/oson.dart so it points stream callers at execute() with rawJsonBlobs, and document the limitation.",
+    "key": "2",
+    "label": "Only fix the hint text",
+    "resolution": ""
+  }
+}
