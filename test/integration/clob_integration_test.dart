@@ -570,6 +570,7 @@ void main() {
       });
 
       test('32,768 UTF-8 bytes converts to a temp CLOB', () async {
+        final baselineTempLobs = await tempLobCount(connection);
         final text = List.generate(
           3277,
           (i) => 'cnv${i.toString().padLeft(7, '0')}',
@@ -582,20 +583,26 @@ void main() {
             'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
           },
         );
-        // TWO frees are pending, not one (Story 12.4 AC4): the driver's own
-        // INPUT temp LOB for the converted bind, PLUS the server's TEMP-flagged
-        // OUT locator, which the materialize path now queues instead of
-        // discarding. The ROUTING signal this test cares about — that the value
+        // One free is pending: the driver's INPUT temp LOB and the echoed
+        // OUT locator share an identity and are queued only once. The ROUTING
+        // signal this test cares about — that the value
         // converted rather than travelling inline — is `> 0` vs `0`; the inline
         // sibling above still asserts exactly `0`.
         expect(
           connection.debugPendingTempLobCount,
-          equals(2),
+          equals(1),
           reason:
               'one byte over the limit must convert to exactly one '
-              'temp CLOB (plus the OUT locator freed since Story 12.4)',
+              'temp CLOB (the OUT locator is the same LOB, deduped by identity)',
         );
         expect(result.outBinds['ret'], equals(text));
+        // The count query carries the pending FREE_TEMP. Confirm the server
+        // released the LOB as well as the driver's queue becoming empty.
+        final afterFree = await tempLobCount(connection);
+        expect(connection.debugPendingTempLobCount, equals(0));
+        if (baselineTempLobs != null && afterFree != null) {
+          expect(afterFree, equals(baselineTempLobs));
+        }
       });
 
       test('multibyte text at exactly 32,767 UTF-8 bytes stays inline: '
@@ -638,18 +645,17 @@ void main() {
             'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
           },
         );
-        // TWO frees are pending, not one (Story 12.4 AC4): the driver's own
-        // INPUT temp LOB for the converted bind, PLUS the server's TEMP-flagged
-        // OUT locator, which the materialize path now queues instead of
-        // discarding. The ROUTING signal this test cares about — that the value
+        // One free is pending: the driver's INPUT temp LOB and the echoed
+        // OUT locator share an identity and are queued only once. The ROUTING
+        // signal this test cares about — that the value
         // converted rather than travelling inline — is `> 0` vs `0`; the inline
         // sibling above still asserts exactly `0`.
         expect(
           connection.debugPendingTempLobCount,
-          equals(2),
+          equals(1),
           reason:
               'the threshold must be measured in UTF-8 bytes, '
-              'not characters (input temp CLOB + the Story 12.4 OUT free)',
+              'not characters (the OUT locator is the same LOB as the input temp CLOB, deduped by identity)',
         );
         expect(result.outBinds['ret'], equals(text));
       });

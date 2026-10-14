@@ -520,6 +520,7 @@ void main() {
       );
 
       test('32,768 bytes converts to a temp BLOB', () async {
+        final baselineTempLobs = await tempLobCount(connection);
         final bytes = patternBytes(32768, seed: 22);
         final result = await connection.execute(
           'BEGIN $copyProc(:src, :ret); END;',
@@ -528,20 +529,24 @@ void main() {
             'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 40000),
           },
         );
-        // TWO frees are pending, not one (Story 12.4 AC4): the driver's own
-        // INPUT temp LOB for the converted bind, PLUS the server's TEMP-flagged
-        // OUT locator, which the materialize path now queues instead of
-        // discarding. The ROUTING signal this test cares about — that the value
+        // One free is pending: the driver's INPUT temp LOB and the echoed
+        // OUT locator share an identity and are queued only once. The ROUTING
+        // signal this test cares about — that the value
         // converted rather than travelling inline — is `> 0` vs `0`; the inline
         // sibling above still asserts exactly `0`.
         expect(
           connection.debugPendingTempLobCount,
-          equals(2),
+          equals(1),
           reason:
               'one byte over the limit must convert to exactly one '
-              'temp BLOB (plus the OUT locator freed since Story 12.4)',
+              'temp BLOB (the OUT locator is the same LOB, deduped by identity)',
         );
         expect(result.outBinds['ret'], equals(bytes));
+        final afterFree = await tempLobCount(connection);
+        expect(connection.debugPendingTempLobCount, equals(0));
+        if (baselineTempLobs != null && afterFree != null) {
+          expect(afterFree, equals(baselineTempLobs));
+        }
       });
 
       test('~1 MB temp-BLOB IN round-trips byte-exactly', () async {

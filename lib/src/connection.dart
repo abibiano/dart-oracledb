@@ -482,6 +482,27 @@ class OracleConnection {
   @visibleForTesting
   int get debugFullParseExecutes => _transport.debugFullParseExecutes;
 
+  /// Temp-LOB locators accepted onto the free queue (diagnostics; see
+  /// `Transport.queueTempLobToFree`).
+  @visibleForTesting
+  int get debugTempLobQueuedCount => _transport.debugTempLobQueuedCount;
+
+  /// Temp-LOB free attempts skipped as duplicates of a pending identity.
+  @visibleForTesting
+  int get debugTempLobSkippedDuplicateCount =>
+      _transport.debugTempLobSkippedDuplicateCount;
+
+  /// Temp-LOB locators the `fetchLobs: false` materialize path queued.
+  @visibleForTesting
+  int get debugTempLobMaterializeQueuedCount =>
+      _transport.debugTempLobMaterializeQueuedCount;
+
+  /// Temp-LOB locators the materialize path skipped because an open handle
+  /// owns them.
+  @visibleForTesting
+  int get debugTempLobMaterializeSkippedOwnedCount =>
+      _transport.debugTempLobMaterializeSkippedOwnedCount;
+
   /// Number of cursor-reuse EXECUTEs sent on this connection (cursorId != 0).
   @visibleForTesting
   int get debugReuseExecutes => _transport.debugReuseExecutes;
@@ -4926,6 +4947,9 @@ class OracleConnection {
       locator: locator,
       createdTemporary: true,
     );
+    // Explicit ownership: the materialize path must never queue this identity
+    // while the handle is open (the handle queues it on close()).
+    _transport.claimTempLobOwnership(locator.locator);
     _openLobs.add(lob);
     return lob;
   }

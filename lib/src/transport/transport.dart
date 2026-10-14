@@ -554,30 +554,59 @@ class Transport {
   /// there?".
   final Set<String> _tempLobKeysToClose = <String>{};
 
-  /// Content key for a locator buffer: its bytes as a `String` (every byte is a
-  /// valid UTF-16 code unit, so this is a lossless, cheap, hashable snapshot of
-  /// the 40-odd bytes — no allocation-heavy hex formatting).
+  /// First byte of a locator's identity subrange (see [_tempLobKey]).
+  static const int _locatorIdentityStart = 10;
+
+  /// One past the last byte of a locator's identity subrange.
+  static const int _locatorIdentityEnd = 22;
+
+  /// Identity key for a locator buffer: the bytes of its **identity subrange**
+  /// as a `String` (every byte is a valid UTF-16 code unit, so this is a
+  /// lossless, cheap, hashable value).
   ///
-  /// Snapshot semantics, deliberately: the key is derived when the locator is
-  /// QUEUED, and it exactly reproduces the live byte-for-byte scan it replaces on
-  /// every measured path.
+  /// Measured live on Oracle 23ai and 21c (a 40-byte temporary-CLOB locator
+  /// dumped after CREATE_TEMP, after WRITE, after READ, and for a second
+  /// temporary LOB): bytes `[0, 10)` hold the length/version/flag bytes, and
+  /// bytes `[10, 22)` hold the LOB's server-side identity (the per-database
+  /// prefix plus the per-session LOB counter, byte 19, which is the one byte that
+  /// differs between two temporary LOBs of one session). The remaining tail was
+  /// identical for every LOB of the session. The flag bytes are what a server
+  /// echo is allowed to rewrite, so they are excluded: the key therefore does not
+  /// depend on whether [copyBackLocator] has already mutated the live buffer, and
+  /// two echoes of one LOB taken at different points of its life compare equal
+  /// BY CONSTRUCTION rather than by an empirical whole-buffer observation. A
+  /// locator that is not the standard 40 bytes falls back to the whole buffer,
+  /// the conservative choice (it can only under-dedupe, never swallow a free).
+  static String _tempLobKey(Uint8List locator) =>
+      locator.length == tnsLobLocatorBufferSize
+      ? String.fromCharCodes(
+          locator,
+          _locatorIdentityStart,
+          _locatorIdentityEnd,
+        )
+      : String.fromCharCodes(locator);
+
+  /// Identity keys of temporary locators currently owned by an open `OracleLob`
+  /// handle (claimed by [claimTempLobOwnership], released when the handle's
+  /// `close()` reaches [queueTempLobToFree]).
   ///
-  /// Do NOT read that as "a pending buffer cannot mutate" — it can.
-  /// [copyBackLocator] does `source.setRange(0, source.length, updated)`, i.e. it
-  /// writes INTO the live locator buffer, which is precisely the instance
-  /// [_createTempClob] queues and the instance an `OracleLob` later hands to
-  /// [queueTempLobToFree]. So this key is a snapshot of a buffer the driver keeps
-  /// updating, and the dedupe's real basis is **byte-equality between two echoes
-  /// of ONE locator taken at different points in its life** (the create helper's
-  /// post-WRITE echo vs the handle's or the materialize path's post-READ echo) —
-  /// an empirical invariant, proven on both the 23ai and 21c fixtures, not a
-  /// structural one. Node-oracledb likewise frees its copy-back-updated locator,
-  /// which is why snapshotting is not obviously the wrong call. Hardening the
-  /// comparison to a locator identity SUBRANGE (so in-place mutation could not
-  /// matter at all) is the robust form and a tracked follow-up; if the two echoes
-  /// ever diverge, the stale key degrades to the same double-queue this backstop
-  /// already documents as its residual risk, not to something new.
-  static String _tempLobKey(Uint8List locator) => String.fromCharCodes(locator);
+  /// The materialize path ([queueMaterializedTempLobToFree]) consults it so it
+  /// never queues a locator whose handle will queue it itself on `close()` —
+  /// the pending-only dedupe cannot see that case once an earlier free has
+  /// already drained off [_tempLobsToClose] (DW-109).
+  final Set<String> _handleOwnedTempLobKeys = <String>{};
+
+  /// Free-queue decision counters, exposed for tests and diagnostics through
+  /// `OracleConnection.debugTempLobQueuedCount` and friends; not public API.
+  int _tempLobQueuedCount = 0;
+  int _tempLobSkippedDuplicateCount = 0;
+  int _tempLobMaterializeQueuedCount = 0;
+  int _tempLobMaterializeSkippedOwnedCount = 0;
+
+  /// Pending depth at which [queueTempLobToFree] warns (once per drain cycle)
+  /// that the queue is growing without an intervening `execute()`.
+  static const int _tempLobQueueWarnDepth = 1000;
+  bool _tempLobQueueWarned = false;
 
   /// Number of temp-LOB locators queued for the free piggyback. Exposed for
   /// integration tests (temp-LOB lifecycle) via
@@ -592,6 +621,19 @@ class Transport {
   /// ([_materializeLobValues], the `IN OUT` LOB-bind OUT locator). Either way the
   /// count drains to zero on the next [sendExecute].
   int get debugPendingTempLobCount => _tempLobsToClose.length;
+
+  /// Locators accepted onto the free queue since this transport was created.
+  int get debugTempLobQueuedCount => _tempLobQueuedCount;
+
+  /// Queue attempts skipped because the same identity was already pending.
+  int get debugTempLobSkippedDuplicateCount => _tempLobSkippedDuplicateCount;
+
+  /// Locators the `fetchLobs: false` materialize path queued.
+  int get debugTempLobMaterializeQueuedCount => _tempLobMaterializeQueuedCount;
+
+  /// Locators the materialize path left alone because an open handle owns them.
+  int get debugTempLobMaterializeSkippedOwnedCount =>
+      _tempLobMaterializeSkippedOwnedCount;
 
   /// Queues [locator]'s raw bytes for the free-temporary-LOB piggyback that
   /// rides the NEXT [sendExecute], keeping [_tempLobsTotalSize] in step (that
@@ -632,9 +674,10 @@ class Transport {
   ///    (Oracle's duplicate-column optimization) is queued at most once per
   ///    response.
   ///
-  /// The two are **mutually exclusive by construction** — one `materializeLobs`
-  /// call either wraps a locator or materializes it, never both — which is what
-  /// keeps a locator from being queued twice, once by each owner class.
+  /// One `materializeLobs` call either wraps a locator or materializes it,
+  /// never both. A caller-owned handle can still be bound into a later call
+  /// whose OUT locator takes the materialize path; the ownership claim above
+  /// prevents that path from queueing the handle's locator before `close()`.
   ///
   /// **Locator-level dedupe backstop (Story 12.4).** Because owner class 2 is a
   /// path with no handle, one case CAN present the same LOB to both: a PL/SQL
@@ -673,11 +716,81 @@ class Transport {
   /// ~N²/2 whole-locator byte comparisons under a linear scan (a real
   /// bulk-load regression), and an application may likewise open many
   /// `createTemporary*` handles between two executes.
+  ///
+  /// **When the server-side free lands.** Queueing issues no wire traffic: the
+  /// free rides the next [sendExecute] only. `createTemporary*()`, `commit()`,
+  /// `rollback()` and `ping()` do not flush it, so a loop that creates, writes
+  /// and closes temporary LOBs without running a statement keeps every one of
+  /// them alive on the server until the next `execute()` (or session end). A
+  /// warning is logged once per drain cycle when the pending depth reaches
+  /// [_tempLobQueueWarnDepth]. No count/size-triggered flush is implemented: a
+  /// standalone FREE_TEMP is not part of the protocol surface this driver
+  /// mirrors, and running any statement drains the queue.
+  ///
+  /// Every decision is logged at `fine` and counted
+  /// ([debugTempLobQueuedCount], [debugTempLobSkippedDuplicateCount]).
+  ///
+  /// This is also the handle-release path: it drops the locator's
+  /// [_handleOwnedTempLobKeys] claim, since the handle is now closing.
   @internal
   void queueTempLobToFree(Uint8List locator) {
-    if (!_tempLobKeysToClose.add(_tempLobKey(locator))) return;
+    final key = _tempLobKey(locator);
+    _handleOwnedTempLobKeys.remove(key);
+    if (!_tempLobKeysToClose.add(key)) {
+      _tempLobSkippedDuplicateCount++;
+      _log.fine(
+        'Temp LOB free skipped: identity already pending '
+        '(pending=${_tempLobsToClose.length}, '
+        'skippedDuplicates=$_tempLobSkippedDuplicateCount)',
+      );
+      return;
+    }
     _tempLobsToClose.add(locator);
     _tempLobsTotalSize += locator.length;
+    _tempLobQueuedCount++;
+    _log.fine(
+      'Temp LOB free queued (pending=${_tempLobsToClose.length}, '
+      'totalQueued=$_tempLobQueuedCount)',
+    );
+    if (_tempLobsToClose.length >= _tempLobQueueWarnDepth &&
+        !_tempLobQueueWarned) {
+      _tempLobQueueWarned = true;
+      _log.warning(
+        '${_tempLobsToClose.length} temporary LOB frees are pending: they are '
+        'only sent with the next execute(), so run a statement to release '
+        'the server-side temporary LOBs',
+      );
+    }
+  }
+
+  /// Records that an open `OracleLob` handle owns the temporary [locator], so
+  /// the materialize path never queues it (see [_handleOwnedTempLobKeys]). The
+  /// claim is released by the handle's `close()` via [queueTempLobToFree].
+  @internal
+  void claimTempLobOwnership(Uint8List locator) {
+    _handleOwnedTempLobKeys.add(_tempLobKey(locator));
+  }
+
+  /// The materialize path's counterpart of [queueTempLobToFree]: queues a
+  /// temporary locator that was read and discarded, unless an open handle
+  /// already owns that identity (its `close()` will queue it).
+  void _queueMaterializedTempLobToFree(Uint8List locator) {
+    if (_handleOwnedTempLobKeys.contains(_tempLobKey(locator))) {
+      _tempLobMaterializeSkippedOwnedCount++;
+      _log.fine(
+        'Materialized temp LOB not queued: owned by an open handle '
+        '(skippedOwned=$_tempLobMaterializeSkippedOwnedCount)',
+      );
+      return;
+    }
+    final queuedBefore = _tempLobQueuedCount;
+    queueTempLobToFree(locator);
+    if (_tempLobQueuedCount == queuedBefore) return;
+    _tempLobMaterializeQueuedCount++;
+    _log.fine(
+      'Materialized temp LOB queued for free '
+      '(materializeQueued=$_tempLobMaterializeQueuedCount)',
+    );
   }
 
   /// Creates an EMPTY session-duration temporary LOB on the server and returns
@@ -891,6 +1004,7 @@ class Transport {
     // no longer pending, a re-created locator with the same bytes must be
     // queueable again.
     _tempLobKeysToClose.clear();
+    _tempLobQueueWarned = false;
 
     // CLOB-typed String binds, BLOB-typed Uint8List binds
     // (and PL/SQL strings beyond the 32767-byte VARCHAR limit) travel as
@@ -2056,6 +2170,7 @@ class Transport {
         // fetchLobs: true — the handle owns the locator and frees it itself on
         // close() via OracleConnection.releaseLob. Queueing here too would
         // double-free (see queueTempLobToFree's ownership invariant).
+        if (locator.isTemporary) claimTempLobOwnership(locator.locator);
         value = wrapLob(locator);
       } else {
         // Story 12.4 AC4 — the MATERIALIZE path's temporary-locator free.
@@ -2149,7 +2264,9 @@ class Transport {
               ? await _readBlobAsBytes(locator, timeout)
               : await _readClobAsString(locator, timeout);
         } finally {
-          if (locator.isTemporary) queueTempLobToFree(locator.locator);
+          if (locator.isTemporary) {
+            _queueMaterializedTempLobToFree(locator.locator);
+          }
         }
       }
       materialized[locator] = value;

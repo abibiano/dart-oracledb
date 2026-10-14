@@ -50,7 +50,7 @@ LobLocator _fetchedTempLocator({
   bytes[tnsLobLocOffsetFlag4] |= tnsLobLocFlagsTemp;
   // A distinguishing byte so two locators are not byte-identical (the queue
   // stores raw bytes; identity assertions must not depend on content equality).
-  if (tag != null) bytes[0] = tag;
+  if (tag != null) bytes[19] = tag;
   final loc = LobLocator(
     locator: bytes,
     oracleType: oracleType,
@@ -110,6 +110,11 @@ class _ChunkedReadTransport extends Transport {
 
   @override
   Future<void> disconnect() async {}
+
+  @override
+  Future<void> sendData(Uint8List ttcData, {int? dataFlags}) async {
+    throw StateError('test transport stops after execute drains pending frees');
+  }
 
   @override
   Future<LobOpResponse> sendLobOp({
@@ -922,7 +927,7 @@ void main() {
     Uint8List locatorBytes(int tag) {
       final b = Uint8List(tnsLobLocatorBufferSize);
       b[tnsLobLocOffsetFlag4] |= tnsLobLocFlagsTemp;
-      b[0] = tag;
+      b[19] = tag;
       return b;
     }
 
@@ -978,6 +983,88 @@ void main() {
         equals(1),
         reason: 'no double free of the input locator',
       );
+      expect(t.debugTempLobMaterializeQueuedCount, equals(0));
+      expect(t.debugTempLobSkippedDuplicateCount, equals(1));
+    });
+
+    test('identity is the locator SUBRANGE: an in-place mutation of the flag '
+        'bytes after queueing does not defeat the dedupe (DW-110)', () {
+      final t = _ChunkedReadTransport([]);
+      final pending = locatorBytes(5);
+      t.queueTempLobToFree(pending);
+      // What copyBackLocator may do to the live buffer: rewrite non-identity
+      // bytes (header/flags and the tail) in place.
+      pending[2] = 0x7F;
+      pending[tnsLobLocOffsetFlag1] = 0x82;
+      pending[tnsLobLocOffsetFlag3] = 0x80;
+      pending[35] = 0x42;
+      final echo = locatorBytes(5)
+        ..[tnsLobLocOffsetFlag1] = 0x82
+        ..[39] = 0x01;
+      t.queueTempLobToFree(echo);
+      expect(
+        t.debugPendingTempLobCount,
+        equals(1),
+        reason: 'same identity subrange == same LOB, whatever the flag bytes',
+      );
+      expect(t.debugTempLobSkippedDuplicateCount, equals(1));
+      // A different identity byte is a different LOB even if all else matches.
+      t.queueTempLobToFree(locatorBytes(6));
+      expect(t.debugPendingTempLobCount, equals(2));
+      expect(t.debugTempLobQueuedCount, equals(2));
+    });
+
+    test('a locator owned by an open handle is NOT queued by the materialize '
+        'path, even after the driver-queued twin already drained '
+        '(DW-109)', () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([1, 2, 3]), amount: 3),
+      ]);
+      t.claimTempLobOwnership(locatorBytes(8));
+      final echoed = LobLocator(
+        locator: locatorBytes(8),
+        oracleType: oraTypeBlob,
+        length: 3,
+        chunkSize: 0,
+      );
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindValues: [echoed],
+          outBindIndices: const [0],
+        ),
+      );
+      expect(out.outBindValues.single, equals([1, 2, 3]));
+      expect(t.debugPendingTempLobCount, equals(0));
+      expect(t.debugTempLobMaterializeSkippedOwnedCount, equals(1));
+      expect(t.debugTempLobMaterializeQueuedCount, equals(0));
+      // The handle's close() is the single owner: it queues exactly once and
+      // releases the claim, after which the materialize path may queue again.
+      t.queueTempLobToFree(locatorBytes(8));
+      expect(t.debugPendingTempLobCount, equals(1));
+    });
+
+    test('an unowned TEMP locator on the materialize path is queued and '
+        'counted', () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([1]), amount: 1),
+      ]);
+      final loc = LobLocator(
+        locator: locatorBytes(4),
+        oracleType: oraTypeBlob,
+        length: 1,
+        chunkSize: 0,
+      );
+      await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindValues: [loc],
+          outBindIndices: const [0],
+        ),
+      );
+      expect(t.debugTempLobMaterializeQueuedCount, equals(1));
+      expect(t.debugTempLobQueuedCount, equals(1));
+      expect(t.debugPendingTempLobCount, equals(1));
     });
 
     test('the dedupe only spans the PENDING window, so a locator freed and '
@@ -1016,10 +1103,10 @@ void main() {
         final b = Uint8List(tnsLobLocatorBufferSize);
         b[tnsLobLocOffsetFlag4] |= tnsLobLocFlagsTemp;
         // 4 distinguishing bytes so all N locators are distinct.
-        b[0] = i & 0xFF;
-        b[1] = (i >> 8) & 0xFF;
-        b[2] = (i >> 16) & 0xFF;
-        b[3] = (i >> 24) & 0xFF;
+        b[10] = i & 0xFF;
+        b[11] = (i >> 8) & 0xFF;
+        b[12] = (i >> 16) & 0xFF;
+        b[13] = (i >> 24) & 0xFF;
         t.queueTempLobToFree(b);
       }
       sw.stop();
@@ -1034,10 +1121,10 @@ void main() {
       for (var i = 0; i < n; i++) {
         final b = Uint8List(tnsLobLocatorBufferSize);
         b[tnsLobLocOffsetFlag4] |= tnsLobLocFlagsTemp;
-        b[0] = i & 0xFF;
-        b[1] = (i >> 8) & 0xFF;
-        b[2] = (i >> 16) & 0xFF;
-        b[3] = (i >> 24) & 0xFF;
+        b[10] = i & 0xFF;
+        b[11] = (i >> 8) & 0xFF;
+        b[12] = (i >> 16) & 0xFF;
+        b[13] = (i >> 24) & 0xFF;
         t.queueTempLobToFree(b);
       }
       expect(
@@ -1051,6 +1138,55 @@ void main() {
         reason: 'queueing $n locators must not be quadratic',
       );
     });
+
+    test(
+      'pending-free warning fires once when the queue reaches 1000',
+      () async {
+        final records = <LogRecord>[];
+        final previousLevel = Logger.root.level;
+        Logger.root.level = Level.ALL;
+        final subscription = Logger('Transport').onRecord.listen(records.add);
+        try {
+          final t = _ChunkedReadTransport([]);
+          for (var i = 0; i < 1001; i++) {
+            final locator = locatorBytes(0);
+            locator[10] = i & 0xFF;
+            locator[11] = (i >> 8) & 0xFF;
+            t.queueTempLobToFree(locator);
+            if (i == 998) {
+              expect(records.where((r) => r.level == Level.WARNING), isEmpty);
+            }
+          }
+          final warnings = records
+              .where((r) => r.level == Level.WARNING)
+              .toList();
+          expect(warnings, hasLength(1));
+          expect(warnings.single.message, contains('1000 temporary LOB frees'));
+
+          // sendExecute drains the pending batch before sending. The fake
+          // transport stops at the wire boundary, after the drain and reset.
+          await expectLater(
+            t.sendExecute('SELECT 1 FROM dual', isQuery: true),
+            throwsA(isA<StateError>()),
+          );
+          expect(t.debugPendingTempLobCount, equals(0));
+          for (var i = 0; i < 1000; i++) {
+            final locator = locatorBytes(0);
+            locator[10] = i & 0xFF;
+            locator[11] = (i >> 8) & 0xFF;
+            t.queueTempLobToFree(locator);
+          }
+          expect(
+            records.where((r) => r.level == Level.WARNING),
+            hasLength(2),
+            reason: 'each new pending-free cycle must warn at the threshold',
+          );
+        } finally {
+          await subscription.cancel();
+          Logger.root.level = previousLevel;
+        }
+      },
+    );
   });
 
   // -------------------------------------------------------------------------
@@ -1219,7 +1355,7 @@ void main() {
 
     LobLocator blobLocator(int length, {int tag = 0}) {
       final bytes = Uint8List(tnsLobLocatorBufferSize);
-      bytes[0] = tag;
+      bytes[19] = tag;
       return LobLocator(
         locator: bytes,
         oracleType: oraTypeBlob,

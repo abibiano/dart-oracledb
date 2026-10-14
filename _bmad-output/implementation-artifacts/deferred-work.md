@@ -776,14 +776,18 @@ resolution-undo: 4912d852181ff84ddd5d44ac470cec2147d8a657aaad8b80344b77f125a0794
 origin: migrated from legacy ledger ("Deferred from: code review of 12-4-dual-env-integration-tests (2026-07-26)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: ⏳ **Residual double-queue window for a caller-owned temporary `OracleLob` bound `inOut` under `fetchLobs: false`.** Introduced (not pre-existing) by 12.4's ownership widening: the new materialize-path `queueTempLobToFree` call can queue a caller-owned temporary locator while the caller's handle still reports open, and a later `OracleLob.close()` would queue the same bytes AGAIN once the first free has already drained off `_tempLobsToClose` — the Story-12.4 locator-level dedupe only suppresses a duplicate while the earlier entry is still pending. Blast radius is one session and no untrusted input (a double FREE_TEMP surfaces as an error on whatever unrelated statement the piggyback rides), and the measured server behaviour appears to keep the shape unreachable: for `p := p` Oracle returns the driver's own input locator (measurement row 1b) and for a bound caller handle it allocates a *replacement* LOB and invalidates the bound handle with ORA-22922. Surfaced by 12.4's security review as a lifecycle edge explicitly below the security bar; not patched on the release story. Fix when the LOB-ownership model is next touched: make ownership explicit (e.g. mark a locator "already owned by a handle" so the materialize path skips it, or record freed locators for one drain cycle) rather than relying on the pending-only dedupe. target: Epic 12 follow-up (LOB lifecycle / free-queue ownership). [lib/src/transport/transport.dart:594 `queueTempLobToFree`; `_materializeLobValues`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-free-queue-hardening
+resolution-undo: 9713e5d55bac6c010ee49249bdcac6a538905292c21031a6bfb7a5bea2bb31e9 2026-10-14 7374617475733a206f70656e
 
 ### DW-110: The temp-free queue's content dedupe compares whole locator buffers that `copyBackLocator` mutates in place, so its correctness is an empirical…
 
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 (2026-07-26)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: **The temp-free queue's content dedupe compares whole locator buffers that `copyBackLocator` mutates in place, so its correctness is an empirical observation rather than an invariant.** UPDATE (epic-12 review patch pass): the linear `_isTempLobAlreadyQueued` scan this entry named was replaced by an O(1) content index (`Transport._tempLobKeysToClose` / `_tempLobKey`) to close the separate `executeMany()` O(n²) finding, so the comparison is now over a whole-buffer key SNAPSHOTTED at queue time rather than over live bytes. That does not resolve this entry — it re-shapes it: the key is still derived from the whole mutable buffer, and a pending buffer that mutated after queueing would now yield a stale key instead of a mutated comparison (same residual double-queue outcome). The robust form is still a comparison over the locator's identity subrange. The original analysis follows. `Transport._tempLobKey` hashes raw locator bytes, but `LobLocator.locator`'s own dartdoc states "for temporary LOBs the server updates this buffer's contents on every LOB operation" and `Transport.copyBackLocator` mutates those buffers in place — including buffers already sitting in `_tempLobsToClose`. So (a) a pending entry's bytes can change after it was queued, and (b) the two values being compared are two independently-obtained echoes of the same LOB at different points in its life (the post-WRITE echo `_createTempClob` queued vs the post-READ echo the materialize path queues). Equality is proven on both fixtures, not by construction; if the two ever diverge the locator is queued twice and the double `FREE_TEMP` surfaces as an error on an unrelated statement — the hardest failure mode in this driver to diagnose, as the docstring itself argues. No test pins the negative case. Note that snapshotting the bytes at queue time is NOT obviously correct (node-oracledb frees the copy-back-updated locator), which is why this is a follow-up rather than a patch: the robust form is a comparison over the locator's identity subrange instead of the whole mutable buffer. target: Epic 12 follow-up (LOB lifecycle / free-queue ownership — folds into the existing residual-double-queue entry). [lib/src/transport/transport.dart `_tempLobKey`, `_tempLobKeysToClose`, `queueTempLobToFree`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-free-queue-hardening
+resolution-undo: 9713e5d55bac6c010ee49249bdcac6a538905292c21031a6bfb7a5bea2bb31e9 2026-10-14 7374617475733a206f70656e
 
 ### DW-111: `chunkSize` is documented and consumed as if it were in the LOB's native units, but Oracle's chunk size is a BYTE count.
 
@@ -850,14 +854,18 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 iteration 2 (2026-07-26)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: **The free-temp queue's two silent decisions emit no diagnostics at all, for the failure class the epic itself calls the hardest to diagnose.** `queueTempLobToFree` returns early on `if (!_tempLobKeysToClose.add(key)) return;` with no log line, no counter and no way to distinguish "correctly deduped" from "a real free was swallowed" — while its own docstring calls the stale-key case a residual risk — and the `fetchLobs: false` materialize path queues a `FREE_TEMP` purely off `locator.isTemporary`, one flag bit with cross-statement blast radius, with no `_log.fine`, no opt-out and no way for an application to attribute the resulting failure. `debugPendingTempLobCount` cannot hint that the backstop ever fired. The only symptom of either mistake is a slow silent `V$TEMPORARY_LOBS` leak (DBA-side inspection to notice) or an error on an innocent unrelated statement the piggyback rides. Fix: a `_log.fine` on both decisions (queued / skipped-as-duplicate) plus a debug counter for backstop hits, so the diagnosis is available without a rebuild. target: Epic 12 follow-up (LOB lifecycle diagnostics). [lib/src/transport/transport.dart:637 `queueTempLobToFree`; `_materializeLobValues`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-free-queue-hardening
+resolution-undo: 9713e5d55bac6c010ee49249bdcac6a538905292c21031a6bfb7a5bea2bb31e9 2026-10-14 7374617475733a206f70656e
 
 ### DW-120: The free-temp queue is unbounded and drains ONLY on `sendExecute`, so a create/write/close loop with no intervening execute accumulates session temp…
 
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 iteration 2 (2026-07-26)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: **The free-temp queue is unbounded and drains ONLY on `sendExecute`, so a create/write/close loop with no intervening execute accumulates session temp LOBs until session end.** `createTemporaryClob()` is a LOB op, not an execute, and `commit()` / `rollback()` / `ping()` are documented not to flush; `close()` only queues. A loop that creates, writes and closes temporary LOBs without running any statement therefore grows both the server-side session temp-LOB count and a single-message piggyback whose concatenated size is carried in one UB4 (`_tempLobsTotalSize`), with no cap, no explicit-flush API, no size-triggered flush and no warning as the queue grows — while the public docs name `close()` as the obligation and stop there. Benign in the mainstream shape (create → write → execute → close keeps the depth at ~1-2, because any execute drains the queue), which is why this is a follow-up. Fix: document that a temporary LOB's server-side free lands on the next `execute()`, and consider a size/count-triggered flush or an explicit flush seam. target: Epic 12 follow-up (LOB lifecycle). [lib/src/transport/transport.dart:522 `_tempLobsToClose`; `queueTempLobToFree`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-free-queue-hardening
+resolution-undo: 9713e5d55bac6c010ee49249bdcac6a538905292c21031a6bfb7a5bea2bb31e9 2026-10-14 7374617475733a206f70656e
 
 ### DW-121: `ResultSetCursor._reapBatchHandles` consults the PREVIOUS batch's `_deliveredHandles` set for the batch it is reaping.
 
@@ -913,3 +921,25 @@ reason: Dart jsonDecode rounds 9007199254740993.0 to 9007199254740992.0 before t
 status: done 2026-10-14
 resolution: closed by human decision: JSON numbers decode as double/int like dart:convert and node-oracledb; the limit is documented rather than redesigned.
 decision: 2026-10-14 Document the double limit — JSON numbers decode as double/int like dart:convert and node-oracledb; the limit is documented rather than redesigned.
+
+### DW-128: A temporary OUT locator can remain unqueued when an existing maxSize guard rejects it before materialization.
+origin: spec-deferred 351be44ef1b6
+location: lib/src/transport/transport.dart:2362
+source_spec: `bmad-build-auto-result-lob-free-queue-hardening.md`
+severity: medium
+reason: The scalar, bulk, and DML RETURNING maxSize checks throw before readLocator reaches its finally block. These checks and their ordering predate this hardening change. A live server-side leak measurement on an oversized temporary OUT locator would settle the impact.
+status: open
+
+### DW-129: Multiple distinct open handles for one temporary locator identity may outlive the ownership set's single claim.
+origin: spec-deferred 5dbcf3a60cfd
+location: lib/src/transport/transport.dart:590
+source_spec: `bmad-build-auto-result-lob-free-queue-hardening.md`
+reason: claimTempLobOwnership stores one set key and queueTempLobToFree removes it on one close. The response-local materialized map shares one handle for aliased LobLocator instances; a reachable path producing two independent handles with the same identity has not been established. A live or decoder-level reproducer would settle this.
+status: open
+
+### DW-130: Distinct temporary LOB identities might collide after enough allocations or across LOB types.
+origin: spec-deferred 24f4fd4346d6
+location: lib/src/transport/transport.dart:561
+source_spec: `bmad-build-auto-result-lob-free-queue-hardening.md`
+reason: The 12-byte identity range was measured on two temporary CLOBs. A live sequence of many CLOB, BLOB, and NCLOB allocations on both Oracle versions, with distinct-identity and post-free server-count checks, would settle whether the range remains unique.
+status: open
