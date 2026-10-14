@@ -1178,7 +1178,7 @@ END;''');
           'n NUMBER, '
           'c CLOB, '
           'b BLOB, '
-          'CONSTRAINT ${t}_uc UNIQUE (code))',
+          'CONSTRAINT ${checkedIdentifier('${t}_uc')} UNIQUE (code))',
         ),
         const [955], // ORA-00955: name already used
       );
@@ -1579,7 +1579,7 @@ END;''');
           'id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, '
           'k NUMBER, '
           'v VARCHAR2(100), '
-          'CONSTRAINT ${coex}_uk UNIQUE (k))',
+          'CONSTRAINT ${checkedIdentifier('${coex}_uk')} UNIQUE (k))',
         ),
         const [955], // ORA-00955: name already used
       );
@@ -1951,8 +1951,8 @@ END;''');
       );
     });
 
-    test('a 256-row batch crosses packet boundaries; total and sampled rows '
-        'round-trip in order (AC3)', () async {
+    test('a 256-row ~77 KB batch (large payload volume); total and sampled '
+        'rows round-trip in order (AC3)', () async {
       const rowCount = 256;
       // A reserved block that no other nextTestId() call can reproduce.
       final base = nextTestId() * 1000;
@@ -2052,11 +2052,12 @@ END;''');
       // columns on both fixtures. Skip only for the "no native JSON" codes.
       final probe = await connectForTest();
       final probeTable = uniqueTableName('s115jp');
+      var probeCreated = false;
       try {
         await probe.execute(
           'CREATE TABLE $probeTable (doc JSON) TABLESPACE USERS',
         );
-        await probe.execute('DROP TABLE $probeTable PURGE');
+        probeCreated = true;
       } on OracleException catch (e) {
         // Skip only for the errors that mean "this server cannot create
         // native JSON columns": ORA-00902 (invalid datatype, pre-21c
@@ -2069,7 +2070,13 @@ END;''');
         if (!jsonUnavailableCodes.contains(e.errorCode)) rethrow;
         jsonUnavailable = 'ORA-${e.errorCode}: ${e.message}';
       } finally {
-        await probe.close();
+        try {
+          if (probeCreated) {
+            await probe.execute('DROP TABLE $probeTable PURGE');
+          }
+        } finally {
+          await probe.close();
+        }
       }
     });
 

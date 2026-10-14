@@ -5,6 +5,7 @@
 /// docker-compose.yml setup (Oracle 23ai on port 1521, service FREEPDB1).
 library;
 
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -142,15 +143,47 @@ final Random _random = Random();
 /// 21c's 30-byte identifier limit (23ai allows 128, but the dual-environment
 /// rule targets the stricter bound).
 String uniqueObjectName(String base) {
+  if (!_identifierFragment.hasMatch(base)) {
+    throw ArgumentError.value(
+      base,
+      'base',
+      'uniqueObjectName("$base"): base must be an ASCII Oracle identifier '
+          'fragment (a letter followed by letters, digits, "_", "\$" or "#")',
+    );
+  }
   final suffix = _random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
   final name = '${base}_$suffix';
-  if (name.length > 30) {
+  final byteLength = utf8.encode(name).length;
+  if (byteLength > _maxIdentifierBytes) {
     throw ArgumentError.value(
       base,
       'base',
       'uniqueObjectName("$base") yields "$name" '
-          '(${name.length} chars) — exceeds the 30-byte Oracle 21c '
-          'identifier limit; shorten the base name',
+          '($byteLength bytes) — exceeds the $_maxIdentifierBytes-byte Oracle '
+          '21c identifier limit; shorten the base name',
+    );
+  }
+  return name;
+}
+
+/// Oracle 21c's identifier limit in bytes (23ai allows 128).
+const int _maxIdentifierBytes = 30;
+
+final RegExp _identifierFragment = RegExp(r'^[A-Za-z][A-Za-z0-9_$#]*$');
+
+/// Returns [name] after asserting its UTF-8 byte length fits Oracle 21c's
+/// 30-byte identifier limit.
+///
+/// [uniqueObjectName] only validates the base name it is given; use this for
+/// identifiers derived from its result by appending a suffix (e.g. `${t}_uk`).
+String checkedIdentifier(String name) {
+  final byteLength = utf8.encode(name).length;
+  if (byteLength > _maxIdentifierBytes) {
+    throw ArgumentError.value(
+      name,
+      'name',
+      'identifier "$name" is $byteLength bytes — exceeds the '
+          '$_maxIdentifierBytes-byte Oracle 21c identifier limit',
     );
   }
   return name;
@@ -170,8 +203,30 @@ String uniqueTableName(String base) => uniqueObjectName('t_$base');
 /// named entry is a `Map` keyed by OUT bind name.
 List<Object?> returned(OracleResult r, int row, Object bind) {
   final entry = r.outBinds[row];
-  final cell = entry is Map ? entry[bind] : (entry as List)[bind as int];
-  return (cell as List).cast<Object?>();
+  final Object? cell;
+  if (entry is Map) {
+    cell = entry[bind];
+  } else if (entry is List) {
+    if (bind is! int) {
+      throw StateError(
+        'returned(): row $row has a positional outBinds entry but bind '
+        '$bind is not an int index',
+      );
+    }
+    cell = entry[bind];
+  } else {
+    throw StateError(
+      'returned(): outBinds[$row] must be a Map or List, got '
+      '${entry.runtimeType}',
+    );
+  }
+  if (cell is! List) {
+    throw StateError(
+      'returned(): outBinds[$row][$bind] must be a List of returned values, '
+      'got ${cell.runtimeType}',
+    );
+  }
+  return cell.cast<Object?>();
 }
 
 /// Monotonically increasing primary-key generator seeded from a random base.
