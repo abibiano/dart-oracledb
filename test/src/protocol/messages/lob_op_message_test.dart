@@ -416,6 +416,156 @@ void main() {
     });
   });
 
+  group('LobOpStreamProbe (incremental, amortized-linear)', () {
+    Uint8List response(int dataBytes) {
+      final buf = WriteBuffer()
+        ..writeUint8(ttcMsgTypeLobData)
+        ..writeBytesWithLength(Uint8List(dataBytes))
+        ..writeUint8(ttcMsgTypeStatus)
+        ..writeUB4(0)
+        ..writeUB2(0);
+      return buf.toBytes();
+    }
+
+    LobOpStreamProbe newProbe() => LobOpStreamProbe(
+      operation: tnsLobOpRead,
+      sourceLocatorLength: 0,
+      sendAmount: false,
+    );
+
+    test('agrees with lobOpStreamIsComplete at every packet boundary', () {
+      // Odd packet size so boundaries fall inside chunk headers, chunk bodies
+      // and the trailing STATUS.
+      final full = response(200000);
+      const packet = 997;
+      final probe = newProbe();
+      for (var end = 0; end < full.length; end += packet) {
+        final slice = full.sublist(end, (end + packet).clamp(0, full.length));
+        final got = probe.add(slice);
+        final upTo = (end + slice.length);
+        final expected = lobOpStreamIsComplete(
+          full.sublist(0, upTo),
+          operation: tnsLobOpRead,
+          sourceLocatorLength: 0,
+          sendAmount: false,
+        );
+        expect(got, expected, reason: 'diverged after $upTo bytes');
+      }
+      expect(probe.bytes, equals(full));
+    });
+
+    test('a small (unchunked) LOB_DATA message is handled', () {
+      final full = response(10);
+      final probe = newProbe();
+      expect(probe.add(full.sublist(0, 5)), isFalse);
+      expect(probe.add(full.sublist(5)), isTrue);
+    });
+
+    test('a chunked LOB_DATA message survives every byte boundary', () {
+      final full = response(300);
+      final probe = newProbe();
+      for (var end = 1; end <= full.length; end++) {
+        final got = probe.add(Uint8List.sublistView(full, end - 1, end));
+        final expected = lobOpStreamIsComplete(
+          Uint8List.sublistView(full, 0, end),
+          operation: tnsLobOpRead,
+          sourceLocatorLength: 0,
+          sendAmount: false,
+        );
+        expect(got, expected, reason: 'diverged after $end bytes');
+      }
+      expect(probe.bytes, equals(full));
+    });
+
+    test('a fragmented pre-23.4 ERROR agrees at every byte boundary', () {
+      final full = Uint8List.fromList(
+        _errorMessage(errorNum: 1031, errorMessage: 'insufficient privs'),
+      );
+      final probe = LobOpStreamProbe(
+        operation: tnsLobOpRead,
+        sourceLocatorLength: 0,
+        sendAmount: false,
+        endOfRequestSupport: false,
+      );
+      for (var end = 1; end <= full.length; end++) {
+        final got = probe.add(Uint8List.sublistView(full, end - 1, end));
+        final expected = lobOpStreamIsComplete(
+          Uint8List.sublistView(full, 0, end),
+          operation: tnsLobOpRead,
+          sourceLocatorLength: 0,
+          sendAmount: false,
+          endOfRequestSupport: false,
+        );
+        expect(got, expected, reason: 'diverged after $end bytes');
+      }
+    });
+
+    test('fragmented WARNING and server piggyback preserve probe state', () {
+      final full = Uint8List.fromList([
+        ttcMsgTypeWarning,
+        ..._ub2(0), // warning number
+        ..._ub2(0), // no text
+        ..._ub2(0), // flags
+        ttcMsgTypeServerSidePiggyback,
+        2, // OS_PID_MTS
+        ..._ub2(2), // two DTYs
+        2, // DTY byte length
+        0x12,
+        0x34,
+        ttcMsgTypeStatus,
+        ..._ub4(0),
+        ..._ub2(0),
+      ]);
+      final probe = newProbe();
+      for (var end = 1; end <= full.length; end++) {
+        final got = probe.add(Uint8List.sublistView(full, end - 1, end));
+        final expected = lobOpStreamIsComplete(
+          Uint8List.sublistView(full, 0, end),
+          operation: tnsLobOpRead,
+          sourceLocatorLength: 0,
+          sendAmount: false,
+        );
+        expect(got, expected, reason: 'diverged after $end bytes');
+      }
+    });
+
+    test('rethrows a face-value malformation as a protocol error', () {
+      final probe = newProbe();
+      expect(
+        () => probe.add(Uint8List.fromList([0xEE])),
+        throwsA(isA<OracleException>()),
+      );
+    });
+
+    // Regression guard for DW-34: probing a response delivered in 1 KB packets
+    // used to re-walk and re-copy the whole accumulation per packet, so
+    // quadrupling the size multiplied the cost ~16x. Compare scaling RATIOS
+    // (machine-speed independent) with generous slack.
+    test('probing cost scales ~linearly with response size', () {
+      int micros(int bytes) {
+        final full = response(bytes);
+        final probe = newProbe();
+        final sw = Stopwatch()..start();
+        for (var at = 0; at < full.length; at += 1024) {
+          probe.add(
+            Uint8List.sublistView(full, at, (at + 1024).clamp(0, full.length)),
+          );
+        }
+        return sw.elapsedMicroseconds;
+      }
+
+      micros(1 << 20); // warm-up
+      final small = micros(4 << 20);
+      final large = micros(16 << 20); // 4x the bytes
+      // Linear => ~4x; the old quadratic probe gave ~16x. Allow up to 10x.
+      expect(
+        large,
+        lessThan(small * 10 + 50000),
+        reason: '4x data took ${large / small}x the time',
+      );
+    });
+  });
+
   group('LobLocator', () {
     test('usesVarLengthCharset reads flag byte 3 bit 0x80', () {
       final nclobLocator = Uint8List(40);

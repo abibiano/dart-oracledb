@@ -414,6 +414,11 @@ class Transport {
   static const int _tnsDataFlagsEof = 0x0040;
   static const int _tnsDataFlagsEndOfRequest = 0x2000;
 
+  /// Round-trip backstop for [readLobRange]'s continuation loop, matching the
+  /// driver's 1,000-round-trip fetch safety cap. Unreachable in production: every
+  /// caller leaves `pieceUnits` null, so the first READ requests the whole amount.
+  static const int maxLobReadPieces = 1000;
+
   // Safety cap: prevent unbounded FETCH loops when moreRowsToFetch stays true.
   // Applied only to EAGER materialization (OracleConnection.execute drains the
   // cursor engine bounded by this many FETCH rounds). Lazy OracleResultSet
@@ -1571,6 +1576,16 @@ class Transport {
         ttcFieldVersion: _ttcFieldVersion,
         endOfRequestSupport: _supportsEndOfRequest,
       ),
+      // Pre-23.4 servers have no TNS end-of-request flag, so the probe runs per
+      // packet; the incremental form keeps a multi-packet READ amortized-linear
+      // there (see [LobOpStreamProbe]).
+      incrementalProbe: LobOpStreamProbe(
+        operation: operation,
+        sourceLocatorLength: sourceLocatorLength,
+        sendAmount: sendAmount,
+        ttcFieldVersion: _ttcFieldVersion,
+        endOfRequestSupport: _supportsEndOfRequest,
+      ),
     );
     final response = decodeLobOpResponse(
       payload,
@@ -2010,6 +2025,14 @@ class Transport {
   ///
   /// The server's echoed post-op locator is copied back after every piece
   /// ([copyBackLocator]), exactly as a single READ did.
+  ///
+  /// **Backstops.** A continuation loop that keeps advancing but never finishes
+  /// (a server — or the test-only [debugLobReadPieceUnits] cap — delivering one
+  /// unit per READ) is cut off two ways, both between round trips so the
+  /// connection stays usable: after [maxPieces] READs
+  /// ([maxLobReadPieces], the analogue of the 1,000-round-trip fetch cap), and
+  /// once [timeout] has elapsed for the WHOLE read. [timeout] is an aggregate
+  /// deadline, not a per-piece wait: each READ is given only the time left.
   @internal
   Future<LobRangeRead> readLobRange({
     required Uint8List locator,
@@ -2017,6 +2040,7 @@ class Transport {
     required int amount,
     int? pieceUnits,
     Duration? timeout = const Duration(minutes: 2),
+    int maxPieces = maxLobReadPieces,
   }) async {
     if (amount <= 0) return LobRangeRead(bytes: Uint8List(0), unitsRead: 0);
     // An explicit argument wins; otherwise the test-only cap applies (null in
@@ -2026,20 +2050,67 @@ class Transport {
     final pieces = <Uint8List>[];
     var unitsRead = 0;
     var totalBytes = 0;
+    var pieceCount = 0;
+    final clock = Stopwatch()..start();
     while (unitsRead < amount) {
+      if (pieceCount >= maxPieces) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'LOB read exceeded the $maxPieces-round-trip safety cap with '
+              '${amount - unitsRead} of $amount units still outstanding '
+              '(read started at offset $offset); the server is delivering '
+              'the value in pieces too small to finish. Use byteStream() / '
+              'textStream() for incremental reads.',
+        );
+      }
+      Duration? remaining;
+      if (timeout != null) {
+        remaining = timeout - clock.elapsed;
+        if (remaining <= Duration.zero) {
+          // Between round trips nothing is in flight, so unlike a mid-READ
+          // timeout the transport is NOT poisoned.
+          throw OracleException(
+            errorCode: oraConnectTimeout,
+            message:
+                'LOB read timed out after ${timeout.inMilliseconds}ms '
+                'overall with ${amount - unitsRead} of $amount units still '
+                'outstanding ($pieceCount round trips)',
+          );
+        }
+      }
+      pieceCount++;
       final outstanding = amount - unitsRead;
       final request =
           effectivePieceUnits != null && effectivePieceUnits < outstanding
           ? effectivePieceUnits
           : outstanding;
-      final response = await sendLobOp(
+      final operation = sendLobOp(
         operation: tnsLobOpRead,
         sourceLocator: locator,
         sourceOffset: offset + unitsRead,
         sendAmount: true,
         amount: request,
-        timeout: timeout,
+        timeout: remaining,
       );
+      // sendLobOp's own timeout covers receiving the reply. Bound its send and
+      // decode work too, so this deadline applies to the entire round trip.
+      final response = remaining == null
+          ? await operation
+          : await operation.timeout(
+              remaining,
+              onTimeout: () {
+                // An unfinished RPC may still have a reply in flight. It cannot
+                // safely share this connection with another operation.
+                _poison();
+                throw OracleException(
+                  errorCode: oraConnectTimeout,
+                  message:
+                      'LOB read timed out after ${timeout!.inMilliseconds}ms '
+                      'overall during a round trip; transport poisoned',
+                );
+              },
+            );
       copyBackLocator(locator, response.updatedLocator);
       final data = response.data;
       if (data != null && data.isNotEmpty) {
@@ -2095,10 +2166,26 @@ class Transport {
       }
       unitsRead += delivered;
     }
-    return LobRangeRead(
-      bytes: _concatPieces(pieces, totalBytes),
-      unitsRead: unitsRead,
-    );
+    if (timeout != null && clock.elapsed > timeout) {
+      throw OracleException(
+        errorCode: oraConnectTimeout,
+        message:
+            'LOB read timed out after ${timeout.inMilliseconds}ms overall '
+            'before assembling the result ($pieceCount round trips)',
+      );
+    }
+    final bytes = _concatPieces(pieces, totalBytes);
+    if (timeout != null && clock.elapsed > timeout) {
+      // The final reply is complete, so this overrun does not leave a reply in
+      // flight and the connection remains reusable.
+      throw OracleException(
+        errorCode: oraConnectTimeout,
+        message:
+            'LOB read timed out after ${timeout.inMilliseconds}ms overall '
+            'while assembling the result ($pieceCount round trips)',
+      );
+    }
+    return LobRangeRead(bytes: bytes, unitsRead: unitsRead);
   }
 
   /// Concatenates [pieces] into one buffer, avoiding a copy in the (dominant)
@@ -2824,6 +2911,7 @@ class Transport {
     List<ColumnMetadata>? expectedColumns,
     List<BindMetadata>? bindMetadata,
     bool Function(Uint8List accumulated)? completionProbe,
+    LobOpStreamProbe? incrementalProbe,
     bool plSqlExecuteMany = false,
     bool dmlReturning = false,
     bool dmlRowCounts = false,
@@ -2834,6 +2922,7 @@ class Transport {
       expectedColumns: expectedColumns,
       bindMetadata: bindMetadata,
       completionProbe: completionProbe,
+      incrementalProbe: incrementalProbe,
       plSqlExecuteMany: plSqlExecuteMany,
       dmlReturning: dmlReturning,
       dmlRowCounts: dmlRowCounts,
@@ -2880,6 +2969,7 @@ class Transport {
     List<ColumnMetadata>? expectedColumns,
     List<BindMetadata>? bindMetadata,
     bool Function(Uint8List accumulated)? completionProbe,
+    LobOpStreamProbe? incrementalProbe,
     bool plSqlExecuteMany = false,
     bool dmlReturning = false,
     bool dmlRowCounts = false,
@@ -2901,21 +2991,9 @@ class Transport {
     // desync: any later read on this socket would decode garbage, so poison
     // the transport before propagating (same rationale as the receive-packet cap and
     // the mid-query REFUSE below). The connection must not be reused.
-    bool isComplete(Uint8List accumulated) {
+    bool guardedProbe(bool Function() probe) {
       try {
-        return completionProbe != null
-            ? completionProbe(accumulated)
-            : ttcStreamIsComplete(
-                accumulated,
-                ttcFieldVersion: _ttcFieldVersion,
-                endOfRequestSupport: _supportsEndOfRequest,
-                expectedColumns: expectedColumns,
-                bindMetadata: bindMetadata,
-                plSqlExecuteMany: plSqlExecuteMany,
-                dmlReturning: dmlReturning,
-                dmlRowCounts: dmlRowCounts,
-                presetOutBindIndices: presetOutBindIndices,
-              );
+        return probe();
       } on OracleException catch (e) {
         _poison();
         throw OracleException(
@@ -2933,6 +3011,22 @@ class Transport {
         rethrow;
       }
     }
+
+    bool isComplete(Uint8List accumulated) => guardedProbe(
+      () => completionProbe != null
+          ? completionProbe(accumulated)
+          : ttcStreamIsComplete(
+              accumulated,
+              ttcFieldVersion: _ttcFieldVersion,
+              endOfRequestSupport: _supportsEndOfRequest,
+              expectedColumns: expectedColumns,
+              bindMetadata: bindMetadata,
+              plSqlExecuteMany: plSqlExecuteMany,
+              dmlReturning: dmlReturning,
+              dmlRowCounts: dmlRowCounts,
+              presetOutBindIndices: presetOutBindIndices,
+            ),
+    );
 
     final chunks = <Uint8List>[];
     var packetsRead = 0;
@@ -2994,12 +3088,17 @@ class Transport {
         );
       }
       if (packet.payload.length < 2) {
-        chunks.add(packet.payload);
+        if (incrementalProbe != null && !_supportsEndOfRequest) {
+          guardedProbe(() => incrementalProbe.add(packet.payload));
+        } else {
+          chunks.add(packet.payload);
+        }
         break;
       }
       final flags = (packet.payload[0] << 8) | packet.payload[1];
       final ttcData = Uint8List.sublistView(packet.payload, 2);
-      chunks.add(ttcData);
+      final useIncremental = incrementalProbe != null && !_supportsEndOfRequest;
+      if (!useIncremental) chunks.add(ttcData);
       if (_supportsEndOfRequest) {
         // Oracle 23.4+: the server provides explicit end-of-request markers.
         // The TNS-level data-flags are authoritative — a success response sets
@@ -3052,10 +3151,15 @@ class Transport {
         // stateful-parser refactor (node-oracledb `waitForPackets` style) is the
         // long-term fix and is tracked as a follow-up; it is intentionally NOT
         // done here to avoid destabilising the working decode path.
-        if (isComplete(_concatChunks(chunks))) {
+        if (useIncremental) {
+          if (guardedProbe(() => incrementalProbe.add(ttcData))) break;
+        } else if (isComplete(_concatChunks(chunks))) {
           break;
         }
       }
+    }
+    if (incrementalProbe != null && !_supportsEndOfRequest) {
+      return incrementalProbe.bytes;
     }
     return _concatChunks(chunks);
   }

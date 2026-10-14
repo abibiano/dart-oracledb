@@ -96,6 +96,12 @@ class _ChunkedReadTransport extends Transport {
   final List<({int offset, int amount})> requests =
       <({int offset, int amount})>[];
 
+  /// The `timeout` each READ was handed (the aggregate deadline's remainder).
+  final List<Duration?> timeouts = <Duration?>[];
+
+  /// Simulated wall-clock cost of each READ, to exercise the aggregate deadline.
+  Duration readDelay = Duration.zero;
+
   /// Echoed as each reply's `updatedLocator`, so the post-op copy-back can be
   /// asserted per piece.
   Uint8List? echoLocator;
@@ -104,9 +110,6 @@ class _ChunkedReadTransport extends Transport {
 
   @override
   bool get isConnected => true;
-
-  @override
-  bool get isCorrupted => false;
 
   @override
   Future<void> disconnect() async {}
@@ -131,6 +134,8 @@ class _ChunkedReadTransport extends Transport {
     expect(operation, equals(tnsLobOpRead));
     expect(sendAmount, isTrue, reason: 'the SB8 unit count is load-bearing');
     requests.add((offset: sourceOffset, amount: amount));
+    timeouts.add(timeout);
+    if (readDelay > Duration.zero) await Future<void>.delayed(readDelay);
     if (_next >= replies.length) {
       return LobOpResponse(isSuccess: true, amount: 0);
     }
@@ -1292,6 +1297,165 @@ void main() {
         );
       },
     );
+
+    group('continuation-loop backstops (DW-118)', () {
+      test(
+        'maxPieces cuts off a loop that advances but never finishes',
+        () async {
+          // One unit per READ, forever: every iteration makes progress, so only
+          // the round-trip cap can stop it.
+          final t = _ChunkedReadTransport([
+            for (var i = 0; i < 50; i++)
+              (data: Uint8List.fromList([i]), amount: 1),
+          ]);
+          await expectLater(
+            t.readLobRange(
+              locator: locator,
+              offset: 1,
+              amount: 40,
+              maxPieces: 5,
+            ),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.message, 'message', contains('5-round-trip'))
+                  .having((e) => e.errorCode, 'code', oraProtocolError),
+            ),
+          );
+          expect(t.requests, hasLength(5));
+          expect(t.requests.map((r) => r.amount), [40, 39, 38, 37, 36]);
+          expect(t.isCorrupted, isFalse);
+          final next = await t.readLobRange(
+            locator: locator,
+            offset: 1,
+            amount: 1,
+          );
+          expect(next.bytes, [5]);
+        },
+      );
+
+      test('the default cap is the 1,000-round-trip fetch cap', () {
+        expect(Transport.maxLobReadPieces, 1000);
+      });
+
+      test(
+        'a read that needs exactly maxPieces round trips succeeds',
+        () async {
+          final t = _ChunkedReadTransport([
+            for (var i = 0; i < 3; i++)
+              (data: Uint8List.fromList([i]), amount: 1),
+          ]);
+          final read = await t.readLobRange(
+            locator: locator,
+            offset: 1,
+            amount: 3,
+            maxPieces: 3,
+          );
+          expect(read.bytes, equals([0, 1, 2]));
+        },
+      );
+
+      test('timeout is an aggregate deadline: each READ gets only the time '
+          'left, and the loop stops once it is spent', () async {
+        final t = _ChunkedReadTransport([
+          for (var i = 0; i < 50; i++)
+            (data: Uint8List.fromList([i]), amount: 1),
+        ])..readDelay = const Duration(milliseconds: 30);
+        await expectLater(
+          t.readLobRange(
+            locator: locator,
+            offset: 1,
+            amount: 40,
+            pieceUnits: 1,
+            timeout: const Duration(milliseconds: 100),
+          ),
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.message, 'message', contains('timed out'))
+                .having((e) => e.errorCode, 'code', oraConnectTimeout),
+          ),
+        );
+        // Far fewer than 40 round trips, and the budget handed down shrinks.
+        expect(t.requests.length, lessThan(8));
+        final budgets = t.timeouts.whereType<Duration>().toList();
+        expect(
+          budgets.first,
+          lessThanOrEqualTo(const Duration(milliseconds: 100)),
+        );
+        for (var i = 1; i < budgets.length; i++) {
+          expect(budgets[i], lessThan(budgets[i - 1]));
+        }
+      });
+
+      test('an in-flight round trip uses the aggregate deadline', () async {
+        final t = _ChunkedReadTransport([
+          (data: Uint8List.fromList([1]), amount: 1),
+        ])..readDelay = const Duration(milliseconds: 80);
+        await expectLater(
+          t.readLobRange(
+            locator: locator,
+            offset: 1,
+            amount: 1,
+            timeout: const Duration(milliseconds: 20),
+          ),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'code',
+              oraConnectTimeout,
+            ),
+          ),
+        );
+        expect(t.isCorrupted, isTrue);
+      });
+
+      test(
+        'an elapsed deadline before a READ leaves the transport usable',
+        () async {
+          final t = _ChunkedReadTransport([
+            (data: Uint8List.fromList([7]), amount: 1),
+          ]);
+          await expectLater(
+            t.readLobRange(
+              locator: locator,
+              offset: 1,
+              amount: 2,
+              timeout: Duration.zero,
+            ),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.errorCode,
+                'code',
+                oraConnectTimeout,
+              ),
+            ),
+          );
+          expect(t.requests, isEmpty);
+          expect(t.isCorrupted, isFalse);
+          final next = await t.readLobRange(
+            locator: locator,
+            offset: 1,
+            amount: 1,
+          );
+          expect(next.bytes, [7]);
+        },
+      );
+
+      test('a null timeout imposes no deadline', () async {
+        final t = _ChunkedReadTransport([
+          for (var i = 0; i < 3; i++)
+            (data: Uint8List.fromList([i]), amount: 1),
+        ]);
+        final read = await t.readLobRange(
+          locator: locator,
+          offset: 1,
+          amount: 3,
+          pieceUnits: 1,
+          timeout: null,
+        );
+        expect(read.unitsRead, 3);
+        expect(t.timeouts, everyElement(isNull));
+      });
+    });
 
     test('the cap is validated: a non-positive value throws and leaves the '
         'seam off', () async {

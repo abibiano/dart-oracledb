@@ -273,7 +273,9 @@ archived: 2026-10-09
 origin: migrated from legacy ledger ("Epic 12 closeout (dev-story of 12-4-dual-env-integration-tests, 2026-07-26)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: ⏳ **A full-length single LOB READ scales super-linearly with value size** (~141 s for a 32 M-unit CLOB on 23ai). Carried unchanged — no buffer-accumulation fix attempted. 12.4 respected it in practice: every new fixture is modest (≤ 300 units / 64 bytes) and the multi-piece proofs use the piece cap rather than bigger values. **Epic-exit disposition:** performance, not correctness, and callers already have a linear alternative in `byteStream()`/`textStream()`; profile the accumulate/concat path and pre-size or rope-join the chunk list. target: Epic 12 follow-up / performance. [lib/src/transport/transport.dart `_receiveDataWithTimeout`, `decodeLobOpResponse`, `readLobRange`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-read-perf-limits
+resolution-undo: 6f2476ee3635524df4a84e2c90789c9c743b51f88f02597b6e756b6ebe64c3a7 2026-10-14 7374617475733a206f70656e
 
 ### DW-35: Bare DML `RETURNING ... INTO` cannot take an `OracleBind` spec; it needs a `BEGIN/END` wrapper. Carried unchanged — the wrapped form is dual-env…
 
@@ -744,7 +746,9 @@ archived: 2026-10-09
 origin: migrated from legacy ledger ("Deferred from: dev-story of 12-3-chunked-streaming-transfer (2026-07-26)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: **A full-length single LOB READ scales super-linearly with value size — ~141 s for a 32 M-unit CLOB on 23ai.** Measured while establishing AC1's single-READ ceiling (the probe read each value whole in ONE `tnsLobOpRead`). 23ai wall-clock for the READ alone: 1,048,544 units → 0.41 s; 4,194,176 → 3.37 s; 16,776,704 → 41.2 s; 33,553,408 → 141.1 s (the wire payload is double those figures — every CLOB arrives UTF-16BE). BLOBs show the same shape more mildly (1 MB → 0.22 s, 4 MB → 2.2 s, 16 MB → 18.3 s, 32 MB → 35.9 s); 21c is comparable (8 M-unit CLOB → 26 s). Doubling the size roughly quadruples the time, which points at repeated buffer accumulation/copying in the LOB_DATA receive path (`_receiveDataWithTimeout`'s accumulate-then-probe loop and/or `decodeLobOpResponse`'s chunk concatenation) rather than at the server or the socket. Not a correctness issue and not a 12.3 regression — the same single READ existed before, it simply used to fail loud above the round-trip limit instead of succeeding slowly. Callers who care now have a linear alternative (`byteStream()`/`textStream()`, one bounded READ per piece), which is why this is deferred rather than fixed here. Fix: profile the accumulate/concat path and make it amortized-linear (pre-size or rope-join the chunk list). target: Epic 12 follow-up (performance). [lib/src/transport/transport.dart `_receiveDataWithTimeout`, `decodeLobOpResponse`, `readLobRange`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-read-perf-limits
+resolution-undo: 6f2476ee3635524df4a84e2c90789c9c743b51f88f02597b6e756b6ebe64c3a7 2026-10-14 7374617475733a206f70656e
 
 ### DW-106: A plain (non-PL/SQL) `execute()` cannot take an `OracleBind` spec, so node-oracledb's canonical `INSERT ... RETURNING c INTO :lobbv` needs a…
 
@@ -847,7 +851,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 iteration 2 (2026-07-26)"), 2026-10-09
 location: lib/src/transport/transport.dart
 reason: **`readLobRange`'s continuation loop has no round-trip cap and no aggregate deadline — only a PER-PIECE timeout.** `while (unitsRead < amount)` exits only when the amount is satisfied or the server reports zero units; there is no analogue of the driver's established 1,000-round-trip fetch safety cap (documented in the README's "Very large result sets"), no warning as the piece count climbs, and the `Duration(minutes: 2)` timeout is passed to EACH `sendLobOp`, so a server (or the test-only `debugLobReadPieceUnits` cap) delivering one unit per READ turns a 32 M-unit read into ~33 M round trips that never time out as a whole and are indistinguishable from a hang. Bounded in principle (every iteration must advance at least one unit or hit the no-progress throw) and unreachable in production today — `pieceUnits` is null on every production caller, so the first READ requests the whole amount, and no live server has ever been observed to short-read (already a carried ledger item) — which is why this is a follow-up rather than a patch. Fix: a `maxLobReadPieces` backstop and/or a single overall deadline across the loop instead of the same `timeout` per piece. target: Epic 12 follow-up (LOB read robustness). [lib/src/transport/transport.dart:1830 `readLobRange`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-read-perf-limits
+resolution-undo: 6f2476ee3635524df4a84e2c90789c9c743b51f88f02597b6e756b6ebe64c3a7 2026-10-14 7374617475733a206f70656e
 
 ### DW-119: The free-temp queue's two silent decisions emit no diagnostics at all, for the failure class the epic itself calls the hardest to diagnose.
 

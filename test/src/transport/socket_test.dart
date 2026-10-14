@@ -224,6 +224,80 @@ void main() {
       });
     });
 
+    group('inbound buffering', () {
+      Future<(OracleSocket, ServerSocket)> connectToPayloadServer(
+        Uint8List payload,
+      ) async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((s) async {
+          s.add(payload);
+          await s.flush();
+        });
+        final socket = OracleSocket();
+        await socket.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
+        return (socket, server);
+      }
+
+      test('reads span chunk boundaries and keep byte order', () async {
+        final payload = Uint8List.fromList(
+          List<int>.generate(300000, (i) => i & 0xFF),
+        );
+        final (socket, server) = await connectToPayloadServer(payload);
+        final got = BytesBuilder();
+        // Odd read sizes so reads straddle whatever chunking the OS delivers.
+        for (var n = 0; n < payload.length;) {
+          final take = (payload.length - n).clamp(0, 7919);
+          got.add(await socket.read(take));
+          n += take;
+        }
+        expect(got.toBytes(), equals(payload));
+        expect(socket.available, 0);
+        expect(socket.hasData, isFalse);
+        await socket.close();
+        await server.close();
+      });
+
+      // Regression guard for DW-34: the pending buffer was a List<int> consumed
+      // with removeRange(0, n), so draining a large backlog in packet-sized
+      // reads cost O(backlog) per read. Compare scaling ratios, not absolutes.
+      test('draining a large backlog scales ~linearly', () async {
+        Future<int> drainMicros(int total) async {
+          final (socket, server) = await connectToPayloadServer(
+            Uint8List(total),
+          );
+          // Let the whole backlog land first so every read sees a big buffer.
+          final deadline = DateTime.now().add(const Duration(seconds: 10));
+          while (socket.available < total &&
+              DateTime.now().isBefore(deadline)) {
+            await Future<void>.delayed(const Duration(milliseconds: 5));
+          }
+          expect(socket.available, total);
+          final sw = Stopwatch()..start();
+          for (var n = 0; n < total; n += 1024) {
+            await socket.read(1024);
+          }
+          final us = sw.elapsedMicroseconds;
+          await socket.close();
+          await server.close();
+          return us;
+        }
+
+        await drainMicros(1 << 20); // warm-up
+        final small = await drainMicros(4 << 20);
+        final large = await drainMicros(16 << 20); // 4x the bytes
+        // Linear => ~4x; the old removeRange drain was ~16x. Allow up to 10x.
+        expect(
+          large,
+          lessThan(small * 10 + 50000),
+          reason: '4x data took ${large / small}x the time',
+        );
+      });
+    });
+
     group('liveness', () {
       test('isConnected becomes false after remote close', () async {
         final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);

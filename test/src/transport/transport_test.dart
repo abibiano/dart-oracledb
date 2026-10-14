@@ -511,6 +511,105 @@ void main() {
       });
     });
 
+    // The pre-23.4 LOB receive path (the default: _supportsEndOfRequest is
+    // false) feeds each DATA packet to the incremental LobOpStreamProbe and
+    // returns its accumulated bytes. A fake server splits one LOB READ reply
+    // (LOB_DATA chunked + RETURN_PARAMETER + STATUS) into odd-sized DATA packets
+    // so boundaries fall inside chunk headers, chunk bodies and the trailer.
+    group('pre-23.4 LOB READ over several DATA packets', () {
+      Uint8List dataPacket(List<int> ttcBytes) {
+        final payload = <int>[0x00, 0x00, ...ttcBytes]; // data flags 0x0000
+        final packetLen = tnsHeaderSize + payload.length;
+        return Uint8List.fromList(<int>[
+          (packetLen >> 8) & 0xFF,
+          packetLen & 0xFF,
+          0x00,
+          0x00,
+          tnsPacketData,
+          0x00,
+          0x00,
+          0x00,
+          ...payload,
+        ]);
+      }
+
+      Future<(Transport, ServerSocket)> start(List<int> reply, int step) async {
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((s) {
+          unawaited(s.done.catchError((_) {}));
+          s.listen((_) async {
+            for (var at = 0; at < reply.length; at += step) {
+              s.add(
+                dataPacket(
+                  reply.sublist(at, (at + step).clamp(0, reply.length)),
+                ),
+              );
+              await s.flush();
+            }
+          }, onError: (_) {});
+        });
+        final transport = Transport();
+        await transport.connect(
+          '127.0.0.1',
+          server.port,
+          timeout: const Duration(seconds: 2),
+        );
+        return (transport, server);
+      }
+
+      test('reassembles data, locator and amount byte-exact', () async {
+        final data = Uint8List.fromList(
+          List<int>.generate(70000, (i) => (i * 7) & 0xFF),
+        );
+        final locator = Uint8List.fromList(List<int>.generate(40, (i) => i));
+        final w = WriteBuffer()
+          ..writeUint8(ttcMsgTypeLobData)
+          ..writeBytesWithLength(data)
+          ..writeUint8(ttcMsgTypeParameter)
+          ..writeBytes(locator)
+          ..writeBytes(Uint8List.fromList([3, 0x01, 0x11, 0x70])) // SB8 70000
+          ..writeUint8(ttcMsgTypeStatus)
+          ..writeUB4(0)
+          ..writeUB2(0);
+        final (transport, server) = await start(w.toBytes(), 4093);
+
+        final response = await transport.sendLobOp(
+          operation: tnsLobOpRead,
+          sourceLocator: locator,
+          sendAmount: true,
+          amount: 70000,
+          timeout: const Duration(seconds: 5),
+        );
+        expect(response.data, equals(data));
+        expect(response.updatedLocator, equals(locator));
+        expect(response.amount, 70000);
+
+        await transport.disconnect();
+        await server.close();
+      });
+
+      test('a malformed byte mid-stream fails loud and poisons', () async {
+        final (transport, server) = await start(<int>[0xEE, 1, 2, 3], 2);
+        await expectLater(
+          transport.sendLobOp(
+            operation: tnsLobOpRead,
+            sendAmount: false,
+            timeout: const Duration(seconds: 5),
+          ),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.errorCode,
+              'errorCode',
+              oraProtocolError,
+            ),
+          ),
+        );
+        expect(transport.isCorrupted, isTrue);
+        await transport.disconnect();
+        await server.close();
+      });
+    });
+
     // The eager fetch-drain iteration cap must surface an honestly incomplete
     // result (moreRowsToFetch == true), never spin forever or silently
     // truncate. sendExecute now returns only the FIRST batch; the shared cursor

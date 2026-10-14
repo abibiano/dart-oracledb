@@ -300,6 +300,117 @@ bool lobOpStreamIsComplete(
   }
 }
 
+/// Incremental, amortized-linear counterpart of [lobOpStreamIsComplete].
+///
+/// The stateless probe re-walks (and, in the transport, re-concatenates) the
+/// whole accumulated response once per inbound TNS packet, so a multi-megabyte
+/// LOB_DATA message spanning N packets costs O(N x bytes). This probe keeps the
+/// accumulated bytes in a doubling buffer and remembers where the last fully
+/// parsed unit ended — a whole TTC message, or one chunk of a chunked
+/// (`0xFE`-prefixed) LOB_DATA message — so each [add] only examines the bytes
+/// that arrived since. Verdicts are identical to [lobOpStreamIsComplete] on the
+/// same bytes.
+class LobOpStreamProbe {
+  LobOpStreamProbe({
+    required this.operation,
+    required this.sourceLocatorLength,
+    required this.sendAmount,
+    this.ttcFieldVersion = 24,
+    this.endOfRequestSupport = true,
+  });
+
+  final int operation;
+  final int sourceLocatorLength;
+  final bool sendAmount;
+  final int ttcFieldVersion;
+  final bool endOfRequestSupport;
+
+  static const int _longLengthIndicator = 0xFE;
+
+  Uint8List _buf = Uint8List(0);
+  int _length = 0;
+  // Start of the first unparsed unit.
+  int _pos = 0;
+  // True while inside a chunked LOB_DATA message (after its 0xFE marker).
+  bool _inChunkedLobData = false;
+  final _LobDecodeState _state = _LobDecodeState();
+
+  /// Every byte added so far. A view over the internal buffer when its spare
+  /// capacity is small; an exact-size copy otherwise, so a caller that keeps
+  /// the result (a decoded LOB value aliases it) never pins up to 2x the data.
+  /// Call once, after the final [add].
+  Uint8List get bytes {
+    final view = Uint8List.sublistView(_buf, 0, _length);
+    return _buf.length - _length > _length ~/ 8
+        ? Uint8List.fromList(view)
+        : view;
+  }
+
+  /// Appends [chunk] and returns whether the response is now complete.
+  bool add(Uint8List chunk) {
+    final needed = _length + chunk.length;
+    if (needed > _buf.length) {
+      var capacity = _buf.isEmpty ? 4096 : _buf.length;
+      while (capacity < needed) {
+        capacity *= 2;
+      }
+      final grown = Uint8List(capacity)..setRange(0, _length, _buf);
+      _buf = grown;
+    }
+    _buf.setRange(_length, needed, chunk);
+    _length = needed;
+    return _advance();
+  }
+
+  bool _advance() {
+    try {
+      while (!_state.endOfResponse && _pos < _length) {
+        final view = Uint8List.sublistView(_buf, _pos, _length);
+        final buffer = ReadBuffer(view);
+        if (_inChunkedLobData) {
+          final chunkSize = buffer.readUB4();
+          if (chunkSize == 0) {
+            _inChunkedLobData = false;
+          } else {
+            buffer.skip(chunkSize);
+          }
+        } else if (view[0] == ttcMsgTypeLobData &&
+            view.length > 1 &&
+            view[1] == _longLengthIndicator) {
+          // LOB_DATA with chunked payload: consume the marker and walk its
+          // chunks one at a time instead of re-walking the whole message.
+          buffer.skip(2);
+          _inChunkedLobData = true;
+        } else {
+          final msgType = buffer.readUint8();
+          _walkLobOpMessage(
+            msgType,
+            buffer,
+            _state,
+            operation: operation,
+            sourceLocatorLength: sourceLocatorLength,
+            sendAmount: sendAmount,
+            ttcFieldVersion: ttcFieldVersion,
+            endOfRequestSupport: endOfRequestSupport,
+          );
+        }
+        _pos += buffer.position;
+      }
+    } on BufferUnderflowException {
+      return false;
+    } on BufferException catch (e) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'Malformed TTC stream detected by the LOB completion probe: '
+            '${e.message}',
+        cause: e,
+      );
+    }
+    return _state.endOfResponse;
+  }
+}
+
 /// Parses a complete LOB operation response payload into a [LobOpResponse].
 LobOpResponse decodeLobOpResponse(
   Uint8List payload, {
@@ -335,7 +446,9 @@ LobOpResponse decodeLobOpResponse(
 
   final isSuccess = state.errorNum == null || state.errorNum == 0;
   Uint8List? data;
-  if (state.dataChunks.isNotEmpty) {
+  if (state.dataChunks.length == 1) {
+    data = state.dataChunks.single;
+  } else if (state.dataChunks.isNotEmpty) {
     final total = state.dataChunks.fold<int>(0, (sum, c) => sum + c.length);
     data = Uint8List(total);
     var offset = 0;

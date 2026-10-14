@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
@@ -20,7 +22,13 @@ class OracleSocket {
 
   Socket? _socket;
   StreamSubscription<Uint8List>? _subscription;
-  final _pendingData = <int>[];
+  // Inbound bytes as a queue of received chunks plus a read offset into the
+  // head chunk, so consuming a packet is O(packet) rather than shifting every
+  // buffered byte (a `List<int>.removeRange(0, n)` made a multi-MB LOB read
+  // quadratic once the socket outran the consumer).
+  final _pendingChunks = Queue<Uint8List>();
+  int _headOffset = 0;
+  int _pendingLength = 0;
   Completer<void>? _dataAvailable;
 
   /// Known-liveness flag for the connection.
@@ -70,7 +78,7 @@ class OracleSocket {
       _subscription = _socket!.listen(
         (Uint8List data) {
           _log.fine('Received ${data.length} bytes');
-          _pendingData.addAll(data);
+          _enqueue(data);
           // Signal that data is available
           if (_dataAvailable != null && !_dataAvailable!.isCompleted) {
             _dataAvailable!.complete();
@@ -153,14 +161,14 @@ class OracleSocket {
   }) async {
     final deadline = DateTime.now().add(timeout);
 
-    while (_pendingData.length < length) {
+    while (_pendingLength < length) {
       // Check connection status inside the loop to catch disconnects during wait
       if (!isConnected) {
         throw OracleException(
           errorCode: oraNetworkError,
           message:
               'Connection closed by server while waiting for data: '
-              'need $length bytes, have ${_pendingData.length}',
+              'need $length bytes, have $_pendingLength',
         );
       }
 
@@ -170,7 +178,7 @@ class OracleSocket {
         throw OracleException(
           errorCode: oraConnectTimeout,
           message:
-              'Timeout waiting for data: need $length bytes, have ${_pendingData.length}',
+              'Timeout waiting for data: need $length bytes, have $_pendingLength',
         );
       }
 
@@ -183,21 +191,43 @@ class OracleSocket {
         throw OracleException(
           errorCode: oraConnectTimeout,
           message:
-              'Timeout waiting for data: need $length bytes, have ${_pendingData.length}',
+              'Timeout waiting for data: need $length bytes, have $_pendingLength',
         );
       }
     }
 
-    final result = Uint8List.fromList(_pendingData.sublist(0, length));
-    _pendingData.removeRange(0, length);
-    return result;
+    return _dequeue(length);
+  }
+
+  void _enqueue(Uint8List data) {
+    if (data.isEmpty) return;
+    _pendingChunks.add(data);
+    _pendingLength += data.length;
+  }
+
+  Uint8List _dequeue(int length) {
+    final out = Uint8List(length);
+    var written = 0;
+    while (written < length) {
+      final head = _pendingChunks.first;
+      final take = min(head.length - _headOffset, length - written);
+      out.setRange(written, written + take, head, _headOffset);
+      written += take;
+      _headOffset += take;
+      if (_headOffset == head.length) {
+        _pendingChunks.removeFirst();
+        _headOffset = 0;
+      }
+    }
+    _pendingLength -= length;
+    return out;
   }
 
   /// Checks if data is available for reading.
-  bool get hasData => _pendingData.isNotEmpty;
+  bool get hasData => _pendingLength > 0;
 
   /// Returns the number of bytes available for reading.
-  int get available => _pendingData.length;
+  int get available => _pendingLength;
 
   /// Upgrades the current TCP connection to TLS.
   ///
@@ -249,7 +279,7 @@ class OracleSocket {
       _subscription = _socket!.listen(
         (Uint8List data) {
           _log.fine('Received ${data.length} bytes (TLS)');
-          _pendingData.addAll(data);
+          _enqueue(data);
           if (_dataAvailable != null && !_dataAvailable!.isCompleted) {
             _dataAvailable!.complete();
           }
@@ -338,7 +368,9 @@ class OracleSocket {
     _subscription?.cancel();
     _subscription = null;
     _socket = null;
-    _pendingData.clear();
+    _pendingChunks.clear();
+    _headOffset = 0;
+    _pendingLength = 0;
     // Complete any pending read with an error by leaving the completer incomplete
     // The read() method will detect !isConnected and throw
     if (_dataAvailable != null && !_dataAvailable!.isCompleted) {
