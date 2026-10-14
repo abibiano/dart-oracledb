@@ -397,7 +397,7 @@ const int ttcExecOptionBatchErrors = 0x80000;
 /// `TNS_EXEC_OPTION_DML_ROWCOUNTS`). Set in the `dmlOptions` / exec-flags
 /// (al8i4[9]) field of the EXECUTE request for array-DML
 /// `executeMany(dmlRowCounts: true)`.
-const int ttcExecOptionDmlRowCounts = 0x4000;
+const int ttcDmlOptionRowCounts = 0x4000;
 
 /// SQL is not PL/SQL (used in the `options` field of EXECUTE request).
 const int ttcExecOptionNotPlSql = 0x8000;

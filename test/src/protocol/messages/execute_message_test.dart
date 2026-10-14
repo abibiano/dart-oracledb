@@ -5355,7 +5355,7 @@ void main() {
       ).toBytes();
       expect(_readOptionsFromHeader(bytes) & ttcExecOptionBatchErrors, 0);
       expect(
-        _openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
+        _openDmlExecuteForRead(bytes).dmlOptions & ttcDmlOptionRowCounts,
         0,
       );
       final block = _readArrayDmlRowCountBlock(bytes);
@@ -5380,7 +5380,7 @@ void main() {
       );
       // batchErrors alone leaves the DML-row-count exec-flag and pointer clear.
       expect(
-        _openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
+        _openDmlExecuteForRead(bytes).dmlOptions & ttcDmlOptionRowCounts,
         0,
       );
       expect(_readArrayDmlRowCountBlock(bytes).pointer, 0);
@@ -5395,10 +5395,10 @@ void main() {
         bulkRows: rows(),
         dmlRowCounts: true,
       ).toBytes();
-      expect(ttcExecOptionDmlRowCounts, 0x4000);
+      expect(ttcDmlOptionRowCounts, 0x4000);
       expect(
-        _openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
-        ttcExecOptionDmlRowCounts,
+        _openDmlExecuteForRead(bytes).dmlOptions & ttcDmlOptionRowCounts,
+        ttcDmlOptionRowCounts,
       );
       // The pointer block carries the executeMany iteration count (3 rows).
       final block = _readArrayDmlRowCountBlock(bytes);
@@ -5423,8 +5423,8 @@ void main() {
         ttcExecOptionBatchErrors,
       );
       expect(
-        _openDmlExecuteForRead(bytes).dmlOptions & ttcExecOptionDmlRowCounts,
-        ttcExecOptionDmlRowCounts,
+        _openDmlExecuteForRead(bytes).dmlOptions & ttcDmlOptionRowCounts,
+        ttcDmlOptionRowCounts,
       );
       expect(_readArrayDmlRowCountBlock(bytes).count, 3);
     });
@@ -6512,7 +6512,8 @@ int _readExecuteOptionsWord(Uint8List bytes) {
 /// Walks a freshly-parsed (cursorId == 0) DML EXECUTE request at the default
 /// ttcFieldVersion (24) up to — but not including — the bind metadata block,
 /// returning the prefetch-num-rows field, the al8i4[1] execution count, the
-/// al8i4[9] exec-flags word (dmlOptions), the declared bind count, and the
+/// al8i4[9] exec-flags word (dmlOptions), the declared bind count, the
+/// array-DML row-count pointer block (pointer / length / pointer 2), and the
 /// [ReadBuffer] positioned at the first bind metadata byte for further
 /// reading.
 ({
@@ -6520,6 +6521,9 @@ int _readExecuteOptionsWord(Uint8List bytes) {
   int executionCount,
   int dmlOptions,
   int numParams,
+  int rowCountPointer,
+  int rowCountLength,
+  int rowCountPointer2,
   ReadBuffer buf,
 })
 _openDmlExecuteForRead(Uint8List bytes) {
@@ -6556,9 +6560,9 @@ _openDmlExecuteForRead(Uint8List bytes) {
   buf.readUint8(); // al8dnam
   buf.readUB4(); // al8dnaml
   buf.readUB4(); // al8regid_msb
-  buf.readUint8(); // array dml row counts pointer
-  buf.readUB4(); // array dml row counts length
-  buf.readUint8(); // array dml row counts pointer 2
+  final rowCountPointer = buf.readUint8(); // array dml row counts pointer
+  final rowCountLength = buf.readUB4(); // array dml row counts length
+  final rowCountPointer2 = buf.readUint8(); // array dml row counts pointer 2
   buf.readUint8(); // al8sqlsig pointer (12.2)
   buf.readUB4(); // SQL signature length
   buf.readUint8(); // SQL id pointer
@@ -6581,54 +6585,26 @@ _openDmlExecuteForRead(Uint8List bytes) {
     executionCount: executionCount,
     dmlOptions: dmlOptions,
     numParams: numParams,
+    rowCountPointer: rowCountPointer,
+    rowCountLength: rowCountLength,
+    rowCountPointer2: rowCountPointer2,
     buf: buf,
   );
 }
 
-/// Walks a freshly-parsed (cursorId == 0) DML EXECUTE at ttcFieldVersion 24
-/// up to the array-DML row-count pointer block (al8pidmlrc / al8pidmlrcbl /
-/// al8pidmlrcl) and returns its three fields. Off is `(0, 0, 0)`; on is
-/// `(1, numExecs, 1)`.
+/// Reads the array-DML row-count pointer block (al8pidmlrc / al8pidmlrcbl /
+/// al8pidmlrcl) of a freshly-parsed (cursorId == 0) DML EXECUTE at
+/// ttcFieldVersion 24 and returns its three fields. Off is `(0, 0, 0)`; on is
+/// `(1, numExecs, 1)`. Reuses [_openDmlExecuteForRead] for the header walk.
 ({int pointer, int count, int pointer2}) _readArrayDmlRowCountBlock(
   Uint8List bytes,
 ) {
-  final buf = ReadBuffer(bytes);
-  buf.readUint8(); // msg type
-  buf.readUint8(); // func code
-  buf.readUint8(); // sequence
-  buf.skipUB8(); // token number (ttcFieldVersion >= 23.1 ext1)
-  buf.readUB4(); // options
-  buf.readUB4(); // cursor id
-  buf.readUint8(); // SQL pointer
-  buf.readUB4(); // SQL length
-  buf.readUint8(); // vector pointer
-  buf.readUB4(); // al8i4 array length (13)
-  buf.readUint8(); // al8o4
-  buf.readUint8(); // al8o4l
-  buf.readUint8(); // prefetch buffer size
-  buf.readUB4(); // prefetch num rows
-  buf.readUB4(); // maximum long size
-  buf.readUint8(); // bind pointer
-  buf.readUB4(); // num binds
-  buf.readUint8(); // al8pp
-  buf.readUint8(); // al8txn
-  buf.readUint8(); // al8txl
-  buf.readUint8(); // al8kv
-  buf.readUint8(); // al8kvl
-  buf.readUint8(); // define pointer
-  buf.readUB4(); // define count
-  buf.readUB4(); // registration id
-  buf.readUint8(); // al8objlist
-  buf.readUint8(); // al8objlen
-  buf.readUint8(); // al8blv pointer
-  buf.readUB4(); // al8blv
-  buf.readUint8(); // al8dnam
-  buf.readUB4(); // al8dnaml
-  buf.readUB4(); // al8regid_msb
-  final pointer = buf.readUint8(); // array dml row counts pointer
-  final count = buf.readUB4(); // array dml row counts length
-  final pointer2 = buf.readUint8(); // array dml row counts pointer 2
-  return (pointer: pointer, count: count, pointer2: pointer2);
+  final parsed = _openDmlExecuteForRead(bytes);
+  return (
+    pointer: parsed.rowCountPointer,
+    count: parsed.rowCountLength,
+    pointer2: parsed.rowCountPointer2,
+  );
 }
 
 /// Builds a TTC ERROR (type 4) message carrying a batch-error array — the

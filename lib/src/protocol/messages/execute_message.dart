@@ -386,7 +386,7 @@ class ExecuteRequest extends Message {
       options |= ttcExecOptionBatchErrors;
     }
     if (dmlRowCounts) {
-      dmlOptions |= ttcExecOptionDmlRowCounts;
+      dmlOptions |= ttcDmlOptionRowCounts;
     }
 
     buffer.writeUB4(options);

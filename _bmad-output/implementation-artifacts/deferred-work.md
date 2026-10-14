@@ -338,14 +338,18 @@ decision: 2026-10-14 Close as accepted convention — Errors in this library int
 origin: migrated from legacy ledger ("Deferred from: code review of 11-3-row-level-batch-errors (2026-07-09)"), 2026-10-09
 location: test/src/protocol/messages/execute_message_test.dart
 reason: **OPEN — test helper `_readArrayDmlRowCountBlock` duplicates the EXECUTE-header walk instead of reusing `_openDmlExecuteForRead`.** Two independently hand-maintained byte walkers for the same message layout (hardcoded to ttcFieldVersion 24) will silently drift if a field is added to one but not the other. Test-only debt, no runtime risk. [test/src/protocol/messages/execute_message_test.dart:5639]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-executemany-test-naming-hygiene
+resolution-undo: 5657532fdbbedae33293ae05db3fbb63f6237b4f20815160c43a2e2ae5365be4 2026-10-15 7374617475733a206f70656e
 
 ### DW-44: OPEN — `ttcExecOptionDmlRowCounts` shares the `ttcExecOption*` naming prefix with sibling constants that live in the `options` word, even though it…
 
 origin: migrated from legacy ledger ("Deferred from: code review of 11-3-row-level-batch-errors (2026-07-09)"), 2026-10-09
 location: lib/src/protocol/constants.dart
 reason: **OPEN — `ttcExecOptionDmlRowCounts` shares the `ttcExecOption*` naming prefix with sibling constants that live in the `options` word, even though it rides the `dmlOptions`/exec-flags word.** Already mitigated by an explicit doc comment and correct usage/tests; a rename (e.g. to a `ttcDmlOption*` family) would reduce future misuse risk but is cosmetic. [lib/src/protocol/constants.dart:342]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-executemany-test-naming-hygiene
+resolution-undo: 5657532fdbbedae33293ae05db3fbb63f6237b4f20815160c43a2e2ae5365be4 2026-10-15 7374617475733a206f70656e
 
 ### DW-45: (HISTORICAL — original deferral, superseded by the RESOLVED sub-bullet below) Feature (node-oracledb parity, Medium): support nested `CURSOR(SELECT…
 
@@ -970,4 +974,12 @@ origin: spec-deferred 24f4fd4346d6
 location: lib/src/transport/transport.dart:561
 source_spec: `bmad-build-auto-result-lob-free-queue-hardening.md`
 reason: The 12-byte identity range was measured on two temporary CLOBs. A live sequence of many CLOB, BLOB, and NCLOB allocations on both Oracle versions, with distinct-identity and post-free server-count checks, would settle whether the range remains unique.
+status: open
+
+### DW-131: Update project context to name ttcDmlOptionRowCounts after the constant rename.
+origin: spec-deferred 425ea5a1f2dd
+location: _bmad-output/project-context.md:298
+source_spec: `bmad-build-auto-result-executemany-test-naming-hygiene.md`
+severity: low
+reason: _bmad-output/project-context.md:298 still names ttcExecOptionDmlRowCounts, which no longer exists. Future agents following that guidance would search for a nonexistent symbol. The review workflow routes agent-context edits to deferred work.
 status: open
