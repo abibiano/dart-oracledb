@@ -138,10 +138,12 @@ class OracleLob {
   ///
   /// Those defaults are [chunkSize] whenever the server reported one —
   /// node-oracledb `lob.pieceSize` parity, whose default is also `chunkSize`,
-  /// with a multiple of `chunkSize` recommended for efficiency. Fetched and
-  /// created-temporary handles normally carry a real chunk size (measured on
-  /// Oracle 23ai and 21c: 8,132 units for a table LOB and a created temporary
-  /// one, 32,600 for a fetched `TO_CLOB(...)`-style expression LOB), so this
+  /// with a multiple of `chunkSize` recommended for efficiency (the number is
+  /// taken in the piece's own units; see [chunkSize] for why that is still
+  /// storage-aligned for a CLOB). Fetched and created-temporary handles
+  /// normally carry a real chunk size (measured on Oracle 23ai and 21c: 8,132
+  /// for a table LOB and a created temporary one, 32,600 for a fetched
+  /// `TO_CLOB(...)`-style expression LOB), so this
   /// constant is only reached by a handle whose metadata reports none — e.g.
   /// the locator of an `EMPTY_CLOB()` value that was never stored.
   ///
@@ -181,7 +183,8 @@ class OracleLob {
   /// new size by [trim], and replaced by the server's answer on [refresh].
   int _length;
 
-  /// Cached server chunk size, same units as [_length]. Seeded from the
+  /// Cached server chunk size, in BYTES for every LOB type (not [_length]'s
+  /// units). Seeded from the
   /// locator's prefetch metadata (or the GET_CHUNK_SIZE a created-temporary
   /// handle issues), replaced by the server's answer on [refresh].
   int _chunkSize;
@@ -212,20 +215,28 @@ class OracleLob {
   /// "Cached length" section for what a stale value does and does not affect.
   int get length => _length;
 
-  /// The server LOB-prefetch chunk size in the same units as [length]
-  /// (characters for CLOB/NCLOB, bytes for BLOB), or `0` when unknown.
+  /// The server LOB chunk size in **bytes** for every LOB type — NOT in
+  /// [length]'s units — or `0` when unknown.
+  ///
+  /// Measured on Oracle 23ai and 21c: a CLOB, an NCLOB and a BLOB declared with
+  /// the same `CHUNK` clause all report the same number (16,264 for
+  /// `CHUNK 16384`), and it equals `DBMS_LOB.GETCHUNKSIZE`, which is therefore a
+  /// byte count even for a CLOB (stored as 2-byte UCS-2 units, so one chunk
+  /// holds half as many characters).
   ///
   /// It does **not** bound [read] / [write] amounts, but it IS the default piece
   /// size for [textStream] / [byteStream] (node-oracledb `lob.pieceSize` parity),
-  /// and a multiple of it is the recommended explicit `pieceSize`: Oracle stores
-  /// and transfers a LOB in chunks, so piece boundaries aligned to them avoid
-  /// re-reading a partially consumed chunk. When it is `0` the streams fall back
-  /// to [defaultStreamPieceSize].
+  /// and a multiple of it is the recommended explicit `pieceSize`. The number is
+  /// used as-is in the piece's own units: for a BLOB that is a whole number of
+  /// storage chunks; for a CLOB/NCLOB a piece of N characters is about 2N bytes,
+  /// so a piece that is a multiple of [chunkSize] characters is still a whole
+  /// number of chunks (just a larger one than a byte-sized piece would be).
+  /// When it is `0` the streams fall back to [defaultStreamPieceSize].
   ///
   /// A handle from `OracleConnection.createTemporary*()` seeds this from a real
   /// server GET_CHUNK_SIZE issued right after creation (node-oracledb
   /// `lob.js create()` parity), so it is `> 0` there. Measured values, on both
-  /// Oracle 23ai and 21c: 8,132 units for a table LOB and for a created
+  /// Oracle 23ai and 21c: 8,132 bytes for a table LOB and for a created
   /// temporary one, 32,600 for a fetched `TO_CLOB(...)`-style expression LOB,
   /// and `0` for the locator of an `EMPTY_CLOB()` / `EMPTY_BLOB()` value that
   /// was never stored. Cached like [length]; [refresh] re-reads it from the
@@ -608,7 +619,9 @@ class OracleLob {
   /// * **[pieceSize]** defaults to [chunkSize] when the server reported one
   ///   (`> 0`) and otherwise to [defaultStreamPieceSize]. A multiple of
   ///   [chunkSize] is recommended for efficiency (node-oracledb `lob.pieceSize`
-  ///   parity, whose default is also `chunkSize`). Units are characters — the
+  ///   parity, whose default is also `chunkSize`; the chunk size itself is a
+  ///   byte count, so the default piece is larger than one storage chunk).
+  ///   Units are characters — the
   ///   type's native units, exactly as for [read] and [length].
   /// * **One round trip per piece** (except across a straddled supplemental
   ///   character — see the next bullet), and the stream ends when a READ comes
@@ -773,6 +786,22 @@ class OracleLob {
     );
   }
 
+  /// Units delivered by one READ payload, derived from its BYTES alone (the
+  /// fallback for a reply that omits its SB8 amount): half the byte count for
+  /// the UTF-16BE form, and for UTF-8 the characters that BEGIN in [bytes]
+  /// (non-continuation bytes, a supplemental 4-byte lead counting two units) —
+  /// so a sequence split across pieces is counted once, by the piece that
+  /// carries its lead byte.
+  static int _deliveredUnits(Uint8List bytes, bool utf16) {
+    if (utf16) return bytes.length >> 1;
+    var units = 0;
+    for (final b in bytes) {
+      if (b & 0xC0 == 0x80) continue; // continuation byte
+      units += b >= 0xF0 ? 2 : 1;
+    }
+    return units;
+  }
+
   /// Cross-checks the two halves of a READ reply in the direction the stream
   /// generators treat as end-of-LOB: reported units but NO payload bytes.
   ///
@@ -805,9 +834,8 @@ class OracleLob {
   /// comparison is against what THIS piece asked for, mirroring
   /// [Transport.readLobRange]'s `delivered > request` guard.
   ///
-  /// Returns [units] unchanged so the caller can keep its `?? fallback` for a
-  /// reply that omits the SB8 amount entirely; the fallback is derived from the
-  /// delivered payload, so it can never exceed the request on its own.
+  /// Returns [units] unchanged. Callers also pass payload-derived fallback
+  /// counts here: an inconsistent reply can contain more data than requested.
   static int? _requireWithinRequest(int? units, int requested, int offset) {
     if (units == null || units <= requested) return units;
     throw OracleException(
@@ -838,9 +866,16 @@ class OracleLob {
       final decoded = decoder.add(piece.bytes);
       // The offset MUST advance by the units the SERVER reported, never by what
       // was decoded or emitted: bytes held back for the next piece were still
-      // delivered by this READ, so re-reading them would duplicate data.
-      final reported = _requireWithinRequest(piece.units, pieceUnits, next);
-      next += _requireProgress(reported ?? decoded.units, next);
+      // delivered by this READ, so re-reading them would duplicate data. When
+      // the reply omits the SB8, fall back to the units of the bytes THIS piece
+      // delivered (like [_bytePieces]) — never `decoded.units`, which is zero
+      // for an all-held-back piece and includes the previous piece's carry.
+      final delivered = _requireWithinRequest(
+        piece.units ?? _deliveredUnits(piece.bytes, _isUtf16),
+        pieceUnits,
+        next,
+      )!;
+      next += _requireProgress(delivered, next);
       if (decoded.text.isNotEmpty) yield decoded.text;
     }
     // Flush anything deliberately held back (a trailing unpaired high surrogate
@@ -1390,14 +1425,13 @@ class _LobTextDecoder {
   String _charCarry = '';
 
   /// Longest byte sequence that can legitimately be incomplete: a 4-byte UTF-8
-  /// sequence missing three continuation bytes. Anything longer means the bytes
-  /// are malformed rather than merely split, and must fail loud instead of
-  /// accumulating forever.
+  /// sequence missing three continuation bytes (the UTF-16 form carries at most
+  /// one byte). Anything longer means the bytes are malformed rather than
+  /// merely split, and must fail loud instead of accumulating forever.
   static const int _maxCarryBytes = 3;
 
   /// Feeds one piece's raw bytes in and returns the text that is safe to emit
-  /// now, plus the number of UCS-2 units the piece's COMPLETE bytes represent
-  /// (used only as a fallback when a server reply omits its SB8 unit count).
+  /// now, plus the number of UCS-2 units its COMPLETE bytes represent.
   ({String text, int units}) add(Uint8List piece) {
     final bytes = _byteCarry.isEmpty ? piece : _join(_byteCarry, piece);
     final int completeBytes;
@@ -1415,12 +1449,12 @@ class _LobTextDecoder {
         ? Uint8List(0)
         : Uint8List.sublistView(bytes, completeBytes);
     if (_byteCarry.length > _maxCarryBytes) {
-      throw OracleException(
-        errorCode: oraProtocolError,
-        message:
-            'LOB stream returned malformed '
-            '${isUtf16 ? 'UTF-16' : 'UTF-8'} data: ${_byteCarry.length} '
-            'trailing bytes cannot start a valid character sequence',
+      // Unreachable for the UTF-16 form (carry is 0 or 1 byte) and, since
+      // [_scanUtf8] rejects non-lead bytes, for UTF-8 too unless a lead byte is
+      // followed by more than three bytes it cannot own; kept as a bound.
+      throw _malformedUtf8(
+        '${_byteCarry.length} trailing bytes cannot start a valid character '
+        'sequence',
       );
     }
     final complete = completeBytes == bytes.length
@@ -1472,6 +1506,11 @@ class _LobTextDecoder {
     return tail;
   }
 
+  static OracleException _malformedUtf8(String detail) => OracleException(
+    errorCode: oraProtocolError,
+    message: 'LOB stream returned malformed UTF-8 data: $detail',
+  );
+
   static Uint8List _join(Uint8List a, Uint8List b) {
     final out = Uint8List(a.length + b.length);
     out.setRange(0, a.length, a);
@@ -1483,9 +1522,10 @@ class _LobTextDecoder {
   /// sequences and how many UCS-2 code units they represent (a 4-byte sequence
   /// is a supplemental character: two units).
   ///
-  /// Stops at the first byte that cannot begin a sequence, leaving the rest as
-  /// carry — the strict `utf8.decode` of the complete prefix, or [finish]'s
-  /// carry guard, then reports the malformed data.
+  /// Stops at a trailing split sequence (the caller carries it). A byte that
+  /// can NEVER begin a sequence (a stray continuation byte 0x80-0xBF, the
+  /// overlong leads 0xC0/0xC1, or 0xF5-0xFF) throws the malformed-data error
+  /// here, so it is never mistaken for a truncated sequence by [finish].
   static ({int completeBytes, int units}) _scanUtf8(Uint8List bytes) {
     var i = 0;
     var units = 0;
@@ -1501,7 +1541,28 @@ class _LobTextDecoder {
       } else if (lead >= 0xF0 && lead <= 0xF4) {
         sequence = 4;
       } else {
-        break; // not a valid lead byte — let the strict decode report it
+        throw _malformedUtf8(
+          'byte 0x${lead.toRadixString(16).toUpperCase()} cannot start a '
+          'character sequence',
+        );
+      }
+      // Check the bytes already present before deciding a short sequence is
+      // merely split. Otherwise E0 FF at end of stream looks truncated.
+      for (var j = 1; j < sequence && i + j < bytes.length; j++) {
+        final continuation = bytes[i + j];
+        final valid =
+            continuation >= 0x80 &&
+            continuation <= 0xBF &&
+            (j != 1 ||
+                (lead != 0xE0 || continuation >= 0xA0) &&
+                    (lead != 0xED || continuation <= 0x9F) &&
+                    (lead != 0xF0 || continuation >= 0x90) &&
+                    (lead != 0xF4 || continuation <= 0x8F));
+        if (!valid) {
+          throw _malformedUtf8(
+            'invalid continuation byte 0x${continuation.toRadixString(16).toUpperCase()}',
+          );
+        }
       }
       if (i + sequence > bytes.length) break; // split sequence: carry it
       units += sequence == 4 ? 2 : 1;

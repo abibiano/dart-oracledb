@@ -3283,6 +3283,134 @@ void main() {
         );
         await lob.close();
       });
+
+      // DW-113: a byte that can never begin a UTF-8 sequence is malformed, not
+      // truncated — it must not be carried and reported as "mid-character".
+      for (final bad in [0x80, 0xBF, 0xC0, 0xC1, 0xF5, 0xFF]) {
+        test('a non-lead UTF-8 byte 0x${bad.toRadixString(16)} fails as '
+            'malformed, not mid-character', () async {
+          final (conn, t, lob) = await _fetchLob(_clob(2));
+          t.lobReadReplies.add((
+            data: Uint8List.fromList([0x63, bad]),
+            amount: 2,
+          ));
+          await expectLater(
+            lob.textStream(pieceSize: 2).toList(),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.message,
+                'message',
+                allOf(contains('malformed UTF-8'), isNot(contains('mid-'))),
+              ),
+            ),
+          );
+          await lob.close();
+        });
+      }
+
+      test('an incomplete UTF-8 sequence with an invalid continuation is '
+          'malformed rather than truncated', () async {
+        final (conn, t, lob) = await _fetchLob(_clob(1));
+        t.lobReadReplies.add((
+          data: Uint8List.fromList([0xE0, 0xFF]),
+          amount: 1,
+        ));
+        await expectLater(
+          lob.textStream(pieceSize: 1).toList(),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('malformed UTF-8'), isNot(contains('mid-'))),
+            ),
+          ),
+        );
+        await lob.close();
+      });
+
+      test('a dangling lone UTF-16 byte still ends as mid-character', () async {
+        final (conn, t, lob) = await _fetchLob(_nclob(2));
+        t.lobReadReplies.add((
+          data: Uint8List.fromList([0x00, 0x41, 0x00]),
+          amount: 2,
+        ));
+        await expectLater(
+          lob.textStream(pieceSize: 2).toList(),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('mid-character'), contains('UTF-16')),
+            ),
+          ),
+        );
+        await lob.close();
+      });
+
+      // DW-114: with no SB8 amount the offset advance comes from the delivered
+      // bytes, never from decoded units.
+      test('UTF-16 reply with no SB8 whose whole payload is held back (a lone '
+          'high surrogate) still advances the offset', () async {
+        const text = 'A\u{1F600}B';
+        final all = encodeUtf16Be(text);
+        final (conn, t, lob) = await _fetchLob(_nclob(4));
+        t.lobReadReplies.addAll([
+          (data: Uint8List.sublistView(all, 0, 2), amount: null), // 'A'
+          (data: Uint8List.sublistView(all, 2, 4), amount: null), // high only
+          (data: Uint8List.sublistView(all, 4, 8), amount: null), // low + 'B'
+        ]);
+        final pieces = await lob.textStream(pieceSize: 2).toList();
+        expect(pieces.join(), equals(text));
+        expect(
+          t.readRequests.map((r) => r.offset).toList(),
+          equals([1, 2, 3, 5]),
+          reason: 'advanced by half the delivered byte count each time',
+        );
+        await lob.close();
+      });
+
+      test('UTF-8 reply with no SB8 whose payload is a split sequence does not '
+          'throw "no progress" and does not re-read', () async {
+        // 'caf' + U+00E9 (2 bytes, split across pieces) + 'x'.
+        final all = Uint8List.fromList(utf8.encode('caf\u{00E9}x'));
+        final (conn, t, lob) = await _fetchLob(_clob(5));
+        t.lobReadReplies.addAll([
+          (data: Uint8List.sublistView(all, 0, 4), amount: null), // caf + lead
+          (data: Uint8List.sublistView(all, 4, 6), amount: null), // cont + x
+        ]);
+        final pieces = await lob.textStream(pieceSize: 4).toList();
+        expect(pieces.join(), equals('caf\u{00E9}x'));
+        expect(
+          t.readRequests.map((r) => r.offset).toList(),
+          equals([1, 5, 6]),
+          reason:
+              'the lead byte is counted once, by the piece that carries it; '
+              'the carried-in continuation byte adds nothing',
+        );
+        await lob.close();
+      });
+
+      test(
+        'a missing SB8 amount cannot hide a reply larger than requested',
+        () async {
+          final (conn, t, lob) = await _fetchLob(_clob(2));
+          t.lobReadReplies.add((
+            data: Uint8List.fromList(utf8.encode('ab')),
+            amount: null,
+          ));
+          await expectLater(
+            lob.textStream(pieceSize: 1).toList(),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.message,
+                'message',
+                contains('LOB read overshot'),
+              ),
+            ),
+          );
+          await lob.close();
+        },
+      );
     });
   });
 

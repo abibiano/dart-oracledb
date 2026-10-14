@@ -798,7 +798,9 @@ resolution-undo: 9713e5d55bac6c010ee49249bdcac6a538905292c21031a6bfb7a5bea2bb31e
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 (2026-07-26)"), 2026-10-09
 location: oracle_lob.dart
 reason: **`chunkSize` is documented and consumed as if it were in the LOB's native units, but Oracle's chunk size is a BYTE count.** `oracle_lob.dart` says "the server LOB-prefetch chunk size in the same units as [length] (characters for CLOB/NCLOB, bytes for BLOB)", and `_validateStreamArgs` feeds it straight in as `pieceUnits` for `textStream`. The measured figures quoted throughout the new docs (8,132 for a table LOB, 32,600 for a temporary one) are the classic Oracle BYTE chunk sizes. The effect is benign — CLOB pieces are merely larger than a storage chunk, never wrong — but if the units claim is wrong then so is the "a multiple of `chunkSize` aligns piece boundaries to storage chunks" efficiency rationale that is repeated in four places, and nothing in the suite asserts the unit. Settling it needs a live measurement, which is why it is deferred. Fix: assert the reported `chunkSize` against `DBMS_LOB.GETCHUNKSIZE` for a CLOB on 23ai and 21c, then correct whichever text is wrong. target: Epic 12 follow-up (docs accuracy / measurement). [lib/src/oracle_lob.dart `chunkSize`, `_validateStreamArgs`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-stream-decode-diagnostics
+resolution-undo: 57d6aaf60bc0e6b157da36c3043f94d7bf20ea50dc6e4c3c3587ec65af987774 2026-10-14 7374617475733a206f70656e
 
 ### DW-112: `debugLobReadPieceUnits` is connection/transport-global mutable state that changes the PRODUCTION materialize path, reset by convention rather than…
 
@@ -812,14 +814,18 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 (2026-07-26)"), 2026-10-09
 location: lib/src/oracle_lob.dart
 reason: **`_LobTextDecoder` misdiagnoses malformed UTF-8 as truncation, and its UTF-16 error text is unreachable.** `_maxCarryBytes = 3` is justified as "a 4-byte UTF-8 sequence missing three continuation bytes", but the UTF-16 branch can only ever carry 0 or 1 byte, so the `isUtf16` variant of the "N trailing bytes cannot start a valid character sequence" message is dead text. For UTF-8, bytes that can NEVER be a lead byte (0x80-0xC1, 0xF5-0xFF) are treated as carry by `_scanUtf8`'s `break`, so if fewer than four of them arrive at end of stream, `finish()` reports "LOB stream ended mid-character … do not complete a character" — the opposite diagnosis to the actual fault (malformed, not truncated). Diagnostic-only and reachable only from a corrupt server stream, hence deferred. Fix: reject a non-lead byte at scan time with the malformed-data error, and drop the unreachable UTF-16 message variant. target: Epic 12 follow-up (streaming decode diagnostics). [lib/src/oracle_lob.dart `_LobTextDecoder`, `_scanUtf8`, `finish`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-stream-decode-diagnostics
+resolution-undo: 57d6aaf60bc0e6b157da36c3043f94d7bf20ea50dc6e4c3c3587ec65af987774 2026-10-14 7374617475733a206f70656e
 
 ### DW-114: `_textPieces`' fallback unit count can throw a spurious "made no progress" error or mis-advance the read offset.
 
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 (2026-07-26)"), 2026-10-09
 location: lib/src/oracle_lob.dart
 reason: **`_textPieces`' fallback unit count can throw a spurious "made no progress" error or mis-advance the read offset.** `next += _requireProgress(piece.units ?? decoded.units, next)`: when a READ reply omits its SB8 amount the offset falls back to DECODED units — but a piece whose entire payload the decoder holds back (a split UTF-16 code unit or a split UTF-8 sequence, both shapes the decoder exists for) decodes to zero complete units, so `_requireProgress(0, …)` throws even though the server did deliver data; and in the mixed case `decoded.units` includes units carried over from the PREVIOUS piece, so the advance is short and then long, re-reading already-delivered units and duplicating text. The `_bytePieces` sibling avoids both by falling back to `piece.bytes.length`; the text path has no equivalent byte-derived fallback even though one is available. Requires a reply with no SB8 amount, never observed on 23ai or 21c, hence deferred. Fix: derive the fallback from the delivered byte count (halved for the UTF-16 form), never from decoded units. target: Epic 12 follow-up (streaming robustness). [lib/src/oracle_lob.dart:619 `_textPieces`]
-status: open
+status: done 2026-10-14
+resolution: resolved by sweep bundle dw-lob-stream-decode-diagnostics
+resolution-undo: 57d6aaf60bc0e6b157da36c3043f94d7bf20ea50dc6e4c3c3587ec65af987774 2026-10-14 7374617475733a206f70656e
 
 ### DW-115: `defaultLobStreamPieceSize` is exported into the public namespace as a bare, un-prefixed top-level constant.
 

@@ -131,6 +131,14 @@
 
 ### Fixes
 
+- **Streaming LOB text diagnostics.** A byte that can never begin a UTF-8
+  sequence in a `textStream` now fails as malformed UTF-8 data instead of being
+  reported as a truncated stream, and a READ reply that omits its unit count
+  advances the offset from the bytes it delivered (not decoded units), so a
+  split character can no longer cause a spurious "no progress" error or a
+  re-read. `OracleLob.chunkSize` is documented as a byte count for every LOB
+  type (verified against `DBMS_LOB.GETCHUNKSIZE` on 23ai and 21c).
+
 - **Implicit result sets (`DBMS_SQL.RETURN_RESULT`) whose rows carry a
   CLOB / NCLOB / BLOB or native JSON column now decode**, eager and lazy
   (`resultSet: true`), and under `fetchLobs: true` (eager) yield `OracleLob`

@@ -815,7 +815,9 @@ try {
 - **`pieceSize`** defaults to `chunkSize` when the server reported one and
   otherwise to `OracleLob.defaultStreamPieceSize` (32,768; the top-level
   `defaultLobStreamPieceSize` is a deprecated alias); a multiple of `chunkSize`
-  is recommended. The concatenation of the emitted pieces equals
+  is recommended. Note `chunkSize` is a **byte** count for every LOB type
+  (measured: identical for a CLOB and a BLOB with the same `CHUNK` clause, and
+  equal to `DBMS_LOB.GETCHUNKSIZE`), not characters like `length`. The concatenation of the emitted pieces equals
   `read(offset: offset)` exactly — for a LOB whose length has not changed since
   the handle was fetched or last `refresh()`ed (see the next bullet for the one
   case where they deliberately differ).
