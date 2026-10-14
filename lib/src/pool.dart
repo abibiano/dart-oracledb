@@ -571,6 +571,7 @@ class OraclePool {
     final idle = _takeCompatibleIdle(requestedTag, matchAnyTag);
     if (idle != null) {
       _inUse.add(idle);
+      _resetTestSeams(idle);
       if (_sessionCallback == null) return idle;
       return _finishBorrow(idle, requestedTag, matchAnyTag);
     }
@@ -611,7 +612,10 @@ class OraclePool {
       // re-aim the idle-cleanup timer so it is eventually shrunk even if no
       // further park happens (the idle-reuse branch above schedules likewise).
       _scheduleIdleCleanup();
-      if (_sessionCallback == null) return conn;
+      if (_sessionCallback == null) {
+        _resetTestSeams(conn);
+        return conn;
+      }
       _neverBorrowed.add(conn);
       return _finishBorrow(conn, requestedTag, matchAnyTag);
     }
@@ -746,10 +750,12 @@ class OraclePool {
     // Unconditionally consume the new-to-borrowers mark: every failure path
     // below destroys the connection, so it can never be borrowed again.
     final isNew = _neverBorrowed.remove(conn);
+    _resetTestSeams(conn);
     final callback = _sessionCallback;
     if (callback == null) return;
     if (!isNew && conn.tag == requestedTag) return;
     await callback(conn, requestedTag);
+    _resetTestSeams(conn);
     if (requestedTag.isNotEmpty &&
         !matchAnyTag &&
         conn.tag.isNotEmpty &&
@@ -761,6 +767,15 @@ class OraclePool {
         'matches, or leave the connection untagged.',
       );
     }
+  }
+
+  /// Clears per-connection test-only seams so a pooled session never carries
+  /// one borrower's `debugLobReadPieceUnits` cap into the next borrower's LOB
+  /// reads. Runs on both [release] and the pre-borrow path (a no-op in
+  /// production, where the cap is always `null`).
+  void _resetTestSeams(OracleConnection conn) {
+    // ignore: invalid_use_of_visible_for_testing_member
+    conn.debugLobReadPieceUnits = null;
   }
 
   /// Returns a borrowed connection to the pool.
@@ -890,6 +905,8 @@ class OraclePool {
       await connection.forceCloseOpenLobs(reclaimedByPool: true);
     }
 
+    _resetTestSeams(connection);
+
     try {
       await connection.rollback();
     } catch (_) {
@@ -901,6 +918,10 @@ class OraclePool {
       unawaited(_provisionForWaiters());
       rethrow;
     }
+
+    // The old borrower may still hold this reference and set the test seam
+    // while rollback is suspended. Clear it before direct handoff or parking.
+    _resetTestSeams(connection);
 
     if (_isClosed) {
       // close() can complete while the rollback above is in flight; the

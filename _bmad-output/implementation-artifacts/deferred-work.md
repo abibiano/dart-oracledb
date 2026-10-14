@@ -833,7 +833,9 @@ resolution-undo: 57d6aaf60bc0e6b157da36c3043f94d7bf20ea50dc6e4c3c3587ec65af98777
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 (2026-07-26)"), 2026-10-09
 location: lob_coexistence_integration_test.dart
 reason: **`debugLobReadPieceUnits` is connection/transport-global mutable state that changes the PRODUCTION materialize path, reset by convention rather than by construction.** It is `@visibleForTesting` but has a public setter on `OracleConnection`, it reaches `_readClobAsString`/`_readBlobAsBytes` (not just the new read seam), and `OraclePool` never resets it on `acquire()`/`release()`. Several new integration loops set it, capture results, then reset AFTER the capture but BEFORE the `expect`s (`lob_coexistence_integration_test.dart` ~6463-6478, ~6494-6503) — correct today only because a `finally` also resets. A test that throws before reaching its `finally`, or any future test that forgets one, leaves a pooled connection with LOB reads silently capped for whichever borrower gets it next, with no observable signal as to why reads are being split into extra round trips. (The security review explicitly classed this as resource-consumption-only, i.e. below the security bar.) Fix: a scoped helper (`await withPieceCap(n, () async {…})`) so the invariant cannot be broken, and/or a reset on pool release. target: Epic 12 follow-up (test hardening). [lib/src/connection.dart `debugLobReadPieceUnits`; lib/src/transport/transport.dart; lib/src/pool.dart]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-lob-piece-cap-scoping
+resolution-undo: 4e74fc105361f6071319dbe7f6b234474547f39f8e3b75c0e86f2af21265db72 2026-10-15 7374617475733a206f70656e
 
 ### DW-113: `_LobTextDecoder` misdiagnoses malformed UTF-8 as truncation, and its UTF-16 error text is unreachable.
 

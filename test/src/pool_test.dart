@@ -865,6 +865,100 @@ void main() {
       },
     );
 
+    test('resets the test-only LOB piece cap on release and on acquire, so a '
+        'pooled session never carries a stale cap (DW-112)', () async {
+      final created = <_FakeConnection>[];
+      final pool = await createFakePool(created, minConnections: 1);
+      try {
+        final conn = await pool.acquire() as _FakeConnection;
+        conn.debugLobReadPieceUnits = 3;
+
+        await pool.release(conn);
+        expect(
+          conn.debugLobReadPieceUnits,
+          isNull,
+          reason: 'release must clear the cap left by the borrower',
+        );
+
+        // A cap set while the session sits idle (a stale writer holding the
+        // old handle) is also cleared before the next borrower gets it.
+        conn.debugLobReadPieceUnits = 5;
+        final again = await pool.acquire() as _FakeConnection;
+        expect(identical(again, conn), isTrue);
+        expect(
+          again.debugLobReadPieceUnits,
+          isNull,
+          reason: 'acquire must never hand out a session with a stale cap',
+        );
+        await pool.release(again);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('clears a cap supplied by a newly opened connection', () async {
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async =>
+            _FakeConnection()..debugLobReadPieceUnits = 3,
+        minConnections: 0,
+        maxConnections: 1,
+      );
+      try {
+        final conn = await pool.acquire();
+        expect(conn.debugLobReadPieceUnits, isNull);
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test('clears a cap set by the session callback', () async {
+      final pool = await OraclePool.createForTesting(
+        connectionFactory: () async => _FakeConnection(),
+        minConnections: 0,
+        maxConnections: 1,
+        sessionCallback: (conn, requestedTag) async {
+          conn.debugLobReadPieceUnits = 4;
+          conn.tag = requestedTag;
+        },
+      );
+      try {
+        final conn = await pool.acquire(tag: 'configured');
+        expect(conn.debugLobReadPieceUnits, isNull);
+        await pool.release(conn);
+      } finally {
+        await pool.close();
+      }
+    });
+
+    test(
+      'clears a cap set during rollback before direct waiter handoff',
+      () async {
+        final pool = await createFakePool(
+          <_FakeConnection>[],
+          maxConnections: 1,
+        );
+        try {
+          final conn = await pool.acquire() as _FakeConnection;
+          final gate = Completer<void>();
+          conn.rollbackGate = gate;
+          final releaseFuture = pool.release(conn);
+          await Future<void>.delayed(Duration.zero);
+          final acquireFuture = pool.acquire();
+          conn.debugLobReadPieceUnits = 5;
+          gate.complete();
+          await releaseFuture;
+          final next = await acquireFuture;
+          expect(identical(next, conn), isTrue);
+          expect(next.debugLobReadPieceUnits, isNull);
+          conn.rollbackGate = null;
+          await pool.release(next);
+        } finally {
+          await pool.close();
+        }
+      },
+    );
+
     test(
       'closes a leaked open result set and recycles the session (AC9)',
       () async {

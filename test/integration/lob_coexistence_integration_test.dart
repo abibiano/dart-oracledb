@@ -1427,6 +1427,32 @@ void main() {
         return id;
       }
 
+      test(
+        'withPieceCap restores the previous cap on success and failure',
+        () async {
+          connection.debugLobReadPieceUnits = 7;
+          try {
+            final value = await withPieceCap(connection, 2, () async {
+              expect(connection.debugLobReadPieceUnits, 2);
+              return 42;
+            });
+            expect(value, 42);
+            expect(connection.debugLobReadPieceUnits, 7);
+
+            await expectLater(
+              withPieceCap(connection, 3, () async {
+                expect(connection.debugLobReadPieceUnits, 3);
+                throw StateError('body failed');
+              }),
+              throwsStateError,
+            );
+            expect(connection.debugLobReadPieceUnits, 7);
+          } finally {
+            connection.debugLobReadPieceUnits = null;
+          }
+        },
+      );
+
       test('the seam defaults to OFF and a default read of a small value still '
           'issues exactly ONE tnsLobOpRead (fast path unchanged)', () async {
         final id = await insert('doc', risingText(90));
@@ -1470,11 +1496,15 @@ void main() {
             expect(reference, equals(text));
 
             for (final cap in [1, 7, 30, 89]) {
-              connection.debugLobReadPieceUnits = cap;
-              final before = connection.debugLobReadOps;
-              final capped = await lob.read();
-              final ops = connection.debugLobReadOps - before;
-              connection.debugLobReadPieceUnits = null;
+              final (capped, ops) = await withPieceCap(
+                connection,
+                cap,
+                () async {
+                  final before = connection.debugLobReadOps;
+                  final capped = await lob.read();
+                  return (capped, connection.debugLobReadOps - before);
+                },
+              );
               // Exact, computed expectation — never a loose bound.
               final expectedPieces = (spec.units + cap - 1) ~/ cap;
               expect(
@@ -1496,7 +1526,6 @@ void main() {
               );
             }
           } finally {
-            connection.debugLobReadPieceUnits = null;
             await lob.close();
           }
         });
@@ -1511,17 +1540,16 @@ void main() {
           final reference = await lob.read();
           expect(reference, equals(bytes));
           for (final cap in [1, 5, 32, 63]) {
-            connection.debugLobReadPieceUnits = cap;
-            final before = connection.debugLobReadOps;
-            final capped = await lob.read();
-            final ops = connection.debugLobReadOps - before;
-            connection.debugLobReadPieceUnits = null;
+            final (capped, ops) = await withPieceCap(connection, cap, () async {
+              final before = connection.debugLobReadOps;
+              final capped = await lob.read();
+              return (capped, connection.debugLobReadOps - before);
+            });
             expect(ops, equals((64 + cap - 1) ~/ cap), reason: 'BLOB cap $cap');
             expect(ops, greaterThan(1));
             expect(capped, equals(reference), reason: 'BLOB cap $cap');
           }
         } finally {
-          connection.debugLobReadPieceUnits = null;
           await lob.close();
         }
       });
@@ -1550,11 +1578,15 @@ void main() {
           try {
             expect(await lob.read(), equals(splitPairText));
             for (final cap in [1, 2, 3, 4, 5]) {
-              connection.debugLobReadPieceUnits = cap;
-              final before = connection.debugLobReadOps;
-              final capped = await lob.read();
-              final ops = connection.debugLobReadOps - before;
-              connection.debugLobReadPieceUnits = null;
+              final (capped, ops) = await withPieceCap(
+                connection,
+                cap,
+                () async {
+                  final before = connection.debugLobReadOps;
+                  final capped = await lob.read();
+                  return (capped, connection.debugLobReadOps - before);
+                },
+              );
               expect(
                 ops,
                 equals((6 + cap - 1) ~/ cap),
@@ -1571,7 +1603,6 @@ void main() {
               expect((capped as String).runes.length, equals(5));
             }
           } finally {
-            connection.debugLobReadPieceUnits = null;
             await lob.close();
           }
         }
@@ -1600,13 +1631,13 @@ void main() {
           expect(r.rows.single['BIN'], equals(bytes));
 
           // On: the materialize path loops too, and the values are IDENTICAL.
-          connection.debugLobReadPieceUnits = 8;
-          before = connection.debugLobReadOps;
-          r = await connection.execute(
-            'SELECT doc, bin FROM $testTable WHERE id = $id',
-          );
-          final ops = connection.debugLobReadOps - before;
-          connection.debugLobReadPieceUnits = null;
+          final ops = await withPieceCap(connection, 8, () async {
+            before = connection.debugLobReadOps;
+            r = await connection.execute(
+              'SELECT doc, bin FROM $testTable WHERE id = $id',
+            );
+            return connection.debugLobReadOps - before;
+          });
           expect(
             ops,
             equals(((50 + 7) ~/ 8) + ((30 + 7) ~/ 8)),
@@ -1630,11 +1661,11 @@ void main() {
           // With a cap of 1 set, a textStream(pieceSize: 10) must still issue
           // ceil(40/10) + 1 READs (its own size + the terminating empty READ),
           // NOT 41. Double-capping the streams would prove nothing.
-          connection.debugLobReadPieceUnits = 1;
-          final before = connection.debugLobReadOps;
-          final pieces = await lob.textStream(pieceSize: 10).toList();
-          final ops = connection.debugLobReadOps - before;
-          connection.debugLobReadPieceUnits = null;
+          final (pieces, ops) = await withPieceCap(connection, 1, () async {
+            final before = connection.debugLobReadOps;
+            final pieces = await lob.textStream(pieceSize: 10).toList();
+            return (pieces, connection.debugLobReadOps - before);
+          });
           expect(pieces.join(), equals(text));
           expect(pieces, hasLength(4));
           expect(
@@ -1645,7 +1676,6 @@ void main() {
                 'the stream seam is deliberately outside the cap',
           );
         } finally {
-          connection.debugLobReadPieceUnits = null;
           await lob.close();
         }
       });
@@ -1661,21 +1691,21 @@ void main() {
 
         final emptyClob = await lobFor('doc', id);
         try {
-          connection.debugLobReadPieceUnits = 4;
-          var before = connection.debugLobReadOps;
-          expect(await emptyClob.read(), equals(''));
-          expect(
-            connection.debugLobReadOps - before,
-            equals(1),
-            reason:
-                'an empty LOB (cached length 0) asks the server with exactly '
-                'ONE READ since DW-28, capped or not — never a useless loop',
-          );
-          before = connection.debugLobReadOps;
-          expect(await emptyClob.read(offset: 1, amount: 4), equals(''));
-          expect(connection.debugLobReadOps - before, equals(1));
+          await withPieceCap(connection, 4, () async {
+            var before = connection.debugLobReadOps;
+            expect(await emptyClob.read(), equals(''));
+            expect(
+              connection.debugLobReadOps - before,
+              equals(1),
+              reason:
+                  'an empty LOB (cached length 0) asks the server with exactly '
+                  'ONE READ since DW-28, capped or not — never a useless loop',
+            );
+            before = connection.debugLobReadOps;
+            expect(await emptyClob.read(offset: 1, amount: 4), equals(''));
+            expect(connection.debugLobReadOps - before, equals(1));
+          });
         } finally {
-          connection.debugLobReadPieceUnits = null;
           await emptyClob.close();
         }
 
@@ -1684,19 +1714,18 @@ void main() {
         final exactId = await insert('doc', risingText(48));
         final exact = await lobFor('doc', exactId);
         try {
-          connection.debugLobReadPieceUnits = 12;
-          final before = connection.debugLobReadOps;
-          expect(await exact.read(), equals(risingText(48)));
-          expect(
-            connection.debugLobReadOps - before,
-            equals(4),
-            reason:
-                'exactly 48/12 pieces — the loop stops on the unit count, '
-                'never on an extra empty READ',
-          );
-          connection.debugLobReadPieceUnits = null;
+          await withPieceCap(connection, 12, () async {
+            final before = connection.debugLobReadOps;
+            expect(await exact.read(), equals(risingText(48)));
+            expect(
+              connection.debugLobReadOps - before,
+              equals(4),
+              reason:
+                  'exactly 48/12 pieces — the loop stops on the unit count, '
+                  'never on an extra empty READ',
+            );
+          });
         } finally {
-          connection.debugLobReadPieceUnits = null;
           await exact.close();
         }
       });
@@ -1707,15 +1736,14 @@ void main() {
         final id = await insert('doc', text);
         final lob = await lobFor('doc', id);
         try {
-          connection.debugLobReadPieceUnits = 5;
-          final before = connection.debugLobReadOps;
-          final part = await lob.read(offset: 21, amount: 20);
-          final ops = connection.debugLobReadOps - before;
-          connection.debugLobReadPieceUnits = null;
+          final (part, ops) = await withPieceCap(connection, 5, () async {
+            final before = connection.debugLobReadOps;
+            final part = await lob.read(offset: 21, amount: 20);
+            return (part, connection.debugLobReadOps - before);
+          });
           expect(part, equals(text.substring(20, 40)));
           expect(ops, equals(4), reason: '20 units / cap 5');
         } finally {
-          connection.debugLobReadPieceUnits = null;
           await lob.close();
         }
       });

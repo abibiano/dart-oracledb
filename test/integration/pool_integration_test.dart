@@ -170,6 +170,36 @@ void main() {
   });
 
   group('OraclePool acquire/release against live Oracle', () {
+    test(
+      'a later borrower reads a LOB with the previous cap cleared',
+      () async {
+        final pool = await createTestPool(minConnections: 1, maxConnections: 1);
+        try {
+          final first = await pool.acquire();
+          first.debugLobReadPieceUnits = 1;
+          await pool.release(first);
+
+          final next = await pool.acquire();
+          expect(identical(next, first), isTrue);
+          expect(next.debugLobReadPieceUnits, isNull);
+          final result = await next.execute(
+            "SELECT TO_CLOB('piece cap reset') AS DOC FROM dual",
+            null,
+            const OracleExecuteOptions(fetchLobs: true),
+          );
+          final lob = result.rows.single['DOC']! as OracleLob;
+          try {
+            expect(await lob.read(), 'piece cap reset');
+          } finally {
+            await lob.close();
+          }
+          await pool.release(next);
+        } finally {
+          await pool.close();
+        }
+      },
+    );
+
     test('a prewarmed connection executes, releases, and is reacquired as '
         'the same healthy physical session', () async {
       final pool = await createTestPool(minConnections: 1, maxConnections: 1);

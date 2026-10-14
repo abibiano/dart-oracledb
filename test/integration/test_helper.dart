@@ -463,3 +463,22 @@ void expectJsonValue(
     expect(actual, equals(expected), reason: path);
   }
 }
+
+/// Runs [body] with [connection]'s test-only LOB read piece cap set to [cap],
+/// and ALWAYS restores the previous value in a `finally` — even when [body] (or
+/// an `expect` inside it) throws. `debugLobReadPieceUnits` changes the
+/// production materialize path, so it must never be set by convention-only
+/// resets (DW-112).
+Future<T> withPieceCap<T>(
+  OracleConnection connection,
+  int? cap,
+  Future<T> Function() body,
+) async {
+  final previous = connection.debugLobReadPieceUnits;
+  connection.debugLobReadPieceUnits = cap;
+  try {
+    return await body();
+  } finally {
+    connection.debugLobReadPieceUnits = previous;
+  }
+}
