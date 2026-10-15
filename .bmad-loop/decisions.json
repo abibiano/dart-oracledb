@@ -1,4 +1,13 @@
 {
+  "DW-106": {
+    "answered_at": "2026-10-15",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Allow OracleBind OUT specs for DML RETURNING ... INTO in single execute(), reusing the executeMany wire path, with dual-env tests and README updates.",
+    "key": "1",
+    "label": "Accept OracleBind on single-execute DML RETURNING",
+    "resolution": ""
+  },
   "DW-126": {
     "answered_at": "2026-10-14",
     "bundle_name": "",
