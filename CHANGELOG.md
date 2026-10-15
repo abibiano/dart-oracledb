@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixes
+
+- SQL `NULL` values in REF CURSOR OUT binds, nested `CURSOR()` rows and
+  implicit results now fetch on Oracle 21c without ORA-01405, including when
+  no LOB or JSON column is present. Describe-created cursors start with a full
+  EXECUTE round, matching node-oracledb.
+
 ### Features
 
 - **Region-id `TIMESTAMP WITH TIME ZONE` values now decode** instead of
@@ -143,11 +150,7 @@
   receive the `OracleIntervalYM`. Validated against Oracle 23ai and Oracle
   21c.
 - **Limits (both interval types):** intervals inside native JSON and
-  `fetchAsString` for intervals remain unsupported. Known issue (not
-  interval-specific, pre-existing): on Oracle 21c a SQL `NULL` of any type
-  in a REF CURSOR / nested `CURSOR()` / implicit-result row without a LOB or
-  JSON column fails the call with ORA-01405, so NULL intervals are not supported inside cursors there
-  (non-NULL values decode on both versions).
+  `fetchAsString` for intervals remain unsupported.
 - **`ROWID` and `UROWID` columns decode.** They previously decoded silently
   to `null`. Columns, REF CURSOR / nested `CURSOR()` / implicit-result rows,
   PL/SQL OUT binds and DML `RETURNING` values now decode to the rowid's
@@ -177,9 +180,6 @@
 - **Fix:** the internal UROWID type code was the OCI `SQLT_RDD` value 104 —
   which the server never sends — instead of the TTC wire id 208, so a
   UROWID describe never matched it.
-- **Known issue:** the same 21c ORA-01405 issue applies to a SQL `NULL`
-  rowid inside a REF CURSOR / nested `CURSOR()` / implicit-result row
-  without a LOB or JSON column.
 - **Oracle 23ai `VECTOR` columns decode and bind.** They previously decoded
   silently to `null` and could not be bound. Columns (eager and
   `resultSet: true`), PL/SQL OUT / IN OUT binds, DML `RETURNING` values,

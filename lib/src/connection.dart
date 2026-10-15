@@ -1095,12 +1095,12 @@ class OracleConnection {
         prefetchRows: _defaultPrefetchRows,
         preserveTimestampTimeZone: _preserveTimestampTimeZone,
         materializePerBatch: true,
-        // node-oracledb requiresFullExecute: when this describe-created cursor
-        // carries nested CURSOR() columns, its FIRST fetch must be a full
-        // EXECUTE so pre-23 (21c) ships the per-row nested describe inline (a
-        // plain OFETCH would shear). Scalar/LOB REF CURSORs (no cursor columns)
-        // stay on plain OFETCH.
-        requiresFullExecute: nestedCursorIndices.isNotEmpty,
+        // node-oracledb requiresFullExecute: createCursorFromDescribe ALWAYS
+        // sets it, so the FIRST fetch of a describe-created cursor is a full
+        // EXECUTE. Needed on pre-23 (21c) for nested CURSOR() columns (the
+        // per-row nested describe ships inline only there) and for SQL NULLs:
+        // a plain OFETCH first round fails with ORA-01405 on 21c (DW-138).
+        requiresFullExecute: true,
         // node-oracledb requiresDefine: a describe-created REF CURSOR carrying a
         // LOB / JSON column announces its LOB-prefetch defines before the first
         // FETCH (see _cursorRequiresDefine).
@@ -1307,11 +1307,10 @@ class OracleConnection {
       prefetchRows: _defaultPrefetchRows,
       preserveTimestampTimeZone: _preserveTimestampTimeZone,
       materializePerBatch: true,
-      // node-oracledb requiresFullExecute: when this nested cursor itself
-      // carries deeper CURSOR() columns, its FIRST fetch must be a full EXECUTE
-      // so pre-23 (21c) ships the deeper describe inline (a plain OFETCH would
-      // shear). A scalar/LOB nested cursor stays on plain OFETCH.
-      requiresFullExecute: deeperCursorIndices.isNotEmpty,
+      // node-oracledb requiresFullExecute: always set for a describe-created
+      // cursor (see the REF CURSOR OUT bind site; DW-138). Also ships any
+      // deeper CURSOR() describe inline on pre-23.
+      requiresFullExecute: true,
       // node-oracledb requiresDefine — same reason as a REF CURSOR OUT bind.
       requiresDefine: _cursorRequiresDefine(decoded.columns),
       // Deliberately NOT wrapping (AC6): a nested cursor's LOB columns are
@@ -1419,12 +1418,10 @@ class OracleConnection {
       prefetchRows: _defaultPrefetchRows,
       preserveTimestampTimeZone: _preserveTimestampTimeZone,
       materializePerBatch: false,
-      // node-oracledb requiresFullExecute: when this implicit result carries
-      // nested CURSOR() columns, its FIRST fetch must be a full EXECUTE so
-      // pre-23 (21c) ships the per-row nested describe inline (a plain OFETCH
-      // would shear). Scalar implicit results stay on plain OFETCH; LOB/JSON
-      // ones open with a DEFINE instead (requiresDefine below).
-      requiresFullExecute: cursorColumnIndicesOf(descriptor.columns).isNotEmpty,
+      // node-oracledb requiresFullExecute: always set for a describe-created
+      // cursor (see the REF CURSOR OUT bind site; DW-138). LOB/JSON ones open
+      // with a DEFINE instead (requiresDefine below), which takes precedence.
+      requiresFullExecute: true,
       // node-oracledb requiresDefine: an implicit result carrying a LOB / JSON
       // column must announce its LOB-prefetch defines before the first FETCH
       // (see _cursorRequiresDefine).
@@ -1538,12 +1535,10 @@ class OracleConnection {
         prefetchRows: prefetchRows,
         preserveTimestampTimeZone: _preserveTimestampTimeZone,
         materializePerBatch: true,
-        // node-oracledb requiresFullExecute: when this implicit result carries
-        // nested CURSOR() columns, its FIRST fetch must be a full EXECUTE so
-        // pre-23 (21c) ships the per-row nested describe inline (a plain OFETCH
-        // would shear). Scalar implicit results stay on plain OFETCH; LOB/JSON
-        // ones open with a DEFINE instead (requiresDefine below).
-        requiresFullExecute: nestedCursorIndices.isNotEmpty,
+        // node-oracledb requiresFullExecute: always set for a describe-created
+        // cursor (see the REF CURSOR OUT bind site; DW-138). LOB/JSON ones open
+        // with a DEFINE instead (requiresDefine below), which takes precedence.
+        requiresFullExecute: true,
         // node-oracledb requiresDefine — same reason as the eager drain.
         requiresDefine: _cursorRequiresDefine(descriptor.columns),
         // Materialize cursor-valued columns in each fetched batch, mirroring the

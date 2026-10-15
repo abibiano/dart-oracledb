@@ -111,6 +111,18 @@ class _ImplicitTransport extends Transport {
     bool dmlRowCounts = false,
     bool dmlReturning = false,
   }) async {
+    // A describe-created cursor's first fetch is a full EXECUTE with no SQL on
+    // the open cursor id (node-oracledb requiresFullExecute, DW-138); serve it
+    // from the same scripted batches as a plain FETCH.
+    if (sql.isEmpty && cursorId != 0) {
+      return fetchRows(
+        cursorId,
+        prefetchRows,
+        columns: expectedColumns,
+        timeout: timeout,
+        preserveTimestampTimeZone: preserveTimestampTimeZone,
+      );
+    }
     sendExecuteCalls++;
     final err = throwOnExecute;
     if (err != null) throw err;

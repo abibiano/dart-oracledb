@@ -800,10 +800,7 @@ await connection.execute(
   11-byte wire form (a bind always carries the full `DAY(9) TO SECOND(9)`
   range). The server enforces the target column's own precision: a column
   declared `INTERVAL DAY(2) TO SECOND(6)` rejects too many days with ORA-01873
-  and rounds extra fractional digits to its scale. Known issue (pre-existing,
-  not interval-specific): on Oracle 21c a SQL `NULL` in a REF CURSOR, nested
-  `CURSOR()` or implicit-result row without a LOB or JSON column fails with
-  ORA-01405, so NULL intervals cannot be fetched through cursors there.
+  and rounds extra fractional digits to its scale.
 - **Not covered** — intervals inside native JSON, and `fetchAsString` (which
   converts date and timestamp types only).
 
@@ -845,9 +842,7 @@ await connection.execute(
   `INTERVAL YEAR(2) TO MONTH` (the default) rejects 100 years or more with
   ORA-01873. A `Duration` or an `OracleIntervalDS` never binds as a YEAR TO
   MONTH value, and the two interval kinds cannot share one `executeMany()`
-  bind. The same known issue applies as for INTERVAL DAY TO SECOND: on
-  Oracle 21c a SQL `NULL` in a REF CURSOR, nested `CURSOR()` or
-  implicit-result row without a LOB or JSON column fails with ORA-01405.
+  bind.
 - **Not covered** — intervals inside native JSON, and `fetchAsString` (which
   converts date and timestamp types only).
 
@@ -896,9 +891,7 @@ ins.outBinds['rid']; // ['AAAR3sAAEAAAACZAAA']
   implicit results and `executeMany()` RETURNING values all decode the same
   text. `fetchTypeHandler` converters receive the `String`;
   `fetchAsString: {OracleDbType.rowid, OracleDbType.urowid}` is accepted and
-  changes nothing. The same known issue applies as for intervals: on Oracle
-  21c a SQL `NULL` in a REF CURSOR, nested `CURSOR()` or implicit-result row
-  without a LOB or JSON column fails with ORA-01405.
+  changes nothing.
 - **Fail loud (fetch shapes only)** — a fetched `UROWID` value with no rowid
   bytes, or a physical one that is not exactly 13 bytes, and a `ROWID` or
   `UROWID` fetch payload cut short, raise `OracleException`
