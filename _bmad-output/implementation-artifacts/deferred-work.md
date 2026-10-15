@@ -879,7 +879,9 @@ decision: 2026-10-14 Keep open
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 iteration 3 (2026-07-26)"), 2026-10-09
 location: lib/src/connection.dart
 reason: **The connection POOL's disposition of an open caller-owned temporary LOB is absent from the public docs that create one.** `OracleConnection.hasOpenLob` deliberately counts created-temporary handles, so `release()`ing a pooled connection while a `createTemporaryClob()` / `createTemporaryNClob()` / `createTemporaryBlob()` handle is still open logs a warning, force-closes the handle (`forceCloseOpenLobs(reclaimedByPool: true)`), marks it reclaimed-by-pool and queues its server-side free for the next borrower's first execute. That is the right behaviour and it fails loud on later use (a pool-reclaim-specific error rather than a generic "is closed"), but the only place it is written down is the internal `forceCloseOpenLobs` seam: `createTemporaryClob`'s own bullet list and README's "Temporary LOBs you create, fill, and bind" section say only "you must `close()` it", and the adjacent pool sentence covers pending FREES, not open HANDLES. A pooled application that holds a handle across `release()` therefore finds its LOB destroyed with no documentation predicting it. Deferred as a minor docs-completeness gap (the driver's behaviour is safe and diagnosable; only the documentation is silent). Fix when next touched: one clause in README's temporary-LOB section and in the three `createTemporary*` dartdocs stating that an open handle at pool `release()` is force-closed and its server-side LOB freed. target: Epic 12 follow-up (docs completeness). [README.md:908 temporary-LOB section; lib/src/connection.dart `createTemporaryClob`/`createTemporaryNClob`/`createTemporaryBlob`, `forceCloseOpenLobs`]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-temp-lob-pool-docs
+resolution-undo: 891ceece813ac0e183204ed66f707c6acc62b9af295caa0db0b4b1114d6de7e0 2026-10-15 7374617475733a206f70656e
 
 ### DW-118: `readLobRange`'s continuation loop has no round-trip cap and no aggregate deadline — only a PER-PIECE timeout.
 

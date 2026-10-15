@@ -4876,6 +4876,13 @@ class OracleConnection {
   ///   unclosed temporary LOB (monitorable via `V$TEMPORARY_LOBS`). The actual
   ///   free rides the **next `execute()`** on this session as a piggyback —
   ///   see [OracleLob.close].
+  /// * **Pool release force-closes it.** If this pooled connection is healthy
+  ///   and idle when you [OraclePool.release] it with the handle still open,
+  ///   the pool logs a warning, force-closes the handle and queues its
+  ///   server-side LOB for freeing on the next borrower's first `execute()`
+  ///   (or at session teardown). Later read/write operations on the handle
+  ///   fail with a pool-reclaim error; cached properties and another [OracleLob.close]
+  ///   remain usable. Close the handle before releasing the connection.
   /// * **Does not block other statements.** Unlike a fetched handle, an open
   ///   created-temporary handle does not make the connection busy (binding it is
   ///   the point). Individual LOB round trips are still serialized against each
@@ -4914,7 +4921,10 @@ class OracleConnection {
   /// character set) on the server and returns a caller-owned [OracleLob].
   ///
   /// Identical to [createTemporaryClob] in every respect — same units, session
-  /// duration, close obligation, bindability and caveats — except that the LOB
+  /// duration, close obligation, pool-release behaviour (on a healthy, idle
+  /// connection, an open handle at [OraclePool.release] is force-closed and its
+  /// server-side LOB queued for freeing),
+  /// bindability and caveats — except that the LOB
   /// is created with the **NCHAR** character set form, so its data is stored and
   /// transferred as UTF-16BE and [OracleLob.type] is [OracleDbType.nClob].
   ///
@@ -4932,7 +4942,10 @@ class OracleConnection {
   /// and returns a caller-owned [OracleLob].
   ///
   /// Identical to [createTemporaryClob] in every respect — same 1-based offsets,
-  /// session duration, close obligation, bindability and caveats — except that
+  /// session duration, close obligation, pool-release behaviour (on a healthy,
+  /// idle connection, an open handle at [OraclePool.release] is force-closed and
+  /// its server-side LOB queued for freeing),
+  /// bindability and caveats — except that
   /// offsets, amounts and [OracleLob.length] count **bytes**,
   /// [OracleLob.write] takes a `Uint8List` / `List<int>`, and
   /// [OracleLob.read] returns a `Uint8List`.

@@ -934,6 +934,13 @@ try {
   only by `connection.close()` relies on session teardown, and a pooled
   connection's pending frees are flushed by the next borrower's first
   `execute()`. `commit()` / `rollback()` / `ping()` do not flush them.
+- **Releasing a pooled connection closes it for you** — if you `release()` a
+  healthy, idle pooled connection while a temporary LOB you created is still
+  open, the pool logs a warning, force-closes the handle and queues its
+  server-side LOB for freeing on the next borrower's first `execute()` (or at
+  session teardown). Later read/write operations on that handle fail with a
+  pool-reclaim error; cached properties and another `close()` remain usable.
+  `close()` every handle before `release()`.
 - **It does not block other statements** — unlike a fetched handle, an open
   created-temporary handle leaves the connection free to run statements (binding
   it is the whole point). Individual LOB round trips are still serialized, so
