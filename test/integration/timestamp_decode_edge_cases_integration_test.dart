@@ -12,18 +12,22 @@ import 'test_helper.dart';
 /// Three orthogonal concerns, each validated on BOTH Oracle 23ai (FAST_AUTH)
 /// and Oracle 21c (classical AUTH):
 ///
-/// 1. **Region-id decode (Story 14.1).** A `TIMESTAMP WITH TIME ZONE`
-///    storing a *named region* (e.g. `Europe/Madrid`) arrives on the wire with
-///    byte 11's high bit set and no numeric offset. The date/time fields are
-///    the UTC instant, so the driver decodes it — never misreading the region
-///    id as an offset — to the UTC `DateTime` on a default connection and to
-///    an `OracleTimestampTz` with the same instant at a `+00:00` offset on a
-///    `preserveTimestampTimeZone` connection (the region is not resolved).
-///    Every instant is proven against the server's own `SYS_EXTRACT_UTC`:
-///    summer / winter, both sides of a DST gap, both readings of a DST
-///    overlap, fractional seconds, half-hour and southern-hemisphere regions,
-///    every region name the server knows (a multi-round fetch), PL/SQL OUT
-///    binds, and the documented `+00:00` bind-back limit.
+/// 1. **Region-id decode (Story 14.1) and region-name preservation (Story
+///    14.2).** A `TIMESTAMP WITH TIME ZONE` storing a *named region* (e.g.
+///    `Europe/Madrid`) arrives on the wire with byte 11's high bit set and no
+///    numeric offset. The date/time fields are the UTC instant, so the driver
+///    decodes it — never misreading the region id as an offset — to the UTC
+///    `DateTime` on a default connection and to an `OracleTimestampTz` with
+///    the same instant at a `+00:00` offset plus the server's region id on a
+///    `preserveTimestampTimeZone` connection; `timeZoneRegionName` resolves
+///    that id against the server's own `V$TIMEZONE_NAMES` to the name `TZR`
+///    renders. Every instant is proven against the server's own
+///    `SYS_EXTRACT_UTC` and every name against `TO_CHAR(ts, 'TZR')`: summer /
+///    winter, both sides of a DST gap, both readings of a DST overlap,
+///    fractional seconds, half-hour and southern-hemisphere regions, every
+///    region name the server knows (a multi-round fetch), PL/SQL OUT binds,
+///    native JSON, unknown ids, offset zones (no lookup query), and the
+///    documented `+00:00` bind-back limit.
 ///
 /// 2. **Offset band edges + fractional-hour zones.** The `OracleTimestampTz`
 ///    bind-back path is exercised at the documented offset band edges
@@ -140,12 +144,13 @@ void main() {
       final ids = <int>[];
 
       // Every row of [table] in id (= [cases]) order, with the server's own
-      // UTC rendering and the stored region name.
+      // UTC rendering, the stored region name, and its TZR rendering.
       String casesQuery() =>
           'SELECT id, ts, '
           "TO_CHAR(SYS_EXTRACT_UTC(ts), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"') "
           'AS utc_text, '
-          'EXTRACT(TIMEZONE_REGION FROM ts) AS region '
+          'EXTRACT(TIMEZONE_REGION FROM ts) AS region, '
+          "TO_CHAR(ts, 'TZR') AS tzr "
           'FROM $table WHERE id BETWEEN ${ids.first} AND ${ids.last} '
           'ORDER BY id';
 
@@ -246,41 +251,236 @@ void main() {
         }
       });
 
-      test('preserve connection decodes every region row to an '
-          'OracleTimestampTz at +00:00 with the same instant, and the '
-          'connection stays usable', () async {
-        final conn = await connectForTest(preserveTimestampTimeZone: true);
-        try {
-          final result = await conn.execute(casesQuery());
-          expect(result.rows, hasLength(cases.length));
-          for (final row in result.rows) {
-            final value = row['TS'];
-            expect(value, isA<OracleTimestampTz>());
-            final tz = value! as OracleTimestampTz;
+      test(
+        'preserve connection decodes every region row to an '
+        'OracleTimestampTz at +00:00 with the same instant and a region id '
+        'that resolves to the TZR name, and the connection stays usable',
+        () async {
+          final conn = await connectForTest(preserveTimestampTimeZone: true);
+          try {
+            final result = await conn.execute(casesQuery());
+            expect(result.rows, hasLength(cases.length));
+            final idByRegion = <String, int>{};
+            for (final row in result.rows) {
+              final value = row['TS'];
+              expect(value, isA<OracleTimestampTz>());
+              final tz = value! as OracleTimestampTz;
+              final region = row['REGION']! as String;
+              expect(
+                tz.offsetMinutes,
+                equals(0),
+                reason: 'no offset is computed: UTC-normalized +00:00',
+              );
+              expectRegionRow(row, tz.utc);
+              // Story 14.2: the region id travels on the value and names the
+              // zone exactly as the server's TZR element renders it.
+              expect(tz.regionId, isNotNull, reason: region);
+              expect(tz.regionId, inInclusiveRange(0, 8191), reason: region);
+              final name = await conn.timeZoneRegionName(tz);
+              expect(name, equals(row['TZR']), reason: region);
+              expect(name, equals(region.toUpperCase()), reason: region);
+              // One region, one id — across summer/winter/DST-flag variants.
+              expect(
+                idByRegion.putIfAbsent(region, () => tz.regionId!),
+                equals(tz.regionId),
+                reason: '$region keeps one id across DST states',
+              );
+            }
             expect(
-              tz.offsetMinutes,
-              equals(0),
-              reason: 'the region is not resolved: UTC-normalized +00:00',
+              idByRegion.keys,
+              containsAll(<String>[
+                'Europe/Madrid',
+                'US/Pacific',
+                'Australia/Sydney',
+                'Asia/Kolkata',
+                'UTC',
+                'Africa/Windhoek',
+              ]),
             );
-            expectRegionRow(row, tz.utc);
+            // Same session: offset-based values still keep their offset (no
+            // region id), and ordinary statements run normally.
+            final offset = await conn.execute(
+              "SELECT TO_TIMESTAMP_TZ('2024-03-15 10:30:45 +05:30', "
+              "'YYYY-MM-DD HH24:MI:SS TZH:TZM') AS ts, 1 AS one FROM dual",
+            );
+            final offsetValue = offset.rows.single['TS']! as OracleTimestampTz;
+            expect(
+              offsetValue,
+              equals(
+                OracleTimestampTz.fromHourMinute(
+                  DateTime.utc(2024, 3, 15, 5, 0, 45),
+                  5,
+                  30,
+                ),
+              ),
+            );
+            expect(offsetValue.regionId, isNull);
+            expect(await conn.timeZoneRegionName(offsetValue), isNull);
+            expect(offset.rows.single['ONE'], equals(1));
+            expect(conn.isHealthy, isTrue);
+          } finally {
+            await conn.close();
           }
-          // Same session: offset-based values still keep their offset, and
-          // ordinary statements run normally.
-          final offset = await conn.execute(
-            "SELECT TO_TIMESTAMP_TZ('2024-03-15 10:30:45 +05:30', "
-            "'YYYY-MM-DD HH24:MI:SS TZH:TZM') AS ts, 1 AS one FROM dual",
-          );
-          expect(
-            offset.rows.single['TS'],
-            equals(
-              OracleTimestampTz.fromHourMinute(
-                DateTime.utc(2024, 3, 15, 5, 0, 45),
-                5,
-                30,
+        },
+      );
+
+      test(
+        'an offset-zone value resolves to null without any lookup query; '
+        'the first region lookup runs exactly one, later ones none',
+        () async {
+          final conn = await connectForTest(preserveTimestampTimeZone: true);
+          try {
+            final result = await conn.execute(
+              "SELECT TO_TIMESTAMP_TZ('2024-03-15 10:30:45 +05:30', "
+              "'YYYY-MM-DD HH24:MI:SS TZH:TZM') AS off, "
+              "TO_TIMESTAMP_TZ('2024-03-15 10:30:45 -08:00', "
+              "'YYYY-MM-DD HH24:MI:SS TZH:TZM') AS off2, "
+              "TO_TIMESTAMP_TZ('2024-07-15 12:00:00 Europe/Madrid', "
+              "'YYYY-MM-DD HH24:MI:SS TZR') AS reg FROM dual",
+            );
+            final row = result.rows.single;
+            final off = row['OFF']! as OracleTimestampTz;
+            final off2 = row['OFF2']! as OracleTimestampTz;
+            final reg = row['REG']! as OracleTimestampTz;
+            expect(off.regionId, isNull);
+            expect(off2.regionId, isNull);
+
+            // Every query this driver issues is a full parse or a cached
+            // re-execute; neither counter may move for an offset value.
+            final parses = conn.debugFullParseExecutes;
+            final reuses = conn.debugReuseExecutes;
+            expect(await conn.timeZoneRegionName(off), isNull);
+            expect(await conn.timeZoneRegionName(off2), isNull);
+            expect(conn.debugFullParseExecutes, equals(parses));
+            expect(conn.debugReuseExecutes, equals(reuses));
+
+            expect(await conn.timeZoneRegionName(reg), equals('EUROPE/MADRID'));
+            expect(
+              conn.debugFullParseExecutes,
+              equals(parses + 1),
+              reason: 'one uncached region-name query',
+            );
+            expect(await conn.timeZoneRegionName(reg), equals('EUROPE/MADRID'));
+            expect(conn.debugFullParseExecutes, equals(parses + 1));
+            expect(conn.debugReuseExecutes, equals(reuses));
+          } finally {
+            await conn.close();
+          }
+        },
+      );
+
+      test('a default connection resolves a hand-built value; an id absent '
+          'from the server table throws ORA-01882', () async {
+        // Learn real ids on a preserve connection...
+        final preserving = await connectForTest(
+          preserveTimestampTimeZone: true,
+        );
+        final Map<String, int> idOf;
+        try {
+          final result = await preserving.execute(casesQuery());
+          idOf = {
+            for (final row in result.rows)
+              row['TZR']! as String:
+                  (row['TS']! as OracleTimestampTz).regionId!,
+          };
+        } finally {
+          await preserving.close();
+        }
+        // ...then resolve hand-built values on a connection that never
+        // opted into preserveTimestampTimeZone.
+        final conn = await connectForTest();
+        try {
+          for (final entry in idOf.entries) {
+            final value = OracleTimestampTz(
+              DateTime.utc(1999, 12, 31),
+              offsetMinutes: 0,
+              regionId: entry.value,
+            );
+            expect(
+              await conn.timeZoneRegionName(value),
+              equals(entry.key),
+              reason: 'id ${entry.value}',
+            );
+          }
+          // 8191 is the top of the 13-bit range and unused by Oracle's
+          // time-zone files (the sweep below proves it per server).
+          await expectLater(
+            conn.timeZoneRegionName(
+              OracleTimestampTz(
+                DateTime.utc(2024),
+                offsetMinutes: 0,
+                regionId: 8191,
               ),
             ),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', 1882)
+                  .having((e) => e.message, 'message', contains('8191')),
+            ),
           );
-          expect(offset.rows.single['ONE'], equals(1));
+          // The failed lookup leaves the connection usable.
+          final probe = await conn.execute('SELECT 1 AS one FROM dual');
+          expect(probe.rows.single['ONE'], equals(1));
+        } finally {
+          await conn.close();
+        }
+      });
+
+      test('the first lookup is rejected while a result set holds the '
+          'connection; once cached, lookups work during iteration', () async {
+        final conn = await connectForTest(preserveTimestampTimeZone: true);
+        try {
+          final fetched = await conn.execute(
+            'SELECT ts FROM $table WHERE id = :1',
+            [ids.first],
+          );
+          final madrid = fetched.rows.single['TS']! as OracleTimestampTz;
+
+          final open = await conn.execute(
+            'SELECT ts FROM $table ORDER BY id',
+            null,
+            const OracleExecuteOptions(resultSet: true, fetchSize: 2),
+          );
+          final rs = open.resultSet!;
+          try {
+            await expectLater(
+              conn.timeZoneRegionName(madrid),
+              throwsA(
+                isA<OracleException>().having(
+                  (e) => e.message,
+                  'message',
+                  contains('Concurrent operation'),
+                ),
+              ),
+            );
+          } finally {
+            await rs.close();
+          }
+
+          // Warm the cache, then resolve every row while a result set is open.
+          expect(await conn.timeZoneRegionName(madrid), 'EUROPE/MADRID');
+          final again = await conn.execute(
+            'SELECT ts, TO_CHAR(ts, \'TZR\') AS tzr FROM $table '
+            'WHERE id BETWEEN ${ids.first} AND ${ids.last} ORDER BY id',
+            null,
+            const OracleExecuteOptions(resultSet: true, fetchSize: 2),
+          );
+          final rs2 = again.resultSet!;
+          var seen = 0;
+          try {
+            for (
+              var row = await rs2.getRow();
+              row != null;
+              row = await rs2.getRow()
+            ) {
+              final tz = row['TS']! as OracleTimestampTz;
+              expect(await conn.timeZoneRegionName(tz), equals(row['TZR']));
+              seen++;
+            }
+          } finally {
+            await rs2.close();
+          }
+          expect(seen, equals(cases.length));
           expect(conn.isHealthy, isTrue);
         } finally {
           await conn.close();
@@ -288,11 +488,13 @@ void main() {
       });
 
       test('every region name the server knows decodes to its instant in '
-          'both modes (multi-round fetch sweep)', () async {
+          'both modes, and in preserve mode every fetched id resolves back to '
+          'that name (multi-round fetch sweep)', () async {
         const sweepQuery =
             'SELECT tzname, w, ts, '
             "TO_CHAR(SYS_EXTRACT_UTC(ts), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"') "
             'AS utc_text, '
+            "TO_CHAR(ts, 'TZR') AS tzr, "
             "CASE WHEN DUMP(ts) LIKE '%,0' THEN 1 ELSE 0 END AS zero_byte12 "
             'FROM ';
         for (final preserve in [false, true]) {
@@ -309,6 +511,10 @@ void main() {
               reason: 'every V\$TIMEZONE_NAMES region at both instants',
             );
             var zeroByte12 = 0;
+            // Story 14.2: id ↔ name must be a bijection over the server's
+            // region table, or some id would resolve to a wrong name.
+            final nameById = <int, String>{};
+            final idByName = <String, int>{};
             for (final row in result.rows) {
               final label = '${row['TZNAME']} w=${row['W']} preserve=$preserve';
               final expected = sweepInstants[(row['W']! as num).toInt()];
@@ -318,6 +524,22 @@ void main() {
                 expect(value, isA<OracleTimestampTz>(), reason: label);
                 final tz = value! as OracleTimestampTz;
                 expect(tz.offsetMinutes, equals(0), reason: label);
+                final id = tz.regionId;
+                expect(id, isNotNull, reason: label);
+                final tzname = row['TZNAME']! as String;
+                final name = await conn.timeZoneRegionName(tz);
+                expect(name, equals(row['TZR']), reason: label);
+                expect(name, equals(tzname.toUpperCase()), reason: label);
+                expect(
+                  nameById.putIfAbsent(id!, () => name!),
+                  equals(name),
+                  reason: '$label: one id, one name',
+                );
+                expect(
+                  idByName.putIfAbsent(name!, () => id),
+                  equals(id),
+                  reason: '$label: one name, one id (both instants)',
+                );
                 instant = tz.utc;
               } else {
                 expect(value, isA<DateTime>(), reason: label);
@@ -340,6 +562,31 @@ void main() {
               greaterThan(0),
               reason: 'the sweep must cover byte-12 == 0x00 region forms',
             );
+            if (preserve) {
+              expect(
+                nameById.length,
+                equals(result.rows.length ~/ sweepInstants.length),
+                reason: 'every region name has its own id',
+              );
+              // An id outside the server's table fails loud, never guessed.
+              expect(nameById.containsKey(8191), isFalse);
+              await expectLater(
+                conn.timeZoneRegionName(
+                  OracleTimestampTz(
+                    DateTime.utc(2024),
+                    offsetMinutes: 0,
+                    regionId: 8191,
+                  ),
+                ),
+                throwsA(
+                  isA<OracleException>().having(
+                    (e) => e.errorCode,
+                    'errorCode',
+                    1882,
+                  ),
+                ),
+              );
+            }
           } finally {
             await conn.close();
           }
@@ -369,12 +616,58 @@ void main() {
           final result = await preserving.execute(block, {
             'ret': OracleBind.out(type: OracleDbType.timestampTz),
           });
+          final out = result.outBinds['ret'];
+          expect(out, isA<OracleTimestampTz>());
+          final tz = out! as OracleTimestampTz;
+          expect(tz.regionId, isNotNull, reason: 'OUT binds carry the id too');
           expect(
-            result.outBinds['ret'],
-            equals(OracleTimestampTz(instant, offsetMinutes: 0)),
+            tz,
+            equals(
+              OracleTimestampTz(
+                instant,
+                offsetMinutes: 0,
+                regionId: tz.regionId,
+              ),
+            ),
+          );
+          expect(
+            await preserving.timeZoneRegionName(tz),
+            equals('EUROPE/MADRID'),
           );
         } finally {
           await preserving.close();
+        }
+      });
+
+      test('a region-id JSON_SCALAR on a preserve connection carries a '
+          'resolvable region id', () async {
+        final conn = await connectForTest(preserveTimestampTimeZone: true);
+        try {
+          final OracleResult result;
+          try {
+            result = await conn.execute(
+              'SELECT JSON_SCALAR(TO_TIMESTAMP_TZ( '
+              "'2024-03-15 10:20:30 US/Pacific', 'YYYY-MM-DD HH24:MI:SS TZR')) "
+              'AS j FROM dual',
+            );
+          } on OracleException catch (e) {
+            // JSON_SCALAR / native JSON need Oracle 21c+ (both suite targets
+            // qualify); anything older is out of scope for this check.
+            if (e.errorCode == 904 || e.errorCode == 902) {
+              markTestSkipped('native JSON unavailable: ${e.message}');
+              return;
+            }
+            rethrow;
+          }
+          final j = result.rows.single['J'];
+          expect(j, isA<OracleTimestampTz>());
+          final tz = j! as OracleTimestampTz;
+          expect(tz.utc, equals(DateTime.utc(2024, 3, 15, 17, 20, 30)));
+          expect(tz.offsetMinutes, equals(0));
+          expect(tz.regionId, isNotNull);
+          expect(await conn.timeZoneRegionName(tz), equals('US/PACIFIC'));
+        } finally {
+          await conn.close();
         }
       });
 
@@ -387,13 +680,16 @@ void main() {
             [ids.first],
           );
           final value = fetched.rows.single['TS']! as OracleTimestampTz;
+          // The fetched value names its region, but the bind ignores the id.
+          expect(value.regionId, isNotNull);
+          expect(await conn.timeZoneRegionName(value), equals('EUROPE/MADRID'));
           final copyId = nextTestId();
           await conn.execute('INSERT INTO $table (id, ts) VALUES (:1, :2)', [
             copyId,
             value,
           ]);
           final stored = await conn.execute(
-            "SELECT TO_CHAR(ts, 'TZH:TZM') AS zone, "
+            "SELECT ts, TO_CHAR(ts, 'TZH:TZM') AS zone, "
             'EXTRACT(TIMEZONE_REGION FROM ts) AS region, '
             "TO_CHAR(SYS_EXTRACT_UTC(ts), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"') "
             'AS utc_text '
@@ -408,6 +704,12 @@ void main() {
             equals(DateTime.utc(2024, 7, 15, 10)),
             reason: 'the instant survives the round-trip',
           );
+          // Re-fetched, the copy is a plain +00:00 offset value.
+          final copy = row['TS']! as OracleTimestampTz;
+          expect(copy.regionId, isNull);
+          expect(copy.utc, equals(value.utc));
+          expect(copy, isNot(equals(value)));
+          expect(await conn.timeZoneRegionName(copy), isNull);
         } finally {
           await cleanUpConnection(conn, rollbackFirst: true);
         }

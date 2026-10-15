@@ -1084,10 +1084,12 @@ void main() {
         });
 
         // Story 14.1: a region-id TSTZ inside native JSON decodes (it used
-        // to fail the whole row). The region is not resolved, so the value is
-        // the UTC instant at +00:00 — proven against SYS_EXTRACT_UTC.
+        // to fail the whole row) to the UTC instant at +00:00 — proven
+        // against SYS_EXTRACT_UTC. Story 14.2: the value carries the
+        // server's region id, which the connection resolves to the name.
         test('region-id TIMESTAMP WITH TIME ZONE scalars decode to the UTC '
-            'instant at +00:00 (== SYS_EXTRACT_UTC)', () async {
+            'instant at +00:00 (== SYS_EXTRACT_UTC) with a resolvable region '
+            'id', () async {
           if (skipWithoutNativeJson()) return;
           const utcFormat = 'YYYY-MM-DD"T"HH24:MI:SS.FF6"Z"';
           final result = await connection.execute(
@@ -1106,52 +1108,84 @@ void main() {
           );
           final row = result.rows.single;
           // US/Pacific in March 2024 is PDT (UTC-7).
-          final pac = OracleTimestampTz(
-            DateTime.utc(2024, 3, 15, 17, 20, 30),
-            offsetMinutes: 0,
-          );
+          final pacUtc = DateTime.utc(2024, 3, 15, 17, 20, 30);
           // Europe/Madrid in January is CET (UTC+1); fraction kept to µs.
-          final mad = OracleTimestampTz(
-            DateTime.utc(2024, 1, 15, 11, 0, 0, 123, 456),
-            offsetMinutes: 0,
-          );
-          expect(row['J_PAC'], isA<OracleTimestampTz>());
-          expect(row['J_PAC'], equals(pac));
-          expect(
-            pac.utc,
-            equals(DateTime.parse(row['U_PAC']! as String)),
-            reason: 'must equal SYS_EXTRACT_UTC',
-          );
-          expect(row['J_MAD'], equals(mad));
-          expect(
-            mad.utc,
-            equals(DateTime.parse(row['U_MAD']! as String)),
-            reason: 'must equal SYS_EXTRACT_UTC',
-          );
-          // Inside nested JSON constructors Oracle 23ai may resolve the
-          // region to the zone's real offset while building the OSON (e.g.
-          // JSON_ARRAY(ts) carries +01:00 for Madrid in January), whereas 21c
-          // keeps the region id. The driver decodes either node faithfully,
-          // so only the instant is version-independent: the offset is +00:00
-          // (region node, unresolved) or the zone's offset (offset node).
-          void expectNestedMember(
+          final madUtc = DateTime.utc(2024, 1, 15, 11, 0, 0, 123, 456);
+
+          // A top-level JSON_SCALAR keeps the region node on both servers:
+          // UTC instant, +00:00, and the server's region id, which resolves
+          // to the name exactly as TZR renders it.
+          Future<void> expectRegionScalar(
             Object? value,
-            OracleTimestampTz regionValue,
-            int zoneOffsetMinutes,
-          ) {
+            DateTime utc,
+            String utcText,
+            String tzr,
+          ) async {
             expect(value, isA<OracleTimestampTz>());
             final tz = value! as OracleTimestampTz;
-            expect(tz.utc, equals(regionValue.utc));
-            expect(tz.offsetMinutes, anyOf(0, zoneOffsetMinutes));
+            expect(tz.utc, equals(utc));
+            expect(
+              tz.utc,
+              equals(DateTime.parse(utcText)),
+              reason: 'must equal SYS_EXTRACT_UTC',
+            );
+            expect(tz.offsetMinutes, equals(0));
+            expect(tz.regionId, isNotNull, reason: '$tzr region node');
+            expect(
+              tz,
+              equals(
+                OracleTimestampTz(utc, offsetMinutes: 0, regionId: tz.regionId),
+              ),
+            );
+            expect(await connection.timeZoneRegionName(tz), equals(tzr));
+          }
+
+          await expectRegionScalar(
+            row['J_PAC'],
+            pacUtc,
+            row['U_PAC']! as String,
+            'US/PACIFIC',
+          );
+          await expectRegionScalar(
+            row['J_MAD'],
+            madUtc,
+            row['U_MAD']! as String,
+            'EUROPE/MADRID',
+          );
+          // Inside nested JSON constructors the server may not keep the
+          // region node while building the OSON: measured, Oracle 23ai
+          // resolves it to the zone's real offset (e.g. JSON_ARRAY(ts)
+          // carries +01:00 for Madrid in January) and 21c to a +00:00 offset
+          // node — neither carries a region id. The driver decodes whichever
+          // node arrives faithfully, so only the instant is
+          // version-independent: a region node (+00:00 with a region id that
+          // resolves to the name) or an offset node (the zone's offset or
+          // +00:00, no region id).
+          Future<void> expectNestedMember(
+            Object? value,
+            DateTime utc,
+            int zoneOffsetMinutes,
+            String tzr,
+          ) async {
+            expect(value, isA<OracleTimestampTz>());
+            final tz = value! as OracleTimestampTz;
+            expect(tz.utc, equals(utc));
+            if (tz.regionId != null) {
+              expect(tz.offsetMinutes, equals(0));
+              expect(await connection.timeZoneRegionName(tz), equals(tzr));
+            } else {
+              expect(tz.offsetMinutes, anyOf(0, zoneOffsetMinutes));
+              expect(await connection.timeZoneRegionName(tz), isNull);
+            }
           }
 
           final obj = row['OBJ']! as Map<String, Object?>;
           expect(obj.keys.toList(), equals(['before', 'tz', 'list']));
           expect(obj['before'], equals(1));
-          expectNestedMember(obj['tz'], mad, 60); // CET
+          await expectNestedMember(obj['tz'], madUtc, 60, 'EUROPE/MADRID');
           final list = obj['list']! as List<Object?>;
           expect(list, hasLength(2));
-          expectNestedMember(list[0], pac, -420); // PDT
+          await expectNestedMember(list[0], pacUtc, -420, 'US/PACIFIC');
           expect(list[1], equals('x'));
           // The connection stays usable after the region-bearing fetch.
           final after = await selectRow("JSON_SCALAR(HEXTORAW('FF')) AS v");
@@ -1192,14 +1226,24 @@ void main() {
             expect(doc['tz'], isA<OracleTimestampTz>(), reason: regions[i]);
             final tz = doc['tz']! as OracleTimestampTz;
             expect(tz.utc, equals(expected[i]), reason: regions[i]);
-            // Both servers measured keeping the region node here (+00:00);
-            // tolerate a server that resolves it to the zone's offset (see
+            // Measured: 23ai keeps the region node for a FROM_TZ member
+            // (+00:00 with a region id naming the zone); 21c stores a +00:00
+            // offset node (no region id). Tolerate the zone's offset too (see
             // the nested-member note in the previous test).
-            expect(
-              tz.offsetMinutes,
-              anyOf(0, zoneOffsets[i]),
-              reason: regions[i],
-            );
+            if (tz.regionId != null) {
+              expect(tz.offsetMinutes, equals(0), reason: regions[i]);
+              expect(
+                await connection.timeZoneRegionName(tz),
+                equals(regions[i].toUpperCase()),
+                reason: regions[i],
+              );
+            } else {
+              expect(
+                tz.offsetMinutes,
+                anyOf(0, zoneOffsets[i]),
+                reason: regions[i],
+              );
+            }
           }
         });
       });

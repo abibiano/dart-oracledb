@@ -587,38 +587,47 @@ void main() {
     });
 
     test('region-id payloads captured from 23ai/21c decode to their UTC '
-        'instant', () {
+        'instant and region id', () {
       // Live DUMP(ts) storage bytes (identical on Oracle 23ai and 21c) for
       // UTC-anchored values `FROM_TZ(TIMESTAMP '…', 'UTC') AT TIME ZONE r`.
-      final cases = <String, (List<int>, DateTime)>{
-        // 2024-07-15 12:00:00Z — Europe/Madrid region bytes 134/80.
+      // The region ids are the ones both servers' time-zone files assign
+      // (verified live: same id on 23ai tz file 43 and 21c tz file 35).
+      final cases = <String, (List<int>, DateTime, int)>{
+        // 2024-07-15 12:00:00Z — Europe/Madrid region bytes 134/80 = id 404.
         'Europe/Madrid summer': (
           [120, 124, 7, 15, 13, 1, 1, 0, 0, 0, 0, 134, 80],
           DateTime.utc(2024, 7, 15, 12),
+          404,
         ),
-        // 2024-01-15 12:00:00Z — US/Pacific region bytes 137/156.
+        // 2024-01-15 12:00:00Z — US/Pacific region bytes 137/156 = id 615.
         'US/Pacific winter': (
           [120, 124, 1, 15, 13, 1, 1, 0, 0, 0, 0, 137, 156],
           DateTime.utc(2024, 1, 15, 12),
+          615,
         ),
         // 2024-03-31 01:00:00.123456Z (Europe/Madrid DST switch instant).
         'Europe/Madrid DST edge + fraction': (
           [120, 124, 3, 31, 2, 1, 1, 7, 91, 202, 0, 134, 80],
           DateTime.utc(2024, 3, 31, 1, 0, 0, 123, 456),
+          404,
         ),
-        // Region `UTC` is itself a region id (208/4), not the +00:00 offset.
+        // Region `UTC` is itself a region id (208/4 = id 5121, above 4095:
+        // all 13 bits are used), not the +00:00 offset.
         'UTC region': (
           [120, 124, 10, 27, 2, 31, 1, 0, 0, 0, 0, 208, 4],
           DateTime.utc(2024, 10, 27, 1, 30),
+          5121,
         ),
-        // byte 12 == 0x00 is a legitimate region encoding — still 13 bytes.
+        // byte 12 == 0x00 is a legitimate region encoding (0x81/0x00 =
+        // id 64) — still 13 bytes.
         'Africa/Windhoek (byte12 = 0)': (
           [120, 124, 1, 15, 13, 1, 1, 0, 0, 0, 0, 129, 0],
           DateTime.utc(2024, 1, 15, 12),
+          64,
         ),
       };
       cases.forEach((label, c) {
-        final (bytes, expected) = c;
+        final (bytes, expected, regionId) = c;
         final wire = Uint8List.fromList(bytes);
         final viaDefault = decodeTimestamp(ReadBuffer(wire));
         expect(viaDefault.isUtc, isTrue, reason: label);
@@ -626,15 +635,26 @@ void main() {
         final viaWrapper = decodeTimestampTz(ReadBuffer(wire));
         expect(viaWrapper.utc, equals(expected), reason: label);
         expect(viaWrapper.offsetMinutes, equals(0), reason: label);
+        expect(viaWrapper.regionId, equals(regionId), reason: label);
+        expect(
+          viaWrapper,
+          equals(
+            OracleTimestampTz(expected, offsetMinutes: 0, regionId: regionId),
+          ),
+          reason: label,
+        );
       });
     });
 
-    test('every 0x80|id byte-11 variant decodes (offset check skipped)', () {
+    test('every 0x80|id byte-11 variant decodes (offset check skipped) and '
+        'yields ((byte11 & 0x7F) << 6) | (byte12 >> 2)', () {
       // Byte 11 values 0x80..0xFF with any byte 12 are region ids: none may
       // hit the numeric offset-range check (which would reject e.g. 0x80 as
-      // +108h) or underflow — all decode to the same UTC instant.
+      // +108h) or underflow — all decode to the same UTC instant. Byte 12's
+      // low two bits are DST flags and never leak into the id.
       final instant = DateTime.utc(2024, 7, 15, 10, 0, 0, 0, 1);
       final fields = encodeTimestamp(instant);
+      final seen = <int>{};
       for (var byte11 = 0x80; byte11 <= 0xFF; byte11++) {
         for (final byte12 in const [0x00, 0x01, 0x02, 0x03, 0x7F, 0x80, 0xFF]) {
           final wire = Uint8List.fromList([...fields, byte11, byte12]);
@@ -645,7 +665,26 @@ void main() {
           final tz = decodeTimestampTz(ReadBuffer(wire));
           expect(tz.utc, instant, reason: label);
           expect(tz.offsetMinutes, 0, reason: label);
+          final id = ((byte11 & 0x7F) << 6) | (byte12 >> 2);
+          expect(tz.regionId, id, reason: label);
+          seen.add(tz.regionId!);
         }
+      }
+      // The extremes of the 13-bit range are reachable from the wire.
+      expect(seen, containsAll(<int>[0, 8191]));
+      expect(seen.every((id) => id >= 0 && id <= 8191), isTrue);
+    });
+
+    test('DST flag bits do not change the region id', () {
+      // Europe/Madrid (id 404 = 0x86/0x50) with each DST-flag combination.
+      final fields = encodeTimestamp(DateTime.utc(2024, 7, 15, 10));
+      for (final flags in const [0, 1, 2, 3]) {
+        final wire = Uint8List.fromList([...fields, 0x86, 0x50 | flags]);
+        expect(
+          decodeTimestampTz(ReadBuffer(wire)).regionId,
+          equals(404),
+          reason: 'flags $flags',
+        );
       }
     });
 
@@ -863,12 +902,33 @@ void main() {
       final decoded = decodeTimestampTz(ReadBuffer(wire));
       expect(decoded.utc, equals(DateTime.utc(2024, 3, 15, 10, 30, 45)));
       expect(decoded.offsetMinutes, equals(0));
+      expect(decoded.regionId, isNull, reason: 'an offset zone has no id');
+    });
+
+    test('decodeTimestampTz leaves regionId null for every numeric offset', () {
+      final instant = DateTime.utc(2024, 3, 15, 10, 30, 45);
+      for (final (hour, minute) in const [
+        (5, 30),
+        (-8, 0),
+        (14, 0),
+        (-12, -59),
+        (0, -30),
+      ]) {
+        final wire = tzWire(instant, hour + 20, minute + 60);
+        final decoded = decodeTimestampTz(ReadBuffer(wire));
+        expect(decoded.regionId, isNull, reason: '$hour:$minute');
+        expect(
+          decoded,
+          equals(OracleTimestampTz.fromHourMinute(instant, hour, minute)),
+        );
+      }
     });
 
     test('decodeTimestampTz decodes region-id zones to the UTC instant at '
-        '+00:00', () {
-      // The region id is not an offset and is not resolved (no region table
-      // is bundled), so the wrapper reports the UTC-normalized +00:00.
+        '+00:00 with the region id', () {
+      // The region id is not an offset and is not resolved here (no region
+      // table is bundled), so the wrapper reports the UTC-normalized +00:00
+      // and keeps the id (0x80/0x01 → id 0, DST flag bit set).
       final wire = tzWire(
         DateTime.utc(2024, 7, 15, 10, 0, 0, 0, 0),
         0x80,
@@ -880,11 +940,25 @@ void main() {
       expect(decoded.tzHourOffset, equals(0));
       expect(decoded.tzMinuteOffset, equals(0));
       expect(decoded.wallClock, equals(DateTime.utc(2024, 7, 15, 10)));
+      expect(decoded.regionId, equals(0));
       expect(
         decoded,
         equals(
-          OracleTimestampTz(DateTime.utc(2024, 7, 15, 10), offsetMinutes: 0),
+          OracleTimestampTz(
+            DateTime.utc(2024, 7, 15, 10),
+            offsetMinutes: 0,
+            regionId: 0,
+          ),
         ),
+      );
+      expect(
+        decoded,
+        isNot(
+          equals(
+            OracleTimestampTz(DateTime.utc(2024, 7, 15, 10), offsetMinutes: 0),
+          ),
+        ),
+        reason: 'a region value is distinguishable from a real +00:00',
       );
       // Agrees with the default decoder on the instant.
       expect(decoded.utc, equals(decodeTimestamp(ReadBuffer(wire))));
@@ -907,16 +981,41 @@ void main() {
         equals(DateTime.utc(2024, 7, 15, 19, 30, 45, 123, 456)),
       );
       expect(decoded.offsetMinutes, equals(0));
+      expect(decoded.regionId, equals(615));
     });
 
     test('region-id decode → re-encode binds the instant at +00:00', () {
-      // Binding stays offset-only: the region name is not carried back, the
+      // Binding stays offset-only: the region id is not carried back, the
       // instant is, at the UTC-normalized +00:00 zone bytes 20/60.
       final fields = encodeTimestamp(DateTime.utc(2024, 7, 15, 10, 0, 0, 500));
       final regionWire = Uint8List.fromList([...fields, 134, 80]);
       final decoded = decodeTimestampTz(ReadBuffer(regionWire));
+      expect(decoded.regionId, equals(404));
       final reEncoded = encodeTimestampTz(decoded);
       expect(reEncoded, equals(Uint8List.fromList([...fields, 20, 60])));
+      // Decoding the re-encoded bytes yields the offset form (no region id).
+      final reDecoded = decodeTimestampTz(ReadBuffer(reEncoded));
+      expect(reDecoded.regionId, isNull);
+      expect(reDecoded.utc, equals(decoded.utc));
+    });
+
+    test('encodeTimestampTz ignores regionId (offset-only bind)', () {
+      final instant = DateTime.utc(2024, 3, 15, 5, 0, 45, 123);
+      for (final offset in const [0, 330, -480]) {
+        final plain = encodeTimestampTz(
+          OracleTimestampTz(instant, offsetMinutes: offset),
+        );
+        for (final id in const [0, 404, 8191]) {
+          expect(
+            encodeTimestampTz(
+              OracleTimestampTz(instant, offsetMinutes: offset, regionId: id),
+            ),
+            equals(plain),
+            reason: 'offset $offset, region id $id',
+          );
+        }
+        expect(plain[11] & 0x80, equals(0), reason: 'never a region form');
+      }
     });
 
     test('non-region malformed zone bytes still raise oraProtocolError', () {

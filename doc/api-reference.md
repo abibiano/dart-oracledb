@@ -16,7 +16,7 @@ import 'package:oracledb/oracledb.dart';
 | `OracleResult`, `OracleRow` | `result.dart` | Query rows / DML outcomes |
 | `ColumnMetadata` | `messages/execute_message.dart` | Per-column metadata on a result |
 | `OracleBind`, `OracleDbType`, `OracleOutBinds` | `oracle_bind.dart` | OUT / IN OUT bind specs and results |
-| `OracleTimestampTz` | `oracle_timestamp_tz.dart` | Offset-preserving TIMESTAMP WITH TIME ZONE |
+| `OracleTimestampTz` | `oracle_timestamp_tz.dart` | Offset-preserving TIMESTAMP WITH TIME ZONE (region id for named regions) |
 | `OracleException` | `errors.dart` | All driver/server errors |
 | `ora*` constants | `errors.dart`, `protocol/constants.dart` | Well-known Oracle error codes |
 | `TlsConfig` | `transport/tls.dart` | TLS/SSL configuration |
@@ -85,6 +85,30 @@ Future<bool> ping({Duration timeout = const Duration(seconds: 5)});
 Future<void> close();
 ```
 
+### Time-zone region names
+
+```dart
+Future<String?> timeZoneRegionName(OracleTimestampTz value);
+```
+
+Resolves `value.regionId` to the region name as Oracle's `TZR` element renders
+it (e.g. `'EUROPE/MADRID'`), from **this connection's database** — never a
+bundled table. The first lookup reads `V$TIMEZONE_NAMES` (readable by `PUBLIC`
+by default) in one query and caches the id → name map for the connection's
+lifetime; later lookups need no round trip. That first lookup is a normal
+connection operation, so it is rejected while another operation (an open
+`OracleResultSet`, an in-flight `execute`) holds the connection.
+
+- `value.regionId == null` (a numeric offset) → `null`, with no query.
+- An id absent from the server's table → `OracleException`, error code 1882
+  (ORA-01882) — never a guessed name or `null`.
+- `V$TIMEZONE_NAMES` unreadable → `OracleException` carrying the server's
+  code (e.g. ORA-00942), message naming the view. A failed load is not
+  cached.
+- Works on any connection (no `preserveTimestampTimeZone` needed), including
+  for hand-built values; ids follow the server's time-zone file, so resolve a
+  value against the database it came from.
+
 ### Test-only instrumentation (`@visibleForTesting`, not public API)
 
 `statementCacheSize`, `debugCacheSize`, `debugPendingCloseCount`,
@@ -130,7 +154,7 @@ type-checked at construction (fails at the call site, not deep in wire encoding)
 | `varchar` | `String` | bytes | requires `maxSize` |
 | `date` | `DateTime` | — | 7-byte |
 | `timestamp` | `DateTime` | — | 11-byte, µs precision |
-| `timestampTz` | `DateTime` (UTC) or `OracleTimestampTz` | — | offset preserved only with `preserveTimestampTimeZone: true` |
+| `timestampTz` | `DateTime` (UTC) or `OracleTimestampTz` | — | offset (or a named region's `regionId`) preserved only with `preserveTimestampTimeZone: true`; `regionId` ignored on bind |
 | `raw` | `Uint8List` | bytes | requires `maxSize` |
 | `clob` | `String` | **characters** (UTF-16 units) | wire = LOB locator; `'' → NULL` |
 | `blob` | `Uint8List` | bytes | wire = LOB locator; empty `Uint8List` → empty BLOB (≠ NULL) |
@@ -166,12 +190,27 @@ String get code;           // 'ORA-01017' (5-digit pad floor); negative → 'ORA
 
 ## `OracleTimestampTz`
 
+```dart
+OracleTimestampTz(DateTime utc, {required int offsetMinutes, int? regionId});
+OracleTimestampTz.fromHourMinute(DateTime utc, int hour, int minute, {int? regionId});
+OracleTimestampTz.fromOffset(DateTime utc, Duration offset, {int? regionId});
+final DateTime utc;        // absolute instant
+final int offsetMinutes;   // reported offset, -779..840; 0 for a decoded region value
+final int? regionId;       // server region id 0..8191 for a named region; null for an offset
+```
+
 Wrapper that preserves a numeric offset of a `TIMESTAMP WITH TIME ZONE`
 (default decode collapses to a UTC `DateTime`). Opt in per connection with
 `preserveTimestampTimeZone: true`; it then applies to both column decode and
-OUT/IN OUT binds. A value stored with a named region (e.g. `Europe/Madrid`)
-decodes to its correct UTC instant at a `+00:00` offset (the region is not
-resolved). See [oracle_timestamp_tz.dart](../lib/src/oracle_timestamp_tz.dart).
+OUT/IN OUT binds (JSON members are always this type). A value stored with a
+named region (e.g. `Europe/Madrid`) decodes to its correct UTC instant at a
+`+00:00` offset — the region's offset is never computed — with the server's
+region id in `regionId`; `OracleConnection.timeZoneRegionName` resolves it to
+the name. `regionId` outside 0..8191 throws `ArgumentError`. `==`, `hashCode`,
+`compareTo` (instant, then offset, then region id; `null` first) and
+`toString` include `regionId`. Binding is offset-only: `regionId` is ignored,
+so a decoded region value binds back at `+00:00` without its region. See
+[oracle_timestamp_tz.dart](../lib/src/oracle_timestamp_tz.dart).
 
 ## `TlsConfig`
 

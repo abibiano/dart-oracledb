@@ -293,6 +293,12 @@ const int oraDataTypeNotSupported = 932;
 /// gate — re-running them would change nothing.
 const int oraVarNotInSelectList = 1007;
 
+/// Timezone region not found (ORA-01882). Raised by
+/// `OracleConnection.timeZoneRegionName` for a region id that is absent from
+/// the connected server's region table — the code the server itself uses for
+/// an unknown region.
+const int oraTimezoneRegionNotFound = 1882;
+
 // ============================================================================
 // TTC Message Types
 // ============================================================================

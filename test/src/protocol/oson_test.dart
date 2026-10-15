@@ -1102,22 +1102,26 @@ void main() {
         );
       });
 
-      test('region-id zone decodes to the UTC instant at +00:00', () {
+      test('region-id zone decodes to the UTC instant at +00:00 and carries '
+          'the region id', () {
         // JSON_SCALAR(TO_TIMESTAMP_TZ('2024-03-15 10:20:30 US/Pacific',
         // ... TZR)), captured from both servers: a 13-byte TSTZ node whose
-        // byte 11 has its high bit set (region bytes 0x89/0x9c). The fields
-        // are the UTC instant — 10:20:30 PDT (UTC-7) == 17:20:30Z — and the
-        // region is not resolved, so the offset is the UTC-normalized +00:00.
+        // byte 11 has its high bit set (region bytes 0x89/0x9c = id 615).
+        // The fields are the UTC instant — 10:20:30 PDT (UTC-7) ==
+        // 17:20:30Z — and the region is not resolved here, so the offset is
+        // the UTC-normalized +00:00 and the id surfaces on the value.
         final value = decodeOson(
           _hex('ff4a5a010016000e7c787c030f12151f00000000899c'),
         );
         expect(value, isA<OracleTimestampTz>());
+        expect((value! as OracleTimestampTz).regionId, equals(615));
         expect(
           value,
           equals(
             OracleTimestampTz(
               DateTime.utc(2024, 3, 15, 17, 20, 30),
               offsetMinutes: 0,
+              regionId: 615,
             ),
           ),
         );
@@ -1153,10 +1157,40 @@ void main() {
             OracleTimestampTz(
               DateTime.utc(2024, 7, 15, 19, 30, 45, 123, 456),
               offsetMinutes: 0,
+              regionId: 615,
             ),
           ),
         );
         expect(value['after'], equals(['x', true]));
+      });
+
+      test('an offset zone decodes with regionId null', () {
+        final value =
+            decodeOson(_scalarDoc('7c 787c030f13151f 00000000 0c3c'))!
+                as OracleTimestampTz;
+        expect(value.offsetMinutes, equals(-480));
+        expect(value.regionId, isNull);
+      });
+
+      test('a decoded region value re-encodes as an offset node at +00:00 '
+          '(regionId is not encoded)', () {
+        final decoded =
+            decodeOson(_hex('ff4a5a010016000e7c787c030f12151f00000000899c'))!
+                as OracleTimestampTz;
+        expect(decoded.regionId, equals(615));
+        // Encoding the region value and the same instant without a region id
+        // yields byte-identical documents: the zone bytes are 20/60.
+        final withRegion = encodeOson(<String, Object?>{'tz': decoded});
+        final withoutRegion = encodeOson(<String, Object?>{
+          'tz': OracleTimestampTz(decoded.utc, offsetMinutes: 0),
+        });
+        expect(withRegion, equals(withoutRegion));
+        final roundTripped =
+            (decodeOson(withRegion)! as Map<String, Object?>)['tz']!
+                as OracleTimestampTz;
+        expect(roundTripped.utc, equals(decoded.utc));
+        expect(roundTripped.offsetMinutes, equals(0));
+        expect(roundTripped.regionId, isNull, reason: 'region not preserved');
       });
 
       test('a BCE region-id TSTZ still raises oraUnsupportedType', () {

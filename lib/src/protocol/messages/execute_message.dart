@@ -802,7 +802,8 @@ class ExecuteRequest extends Message {
         buffer.writeBytesWithLength(dt.encodeTimestamp(value as DateTime));
         return;
       case oraTypeTimestampTz:
-        // OracleTimestampTz binds carry their reported offset on the wire.
+        // OracleTimestampTz binds carry their reported offset on the wire
+        // (a regionId is ignored: binding is offset-only).
         // A plain DateTime under an explicit TZ oraType is
         // encoded as its UTC instant wrapped at an explicit +00:00 offset
         // (full 13-byte payload): empirically (validated against 23ai
@@ -2274,7 +2275,8 @@ Object? _decodeValueByOraType(
       if (bytes.isEmpty) return null;
       if (!strict) return null; // probe pass: bytes consumed, value unused
       // Opt-in wrapper preserves numeric wire offsets and reports +00:00
-      // for region ids; default stays the UTC DateTime contract.
+      // plus the regionId for region ids; default stays the UTC DateTime
+      // contract.
       return preserveTimestampTimeZone
           ? dt.decodeTimestampTz(ReadBuffer(bytes))
           : dt.decodeTimestamp(ReadBuffer(bytes));

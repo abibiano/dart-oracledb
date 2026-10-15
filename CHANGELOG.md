@@ -13,15 +13,35 @@
   an `OracleTimestampTz` on a `preserveTimestampTimeZone: true` connection
   (and always inside JSON). Validated against Oracle 23ai and Oracle 21c,
   across every region name each server knows.
-- **Limits:** the region name is not returned and is not resolved to an
-  offset (no region table is bundled): an `OracleTimestampTz` decoded from a
-  region-id value reports `+00:00` (the UTC-normalized instant, not the
-  region's offset), and binding it back stores the instant at `+00:00`.
-  Binding stays offset-only. Select `TO_CHAR(col, 'TZR')` /
-  `EXTRACT(TIMEZONE_REGION FROM col)` when the name is needed. Inside nested
-  JSON, Oracle 23ai may resolve the region to its offset itself; such members
-  decode as ordinary offset values. Region-name preservation is planned
-  separately.
+- **Region names are recoverable (opt-in).** An `OracleTimestampTz` decoded
+  from a region-id value (on a `preserveTimestampTimeZone: true` connection,
+  in PL/SQL OUT binds, and always inside JSON) now carries the server's
+  numeric region id in the new `regionId` field (`null` for numeric-offset
+  values), and the new `OracleConnection.timeZoneRegionName(value)` resolves
+  it to the region name as Oracle's `TZR` element renders it (e.g.
+  `'EUROPE/MADRID'`). Names come from the connected database's own
+  `V$TIMEZONE_NAMES` — no region table is bundled — read in one query on the
+  first lookup and cached for the connection's lifetime. A value without a
+  region id resolves to `null` with no query; an id absent from the server's
+  table throws `OracleException` (ORA-01882); an unreadable view raises the
+  server error, naming `V$TIMEZONE_NAMES`. `OracleTimestampTz` gains an
+  optional `regionId` (0..8191, `ArgumentError` otherwise) on all three
+  constructors, and its `==`, `hashCode`, `compareTo` and `toString` include
+  it. Default-mode decoding (a UTC `DateTime`) is unchanged. Validated
+  against Oracle 23ai and Oracle 21c, resolving every region name each server
+  knows.
+- **Limits:** the region's offset is never computed (no time-zone rules are
+  bundled): an `OracleTimestampTz` decoded from a region-id value reports
+  `+00:00` (the UTC-normalized instant, not the region's offset). Binding
+  stays offset-only — `regionId` is ignored, so binding such a value back
+  stores the instant at `+00:00` without the region. Names follow the
+  connected server's time-zone file, so resolve a value against the database
+  it came from; the lookup needs read access to `V$TIMEZONE_NAMES` (granted
+  to `PUBLIC` by default), and the first lookup on a connection cannot run
+  while an `OracleResultSet` or another operation holds it. Inside nested
+  JSON constructors the server may not keep the region (Oracle 23ai may
+  resolve it to its offset, 21c may store `+00:00`); such members decode as
+  ordinary offset values without a `regionId`.
 - **Behavior change:** queries over region-id `TIMESTAMP WITH TIME ZONE` data
   that previously threw `OracleException` (`oraUnsupportedType`) now return
   rows. BCE values and malformed numeric zone offsets still fail loudly

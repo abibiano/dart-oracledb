@@ -307,12 +307,26 @@ class OracleConnection {
   final StatementCache _cache;
 
   /// Opt-in: when true, `TIMESTAMP WITH TIME ZONE` columns
-  /// decode to [OracleTimestampTz] (preserving a numeric offset) instead
-  /// of a UTC [DateTime]. Connection-level because [execute]'s optional
-  /// positional bind parameter rules out per-call named options.
+  /// decode to [OracleTimestampTz] (preserving a numeric offset, or carrying
+  /// the region id of a named region) instead of a UTC [DateTime].
+  /// Connection-level because [execute]'s optional positional bind parameter
+  /// rules out per-call named options.
   final bool _preserveTimestampTimeZone;
   bool _isClosed;
   bool _inTransaction = false;
+
+  /// This server's time-zone region id → `TZR` name map, loaded lazily by the
+  /// first [timeZoneRegionName] call that needs it and kept for the
+  /// connection's lifetime (a server's region ids do not change while a
+  /// session is open). `null` until a load succeeds; a failed load leaves it
+  /// `null` so a later call retries.
+  Map<int, String>? _timeZoneRegionNames;
+
+  /// The in-flight region-name load, shared by concurrent
+  /// [timeZoneRegionName] callers so a burst of first lookups runs one query
+  /// (and never trips the single-operation guard against itself). Cleared
+  /// when the load completes, successfully or not.
+  Future<Map<int, String>>? _timeZoneRegionNamesLoad;
 
   /// The character sets detected once at connection startup, or `null` before
   /// detection runs. Populated by [_detectCharsetInfo] during [connect] (and on
@@ -3458,6 +3472,125 @@ class OracleConnection {
   @visibleForTesting
   Future<void> detectCharsetInfoForTesting() => _detectCharsetInfo();
 
+  /// Region-name query behind [timeZoneRegionName] (Story 14.2).
+  ///
+  /// Builds one `TIMESTAMP WITH TIME ZONE` value per region name the server
+  /// knows (`V$TIMEZONE_NAMES` lists a name once per abbreviation, hence the
+  /// `DISTINCT`) and selects it next to its `TZR` rendering. The `TS` column
+  /// travels in the exact wire form a fetched column uses, so the decoder
+  /// extracts the region id the same way it does for user data — no id is
+  /// computed, guessed or bundled driver-side, and the name is whatever the
+  /// server's own `TZR` element renders for that id. The values are anchored
+  /// at a UTC instant with `AT TIME ZONE`, which converts an instant and so
+  /// can never land in a DST gap (unlike parsing a local wall clock).
+  /// Double-quoted for the embedded single-quoted literals.
+  static const String _timeZoneRegionNamesSql =
+      "SELECT TO_CHAR(ts, 'TZR') AS name, ts FROM ( "
+      "SELECT FROM_TZ(TIMESTAMP '2000-01-01 00:00:00', 'UTC') "
+      'AT TIME ZONE tzname AS ts '
+      'FROM (SELECT DISTINCT tzname FROM v\$timezone_names))';
+
+  /// Returns this connection's region id → name map, loading it on first use
+  /// (one shared in-flight load; see [_timeZoneRegionNamesLoad]).
+  Future<Map<int, String>> _timeZoneRegionNameMap() {
+    final cached = _timeZoneRegionNames;
+    if (cached != null) return Future.value(cached);
+    return _timeZoneRegionNamesLoad ??= _loadTimeZoneRegionNames().whenComplete(
+      () => _timeZoneRegionNamesLoad = null,
+    );
+  }
+
+  /// Runs [_timeZoneRegionNamesSql] once and caches the id → name map.
+  ///
+  /// Goes through the normal single-operation guard (it is a real wire round
+  /// trip on the caller's connection) and the shared eager execute path, run
+  /// uncacheable so it occupies no statement-cache slot, with the TSTZ decode
+  /// forced to the [OracleTimestampTz] wrapper so each row's region id is
+  /// visible whatever the connection's `preserveTimestampTimeZone` flag.
+  ///
+  /// Fails loud with [OracleException] — never caching a partial map — when
+  /// the view cannot be read (the server error code, e.g. ORA-00942 /
+  /// ORA-01031, is kept and the message names `V$TIMEZONE_NAMES`), when the
+  /// result is empty or incomplete or holds no region-id value, when a row
+  /// does not decode as expected, or when one id renders as two different
+  /// names.
+  Future<Map<int, String>> _loadTimeZoneRegionNames() async {
+    _rejectConcurrentOperation();
+    _executeInProgress = true;
+    final OracleResult result;
+    try {
+      result = await _executeGuarded(
+        _timeZoneRegionNamesSql,
+        null,
+        forceUncacheable: true,
+        // A VARCHAR2 and a TSTZ column: no BLOB IS JSON column to keep raw.
+        rawJsonBlobs: false,
+        preserveTimestampTimeZone: true,
+      );
+    } on OracleException catch (e, st) {
+      // Only the view-access failures (ORA-00942 table or view does not
+      // exist, ORA-01031 insufficient privileges) get the V$TIMEZONE_NAMES
+      // hint; a lost connection, timeout or any other error propagates as-is
+      // rather than being mislabelled as a privilege problem.
+      if (e.errorCode != 942 && e.errorCode != 1031) rethrow;
+      Error.throwWithStackTrace(
+        OracleException(
+          errorCode: e.errorCode,
+          message:
+              'Failed to read the time-zone region names from '
+              'V\$TIMEZONE_NAMES (needed to resolve a region id; the view is '
+              'readable by PUBLIC by default): ${e.message}',
+          cause: e,
+          sql: e.sql,
+          offset: e.offset,
+        ),
+        st,
+      );
+    } finally {
+      _executeInProgress = false;
+    }
+
+    OracleException malformed(String detail) => OracleException(
+      errorCode: oraProtocolError,
+      message: 'Unexpected V\$TIMEZONE_NAMES region-name result: $detail',
+    );
+
+    if (result.moreRowsAvailable) {
+      throw malformed('the result was not fully fetched');
+    }
+    if (result.rows.isEmpty) {
+      throw malformed('the server returned no region names');
+    }
+    final names = <int, String>{};
+    for (final row in result.rows) {
+      final name = row['NAME'];
+      final ts = row['TS'];
+      if (name is! String || name.isEmpty) {
+        throw malformed('a row has no TZR name ($name)');
+      }
+      if (ts is! OracleTimestampTz) {
+        throw malformed('$name did not decode to an OracleTimestampTz ($ts)');
+      }
+      final regionId = ts.regionId;
+      // Every name measured on 23ai and 21c comes back in region-id form. A
+      // name a server stored as a plain offset instead would have no id to
+      // map; skipping it is still fail-loud, since no value can carry an id
+      // that is absent from the map without timeZoneRegionName throwing.
+      if (regionId == null) continue;
+      final previous = names[regionId];
+      if (previous != null && previous != name) {
+        throw malformed(
+          'region id $regionId renders as both $previous and $name',
+        );
+      }
+      names[regionId] = name;
+    }
+    if (names.isEmpty) {
+      throw malformed('no row came back as a region-id value');
+    }
+    return _timeZoneRegionNames = Map.unmodifiable(names);
+  }
+
   /// Runs the eager `execute()` path for SELECT, DML, and PL/SQL.
   ///
   /// When [lazyImplicit] is true (set only by the public
@@ -3472,10 +3605,17 @@ class OracleConnection {
   /// returns at most N rows and stops fetching once N is reached (a deliberate
   /// bound, not the safety backstop). It is a no-op when [lazyImplicit] is true.
   ///
-  /// [forceUncacheable] (set only by [_detectCharsetInfo]) classifies the
+  /// [forceUncacheable] (set only by the internal queries
+  /// [_detectCharsetInfo] and [_loadTimeZoneRegionNames]) classifies the
   /// statement as cache-ineligible regardless of its SQL, so the internal
-  /// startup detection query opens no cached cursor and leaves the
-  /// statement cache untouched.
+  /// query opens no cached cursor and leaves the statement cache untouched.
+  ///
+  /// [preserveTimestampTimeZone] overrides the connection's
+  /// `TIMESTAMP WITH TIME ZONE` decode mode for this call's first batch and
+  /// its eager drain (`null` = the connection's own flag). Set only by
+  /// [_loadTimeZoneRegionNames], an internal top-level SELECT that needs the
+  /// wire region id on every connection; nested-cursor and implicit-result
+  /// drains, which that query never produces, keep the connection's flag.
   ///
   /// [fetchLobs] (Story 12.1) makes each CLOB/NCLOB/BLOB in the result rows and
   /// OUT binds a connection-owned [OracleLob] handle (registered via
@@ -3498,10 +3638,12 @@ class OracleConnection {
     bool fetchLobs = false,
     required bool rawJsonBlobs,
     _ExecuteManyCall? bulk,
+    bool? preserveTimestampTimeZone,
   }) async {
     _log.fine(
       'Executing: ${sql.length > 100 ? '${sql.substring(0, 100)}...' : sql}',
     );
+    final preserveTz = preserveTimestampTimeZone ?? _preserveTimestampTimeZone;
 
     // executeMany (array DML or PL/SQL iteration) arrives pre-validated and
     // pre-normalized with its own prepared statement; everything downstream —
@@ -3522,6 +3664,7 @@ class OracleConnection {
       batchErrors: bulk?.batchErrors ?? false,
       dmlRowCounts: bulk?.dmlRowCounts ?? false,
       dmlReturning: bulk?.dmlReturning ?? stmt.dmlReturning,
+      preserveTimestampTimeZone: preserveTz,
     );
     StatementCacheEntry? cacheEntry = open.cacheEntry;
     var unhandledCursorId = open.response.cursorId;
@@ -3541,7 +3684,7 @@ class OracleConnection {
           firstBatch: response.rows,
           serverHasMoreRows: true,
           prefetchRows: _defaultPrefetchRows,
-          preserveTimestampTimeZone: _preserveTimestampTimeZone,
+          preserveTimestampTimeZone: preserveTz,
           materializePerBatch: false,
           // Deliberately NOT wrapping here: this is the EAGER execute() drain,
           // which materializes (or wraps, under fetchLobs) ONCE over the whole
@@ -3879,6 +4022,9 @@ class OracleConnection {
   /// response; an unrecoverable server error throws [OracleException]. The
   /// caller owns the returned cache entry and must release/store it (eager) or
   /// hold it for the result set's lifetime (lazy).
+  ///
+  /// [preserveTimestampTimeZone] overrides the connection's TSTZ decode mode
+  /// for this open (`null` = the connection's flag); see [_executeGuarded].
   Future<_CursorOpen> _openCursor(
     String sql,
     _PreparedStatement stmt, {
@@ -3887,6 +4033,7 @@ class OracleConnection {
     bool batchErrors = false,
     bool dmlRowCounts = false,
     bool dmlReturning = false,
+    bool? preserveTimestampTimeZone,
   }) async {
     // Try to acquire a cached cursor.
     StatementCacheEntry? cacheEntry;
@@ -3945,7 +4092,8 @@ class OracleConnection {
           cursorId: cursorId,
           expectedColumns: expectedColumns,
           cursorsToClose: cursorsToClose,
-          preserveTimestampTimeZone: _preserveTimestampTimeZone,
+          preserveTimestampTimeZone:
+              preserveTimestampTimeZone ?? _preserveTimestampTimeZone,
           bulkRows: bulkRows,
           executeManyIters: executeManyIters,
           batchErrors: batchErrors,
@@ -5470,6 +5618,71 @@ class OracleConnection {
   /// The Oracle service name.
   String get serviceName => _connectionInfo.serviceName;
 
+  /// Resolves the time-zone region id carried by [value]
+  /// ([OracleTimestampTz.regionId]) to its region name, as Oracle's `TZR`
+  /// format element renders it (e.g. `'EUROPE/MADRID'`, `'US/PACIFIC'`).
+  ///
+  /// A region-id `TIMESTAMP WITH TIME ZONE` value decoded as an
+  /// [OracleTimestampTz] (on a `preserveTimestampTimeZone: true` connection,
+  /// or anywhere inside native JSON) reports offset `+00:00` and carries the
+  /// server's numeric region id; this call names it:
+  ///
+  /// ```dart
+  /// final row = (await conn.execute('SELECT ts FROM t')).rows.first;
+  /// final ts = row['TS'] as OracleTimestampTz;
+  /// final region = await conn.timeZoneRegionName(ts); // 'EUROPE/MADRID'
+  /// ```
+  ///
+  /// Returns `null` — without any server round trip, and whatever this
+  /// connection's state — when [value] has no region id (a numeric-offset
+  /// value such as `+05:30`).
+  ///
+  /// The names come from **this connection's database**, never from a table
+  /// bundled with the driver: the first lookup on a connection reads every
+  /// region of `V$TIMEZONE_NAMES` (readable by `PUBLIC` by default) in one
+  /// query and caches the id → name map for the connection's lifetime, so
+  /// later lookups need no round trip. That first lookup therefore cannot run
+  /// while another operation (an in-flight [execute], an open
+  /// [OracleResultSet] or fetched [OracleLob]) holds the connection — it is
+  /// rejected like any concurrent operation; cached lookups are not. Resolve
+  /// a value against the database it was fetched from (or one with the same
+  /// time-zone file): ids are numbered by the server's time-zone file. The
+  /// connection does not need `preserveTimestampTimeZone`, so a value built
+  /// by hand (`OracleTimestampTz(utc, offsetMinutes: 0, regionId: id)`) can be
+  /// resolved too.
+  ///
+  /// Only the name is recovered: the value's offset stays `+00:00` (the
+  /// driver does not compute a region's offset or DST state), and binding the
+  /// value stores the instant at `+00:00`, without the region.
+  ///
+  /// Throws [OracleException]:
+  /// - error code 1882 (ORA-01882, timezone region not found) when the id is
+  ///   not in this server's region table — never a guessed name or `null`;
+  /// - the server's error code (e.g. ORA-00942 / ORA-01031), with a message
+  ///   naming `V$TIMEZONE_NAMES`, when the region names cannot be read;
+  /// - ORA-03113 when the connection is closed, or the usual
+  ///   concurrent-operation error for a first lookup on a busy connection.
+  ///
+  /// A failed load is not cached; the next call retries it.
+  Future<String?> timeZoneRegionName(OracleTimestampTz value) async {
+    final regionId = value.regionId;
+    if (regionId == null) return null;
+    _ensureOpen();
+    final names = await _timeZoneRegionNameMap();
+    final name = names[regionId];
+    if (name == null) {
+      throw OracleException(
+        errorCode: oc.oraTimezoneRegionNotFound,
+        message:
+            'Time-zone region id $regionId is not in this server\'s region '
+            'table (V\$TIMEZONE_NAMES, ${names.length} regions): the value '
+            'was built by hand or comes from a database with a different '
+            'time-zone file',
+      );
+    }
+    return name;
+  }
+
   /// Pings the database to verify the connection is alive.
   ///
   /// Returns `true` if the connection responds to ping.
@@ -5714,7 +5927,9 @@ class OracleConnection {
   /// handling are unchanged. [OracleTimestampTz] values can be bound back on
   /// any connection regardless of this flag. A value stored with a named
   /// region (e.g. `Europe/Madrid`) decodes to its correct UTC instant at a
-  /// `+00:00` offset — the region is not resolved; see [OracleTimestampTz].
+  /// `+00:00` offset, carrying the server's region id
+  /// ([OracleTimestampTz.regionId]); [timeZoneRegionName] resolves that id to
+  /// the region name. See [OracleTimestampTz].
   ///
   /// Throws [OracleException] if connection fails with:
   /// - `errorCode`: ORA-xxxxx error code

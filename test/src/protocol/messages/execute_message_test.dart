@@ -4847,7 +4847,8 @@ void main() {
       test('strict pass decodes a region-id TSTZ column in both modes', () {
         // Same region-id slice, valid DATE: the probe still completes and the
         // strict pass now returns the UTC instant (default) or an
-        // OracleTimestampTz at the UTC-normalized +00:00 (preserve mode).
+        // OracleTimestampTz at the UTC-normalized +00:00 carrying the region
+        // id (preserve mode; 0x80/0x01 → id 0).
         final payload = regionTstzRow(const [120, 124, 3, 15, 1, 1, 1]);
         expect(
           ttcStreamIsComplete(payload, expectedColumns: regionAndBceCols),
@@ -4873,7 +4874,7 @@ void main() {
         );
         expect(
           preserved.rows.single[0],
-          equals(OracleTimestampTz(instant, offsetMinutes: 0)),
+          equals(OracleTimestampTz(instant, offsetMinutes: 0, regionId: 0)),
         );
       });
 

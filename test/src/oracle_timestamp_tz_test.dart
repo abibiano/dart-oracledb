@@ -285,5 +285,184 @@ void main() {
         contains('-00:30'),
       );
     });
+
+    // Story 14.2: the server's region id travels on the value.
+    group('regionId', () {
+      test('defaults to null on every constructor', () {
+        expect(OracleTimestampTz(instant, offsetMinutes: 330).regionId, isNull);
+        expect(
+          OracleTimestampTz.fromHourMinute(instant, 5, 30).regionId,
+          isNull,
+        );
+        expect(
+          OracleTimestampTz.fromOffset(
+            instant,
+            const Duration(hours: 1),
+          ).regionId,
+          isNull,
+        );
+      });
+
+      test('every constructor accepts the 13-bit range 0..8191', () {
+        for (final id in const [0, 1, 404, 5121, 8191]) {
+          expect(
+            OracleTimestampTz(instant, offsetMinutes: 0, regionId: id).regionId,
+            equals(id),
+          );
+          expect(
+            OracleTimestampTz.fromHourMinute(
+              instant,
+              0,
+              0,
+              regionId: id,
+            ).regionId,
+            equals(id),
+          );
+          expect(
+            OracleTimestampTz.fromOffset(
+              instant,
+              Duration.zero,
+              regionId: id,
+            ).regionId,
+            equals(id),
+          );
+        }
+      });
+
+      test('every constructor rejects ids outside 0..8191', () {
+        for (final id in const [-1, 8192, 0x7FFFFFFF, -0x80000000]) {
+          expect(
+            () => OracleTimestampTz(instant, offsetMinutes: 0, regionId: id),
+            throwsA(
+              isA<ArgumentError>().having((e) => e.name, 'name', 'regionId'),
+            ),
+            reason: 'id $id',
+          );
+          expect(
+            () => OracleTimestampTz.fromHourMinute(instant, 0, 0, regionId: id),
+            throwsArgumentError,
+            reason: 'id $id',
+          );
+          expect(
+            () => OracleTimestampTz.fromOffset(
+              instant,
+              Duration.zero,
+              regionId: id,
+            ),
+            throwsArgumentError,
+            reason: 'id $id',
+          );
+        }
+      });
+
+      test('the offset band check still applies alongside a region id', () {
+        expect(
+          () => OracleTimestampTz(instant, offsetMinutes: 841, regionId: 404),
+          throwsA(
+            isA<ArgumentError>().having((e) => e.name, 'name', 'offsetMinutes'),
+          ),
+        );
+      });
+
+      test('equality and hashCode include the region id', () {
+        final madrid = OracleTimestampTz(
+          instant,
+          offsetMinutes: 0,
+          regionId: 404,
+        );
+        final madridAgain = OracleTimestampTz.fromHourMinute(
+          instant,
+          0,
+          0,
+          regionId: 404,
+        );
+        final pacific = OracleTimestampTz(
+          instant,
+          offsetMinutes: 0,
+          regionId: 615,
+        );
+        final plainUtc = OracleTimestampTz(instant, offsetMinutes: 0);
+        expect(madrid, equals(madridAgain));
+        expect(madrid.hashCode, equals(madridAgain.hashCode));
+        expect(
+          madrid,
+          isNot(equals(pacific)),
+          reason: 'same instant/offset, different region id',
+        );
+        expect(
+          madrid,
+          isNot(equals(plainUtc)),
+          reason: 'a region value is not the +00:00 offset value',
+        );
+        expect(plainUtc, isNot(equals(madrid)));
+      });
+
+      test('compareTo tie-breaks on regionId (null first), consistent with '
+          '==', () {
+        final plain = OracleTimestampTz(instant, offsetMinutes: 0);
+        final id0 = OracleTimestampTz(instant, offsetMinutes: 0, regionId: 0);
+        final id404 = OracleTimestampTz(
+          instant,
+          offsetMinutes: 0,
+          regionId: 404,
+        );
+        final id615 = OracleTimestampTz(
+          instant,
+          offsetMinutes: 0,
+          regionId: 615,
+        );
+        expect(plain.compareTo(id0), lessThan(0));
+        expect(id0.compareTo(plain), greaterThan(0));
+        expect(id404.compareTo(id615), lessThan(0));
+        expect(id615.compareTo(id404), greaterThan(0));
+        expect(
+          id404.compareTo(
+            OracleTimestampTz(instant, offsetMinutes: 0, regionId: 404),
+          ),
+          equals(0),
+        );
+        // Instant and offset still dominate the region id.
+        final laterNoRegion = OracleTimestampTz(
+          instant.add(const Duration(microseconds: 1)),
+          offsetMinutes: 0,
+        );
+        expect(id615.compareTo(laterNoRegion), lessThan(0));
+        final biggerOffset = OracleTimestampTz(instant, offsetMinutes: 60);
+        expect(id615.compareTo(biggerOffset), lessThan(0));
+
+        // compareTo == 0 exactly when == holds, across every pair.
+        final all = [plain, id0, id404, id615, laterNoRegion, biggerOffset];
+        for (final a in all) {
+          for (final b in all) {
+            expect(a.compareTo(b) == 0, equals(a == b), reason: '$a vs $b');
+          }
+        }
+        final set = SplayTreeSet<OracleTimestampTz>()
+          ..addAll([id615, plain, id404, id0])
+          ..add(OracleTimestampTz(instant, offsetMinutes: 0, regionId: 404));
+        expect(set.map((v) => v.regionId), equals([null, 0, 404, 615]));
+      });
+
+      test('toString shows the region id when present', () {
+        expect(
+          OracleTimestampTz(
+            DateTime.utc(2024, 7, 15, 10),
+            offsetMinutes: 0,
+            regionId: 404,
+          ).toString(),
+          equals(
+            'OracleTimestampTz(2024-07-15 10:00:00.000Z +00:00 '
+            'regionId=404)',
+          ),
+        );
+        expect(
+          OracleTimestampTz(
+            DateTime.utc(2024, 7, 15, 10),
+            offsetMinutes: 0,
+          ).toString(),
+          equals('OracleTimestampTz(2024-07-15 10:00:00.000Z +00:00)'),
+        );
+      });
+    });
   });
 }

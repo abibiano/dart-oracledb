@@ -65,10 +65,11 @@ enum OracleDbType {
   ///
   /// Decoded as a UTC `DateTime` by default, or as `OracleTimestampTz`
   /// (preserving the original offset; a region-id value is carried at
-  /// `+00:00`) on a connection opened with `preserveTimestampTimeZone: true`
-  /// — consistent with column decoding.
+  /// `+00:00` with its `regionId`) on a connection opened with
+  /// `preserveTimestampTimeZone: true` — consistent with column decoding.
   /// IN OUT values may be supplied as `OracleTimestampTz` (the original
-  /// offset travels on the wire) or as a plain `DateTime`, which is encoded
+  /// offset travels on the wire; a `regionId` is ignored) or as a plain
+  /// `DateTime`, which is encoded
   /// as its UTC instant at an explicit `+00:00` offset. (The full 13-byte
   /// payload is always sent: the server mishandles an offset-less 11-byte
   /// TSTZ bind, echoing invalid zone bytes back.)

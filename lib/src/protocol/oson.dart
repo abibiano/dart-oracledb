@@ -407,7 +407,8 @@ String? _unsupportedYearReason(int year) {
 /// TIME ZONE at offset `+00:00`, so its zone survives (it decodes back as an
 /// `OracleTimestampTz` holding the same instant); `OracleTimestampTz` as
 /// TIMESTAMP WITH TIME ZONE (13 bytes: UTC instant plus its reported offset;
-/// a decoded region-id value reports `+00:00`);
+/// a decoded region-id value reports `+00:00`, and its `regionId` is not
+/// encoded);
 /// `Uint8List` as a binary node (uint16 length, uint32 from 65536 bytes).
 ///
 /// The document is OSON version 1 — byte-identical to node-oracledb — unless
@@ -902,7 +903,8 @@ class _OsonEncoder {
     } else if (value is OracleTimestampTz) {
       _checkYear(value.utc.year);
       // 13 bytes: the UTC instant plus the reported offset, as the TSTZ
-      // column bind writes it and the decoder reads it back.
+      // column bind writes it and the decoder reads it back. A region id
+      // (value.regionId) is not encoded — binding is offset-only.
       _treeSeg.writeUint8(_nodeTimestampTz);
       _treeSeg.writeBytes(dt.encodeTimestampTz(value));
     } else if (value is Uint8List) {
@@ -1039,8 +1041,10 @@ class _OsonEncoder {
 /// - TIMESTAMP WITH TIME ZONE (13 bytes) → `OracleTimestampTz` (UTC instant
 ///   plus its reported offset) always — unlike a column, this does not
 ///   depend on `preserveTimestampTimeZone`. A region-id zone (e.g.
-///   `US/Pacific`) yields the UTC instant at a `+00:00` offset, exactly as
-///   `decodeTimestampTz` does for a column (the region is not resolved);
+///   `US/Pacific`) yields the UTC instant at a `+00:00` offset with the
+///   server's region id in `OracleTimestampTz.regionId`, exactly as
+///   `decodeTimestampTz` does for a column (the id is not resolved here;
+///   `OracleConnection.timeZoneRegionName` names it);
 /// - BINARY_FLOAT / BINARY_DOUBLE → `double` (NaN and ±Infinity included);
 /// - binary (RAW) → `Uint8List` (a copy, never a view of [data]).
 ///
