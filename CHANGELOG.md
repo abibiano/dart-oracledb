@@ -46,6 +46,30 @@
   that previously threw `OracleException` (`oraUnsupportedType`) now return
   rows. BCE values and malformed numeric zone offsets still fail loudly
   (unchanged).
+- **Fetch dates and timestamps as strings (opt-in).** The new
+  `OracleExecuteOptions.fetchAsString` (a `Set<OracleDbType>`, default empty)
+  returns the selected column types as `String` (node-oracledb
+  `fetchAsString` parity for dates and timestamps): `OracleDbType.date`
+  converts `DATE`; `OracleDbType.timestamp` converts `TIMESTAMP` and
+  `TIMESTAMP WITH LOCAL TIME ZONE`; `OracleDbType.timestampTz` converts
+  `TIMESTAMP WITH TIME ZONE`. It works on the eager path (with or without
+  `maxRows`) and on every batch of a `resultSet: true` result set, and a
+  cached statement re-executed with and without the option returns each
+  call's own representation. SQL `NULL` stays `null`. Any other
+  `OracleDbType` throws `ArgumentError` before any round trip. Validated
+  against Oracle 23ai and Oracle 21c.
+- **Limits:** as in node-oracledb thin mode, the column is still fetched in
+  binary (Oracle ignores a text define for these types) and the text is the
+  decoded value's own `toString()` — e.g. `2024-03-05 00:00:00.000`, a UTC
+  `...Z` instant for `TIMESTAMP WITH TIME ZONE`, or
+  `OracleTimestampTz(... regionId=...)` on a `preserveTimestampTimeZone:
+  true` connection. It does not follow the session's NLS formats, keeps
+  microsecond precision only and never shows a region name; select
+  `TO_CHAR(col, 'format')` for Oracle's exact text. Only the top-level
+  query's rows convert: REF CURSOR OUT bind, nested `CURSOR(...)` and PL/SQL
+  implicit-result rows keep their native types, and `executeStream()` /
+  `queryStream()` take no options. Column metadata still reports the
+  database type.
 
 ## 1.5.0
 

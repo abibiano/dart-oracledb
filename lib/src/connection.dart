@@ -14,6 +14,7 @@ import 'oracle_timestamp_tz.dart';
 import 'protocol/bind_parser.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/data_types.dart' as dt;
+import 'protocol/fetch_as_string.dart';
 import 'protocol/lob_locator.dart';
 import 'protocol/messages/execute_message.dart';
 import 'protocol/oson.dart'
@@ -59,6 +60,7 @@ class OracleExecuteOptions {
     this.maxRows = 0,
     this.fetchLobs = false,
     this.rawJsonBlobs = false,
+    this.fetchAsString = const <OracleDbType>{},
   });
 
   /// When `true`, [OracleConnection.execute] returns a lazy
@@ -183,6 +185,58 @@ class OracleExecuteOptions {
   /// `executeMany()` has no [rawJsonBlobs] option for implicit result rows.
   /// Use a separate `execute()` SELECT with this option to read raw bytes.
   final bool rawJsonBlobs;
+
+  /// Date and timestamp column types to return as `String` instead of
+  /// `DateTime` / [OracleTimestampTz] (node-oracledb `fetchAsString` parity
+  /// for dates and timestamps).
+  ///
+  /// ```dart
+  /// final result = await connection.execute(
+  ///   'SELECT hired, updated_at FROM employees',
+  ///   null,
+  ///   const OracleExecuteOptions(
+  ///     fetchAsString: {OracleDbType.date, OracleDbType.timestamp},
+  ///   ),
+  /// );
+  /// result.rows.first['HIRED']; // '2024-03-05 00:00:00.000'
+  /// ```
+  ///
+  /// Each entry selects the columns it converts:
+  ///
+  /// * [OracleDbType.date] — `DATE`;
+  /// * [OracleDbType.timestamp] — `TIMESTAMP` and
+  ///   `TIMESTAMP WITH LOCAL TIME ZONE`;
+  /// * [OracleDbType.timestampTz] — `TIMESTAMP WITH TIME ZONE`.
+  ///
+  /// Any other [OracleDbType] throws [ArgumentError] before any wire round
+  /// trip (NUMBER, CLOB, RAW and JSON cannot be fetched as strings). The
+  /// default empty set changes nothing.
+  ///
+  /// **The text is produced by the driver, not by Oracle.** As in
+  /// node-oracledb thin mode, the column is still fetched in its native
+  /// binary form (Oracle sends these types in binary whatever the client
+  /// asks for) and each decoded value is converted with its own `toString()`:
+  ///
+  /// * `DATE`, `TIMESTAMP` and `TIMESTAMP WITH LOCAL TIME ZONE` give
+  ///   `DateTime.toString()`, e.g. `2024-03-05 13:14:15.123456`;
+  /// * `TIMESTAMP WITH TIME ZONE` gives the UTC `DateTime.toString()`
+  ///   (`2024-03-05 12:14:15.123456Z`), or `OracleTimestampTz.toString()` on a
+  ///   `preserveTimestampTimeZone: true` connection — offset and `regionId`,
+  ///   not the region name.
+  ///
+  /// It does not follow the session's `NLS_DATE_FORMAT` /
+  /// `NLS_TIMESTAMP_FORMAT` / `NLS_TIMESTAMP_TZ_FORMAT`, and it keeps only
+  /// microsecond precision (a Dart `DateTime` limit). For Oracle's own text
+  /// — an NLS or explicit format, nanoseconds, a region name — select
+  /// `TO_CHAR(col, 'format')` in SQL instead. A SQL `NULL` is still `null`,
+  /// and [OracleResult.columns] still reports the database type.
+  ///
+  /// It applies to the rows of the top-level query this call runs:
+  /// [OracleResult.rows] (with or without [maxRows]) and every batch of a
+  /// [resultSet]. The rows of a REF CURSOR OUT bind, a nested `CURSOR(...)`
+  /// column and PL/SQL implicit results keep their native types, as do OUT
+  /// bind values. `executeStream()` / `queryStream()` take no options.
+  final Set<OracleDbType> fetchAsString;
 }
 
 /// Per-call options for [OracleConnection.executeMany].
@@ -935,6 +989,9 @@ class OracleConnection {
         wrapLob: null,
         // The per-batch materialize honors the call's BLOB IS JSON opt-out.
         rawJsonBlobs: rawJsonBlobs,
+        // A REF CURSOR's rows keep native types (fetchAsString applies to the
+        // top-level query only; documented on OracleExecuteOptions).
+        fetchAsString: null,
       );
       final rs = OracleResultSet.fromCursor(
         connection: this,
@@ -1127,6 +1184,9 @@ class OracleConnection {
       wrapLob: null,
       // The per-batch materialize honors the call's BLOB IS JSON opt-out.
       rawJsonBlobs: rawJsonBlobs,
+      // Nested CURSOR() rows keep native types (fetchAsString applies to the
+      // top-level query only; documented on OracleExecuteOptions).
+      fetchAsString: null,
     );
     try {
       final rawRows = await nested.nextAllRowsData();
@@ -1241,6 +1301,9 @@ class OracleConnection {
       // nothing); the result-wide materialize below applies it. Passed anyway
       // so every construction site states the call's answer.
       rawJsonBlobs: rawJsonBlobs,
+      // Implicit-result rows keep native types (fetchAsString applies to the
+      // top-level query only; documented on OracleExecuteOptions).
+      fetchAsString: null,
     );
     // maxRows (node-oracledb parity): a positive N caps this implicit result at
     // exactly N rows and stops fetching once N is reached; 0 = unlimited.
@@ -1370,6 +1433,9 @@ class OracleConnection {
         wrapLob: null,
         // The per-batch materialize honors the call's BLOB IS JSON opt-out.
         rawJsonBlobs: rawJsonBlobs,
+        // Implicit-result rows keep native types (fetchAsString applies to
+        // the top-level query only; documented on OracleExecuteOptions).
+        fetchAsString: null,
       );
       final rs = OracleResultSet.fromCursor(
         connection: this,
@@ -1598,6 +1664,13 @@ class OracleConnection {
     // JSON column never decodes on one shape of this call while staying raw on
     // another.
     final rawJsonBlobs = options?.rawJsonBlobs ?? false;
+    // Story 14.3: validated before any wire round trip (an unsupported entry
+    // throws ArgumentError) and snapshotted as Oracle type codes, so a caller
+    // mutating the Set afterwards cannot change this call's later batches.
+    // Applies only to top-level query rows; see OracleExecuteOptions.
+    final fetchAsString = _fetchAsStringOraTypes(
+      options?.fetchAsString ?? const <OracleDbType>{},
+    );
 
     if (options?.resultSet == true) {
       final effectiveFetchSize = options!.fetchSize ?? _defaultPrefetchRows;
@@ -1651,6 +1724,9 @@ class OracleConnection {
             fetchLobs: false,
             // Supported: the raw-bytes opt-out needs no handle lifecycle.
             rawJsonBlobs: rawJsonBlobs,
+            // Inert for a block (no top-level query rows); its implicit
+            // results keep native types (documented on OracleExecuteOptions).
+            fetchAsString: fetchAsString,
           );
         } finally {
           _executeInProgress = false;
@@ -1681,6 +1757,7 @@ class OracleConnection {
           prefetchRows: effectiveFetchSize,
           fetchLobs: fetchLobs,
           rawJsonBlobs: rawJsonBlobs,
+          fetchAsString: fetchAsString,
         );
       } finally {
         _executeInProgress = false;
@@ -1705,10 +1782,47 @@ class OracleConnection {
         maxRows: maxRows,
         fetchLobs: fetchLobs,
         rawJsonBlobs: rawJsonBlobs,
+        fetchAsString: fetchAsString,
       );
     } finally {
       _executeInProgress = false;
     }
+  }
+
+  /// Maps `OracleExecuteOptions.fetchAsString` to the Oracle column type codes
+  /// it converts (Story 14.3), rejecting any entry other than
+  /// [OracleDbType.date], [OracleDbType.timestamp] and
+  /// [OracleDbType.timestampTz] with [ArgumentError].
+  ///
+  /// The mapping follows the story contract: `date` is `DATE`; `timestamp` is
+  /// `TIMESTAMP` and `TIMESTAMP WITH LOCAL TIME ZONE`; `timestampTz` is
+  /// `TIMESTAMP WITH TIME ZONE`. (node-oracledb's `DB_TYPE_TIMESTAMP` entry
+  /// converts all four types; this driver keeps one public type per column
+  /// family instead.) Returns an unmodifiable snapshot, empty for an empty
+  /// request.
+  static Set<int> _fetchAsStringOraTypes(Set<OracleDbType> requested) {
+    if (requested.isEmpty) return const <int>{};
+    final oraTypes = <int>{};
+    for (final type in requested) {
+      switch (type) {
+        case OracleDbType.date:
+          oraTypes.add(oc.oraTypeDate);
+        case OracleDbType.timestamp:
+          oraTypes
+            ..add(oc.oraTypeTimestamp)
+            ..add(oc.oraTypeTimestampLtz);
+        case OracleDbType.timestampTz:
+          oraTypes.add(oc.oraTypeTimestampTz);
+        default:
+          throw ArgumentError.value(
+            type,
+            'options.fetchAsString',
+            'only OracleDbType.date, OracleDbType.timestamp and '
+                'OracleDbType.timestampTz can be fetched as strings',
+          );
+      }
+    }
+    return Set<int>.unmodifiable(oraTypes);
   }
 
   /// Executes one statement multiple times in a **single wire round trip**:
@@ -1890,6 +2004,7 @@ class OracleConnection {
         // executeMany takes no fetch options: its rows (if any) decode by
         // default, like executeStream / queryStream.
         rawJsonBlobs: false,
+        fetchAsString: const <int>{},
       );
     } finally {
       _executeInProgress = false;
@@ -3420,6 +3535,8 @@ class OracleConnection {
           forceUncacheable: true,
           // Two VARCHAR2 columns: no BLOB IS JSON column to keep raw.
           rawJsonBlobs: false,
+          // Nor any date/time column to stringify.
+          fetchAsString: const <int>{},
         );
       } finally {
         _executeInProgress = false;
@@ -3525,6 +3642,9 @@ class OracleConnection {
         forceUncacheable: true,
         // A VARCHAR2 and a TSTZ column: no BLOB IS JSON column to keep raw.
         rawJsonBlobs: false,
+        // The TSTZ column must stay an OracleTimestampTz: its region id is
+        // the whole point of this query.
+        fetchAsString: const <int>{},
         preserveTimestampTimeZone: true,
       );
     } on OracleException catch (e, st) {
@@ -3628,6 +3748,14 @@ class OracleConnection {
   /// columns as raw bytes and is threaded to the same entry points as
   /// [fetchLobs] — plus the lazy implicit-result group, where (unlike a handle
   /// wrap) it is supported. `required` so every caller states its answer.
+  ///
+  /// [fetchAsString] (Story 14.3; Oracle type codes from
+  /// [_fetchAsStringOraTypes]) converts the selected date/time columns of a
+  /// top-level query's rows to `String`, once over the fully drained result.
+  /// It never reaches implicit results, REF CURSOR OUT binds or nested
+  /// cursors, and is a no-op for DML / PL/SQL. `required` for the same reason
+  /// as [rawJsonBlobs]: the internal queries must state that they keep
+  /// native values.
   Future<OracleResult> _executeGuarded(
     String sql,
     Object? bindValues, {
@@ -3637,6 +3765,7 @@ class OracleConnection {
     bool forceUncacheable = false,
     bool fetchLobs = false,
     required bool rawJsonBlobs,
+    required Set<int> fetchAsString,
     _ExecuteManyCall? bulk,
     bool? preserveTimestampTimeZone,
   }) async {
@@ -3694,6 +3823,9 @@ class OracleConnection {
           // Inert here (materializePerBatch: false); the result-wide
           // materialize below applies it. Stated so the answer is visible.
           rawJsonBlobs: rawJsonBlobs,
+          // Not per batch: fetchAsString converts the whole drained result
+          // once, below, so the drain's duplicate-column source stays raw.
+          fetchAsString: null,
         );
         // maxRows (node-oracledb parity): 0 = unlimited; a positive N caps the
         // eager SELECT drain at exactly N rows and stops fetching once N is
@@ -3811,6 +3943,17 @@ class OracleConnection {
             rawJsonBlobs: rawJsonBlobs,
           );
         }
+        // Fetch-as-string (Story 14.3): convert the selected date/time
+        // columns of the top-level rows, once over the drained (and
+        // maxRows-capped) result. Post-decode only — the cursor, its describe
+        // and the statement cache entry are untouched, so a later execute of
+        // the same SQL with or without the option decodes natively and
+        // applies its own answer. Nested-cursor rows were already wrapped as
+        // OracleRows above and keep native types.
+        FetchAsStringConversion.forColumns(
+          response.columnMetadata,
+          fetchAsString,
+        )?.applyToRows(response.rows);
       }
 
       // Update the cache from the successful response.
@@ -4628,6 +4771,8 @@ class OracleConnection {
         fetchLobs: false,
         // Nor a rawJsonBlobs surface: BLOB IS JSON columns decode.
         rawJsonBlobs: false,
+        // Nor a fetchAsString surface: date/time columns stay native.
+        fetchAsString: const <int>{},
       );
     } finally {
       // The open round trip is complete; the cursor is now idle between pulls.
@@ -4696,8 +4841,10 @@ class OracleConnection {
         // these signatures.
         fetchLobs: false,
         // These signatures take no options at all: BLOB IS JSON columns
-        // decode, as documented on OracleExecuteOptions.rawJsonBlobs.
+        // decode, as documented on OracleExecuteOptions.rawJsonBlobs, and
+        // date/time columns stay native (OracleExecuteOptions.fetchAsString).
         rawJsonBlobs: false,
+        fetchAsString: const <int>{},
       );
     } finally {
       // The open round trip is complete; the cursor is now idle between pulls.
@@ -4752,11 +4899,17 @@ class OracleConnection {
   /// batch's materialize here, the cursor's per-batch materialize, and the
   /// nested-cursor pass on both, so a BLOB IS JSON column cannot decode in one
   /// batch of the result set and stay raw in another.
+  ///
+  /// [fetchAsString] (Story 14.3; Oracle type codes) is `required` for the
+  /// same reason: the FIRST batch is converted here and every continuation
+  /// batch inside the cursor, so no batch of the result set returns a
+  /// date/time column natively while another returns it as a `String`.
   Future<OracleResultSet> _openResultSetGuarded(
     String sql,
     Object? bindValues, {
     required bool fetchLobs,
     required bool rawJsonBlobs,
+    required Set<int> fetchAsString,
     int? prefetchRows,
   }) async {
     _log.fine(
@@ -4823,6 +4976,16 @@ class OracleConnection {
           rawJsonBlobs: rawJsonBlobs,
         );
       }
+
+      // Fetch-as-string (Story 14.3): convert the first batch's selected
+      // date/time columns BEFORE the cursor buffers it (the constructor seeds
+      // the buffer synchronously); the same conversion object converts each
+      // continuation batch inside the cursor. Null when nothing is selected.
+      final fetchAsStringConversion = FetchAsStringConversion.forColumns(
+        firstResponse.columnMetadata,
+        fetchAsString,
+      );
+      fetchAsStringConversion?.applyToRows(firstResponse.rows);
 
       // Cache disposition: keep the entry inUse for the result set's lifetime;
       // OracleResultSet.close() releases it through the same path execute uses.
@@ -4921,6 +5084,8 @@ class OracleConnection {
         // Continuation batches keep BLOB IS JSON columns raw exactly when the
         // first batch (materialized above) did.
         rawJsonBlobs: rawJsonBlobs,
+        // ... and convert date/time columns exactly when it did.
+        fetchAsString: fetchAsStringConversion,
       );
       // Handed to the result set, which now owns the reap: the first batch's
       // handles live in the cursor's buffer and are reachable from
@@ -5654,6 +5819,11 @@ class OracleConnection {
   /// Only the name is recovered: the value's offset stays `+00:00` (the
   /// driver does not compute a region's offset or DST state), and binding the
   /// value stores the instant at `+00:00`, without the region.
+  ///
+  /// For text instead, `OracleExecuteOptions.fetchAsString` returns the column
+  /// as the decoded value's `toString()` (the region shows only as
+  /// `regionId=...`), while `TO_CHAR(col, '... TZR')` in SQL returns Oracle's
+  /// own text with the region name.
   ///
   /// Throws [OracleException]:
   /// - error code 1882 (ORA-01882, timezone region not found) when the id is

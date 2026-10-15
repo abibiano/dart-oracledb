@@ -30,6 +30,7 @@ A pure Dart driver for Oracle Database. It speaks the thin-mode TNS/TTC wire pro
 - **Native JSON** — `JSON` columns (and `BLOB ... IS JSON`) decode to `Map` / `List`, including Oracle `DATE`/`TIMESTAMP`/`RAW` members, and fetched documents bind back unchanged
 - **Transactions** — commit, rollback, and transaction helper
 - **TIMESTAMP WITH TIME ZONE** — decoded as UTC `DateTime`, or as `OracleTimestampTz` preserving a numeric offset (opt-in); named-region values (e.g. `Europe/Madrid`) decode to the correct UTC instant with a reported `+00:00` offset and a region id that `timeZoneRegionName` resolves to the region name
+- **Dates as strings** — `OracleExecuteOptions(fetchAsString: {...})` returns DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE columns as `String` (node-oracledb `fetchAsString` parity; see [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings))
 - **Statement caching** — transparent prepared-statement cache
 - **Async/await** — modern Dart async API throughout
 
@@ -504,6 +505,33 @@ final top = await connection.execute(
 );
 ```
 
+#### Fetching dates and timestamps as strings
+
+`OracleExecuteOptions(fetchAsString: {...})` returns the selected date/time column types as `String` instead of `DateTime` / `OracleTimestampTz` (node-oracledb `fetchAsString` parity for dates and timestamps):
+
+```dart
+final result = await connection.execute(
+  'SELECT hired, updated_at FROM employees',
+  null,
+  const OracleExecuteOptions(
+    fetchAsString: {OracleDbType.date, OracleDbType.timestamp},
+  ),
+);
+result.rows.first['HIRED'];      // '2024-03-05 00:00:00.000'
+result.rows.first['UPDATED_AT']; // '2024-03-05 13:14:15.123456'
+```
+
+| Entry                      | Columns returned as `String`                       |
+| -------------------------- | -------------------------------------------------- |
+| `OracleDbType.date`        | `DATE`                                             |
+| `OracleDbType.timestamp`   | `TIMESTAMP`, `TIMESTAMP WITH LOCAL TIME ZONE`      |
+| `OracleDbType.timestampTz` | `TIMESTAMP WITH TIME ZONE`                         |
+
+- **The text comes from the driver, not from Oracle.** As in node-oracledb thin mode, the column is still fetched in its native binary form (Oracle sends these types in binary whatever the client asks for), and each decoded value is converted with its own `toString()`: `DateTime.toString()` for DATE / TIMESTAMP / LTZ, the UTC `DateTime.toString()` for TIMESTAMP WITH TIME ZONE (`'2024-03-05 12:14:15.123456Z'`), or `OracleTimestampTz.toString()` on a `preserveTimestampTimeZone: true` connection (offset and `regionId`, not the region name). It ignores the session's `NLS_DATE_FORMAT` / `NLS_TIMESTAMP_FORMAT` / `NLS_TIMESTAMP_TZ_FORMAT` and keeps microsecond precision only. **For Oracle's exact text** (an NLS or explicit format, nanoseconds, a region name), select `TO_CHAR(col, 'format')` in the SQL instead.
+- SQL `NULL` stays `null`; `result.columns` still reports the database type.
+- Any other `OracleDbType` in the set (NUMBER, CLOB, RAW, JSON, ...) throws `ArgumentError` before any round trip.
+- It applies to the top-level query's rows: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set. The rows of a **REF CURSOR OUT bind, a nested `CURSOR(...)` column and PL/SQL implicit results keep their native types**, as do OUT bind values; `executeStream()` / `queryStream()` take no options.
+
 ### TLS/SSL Connections
 
 ```dart
@@ -541,7 +569,7 @@ final isAlive = await connection.ping();
 | `OracleConnection.connect(...)`           | Open a connection                                   |
 | `OracleConnection.withConnection(...)`    | Open, use, and auto-close a connection              |
 | `connection.execute(sql, [bindValues])`   | Run a query, DML statement, or PL/SQL block         |
-| `connection.execute(sql, binds, OracleExecuteOptions(...))` | Eager (default), lazy result set (`resultSet: true`), or row-capped (`maxRows:`) execution |
+| `connection.execute(sql, binds, OracleExecuteOptions(...))` | Eager (default), lazy result set (`resultSet: true`), or row-capped (`maxRows:`) execution; `fetchAsString:` returns date/time columns as `String` |
 | `connection.executeMany(sql, rows, [OracleExecuteManyOptions(...)])` | Run one statement across many bind sets in a single round trip (array DML, PL/SQL, RETURNING) |
 | `OracleBindDef.input/output/inputOutput(type: ..., maxSize: ...)` | Declare a placeholder's type & direction for `executeMany` `bindDefs` (PL/SQL and DML RETURNING) |
 | `result.batchErrors` / `result.dmlRowCounts` | Per-row errors / per-row affected-row counts from `executeMany` (opt-in via `OracleExecuteManyOptions`) |
@@ -572,9 +600,9 @@ final isAlive = await connection.ping();
 | VARCHAR2, CHAR            | `String` (see [Character Set Support](#character-set-support))                    |
 | NCHAR, NVARCHAR2, NCLOB   | `String` (national charset — see [Character Set Support](#character-set-support)) |
 | NUMBER                    | `num` / `int` / `double`                                                         |
-| DATE                      | `DateTime`                                                                       |
-| TIMESTAMP                 | `DateTime`                                                                       |
-| TIMESTAMP WITH TIME ZONE  | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` (see [Region-id time zones](#region-id-time-zones)) |
+| DATE                      | `DateTime` — or `String` with `fetchAsString` (see [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings)) |
+| TIMESTAMP, TIMESTAMP WITH LOCAL TIME ZONE | `DateTime` — or `String` with `fetchAsString`                  |
+| TIMESTAMP WITH TIME ZONE  | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` (see [Region-id time zones](#region-id-time-zones)), or `String` with `fetchAsString` |
 | RAW                       | `Uint8List` (see [RAW support](#raw-support))                                    |
 | CLOB                      | `String` (see [CLOB support](#clob-support), [Character Set Support](#character-set-support)) |
 | BLOB                      | `Uint8List` (see [BLOB support](#blob-support)); a BLOB `IS JSON` column decodes like JSON (see [JSON stored in a BLOB](#json-stored-in-a-blob-is-json)) |
@@ -640,6 +668,14 @@ driver never computes a region's offset):
   Select `TO_CHAR(col, 'TZH:TZM')` alongside the column when you need the
   offset. On a default connection the value is a plain UTC `DateTime` and
   carries no region id (`TO_CHAR(col, 'TZR')` names it server-side).
+- **Text instead of a value.** `OracleExecuteOptions(fetchAsString:
+  {OracleDbType.timestampTz})` returns the column as text, but rendered by
+  the driver from the decoded value (see [Fetching dates and timestamps as
+  strings](#fetching-dates-and-timestamps-as-strings)): on a
+  `preserveTimestampTimeZone: true` connection that is
+  `OracleTimestampTz(2024-07-15 10:00:00.000Z +00:00 regionId=404)`, so the
+  region appears only as its id. For Oracle's own text with the region name,
+  select `TO_CHAR(col, 'YYYY-MM-DD HH24:MI:SS.FF TZR')`.
 - **Binding is offset-only.** Binding a fetched region value back stores the
   same instant at `+00:00`; `regionId` is ignored and the region is not
   carried back.
@@ -1462,6 +1498,7 @@ RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
 - **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work. As of 1.4 an **open fetched `OracleLob`** (from `fetchLobs: true`) also holds that slot — for the handle's whole lifetime, not just during a round trip, and including handles a streaming result set prefetched but you never asked for — so an unclosed LOB handle is the most likely cause of a concurrent-operation error; a **created-temporary** handle (`createTemporaryClob()` and friends) is deliberately exempt and can be read, written, and bound while open. See [Incremental LOB access with `fetchLobs`](#incremental-lob-access-with-fetchlobs).
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
 - **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) decode to the correct UTC instant; with `preserveTimestampTimeZone: true` they report a `+00:00` offset (UTC-normalized — the driver never computes the region's offset) and carry the server's region id, which `OracleConnection.timeZoneRegionName` resolves to the name (`'EUROPE/MADRID'`, as `TZR` renders it) from the connected database's `V$TIMEZONE_NAMES` (first lookup per connection runs one query; needs read access to that view, granted to `PUBLIC` by default). Binding one back stores `+00:00` without the region. Offset-based zones (e.g. `+02:00`) keep their offset. See [Region-id time zones](#region-id-time-zones).
+- **`fetchAsString` text is client-side** — `OracleExecuteOptions(fetchAsString: ...)` renders DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE values with the decoded Dart value's `toString()` (node-oracledb thin parity), not with Oracle's NLS formats; microsecond precision, no region names. Use `TO_CHAR(...)` in SQL for Oracle's exact text. The option covers only the top-level query's rows: REF CURSOR OUT bind, nested `CURSOR(...)` and implicit-result rows keep native types. Only `OracleDbType.date`, `timestamp` and `timestampTz` are accepted (no NUMBER/CLOB/RAW/JSON as string). See [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings).
 - **Very large result sets** — a single `execute()` is bounded by a safety cap of 1,000 fetch round-trips (about 50,000 rows at the default fetch size); if the cap is hit, a warning is logged, the rows fetched so far are returned, and `result.moreRowsAvailable` is `true` so the truncation is detectable. The same flag is also set (with a logged warning) in the rarer case where the server reports more rows pending but the driver has no usable cursor id to continue fetching — in either case `true` means the rows are an incomplete prefix of the full result set. Streaming (`queryStream()` / `executeStream()`) and result-set (`OracleExecuteOptions(resultSet: true)`) consumption have **no such cap** — prefer them for very large result sets.
 
 ## Thin Mode Limitations

@@ -26,6 +26,7 @@ import 'package:meta/meta.dart';
 
 import '../errors.dart';
 import '../transport/transport.dart';
+import 'fetch_as_string.dart';
 import 'lob_locator.dart';
 import 'messages/execute_message.dart';
 
@@ -123,6 +124,15 @@ class ResultSetCursor {
   /// caller materialized. Inert when [materializePerBatch] is false — the
   /// caller's result-wide pass applies it there — and under [wrapLob], which
   /// already skips the decode.
+  ///
+  /// [fetchAsString] (`OracleExecuteOptions.fetchAsString`, Story 14.3)
+  /// converts the selected date/time columns of every continuation batch to
+  /// `String` before the batch is buffered — the caller converts the
+  /// [firstBatch] before seeding, exactly like materialization. Only the
+  /// top-level `resultSet: true` SELECT supplies it: the eager drain converts
+  /// its whole result once above the cursor, and REF CURSOR, nested
+  /// `CURSOR()` and implicit-result cursors keep native types. Requires
+  /// [materializePerBatch].
   ResultSetCursor({
     required Transport transport,
     required int cursorId,
@@ -139,6 +149,7 @@ class ResultSetCursor {
     bool Function(Object? value)? isLobHandle,
     Future<void> Function(Iterable<Object> handles)? closeLobHandles,
     bool rawJsonBlobs = false,
+    FetchAsStringConversion? fetchAsString,
     Duration? fetchTimeout = const Duration(minutes: 2),
   }) : _transport = transport,
        _cursorId = cursorId,
@@ -154,6 +165,7 @@ class ResultSetCursor {
        _isLobHandle = isLobHandle,
        _closeLobHandles = closeLobHandles,
        _rawJsonBlobs = rawJsonBlobs,
+       _fetchAsString = fetchAsString,
        _fetchTimeout = fetchTimeout,
        _buffer = Queue<List<Object?>>.of(firstBatch),
        _previousRoundLastRow = firstBatch.isNotEmpty ? firstBatch.last : null,
@@ -163,6 +175,11 @@ class ResultSetCursor {
          'wrapLob, isLobHandle and closeLobHandles must be supplied together '
          'or not at all: a partial set registers handles nothing can ever '
          'reap, wedging the connection with no way to find them.',
+       ),
+       assert(
+         fetchAsString == null || materializePerBatch,
+         'fetchAsString converts per batch and needs materializePerBatch; the '
+         'eager drain converts its whole result once above the cursor.',
        );
 
   final Transport _transport;
@@ -186,6 +203,12 @@ class ResultSetCursor {
   /// Keeps a BLOB `IS JSON` / `IS OSON` column as raw bytes on every per-batch
   /// materialize (`OracleExecuteOptions.rawJsonBlobs`). False by default.
   final bool _rawJsonBlobs;
+
+  /// Converts each continuation batch's fetch-as-string columns to `String`
+  /// before buffering (`OracleExecuteOptions.fetchAsString`). Null when the
+  /// call did not ask for it, on the eager drain, and on every
+  /// describe-created cursor (REF CURSOR, nested `CURSOR()`, implicit result).
+  final FetchAsStringConversion? _fetchAsString;
 
   /// Handles from the CURRENT batch that were handed to the caller, tracked by
   /// identity so an aliased handle counts as delivered for every row it appears
@@ -624,6 +647,13 @@ class ResultSetCursor {
               rawJsonBlobs: _rawJsonBlobs,
             )
           : fetched;
+      // Fetch-as-string (Story 14.3): convert this batch's selected date/time
+      // columns before it is buffered, the same answer the caller applied to
+      // the first batch before seeding. It runs before `_previousRoundLastRow`
+      // is captured below, so a duplicate-column copy into the next round's
+      // first row carries the already-converted `String`, which the
+      // conversion passes through unchanged.
+      _fetchAsString?.applyToRows(batch.rows);
       // Eager nested-cursor materialization runs AFTER LOB materialization and
       // BEFORE buffering, so the replaced `List<OracleRow>` values are what
       // both `_buffer` and `_previousRoundLastRow` carry. Capturing a still-raw

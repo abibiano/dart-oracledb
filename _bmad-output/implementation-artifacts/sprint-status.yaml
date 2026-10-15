@@ -217,7 +217,7 @@ development_status:
   epic-14: backlog
   14-1-tstz-region-name-decode: done
   14-2-region-name-preservation: done
-  14-3-fetch-as-string: backlog
+  14-3-fetch-as-string: done
   14-4-fetch-type-handler-hooks: backlog
   14-5-dual-env-integration-tests: backlog
   epic-14-retrospective: optional

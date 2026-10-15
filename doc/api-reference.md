@@ -58,7 +58,11 @@ static Future<T> withConnection<T>(
 ### Executing
 
 ```dart
-Future<OracleResult> execute(String sql, [Object? bindValues]);
+Future<OracleResult> execute(
+  String sql, [
+  Object? bindValues,
+  OracleExecuteOptions? options,
+]);
 ```
 
 - `bindValues` is a `Map<String, Object?>` for **named** binds (`:name`) or a
@@ -66,6 +70,47 @@ Future<OracleResult> execute(String sql, [Object? bindValues]);
 - IN binds are plain Dart values; OUT / IN OUT binds are `OracleBind` instances.
 - **One in-flight `execute` per connection** — an overlapping call is rejected
   (use a separate connection for concurrency).
+
+`OracleExecuteOptions` (all optional; omitting it is the default eager path):
+
+```dart
+const OracleExecuteOptions({
+  bool resultSet = false,       // lazy OracleResultSet in result.resultSet
+  int? fetchSize,               // resultSet continuation batch size (default 50)
+  int maxRows = 0,              // eager row cap; 0 = unlimited
+  bool fetchLobs = false,       // CLOB/NCLOB/BLOB as OracleLob handles
+  bool rawJsonBlobs = false,    // BLOB IS JSON columns as raw Uint8List
+  Set<OracleDbType> fetchAsString = const {}, // date/time columns as String
+});
+```
+
+#### Fetch as string
+
+`fetchAsString` returns the selected date/time column types as `String`
+(node-oracledb `fetchAsString` parity for dates and timestamps):
+
+| Entry | Columns converted |
+|-------|-------------------|
+| `OracleDbType.date` | `DATE` |
+| `OracleDbType.timestamp` | `TIMESTAMP`, `TIMESTAMP WITH LOCAL TIME ZONE` |
+| `OracleDbType.timestampTz` | `TIMESTAMP WITH TIME ZONE` |
+
+- Any other `OracleDbType` → `ArgumentError` (name `options.fetchAsString`)
+  before any wire round trip. An empty set (the default) changes nothing.
+- **Client-side text.** The column is still fetched natively (Oracle sends
+  these types in binary whatever the client asks) and each decoded value is
+  converted with its own `toString()`: `DateTime.toString()` for DATE /
+  TIMESTAMP / LTZ (`2024-03-05 13:14:15.123456`), the UTC `DateTime` for
+  TIMESTAMP WITH TIME ZONE (`2024-03-05 12:14:15.123456Z`), or
+  `OracleTimestampTz.toString()` with `preserveTimestampTimeZone: true`
+  (offset and `regionId`, never the region name). NLS formats are not
+  applied and precision stops at microseconds; select `TO_CHAR(col, 'fmt')`
+  for Oracle's exact text.
+- SQL `NULL` → `null`; `ColumnMetadata` still reports the database type.
+- Scope: the top-level query's rows — `result.rows` (with or without
+  `maxRows`) and every batch of a `resultSet: true` result set. REF CURSOR
+  OUT bind rows, nested `CURSOR(...)` rows and PL/SQL implicit results keep
+  native types; `executeStream()` / `queryStream()` take no options.
 
 ### Transactions
 
@@ -108,6 +153,11 @@ connection operation, so it is rejected while another operation (an open
 - Works on any connection (no `preserveTimestampTimeZone` needed), including
   for hand-built values; ids follow the server's time-zone file, so resolve a
   value against the database it came from.
+- Textual alternative: `OracleExecuteOptions(fetchAsString:
+  {OracleDbType.timestampTz})` returns the column as text rendered by the
+  driver (`OracleTimestampTz.toString()` in preserve mode, which shows the
+  `regionId`, not the name); `TO_CHAR(col, '... TZR')` in SQL gives Oracle's
+  own text with the region name. See [Fetch as string](#fetch-as-string).
 
 ### Test-only instrumentation (`@visibleForTesting`, not public API)
 
@@ -152,9 +202,9 @@ type-checked at construction (fails at the call site, not deep in wire encoding)
 |----------------|-----------|----------------|-------|
 | `number` | `int` / `double` | — | NUMBER can exceed Dart `int`; rejects NaN/Inf |
 | `varchar` | `String` | bytes | requires `maxSize` |
-| `date` | `DateTime` | — | 7-byte |
-| `timestamp` | `DateTime` | — | 11-byte, µs precision |
-| `timestampTz` | `DateTime` (UTC) or `OracleTimestampTz` | — | offset (or a named region's `regionId`) preserved only with `preserveTimestampTimeZone: true`; `regionId` ignored on bind |
+| `date` | `DateTime` | — | 7-byte; also a `fetchAsString` entry (DATE columns) |
+| `timestamp` | `DateTime` | — | 11-byte, µs precision; also a `fetchAsString` entry (TIMESTAMP and LTZ columns) |
+| `timestampTz` | `DateTime` (UTC) or `OracleTimestampTz` | — | offset (or a named region's `regionId`) preserved only with `preserveTimestampTimeZone: true`; `regionId` ignored on bind; also a `fetchAsString` entry (TSTZ columns) |
 | `raw` | `Uint8List` | bytes | requires `maxSize` |
 | `clob` | `String` | **characters** (UTF-16 units) | wire = LOB locator; `'' → NULL` |
 | `blob` | `Uint8List` | bytes | wire = LOB locator; empty `Uint8List` → empty BLOB (≠ NULL) |
