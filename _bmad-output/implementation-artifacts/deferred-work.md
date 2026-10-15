@@ -1098,6 +1098,7 @@ source_spec: `15-3-rowid-urowid.md`
 severity: medium
 reason: Pre-existing: affects NUMBER and VARCHAR columns too and node-oracledb fails identically; 23ai gives ORA-12547, 21c poisons the transport with "Unknown TTC message type 1". Not caused by 15.3.
 status: open
+decision: 2026-10-15 Keep open
 
 ### DW-140: A single execute() cannot declare an IN bind's type, so a dense BINARY vector (Uint8List, which infers RAW) or a declared List<double> cannot be bound in plain SQL.
 origin: spec-deferred f7416ddd9588
@@ -1106,6 +1107,7 @@ source_spec: `15-4-vector.md`
 severity: low
 reason: OracleBind has only out/inOut (rejected outside PL/SQL and RETURNING targets) and executeMany bindDefs are rejected for non-RETURNING DML. Live 23ai: a RAW bind into VECTOR(16, BINARY) fails ORA-00932. Workarounds documented: PL/SQL OracleBind.inOut, executeMany bindDefs (PL/SQL or DML RETURNING), TO_VECTOR text. A plain List<double> works via the server's JSON-to-VECTOR conversion.
 status: open
+decision: 2026-10-15 Keep open
 
 ### DW-141: On Oracle 21c a LONG / LONG RAW column fetch times out with ORA-12170 instead of raising oraUnsupportedType, because the probe pass does not skip the trailing SB4/UB4 fields.
 origin: spec-deferred c32a8f16d975
