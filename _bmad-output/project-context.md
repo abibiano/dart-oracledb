@@ -291,7 +291,7 @@ There are ~33 `@visibleForTesting` and ~37 `@internal` annotations. Instrumentat
 
 - Empty result set → empty list, never `null`. Oracle NULL ≠ empty string.
 - Oracle `NUMBER` is base-100-encoded and can exceed Dart `int` range.
-- `DATE` is a 7-byte format; TSTZ **region-id** form is currently hard-rejected (offset form only).
+- `DATE` is a 7-byte format; TSTZ **region-id** form decodes to the UTC instant at `+00:00` (Story 14.1, lib decode path): a UTC `DateTime` for columns by default, an `OracleTimestampTz` with `preserveTimestampTimeZone` or inside native JSON. The `+00:00` is the UTC rendering, not the region's offset; `OracleConnection.timeZoneRegionName` can resolve the name when an `OracleTimestampTz` retains its `regionId`. Binding stays offset-only.
 - LOBs materialize by default; handles are opt-in via `fetchLobs: true`.
 - TNS timeout and socket timeout are distinct.
 - `SELECT ... FOR UPDATE` takes **no** statement-cache slot (`isCacheEligibleSql` in `lib/src/sql_classifier.dart` excludes locking selects); a repeated LOB SELECT holds exactly one.

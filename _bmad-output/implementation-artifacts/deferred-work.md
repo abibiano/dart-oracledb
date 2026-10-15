@@ -1081,7 +1081,9 @@ location: _bmad-output/project-context.md:294
 source_spec: `14-1-tstz-region-name-decode.md`
 severity: low
 reason: Agent-context file; the story's fix edits agent-context, so it is deferred. Regenerate or edit project-context.md to say region-id TSTZ decodes to the UTC instant at +00:00.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-project-context-tstz-fix
+resolution-undo: 6c3ecd7d9636efde57efafd3623c1c742b64bf7ce8f2482388ad27eabb8547c1 2026-10-15 7374617475733a206f70656e
 
 ### DW-138: On Oracle 21c a SQL NULL of any type in a REF CURSOR / nested CURSOR() / implicit-result row without a LOB or JSON column fails the whole call with ORA-01405.
 origin: spec-deferred 75e847c35a29
