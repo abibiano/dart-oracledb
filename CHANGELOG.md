@@ -70,6 +70,42 @@
   implicit-result rows keep their native types, and `executeStream()` /
   `queryStream()` take no options. Column metadata still reports the
   database type.
+- **Per-column fetch type handlers (opt-in).** The new
+  `OracleExecuteOptions.fetchTypeHandler` (node-oracledb `fetchTypeHandler`
+  parity for its converter half) is called once per result column, in
+  column order, with the column's `ColumnMetadata` and the list of all
+  result columns, and returns a converter for that column or `null` to keep
+  the default. The converter maps every non-NULL value of its column — as
+  decoded: `int`/`double`, `String`, `Uint8List`, `DateTime`,
+  `OracleTimestampTz`, JSON `Map`/`List`, a nested cursor's
+  `List<OracleRow>`, or an `OracleLob` under `fetchLobs: true` — to any
+  `Object?` (e.g. a NUMBER as `String`, a custom date format). It applies on
+  the eager path (with or without `maxRows`) and to every batch of a
+  `resultSet: true` result set, exactly once per cell (Oracle's
+  duplicate-column copies across fetch rounds are converted from the decoded
+  value, never re-converted). SQL `NULL` stays `null` without calling the
+  converter. A converter wins over `fetchAsString` for its column;
+  `fetchAsString` still applies to columns the handler returned `null` for.
+  The handler runs per call, so a cached statement re-executed with a
+  different handler (or none) returns each call's own representation. An
+  exception thrown by the handler or a converter propagates unchanged (not
+  wrapped in `OracleException`), no rows of the failed call or batch are
+  returned, and the connection stays usable. New public typedefs
+  `OracleFetchTypeHandler` and `OracleFetchConverter`. Option omitted (or a
+  handler that always returns `null`): behavior unchanged. Validated against
+  Oracle 23ai and Oracle 21c.
+- **Limits:** converter only — there is no node-oracledb `type`: every column
+  is still fetched natively (no DEFINE, no SQL rewrite) and converted by the
+  driver, synchronously (a returned `Future` is not awaited), so the result
+  never follows NLS settings; use `TO_CHAR(...)` in SQL for Oracle's own
+  text. Only the top-level query's rows are converted: REF CURSOR OUT bind,
+  nested `CURSOR(...)` and PL/SQL implicit-result rows and OUT binds keep
+  their default types and never reach the handler; there is no
+  connection-level or global handler, and `executeMany()` /
+  `executeStream()` / `queryStream()` do not take it. Under `fetchLobs:
+  true` the converter receives the `OracleLob` handle, which stays the
+  caller's to close (a result set's `close()` still reaps the handles of rows
+  never retrieved). Column metadata still reports the database type.
 
 ## 1.5.0
 

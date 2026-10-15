@@ -32,7 +32,13 @@ export 'src/protocol/constants.dart'
 
 // Connection API
 export 'src/connection.dart'
-    show OracleConnection, OracleExecuteOptions, OracleExecuteManyOptions;
+    show
+        OracleConnection,
+        OracleExecuteOptions,
+        OracleExecuteManyOptions,
+        // Fetch type handler (Story 14.4)
+        OracleFetchConverter,
+        OracleFetchTypeHandler;
 
 // Charset capability detection (Story 10.1)
 export 'src/oracle_charset_info.dart' show OracleCharsetInfo;

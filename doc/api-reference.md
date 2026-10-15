@@ -13,6 +13,8 @@ import 'package:oracledb/oracledb.dart';
 | Type / symbol | Source | Purpose |
 |---------------|--------|---------|
 | `OracleConnection` | `connection.dart` | The connection and its operations |
+| `OracleExecuteOptions`, `OracleExecuteManyOptions` | `connection.dart` | Per-call options for `execute` / `executeMany` |
+| `OracleFetchTypeHandler`, `OracleFetchConverter` | `connection.dart` | Per-column fetch converters (`OracleExecuteOptions.fetchTypeHandler`) |
 | `OracleResult`, `OracleRow` | `result.dart` | Query rows / DML outcomes |
 | `ColumnMetadata` | `messages/execute_message.dart` | Per-column metadata on a result |
 | `OracleBind`, `OracleDbType`, `OracleOutBinds` | `oracle_bind.dart` | OUT / IN OUT bind specs and results |
@@ -81,6 +83,7 @@ const OracleExecuteOptions({
   bool fetchLobs = false,       // CLOB/NCLOB/BLOB as OracleLob handles
   bool rawJsonBlobs = false,    // BLOB IS JSON columns as raw Uint8List
   Set<OracleDbType> fetchAsString = const {}, // date/time columns as String
+  OracleFetchTypeHandler? fetchTypeHandler,   // per-column converters
 });
 ```
 
@@ -111,6 +114,72 @@ const OracleExecuteOptions({
   `maxRows`) and every batch of a `resultSet: true` result set. REF CURSOR
   OUT bind rows, nested `CURSOR(...)` rows and PL/SQL implicit results keep
   native types; `executeStream()` / `queryStream()` take no options.
+- A [fetch type handler](#fetch-type-handler) converter for the same column
+  wins over `fetchAsString`.
+
+#### Fetch type handler
+
+```dart
+typedef OracleFetchConverter = Object? Function(Object value);
+typedef OracleFetchTypeHandler =
+    OracleFetchConverter? Function(
+      ColumnMetadata column,
+      List<ColumnMetadata> columns,
+    );
+```
+
+`fetchTypeHandler` converts fetched values per column (node-oracledb
+`fetchTypeHandler` parity for its **converter** half):
+
+```dart
+final result = await conn.execute(
+  'SELECT name, salary FROM employees',
+  null,
+  OracleExecuteOptions(
+    fetchTypeHandler: (column, columns) =>
+        column.name == 'SALARY' ? (value) => value.toString() : null,
+  ),
+);
+result.rows.first['SALARY']; // '7000'
+```
+
+- **Handler:** called exactly once per result column, in column order, with
+  the column's `ColumnMetadata` and an unmodifiable list of all result
+  columns, before any row is converted. Returns the column's converter, or
+  `null` to keep the default. Called on every call (nothing is cached with
+  the statement), so a cached re-execute with a different handler, or none,
+  returns that call's own representation. Always returning `null` = option
+  omitted.
+- **Converter:** called synchronously, once per non-NULL cell, on every fetch
+  round (`result.rows` with or without `maxRows`; every `resultSet: true`
+  batch — Oracle's duplicate-column copies across rounds are converted from
+  the decoded value, never re-converted). Receives the decoded value
+  (`int`/`double`, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz`,
+  JSON `Map`/`List`/scalar, `List<OracleRow>` for a nested `CURSOR(...)`
+  column, `String`/`Uint8List` for CLOB/BLOB or `OracleLob` under
+  `fetchLobs`); its return value (any `Object?`) becomes the cell. SQL `NULL`
+  → `null`, converter not called. A returned `Future` is not awaited.
+- **No `type`:** the fetch type cannot be changed — columns are fetched
+  natively (no DEFINE, no SQL rewrite) and converted client-side, never with
+  NLS formatting; use `TO_CHAR(col, 'fmt')` for Oracle's own text.
+  `ColumnMetadata` still reports the database type.
+- **Precedence:** a converter wins over [`fetchAsString`](#fetch-as-string)
+  for its column; `fetchAsString` still applies where the handler returned
+  `null`.
+- **Errors:** anything the handler or a converter throws is rethrown
+  unchanged (not wrapped in `OracleException`); no rows of the failed call or
+  result-set batch are returned; the connection stays usable (a failed
+  `resultSet` still needs `close()`).
+- **`fetchLobs: true`:** the converter receives the `OracleLob`; it remains the
+  caller's to close (`closeLobs()` only finds handles still in the rows). A
+  result set's `close()` still reaps handles of rows never retrieved.
+- **Scope:** top-level query rows only — never called for REF CURSOR OUT
+  binds, rows inside a nested `CURSOR(...)` column, PL/SQL implicit results,
+  OUT binds, DML or PL/SQL; no connection-level or global handler;
+  `executeMany()` / `executeStream()` / `queryStream()` take no such option.
+- **From node-oracledb:** return the converter itself (not
+  `{converter: fn}`); `{type: ...}` has no equivalent; `metaData.dbType` →
+  `ColumnMetadata.oracleType` (an Oracle type code).
 
 ### Transactions
 

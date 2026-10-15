@@ -31,6 +31,7 @@ A pure Dart driver for Oracle Database. It speaks the thin-mode TNS/TTC wire pro
 - **Transactions** — commit, rollback, and transaction helper
 - **TIMESTAMP WITH TIME ZONE** — decoded as UTC `DateTime`, or as `OracleTimestampTz` preserving a numeric offset (opt-in); named-region values (e.g. `Europe/Madrid`) decode to the correct UTC instant with a reported `+00:00` offset and a region id that `timeZoneRegionName` resolves to the region name
 - **Dates as strings** — `OracleExecuteOptions(fetchAsString: {...})` returns DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE columns as `String` (node-oracledb `fetchAsString` parity; see [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings))
+- **Per-column fetch converters** — `OracleExecuteOptions(fetchTypeHandler: ...)` picks a converter per result column (e.g. a NUMBER as `String`, your own date format) applied to every fetched value (node-oracledb `fetchTypeHandler` converter parity; see [Fetch type handlers](#fetch-type-handlers-per-column-converters))
 - **Statement caching** — transparent prepared-statement cache
 - **Async/await** — modern Dart async API throughout
 
@@ -531,6 +532,39 @@ result.rows.first['UPDATED_AT']; // '2024-03-05 13:14:15.123456'
 - SQL `NULL` stays `null`; `result.columns` still reports the database type.
 - Any other `OracleDbType` in the set (NUMBER, CLOB, RAW, JSON, ...) throws `ArgumentError` before any round trip.
 - It applies to the top-level query's rows: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set. The rows of a **REF CURSOR OUT bind, a nested `CURSOR(...)` column and PL/SQL implicit results keep their native types**, as do OUT bind values; `executeStream()` / `queryStream()` take no options.
+- For any other per-column representation (a NUMBER as text, your own date format, ...), use a [fetch type handler](#fetch-type-handlers-per-column-converters); its converter wins over `fetchAsString` for the columns it selects.
+
+#### Fetch type handlers (per-column converters)
+
+`OracleExecuteOptions(fetchTypeHandler: ...)` lets you convert fetched values per column (node-oracledb `fetchTypeHandler` parity for its **converter** half). The handler is called once per result column, in column order, with that column's `ColumnMetadata` and the list of all result columns; it returns a converter for the column, or `null` to keep the default value:
+
+```dart
+final result = await connection.execute(
+  'SELECT name, salary, hired FROM employees',
+  null,
+  OracleExecuteOptions(
+    fetchTypeHandler: (column, columns) {
+      if (column.name == 'SALARY') return (value) => value.toString();
+      if (column.name == 'HIRED') {
+        return (value) => (value as DateTime).toIso8601String();
+      }
+      return null; // every other column keeps its default value
+    },
+  ),
+);
+result.rows.first['SALARY']; // '7000' instead of 7000
+result.rows.first['HIRED'];  // '2024-03-05T00:00:00.000'
+```
+
+- **The converter** receives each non-NULL value exactly as the row would otherwise hold it — `int` / `double` for NUMBER, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz` (on a `preserveTimestampTimeZone: true` connection), the decoded `Map` / `List` for JSON, `List<OracleRow>` for a nested `CURSOR(...)` column, `String` / `Uint8List` for CLOB / BLOB or an `OracleLob` under `fetchLobs: true` — and its return value (any `Object?`, including `null`) becomes the cell. SQL `NULL` stays `null` and the converter is not called. It runs synchronously, once per cell, on every fetch round: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set.
+- **No `type`.** Unlike node-oracledb, the handler cannot change the type Oracle sends: every column is fetched in its native form (no DEFINE, no SQL rewrite) and converted by the driver after decoding — so the result never follows the session's NLS settings. Select `TO_CHAR(col, 'format')` for Oracle's own text. `result.columns` still reports the database type.
+- **Precedence:** a column the handler returns a converter for is converted by that converter only; [`fetchAsString`](#fetching-dates-and-timestamps-as-strings) still applies to the columns the handler returned `null` for. A handler that always returns `null` changes nothing.
+- **Per call:** the handler runs on every `execute()` and nothing is cached, so re-executing a cached statement with a different handler (or none) returns that call's own representation.
+- **Errors propagate unchanged:** an exception thrown by the handler or a converter is rethrown as-is (not wrapped in `OracleException`), no rows of the failed call (or failed result-set batch) are returned, and the connection stays usable — close a failed result set as usual.
+- **LOBs under `fetchLobs: true`:** the converter receives the `OracleLob` handle, which still holds the connection until closed. Keep it reachable from the converted value and close it yourself (`result.closeLobs()` only finds handles still present in the rows); a result set's `close()` still reaps the handles of rows you never retrieved.
+- **Top-level only:** the handler is never called for REF CURSOR OUT binds, the rows inside a nested `CURSOR(...)` column, PL/SQL implicit results or OUT binds (they keep their default types), nor for DML / PL/SQL; `executeMany()`, `executeStream()` and `queryStream()` take no such option.
+
+**Migrating from node-oracledb:** return the converter function itself instead of `{converter: fn}`; a `{type: ...}` result has no equivalent (convert the value in the converter, or use `TO_CHAR` / `CAST` in the SQL); `metaData.dbType` maps to `ColumnMetadata.oracleType` (an Oracle type code, e.g. `2` for NUMBER); the handler is per call (no global `oracledb.fetchTypeHandler`); converters are synchronous (a returned `Future` is stored as-is, not awaited).
 
 ### TLS/SSL Connections
 
@@ -569,7 +603,7 @@ final isAlive = await connection.ping();
 | `OracleConnection.connect(...)`           | Open a connection                                   |
 | `OracleConnection.withConnection(...)`    | Open, use, and auto-close a connection              |
 | `connection.execute(sql, [bindValues])`   | Run a query, DML statement, or PL/SQL block         |
-| `connection.execute(sql, binds, OracleExecuteOptions(...))` | Eager (default), lazy result set (`resultSet: true`), or row-capped (`maxRows:`) execution; `fetchAsString:` returns date/time columns as `String` |
+| `connection.execute(sql, binds, OracleExecuteOptions(...))` | Eager (default), lazy result set (`resultSet: true`), or row-capped (`maxRows:`) execution; `fetchAsString:` returns date/time columns as `String`; `fetchTypeHandler:` converts chosen columns per value |
 | `connection.executeMany(sql, rows, [OracleExecuteManyOptions(...)])` | Run one statement across many bind sets in a single round trip (array DML, PL/SQL, RETURNING) |
 | `OracleBindDef.input/output/inputOutput(type: ..., maxSize: ...)` | Declare a placeholder's type & direction for `executeMany` `bindDefs` (PL/SQL and DML RETURNING) |
 | `result.batchErrors` / `result.dmlRowCounts` | Per-row errors / per-row affected-row counts from `executeMany` (opt-in via `OracleExecuteManyOptions`) |
@@ -1499,6 +1533,7 @@ RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
 - **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) decode to the correct UTC instant; with `preserveTimestampTimeZone: true` they report a `+00:00` offset (UTC-normalized — the driver never computes the region's offset) and carry the server's region id, which `OracleConnection.timeZoneRegionName` resolves to the name (`'EUROPE/MADRID'`, as `TZR` renders it) from the connected database's `V$TIMEZONE_NAMES` (first lookup per connection runs one query; needs read access to that view, granted to `PUBLIC` by default). Binding one back stores `+00:00` without the region. Offset-based zones (e.g. `+02:00`) keep their offset. See [Region-id time zones](#region-id-time-zones).
 - **`fetchAsString` text is client-side** — `OracleExecuteOptions(fetchAsString: ...)` renders DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE values with the decoded Dart value's `toString()` (node-oracledb thin parity), not with Oracle's NLS formats; microsecond precision, no region names. Use `TO_CHAR(...)` in SQL for Oracle's exact text. The option covers only the top-level query's rows: REF CURSOR OUT bind, nested `CURSOR(...)` and implicit-result rows keep native types. Only `OracleDbType.date`, `timestamp` and `timestampTz` are accepted (no NUMBER/CLOB/RAW/JSON as string). See [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings).
+- **`fetchTypeHandler` is converter-only and client-side** — `OracleExecuteOptions(fetchTypeHandler: ...)` cannot request a different fetch type (no node-oracledb `type`, no DEFINE): each column is fetched natively and the converter maps the decoded value in the driver, synchronously. It covers only the top-level query's rows (not REF CURSOR OUT bind, nested `CURSOR(...)`, implicit-result or OUT bind values), is per call (no connection-level or global default), and `executeMany()` / `executeStream()` / `queryStream()` do not take it. See [Fetch type handlers](#fetch-type-handlers-per-column-converters).
 - **Very large result sets** — a single `execute()` is bounded by a safety cap of 1,000 fetch round-trips (about 50,000 rows at the default fetch size); if the cap is hit, a warning is logged, the rows fetched so far are returned, and `result.moreRowsAvailable` is `true` so the truncation is detectable. The same flag is also set (with a logged warning) in the rarer case where the server reports more rows pending but the driver has no usable cursor id to continue fetching — in either case `true` means the rows are an incomplete prefix of the full result set. Streaming (`queryStream()` / `executeStream()`) and result-set (`OracleExecuteOptions(resultSet: true)`) consumption have **no such cap** — prefer them for very large result sets.
 
 ## Thin Mode Limitations

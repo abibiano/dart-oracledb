@@ -125,14 +125,15 @@ class ResultSetCursor {
   /// caller's result-wide pass applies it there — and under [wrapLob], which
   /// already skips the decode.
   ///
-  /// [fetchAsString] (`OracleExecuteOptions.fetchAsString`, Story 14.3)
-  /// converts the selected date/time columns of every continuation batch to
-  /// `String` before the batch is buffered — the caller converts the
-  /// [firstBatch] before seeding, exactly like materialization. Only the
-  /// top-level `resultSet: true` SELECT supplies it: the eager drain converts
-  /// its whole result once above the cursor, and REF CURSOR, nested
-  /// `CURSOR()` and implicit-result cursors keep native types. Requires
-  /// [materializePerBatch].
+  /// [fetchConversion] (`OracleExecuteOptions.fetchAsString`, Story 14.3, and
+  /// `OracleExecuteOptions.fetchTypeHandler`, Story 14.4) converts the
+  /// selected columns of every continuation batch before the batch is
+  /// buffered — the caller converts the [firstBatch] before seeding, exactly
+  /// like materialization, and passes what that conversion reported as
+  /// [convertedFirstBatch]. Only the top-level `resultSet: true` SELECT
+  /// supplies it: the eager drain converts its whole result once above the
+  /// cursor, and REF CURSOR, nested `CURSOR()` and implicit-result cursors
+  /// keep native types. Requires [materializePerBatch].
   ResultSetCursor({
     required Transport transport,
     required int cursorId,
@@ -149,7 +150,8 @@ class ResultSetCursor {
     bool Function(Object? value)? isLobHandle,
     Future<void> Function(Iterable<Object> handles)? closeLobHandles,
     bool rawJsonBlobs = false,
-    FetchAsStringConversion? fetchAsString,
+    FetchConversion? fetchConversion,
+    ConvertedBatch? convertedFirstBatch,
     Duration? fetchTimeout = const Duration(minutes: 2),
   }) : _transport = transport,
        _cursorId = cursorId,
@@ -165,10 +167,16 @@ class ResultSetCursor {
        _isLobHandle = isLobHandle,
        _closeLobHandles = closeLobHandles,
        _rawJsonBlobs = rawJsonBlobs,
-       _fetchAsString = fetchAsString,
+       _fetchConversion = fetchConversion,
        _fetchTimeout = fetchTimeout,
        _buffer = Queue<List<Object?>>.of(firstBatch),
-       _previousRoundLastRow = firstBatch.isNotEmpty ? firstBatch.last : null,
+       // A first batch converted with a caller converter hands back its
+       // pre-conversion last row: the duplicate-column source must be the
+       // decoded value, never the converter's output (see
+       // FetchConversion.convertBatch).
+       _previousRoundLastRow =
+           convertedFirstBatch?.duplicateSource ??
+           (firstBatch.isNotEmpty ? firstBatch.last : null),
        assert(
          (wrapLob == null) == (isLobHandle == null) &&
              (wrapLob == null) == (closeLobHandles == null),
@@ -177,10 +185,21 @@ class ResultSetCursor {
          'reap, wedging the connection with no way to find them.',
        ),
        assert(
-         fetchAsString == null || materializePerBatch,
-         'fetchAsString converts per batch and needs materializePerBatch; the '
-         'eager drain converts its whole result once above the cursor.',
-       );
+         fetchConversion == null || materializePerBatch,
+         'fetchConversion converts per batch and needs materializePerBatch; '
+         'the eager drain converts its whole result once above the cursor.',
+       ),
+       assert(
+         convertedFirstBatch == null || fetchConversion != null,
+         'convertedFirstBatch reports a conversion of the first batch, so the '
+         'same fetchConversion must convert the continuation batches.',
+       ) {
+    if (convertedFirstBatch != null) {
+      _handlesBeforeConversion.addAll(
+        convertedFirstBatch.handlesBeforeConversion,
+      );
+    }
+  }
 
   final Transport _transport;
   final int _cursorId;
@@ -204,16 +223,31 @@ class ResultSetCursor {
   /// materialize (`OracleExecuteOptions.rawJsonBlobs`). False by default.
   final bool _rawJsonBlobs;
 
-  /// Converts each continuation batch's fetch-as-string columns to `String`
-  /// before buffering (`OracleExecuteOptions.fetchAsString`). Null when the
-  /// call did not ask for it, on the eager drain, and on every
+  /// Converts each continuation batch's selected columns before buffering
+  /// (`OracleExecuteOptions.fetchAsString` / `fetchTypeHandler`). Null when
+  /// the call asked for neither, on the eager drain, and on every
   /// describe-created cursor (REF CURSOR, nested `CURSOR()`, implicit result).
-  final FetchAsStringConversion? _fetchAsString;
+  final FetchConversion? _fetchConversion;
+
+  /// LOB handles a caller converter (`fetchTypeHandler`) was handed for a
+  /// still-buffered row, keyed by row identity and recorded BEFORE the
+  /// conversion ran. A converter may replace or wrap a handle, which would
+  /// otherwise hide it from [bufferedLobHandles] (so [close] could never reap
+  /// it for a row the caller never retrieved) and from [_recordDelivered]
+  /// (so a delivered one could be reaped). An entry leaves the map when its
+  /// row is delivered. Always empty unless this cursor wraps handles AND
+  /// converts with a caller converter.
+  final Map<List<Object?>, List<Object>> _handlesBeforeConversion =
+      LinkedHashMap<List<Object?>, List<Object>>.identity();
 
   /// Handles from the CURRENT batch that were handed to the caller, tracked by
   /// identity so an aliased handle counts as delivered for every row it appears
   /// in. Never reaped. Unused unless [_wrapLob] is set.
   Set<Object> _deliveredHandles = LinkedHashSet<Object>.identity();
+
+  // Handles tentatively delivered while getRows() builds its answer. If a
+  // later FETCH fails, none of those rows reaches the caller.
+  Set<Object>? _aggregateHandles;
 
   /// Set once [close] has run, so a second close reaps nothing twice.
   bool _closed = false;
@@ -343,7 +377,17 @@ class ResultSetCursor {
     final isHandle = _isLobHandle;
     if (isHandle == null) return;
     for (final cell in row) {
-      if (cell != null && isHandle(cell)) _deliveredHandles.add(cell);
+      if (cell != null && isHandle(cell)) {
+        _deliveredHandles.add(cell);
+        _aggregateHandles?.add(cell);
+      }
+    }
+    // A handle a caller converter replaced in this row was still handed to
+    // the caller (through the converter): it is theirs, never reaped.
+    final converted = _handlesBeforeConversion.remove(row);
+    if (converted != null) {
+      _deliveredHandles.addAll(converted);
+      _aggregateHandles?.addAll(converted);
     }
   }
 
@@ -362,6 +406,9 @@ class ResultSetCursor {
       for (final cell in row) {
         if (cell != null && isHandle(cell)) found.add(cell);
       }
+      // Handles a caller converter replaced in this undelivered row.
+      final converted = _handlesBeforeConversion[row];
+      if (converted != null) found.addAll(converted);
     }
     return found;
   }
@@ -389,6 +436,7 @@ class ResultSetCursor {
         .where((handle) => !_deliveredHandles.contains(handle))
         .toList(growable: false);
     _deliveredHandles.clear();
+    _handlesBeforeConversion.clear();
     if (undelivered.isEmpty) return;
     await closeHandles(undelivered);
   }
@@ -398,13 +446,42 @@ class ResultSetCursor {
   ///
   /// Throws [OracleException] if a FETCH round fails.
   Future<List<List<Object?>>> nextRowsData(int count) async {
+    return _collectRows(count);
+  }
+
+  Future<List<List<Object?>>> _collectRows(int? count) async {
     final out = <List<Object?>>[];
-    while (out.length < count) {
-      final row = await nextRowData();
-      if (row == null) break;
-      out.add(row);
+    final previouslyDelivered = LinkedHashSet<Object>.identity()
+      ..addAll(_deliveredHandles);
+    final collectedHandles = LinkedHashSet<Object>.identity();
+    _aggregateHandles = collectedHandles;
+    try {
+      while (count == null || out.length < count) {
+        final row = await nextRowData();
+        if (row == null) break;
+        out.add(row);
+      }
+      return out;
+    } catch (_) {
+      // nextRowData() marks each row delivered as it is removed from the
+      // buffer, but a failed aggregate call returns no rows. Reap only handles
+      // first encountered in this call; aliases of earlier delivered handles
+      // still belong to the caller.
+      final undelivered = collectedHandles
+          .where((handle) => !previouslyDelivered.contains(handle))
+          .toList(growable: false);
+      final closeHandles = _closeLobHandles;
+      if (closeHandles != null && undelivered.isNotEmpty) {
+        try {
+          await closeHandles(undelivered);
+        } catch (e) {
+          _log.warning('Failed to reap an unreturned row\'s OracleLob: $e');
+        }
+      }
+      rethrow;
+    } finally {
+      _aggregateHandles = null;
     }
-    return out;
   }
 
   /// Returns every remaining row's raw value list, fetching batches until the
@@ -413,13 +490,7 @@ class ResultSetCursor {
   ///
   /// Throws [OracleException] if a FETCH round fails (fail-loud).
   Future<List<List<Object?>>> nextAllRowsData() async {
-    final out = <List<Object?>>[];
-    while (true) {
-      final row = await nextRowData();
-      if (row == null) break;
-      out.add(row);
-    }
-    return out;
+    return _collectRows(null);
   }
 
   /// Drains every remaining row eagerly and returns them as raw value lists,
@@ -647,13 +718,6 @@ class ResultSetCursor {
               rawJsonBlobs: _rawJsonBlobs,
             )
           : fetched;
-      // Fetch-as-string (Story 14.3): convert this batch's selected date/time
-      // columns before it is buffered, the same answer the caller applied to
-      // the first batch before seeding. It runs before `_previousRoundLastRow`
-      // is captured below, so a duplicate-column copy into the next round's
-      // first row carries the already-converted `String`, which the
-      // conversion passes through unchanged.
-      _fetchAsString?.applyToRows(batch.rows);
       // Eager nested-cursor materialization runs AFTER LOB materialization and
       // BEFORE buffering, so the replaced `List<OracleRow>` values are what
       // both `_buffer` and `_previousRoundLastRow` carry. Capturing a still-raw
@@ -664,9 +728,27 @@ class ResultSetCursor {
       if (onBatch != null && batch.rows.isNotEmpty) {
         await onBatch(batch.rows);
       }
+      // Fetch conversion (Stories 14.3 / 14.4): convert this batch's selected
+      // columns before it is buffered, the same answer the caller applied to
+      // the first batch before seeding. It runs AFTER the nested-cursor pass
+      // (same order as the first batch and the eager path), so a converter on
+      // a `CURSOR()` column sees the drained `List<OracleRow>`, never the
+      // internal descriptor. Its reported duplicate-column source replaces
+      // the converted last row whenever a caller converter ran (see
+      // FetchConversion.convertBatch): the next round's carried copy must be
+      // the decoded value, which its converter then maps exactly once. A
+      // fetch-as-string-only conversion keeps the converted row as the
+      // source; the carried `String` passes through unchanged.
+      final converted = _fetchConversion?.convertBatch(
+        batch.rows,
+        isLobHandle: _isLobHandle,
+      );
       if (batch.rows.isNotEmpty) {
         _buffer.addAll(batch.rows);
-        _previousRoundLastRow = batch.rows.last;
+        _previousRoundLastRow = converted?.duplicateSource ?? batch.rows.last;
+        if (converted != null) {
+          _handlesBeforeConversion.addAll(converted.handlesBeforeConversion);
+        }
       }
       _serverHasMoreRows = fetched.moreRowsToFetch;
     } catch (_) {

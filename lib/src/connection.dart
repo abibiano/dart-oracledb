@@ -31,6 +31,33 @@ import 'transport/transport.dart';
 
 final _log = Logger('OracleConnection');
 
+/// Maps one fetched, non-NULL column value to the value the row returns
+/// instead (Story 14.4; the `converter` of a node-oracledb
+/// `fetchTypeHandler`).
+///
+/// [value] is the cell exactly as the driver decoded it — the same object the
+/// row would otherwise hold (see [OracleExecuteOptions.fetchTypeHandler] for
+/// the per-type list). It is never `null`: a SQL `NULL` stays `null` and the
+/// converter is not called. Whatever the converter returns, `null` included,
+/// becomes the cell; whatever it throws propagates unchanged out of the call
+/// that fetched the row.
+typedef OracleFetchConverter = Object? Function(Object value);
+
+/// Chooses the [OracleFetchConverter] for one result column (Story 14.4;
+/// node-oracledb `fetchTypeHandler` parity for the `converter` half).
+///
+/// Called once per column of the top-level query's result, in column order,
+/// with that [column]'s metadata and the unmodifiable list of every result
+/// column ([columns]), before any row is converted. Return a converter to map
+/// that column's values, or `null` to keep the default representation (and
+/// [OracleExecuteOptions.fetchAsString], when it selects the column). See
+/// [OracleExecuteOptions.fetchTypeHandler].
+typedef OracleFetchTypeHandler =
+    OracleFetchConverter? Function(
+      ColumnMetadata column,
+      List<ColumnMetadata> columns,
+    );
+
 /// Per-call options for [OracleConnection.execute].
 ///
 /// Pass as the third (optional positional) argument to [execute]:
@@ -61,6 +88,7 @@ class OracleExecuteOptions {
     this.fetchLobs = false,
     this.rawJsonBlobs = false,
     this.fetchAsString = const <OracleDbType>{},
+    this.fetchTypeHandler,
   });
 
   /// When `true`, [OracleConnection.execute] returns a lazy
@@ -236,7 +264,96 @@ class OracleExecuteOptions {
   /// [resultSet]. The rows of a REF CURSOR OUT bind, a nested `CURSOR(...)`
   /// column and PL/SQL implicit results keep their native types, as do OUT
   /// bind values. `executeStream()` / `queryStream()` take no options.
+  ///
+  /// For any other per-column conversion (a NUMBER as text, your own date
+  /// format, ...) use [fetchTypeHandler], whose converter wins over this
+  /// option for the columns it selects.
   final Set<OracleDbType> fetchAsString;
+
+  /// Per-column conversion of the rows this call's top-level query returns
+  /// (node-oracledb `fetchTypeHandler` parity for its `converter` half).
+  /// `null` (the default) changes nothing.
+  ///
+  /// ```dart
+  /// final result = await connection.execute(
+  ///   'SELECT name, salary, hired FROM employees',
+  ///   null,
+  ///   OracleExecuteOptions(
+  ///     fetchTypeHandler: (column, columns) {
+  ///       if (column.name == 'SALARY') return (value) => value.toString();
+  ///       if (column.name == 'HIRED') {
+  ///         return (value) => (value as DateTime).toIso8601String();
+  ///       }
+  ///       return null; // every other column keeps its default value
+  ///     },
+  ///   ),
+  /// );
+  /// result.rows.first['SALARY']; // '7000' instead of 7000
+  /// ```
+  ///
+  /// **The handler** ([OracleFetchTypeHandler]) is called exactly once per
+  /// result column, in column order, from the query's describe and before
+  /// any row is converted. It receives the column's [ColumnMetadata]
+  /// (name, Oracle type code, precision, scale, JSON flags, ...) and the
+  /// unmodifiable list of all result columns, and returns the
+  /// [OracleFetchConverter] for that column — or `null` to keep the default.
+  /// It runs on every call: nothing is remembered across calls, so a cached
+  /// statement re-executed with a different handler, or none, returns that
+  /// call's own representation.
+  ///
+  /// **The converter** is called once per non-NULL cell of its column, on
+  /// every fetch round — [OracleResult.rows] (with or without [maxRows]) and
+  /// every batch of a [resultSet] — and its return value, any `Object?`,
+  /// becomes the cell. It runs synchronously: a returned `Future` is stored
+  /// as the cell, not awaited. A SQL `NULL` stays `null` without calling it. It
+  /// receives the value exactly as the row would otherwise hold it, for
+  /// example:
+  ///
+  /// * NUMBER: `int` or `double`; BINARY_FLOAT / BINARY_DOUBLE: `double`;
+  /// * VARCHAR2 / CHAR / NVARCHAR2 / NCHAR: `String`; RAW: `Uint8List`;
+  /// * DATE, TIMESTAMP, TIMESTAMP WITH LOCAL TIME ZONE: `DateTime`;
+  /// * TIMESTAMP WITH TIME ZONE: a UTC `DateTime`, or an [OracleTimestampTz]
+  ///   on a `preserveTimestampTimeZone: true` connection;
+  /// * CLOB / NCLOB: `String`, BLOB: `Uint8List` — or an [OracleLob] handle
+  ///   under [fetchLobs] (see below);
+  /// * JSON (and a BLOB `IS JSON` column): the decoded `Map` / `List` /
+  ///   scalar, or the raw `Uint8List` under [rawJsonBlobs];
+  /// * a nested `CURSOR(...)` column: its rows, a `List<OracleRow>`.
+  ///
+  /// **No `type`.** Unlike node-oracledb's handler, this one cannot change
+  /// the type Oracle sends: every column is fetched in its native form (no
+  /// DEFINE, no SQL rewrite) and converted by the driver after decoding, so
+  /// the result does not follow the session's NLS settings. Select
+  /// `TO_CHAR(col, 'format')` for Oracle's own text. [OracleResult.columns]
+  /// still reports the database type.
+  ///
+  /// **Precedence over [fetchAsString].** A column the handler returns a
+  /// converter for maps through that converter only, never through
+  /// [fetchAsString]'s `toString()`; [fetchAsString] still applies to the
+  /// columns the handler returned `null` for.
+  ///
+  /// **Errors propagate unchanged.** An exception thrown by the handler or by
+  /// a converter is rethrown as-is (not wrapped in [OracleException]) and no
+  /// rows of the failed call — or of the failed [resultSet] batch — are
+  /// returned. The connection stays usable: an eager call or a failure while
+  /// opening a [resultSet] releases everything before rethrowing; a failure
+  /// on a later [resultSet] batch leaves that result set failed, and closing
+  /// it releases the connection as for any failed fetch.
+  ///
+  /// **LOBs under [fetchLobs].** The converter receives the [OracleLob]
+  /// handle, which holds the connection until closed exactly as an
+  /// unconverted handle does. Keep it reachable from the converted value
+  /// and close it when done: a converter cannot close it (it runs
+  /// synchronously), and [OracleResult.closeLobs] only finds handles still
+  /// present in the rows. A [resultSet]'s `close()` still reaps the handles
+  /// of rows you never retrieved, converted or not.
+  ///
+  /// **Top-level only.** The handler is not called — and the rows keep
+  /// their default types — for REF CURSOR OUT binds, the rows inside a
+  /// nested `CURSOR(...)` column, PL/SQL implicit results and OUT bind
+  /// values; DML and PL/SQL calls never call it. `executeMany()`,
+  /// `executeStream()` and `queryStream()` take no such option.
+  final OracleFetchTypeHandler? fetchTypeHandler;
 }
 
 /// Per-call options for [OracleConnection.executeMany].
@@ -989,9 +1106,10 @@ class OracleConnection {
         wrapLob: null,
         // The per-batch materialize honors the call's BLOB IS JSON opt-out.
         rawJsonBlobs: rawJsonBlobs,
-        // A REF CURSOR's rows keep native types (fetchAsString applies to the
-        // top-level query only; documented on OracleExecuteOptions).
-        fetchAsString: null,
+        // A REF CURSOR's rows keep native types (fetchAsString and the
+        // fetchTypeHandler apply to the top-level query only; documented on
+        // OracleExecuteOptions).
+        fetchConversion: null,
       );
       final rs = OracleResultSet.fromCursor(
         connection: this,
@@ -1184,9 +1302,10 @@ class OracleConnection {
       wrapLob: null,
       // The per-batch materialize honors the call's BLOB IS JSON opt-out.
       rawJsonBlobs: rawJsonBlobs,
-      // Nested CURSOR() rows keep native types (fetchAsString applies to the
-      // top-level query only; documented on OracleExecuteOptions).
-      fetchAsString: null,
+      // Nested CURSOR() rows keep native types (fetchAsString and the
+      // fetchTypeHandler apply to the top-level query only; documented on
+      // OracleExecuteOptions).
+      fetchConversion: null,
     );
     try {
       final rawRows = await nested.nextAllRowsData();
@@ -1301,9 +1420,10 @@ class OracleConnection {
       // nothing); the result-wide materialize below applies it. Passed anyway
       // so every construction site states the call's answer.
       rawJsonBlobs: rawJsonBlobs,
-      // Implicit-result rows keep native types (fetchAsString applies to the
-      // top-level query only; documented on OracleExecuteOptions).
-      fetchAsString: null,
+      // Implicit-result rows keep native types (fetchAsString and the
+      // fetchTypeHandler apply to the top-level query only; documented on
+      // OracleExecuteOptions).
+      fetchConversion: null,
     );
     // maxRows (node-oracledb parity): a positive N caps this implicit result at
     // exactly N rows and stops fetching once N is reached; 0 = unlimited.
@@ -1433,9 +1553,10 @@ class OracleConnection {
         wrapLob: null,
         // The per-batch materialize honors the call's BLOB IS JSON opt-out.
         rawJsonBlobs: rawJsonBlobs,
-        // Implicit-result rows keep native types (fetchAsString applies to
-        // the top-level query only; documented on OracleExecuteOptions).
-        fetchAsString: null,
+        // Implicit-result rows keep native types (fetchAsString and the
+        // fetchTypeHandler apply to the top-level query only; documented on
+        // OracleExecuteOptions).
+        fetchConversion: null,
       );
       final rs = OracleResultSet.fromCursor(
         connection: this,
@@ -1671,6 +1792,9 @@ class OracleConnection {
     final fetchAsString = _fetchAsStringOraTypes(
       options?.fetchAsString ?? const <OracleDbType>{},
     );
+    // Story 14.4: called once per column at the top-level query's describe
+    // (never stored in the statement cache); see OracleExecuteOptions.
+    final fetchTypeHandler = options?.fetchTypeHandler;
 
     if (options?.resultSet == true) {
       final effectiveFetchSize = options!.fetchSize ?? _defaultPrefetchRows;
@@ -1727,6 +1851,8 @@ class OracleConnection {
             // Inert for a block (no top-level query rows); its implicit
             // results keep native types (documented on OracleExecuteOptions).
             fetchAsString: fetchAsString,
+            // Likewise never called for a block (no query describe).
+            fetchTypeHandler: fetchTypeHandler,
           );
         } finally {
           _executeInProgress = false;
@@ -1758,6 +1884,7 @@ class OracleConnection {
           fetchLobs: fetchLobs,
           rawJsonBlobs: rawJsonBlobs,
           fetchAsString: fetchAsString,
+          fetchTypeHandler: fetchTypeHandler,
         );
       } finally {
         _executeInProgress = false;
@@ -1783,6 +1910,7 @@ class OracleConnection {
         fetchLobs: fetchLobs,
         rawJsonBlobs: rawJsonBlobs,
         fetchAsString: fetchAsString,
+        fetchTypeHandler: fetchTypeHandler,
       );
     } finally {
       _executeInProgress = false;
@@ -1823,6 +1951,50 @@ class OracleConnection {
       }
     }
     return Set<int>.unmodifiable(oraTypes);
+  }
+
+  /// Builds the fetch conversion for a top-level query described by
+  /// [columns]: the caller's [fetchTypeHandler] answers (Story 14.4) over the
+  /// [fetchAsString] type codes (Story 14.3). `null` when neither selects a
+  /// column.
+  ///
+  /// Calls [fetchTypeHandler] exactly once per column, in column order, with
+  /// an unmodifiable view of [columns] — so a handler cannot corrupt the
+  /// describe the cursor and the statement cache share. Whatever it throws is
+  /// rethrown wrapped in [_FetchCallbackFailure], so the caller's cleanup
+  /// `catch` can release the cursor and rethrow it unchanged.
+  static FetchConversion? _fetchConversionFor(
+    List<ColumnMetadata> columns, {
+    required Set<int> fetchAsString,
+    required OracleFetchTypeHandler? fetchTypeHandler,
+  }) {
+    List<OracleFetchConverter?>? converters;
+    if (fetchTypeHandler != null && columns.isNotEmpty) {
+      final view = List<ColumnMetadata>.unmodifiable(columns);
+      try {
+        converters = [
+          for (final column in view) fetchTypeHandler(column, view),
+        ];
+      } catch (e, st) {
+        throw _FetchCallbackFailure(e, st);
+      }
+    }
+    return FetchConversion.forColumns(
+      columns,
+      fetchAsString,
+      converters: converters,
+    );
+  }
+
+  /// Runs [convert] — a [FetchConversion] pass that may call the caller's
+  /// converters — rethrowing anything it throws wrapped in
+  /// [_FetchCallbackFailure] (see [_fetchConversionFor]).
+  static T _runFetchConversion<T>(T Function() convert) {
+    try {
+      return convert();
+    } catch (e, st) {
+      throw _FetchCallbackFailure(e, st);
+    }
   }
 
   /// Executes one statement multiple times in a **single wire round trip**:
@@ -2005,6 +2177,7 @@ class OracleConnection {
         // default, like executeStream / queryStream.
         rawJsonBlobs: false,
         fetchAsString: const <int>{},
+        fetchTypeHandler: null,
       );
     } finally {
       _executeInProgress = false;
@@ -3535,8 +3708,9 @@ class OracleConnection {
           forceUncacheable: true,
           // Two VARCHAR2 columns: no BLOB IS JSON column to keep raw.
           rawJsonBlobs: false,
-          // Nor any date/time column to stringify.
+          // Nor any date/time column to stringify, nor a caller handler.
           fetchAsString: const <int>{},
+          fetchTypeHandler: null,
         );
       } finally {
         _executeInProgress = false;
@@ -3645,6 +3819,7 @@ class OracleConnection {
         // The TSTZ column must stay an OracleTimestampTz: its region id is
         // the whole point of this query.
         fetchAsString: const <int>{},
+        fetchTypeHandler: null,
         preserveTimestampTimeZone: true,
       );
     } on OracleException catch (e, st) {
@@ -3756,6 +3931,16 @@ class OracleConnection {
   /// cursors, and is a no-op for DML / PL/SQL. `required` for the same reason
   /// as [rawJsonBlobs]: the internal queries must state that they keep
   /// native values.
+  ///
+  /// [fetchTypeHandler] (Story 14.4; `OracleExecuteOptions.fetchTypeHandler`)
+  /// is called once per column of a top-level query's describe, after the
+  /// drain and the LOB / nested-cursor materialization and before any row is
+  /// converted; the converters it returns run with [fetchAsString] in the
+  /// same single pass over the drained result. Never called for DML / PL/SQL
+  /// (no query describe), implicit results, REF CURSOR OUT binds or nested
+  /// cursors. Anything the handler or a converter throws is rethrown
+  /// unchanged after the usual cleanup. `required` for the same reason as
+  /// [fetchAsString].
   Future<OracleResult> _executeGuarded(
     String sql,
     Object? bindValues, {
@@ -3766,6 +3951,7 @@ class OracleConnection {
     bool fetchLobs = false,
     required bool rawJsonBlobs,
     required Set<int> fetchAsString,
+    required OracleFetchTypeHandler? fetchTypeHandler,
     _ExecuteManyCall? bulk,
     bool? preserveTimestampTimeZone,
   }) async {
@@ -3823,9 +4009,10 @@ class OracleConnection {
           // Inert here (materializePerBatch: false); the result-wide
           // materialize below applies it. Stated so the answer is visible.
           rawJsonBlobs: rawJsonBlobs,
-          // Not per batch: fetchAsString converts the whole drained result
-          // once, below, so the drain's duplicate-column source stays raw.
-          fetchAsString: null,
+          // Not per batch: the fetch conversion runs once over the whole
+          // drained result, below, so the drain's duplicate-column source
+          // stays the decoded value and each converter runs once per cell.
+          fetchConversion: null,
         );
         // maxRows (node-oracledb parity): 0 = unlimited; a positive N caps the
         // eager SELECT drain at exactly N rows and stops fetching once N is
@@ -3943,17 +4130,31 @@ class OracleConnection {
             rawJsonBlobs: rawJsonBlobs,
           );
         }
-        // Fetch-as-string (Story 14.3): convert the selected date/time
-        // columns of the top-level rows, once over the drained (and
-        // maxRows-capped) result. Post-decode only — the cursor, its describe
-        // and the statement cache entry are untouched, so a later execute of
-        // the same SQL with or without the option decodes natively and
-        // applies its own answer. Nested-cursor rows were already wrapped as
-        // OracleRows above and keep native types.
-        FetchAsStringConversion.forColumns(
+        // Fetch conversion (Stories 14.3 / 14.4): convert the selected
+        // columns of the top-level rows — fetchAsString's toString() and the
+        // fetchTypeHandler's converters — once over the drained (and
+        // maxRows-capped) result, after LOB and nested-cursor
+        // materialization, so a converter sees the cell the row would hold.
+        //
+        // The fetchTypeHandler is called here, once per column of the
+        // query's describe and before any row is converted. Not earlier:
+        // by now every temporary LOB locator has been read (its free queued)
+        // or wrapped (a handle the catch below reaps), so a throwing handler
+        // strands nothing. Post-decode only and built per call — the cursor,
+        // its describe and the statement cache entry are untouched, so a
+        // later execute of the same SQL with or without the options decodes
+        // natively and applies its own answer. Nested-cursor rows were
+        // already wrapped as OracleRows above and keep native types. A
+        // handler's or converter's throw reaches the catch below.
+        final fetchConversion = _fetchConversionFor(
           response.columnMetadata,
-          fetchAsString,
-        )?.applyToRows(response.rows);
+          fetchAsString: fetchAsString,
+          fetchTypeHandler: fetchTypeHandler,
+        );
+        if (fetchConversion != null) {
+          final rows = response.rows;
+          _runFetchConversion(() => fetchConversion.applyToRows(rows));
+        }
       }
 
       // Update the cache from the successful response.
@@ -4146,6 +4347,9 @@ class OracleConnection {
       if (_openLobs.any((lob) => !lob.isCreatedTemporary)) {
         await forceCloseOpenLobs(onlyFetched: true);
       }
+      // A fetchTypeHandler / converter failure is the caller's own exception:
+      // released like any failure above, then rethrown exactly as thrown.
+      if (e is _FetchCallbackFailure) e.rethrowOriginal();
       if (e is OracleException) rethrow;
       throw OracleException(
         errorCode: oraProtocolError,
@@ -4771,8 +4975,10 @@ class OracleConnection {
         fetchLobs: false,
         // Nor a rawJsonBlobs surface: BLOB IS JSON columns decode.
         rawJsonBlobs: false,
-        // Nor a fetchAsString surface: date/time columns stay native.
+        // Nor a fetchAsString / fetchTypeHandler surface: every column keeps
+        // its default type.
         fetchAsString: const <int>{},
+        fetchTypeHandler: null,
       );
     } finally {
       // The open round trip is complete; the cursor is now idle between pulls.
@@ -4842,9 +5048,11 @@ class OracleConnection {
         fetchLobs: false,
         // These signatures take no options at all: BLOB IS JSON columns
         // decode, as documented on OracleExecuteOptions.rawJsonBlobs, and
-        // date/time columns stay native (OracleExecuteOptions.fetchAsString).
+        // every column keeps its default type
+        // (OracleExecuteOptions.fetchAsString / fetchTypeHandler).
         rawJsonBlobs: false,
         fetchAsString: const <int>{},
+        fetchTypeHandler: null,
       );
     } finally {
       // The open round trip is complete; the cursor is now idle between pulls.
@@ -4904,12 +5112,21 @@ class OracleConnection {
   /// same reason: the FIRST batch is converted here and every continuation
   /// batch inside the cursor, so no batch of the result set returns a
   /// date/time column natively while another returns it as a `String`.
+  ///
+  /// [fetchTypeHandler] (Story 14.4) is `required` likewise. It is called
+  /// once per column of the open's describe, after the first batch's LOB /
+  /// nested-cursor materialization and before any row is converted; its
+  /// converters join [fetchAsString] in the one conversion object that
+  /// converts the first batch here and every continuation batch inside the
+  /// cursor. A handler or converter throw while opening releases the cursor
+  /// and first-batch LOB handles, then is rethrown unchanged.
   Future<OracleResultSet> _openResultSetGuarded(
     String sql,
     Object? bindValues, {
     required bool fetchLobs,
     required bool rawJsonBlobs,
     required Set<int> fetchAsString,
+    required OracleFetchTypeHandler? fetchTypeHandler,
     int? prefetchRows,
   }) async {
     _log.fine(
@@ -4977,15 +5194,32 @@ class OracleConnection {
         );
       }
 
-      // Fetch-as-string (Story 14.3): convert the first batch's selected
-      // date/time columns BEFORE the cursor buffers it (the constructor seeds
-      // the buffer synchronously); the same conversion object converts each
-      // continuation batch inside the cursor. Null when nothing is selected.
-      final fetchAsStringConversion = FetchAsStringConversion.forColumns(
+      // Fetch conversion (Stories 14.3 / 14.4): the fetchTypeHandler is
+      // called here, once per column of the describe, after LOB and
+      // nested-cursor materialization (as on the eager path, so a throwing
+      // handler strands no temporary locator: each was read, its free
+      // queued, or wrapped as a first-batch handle the catch below reaps)
+      // and before any row is converted. Null when neither option selects a
+      // column.
+      final fetchConversion = _fetchConversionFor(
         firstResponse.columnMetadata,
-        fetchAsString,
+        fetchAsString: fetchAsString,
+        fetchTypeHandler: fetchTypeHandler,
       );
-      fetchAsStringConversion?.applyToRows(firstResponse.rows);
+      // Convert the first batch's selected columns BEFORE the cursor buffers
+      // it (the constructor seeds the buffer synchronously) and BEFORE cache
+      // disposition, so a throwing converter leaves no stored entry behind;
+      // the same conversion object converts each continuation batch inside
+      // the cursor. What it reports (the decoded duplicate-column source,
+      // handles a converter replaced) seeds the cursor.
+      final convertedFirstBatch = fetchConversion == null
+          ? null
+          : _runFetchConversion(
+              () => fetchConversion.convertBatch(
+                firstResponse.rows,
+                isLobHandle: fetchLobs ? _isLobHandleValue : null,
+              ),
+            );
 
       // Cache disposition: keep the entry inUse for the result set's lifetime;
       // OracleResultSet.close() releases it through the same path execute uses.
@@ -5084,8 +5318,10 @@ class OracleConnection {
         // Continuation batches keep BLOB IS JSON columns raw exactly when the
         // first batch (materialized above) did.
         rawJsonBlobs: rawJsonBlobs,
-        // ... and convert date/time columns exactly when it did.
-        fetchAsString: fetchAsStringConversion,
+        // ... and convert the selected columns exactly when it did, seeded
+        // with what the first batch's conversion reported.
+        fetchConversion: fetchConversion,
+        convertedFirstBatch: convertedFirstBatch,
       );
       // Handed to the result set, which now owns the reap: the first batch's
       // handles live in the cursor's buffer and are reachable from
@@ -5110,6 +5346,9 @@ class OracleConnection {
       if (unhandledCursorId != 0) {
         _cache.requeueCursorsToClose([unhandledCursorId]);
       }
+      // A fetchTypeHandler / converter failure is the caller's own exception:
+      // released like any failure above, then rethrown exactly as thrown.
+      if (e is _FetchCallbackFailure) e.rethrowOriginal();
       if (e is OracleException) rethrow;
       throw OracleException(
         errorCode: oraProtocolError,
@@ -5125,7 +5364,8 @@ class OracleConnection {
   /// and reaps handles without ever importing `oracle_lob.dart` (the epic's
   /// ratified rule for everything under `lib/src/protocol/`), so the type test
   /// lives here.
-  static bool _isLobHandleValue(Object? value) => value is OracleLob;
+  static bool _isLobHandleValue(Object? value) =>
+      value is OracleLob && !value.isCreatedTemporary;
 
   /// Closes LOB handles a [ResultSetCursor] wrapped but never delivered.
   ///
@@ -6349,6 +6589,23 @@ class _CursorOpen {
 
   final ExecuteResponse response;
   final StatementCacheEntry? cacheEntry;
+}
+
+/// Carries an exception thrown by caller code — an
+/// `OracleExecuteOptions.fetchTypeHandler` or one of its converters (Story
+/// 14.4) — through the cleanup `catch` of [OracleConnection._executeGuarded]
+/// / [OracleConnection._openResultSetGuarded], which would otherwise wrap a
+/// non-[OracleException] as "Query execution failed". Those catches release
+/// the cursor and any fetched LOB handles, then rethrow [error] unchanged
+/// with its original [stackTrace]. Never escapes the connection.
+final class _FetchCallbackFailure implements Exception {
+  _FetchCallbackFailure(this.error, this.stackTrace);
+
+  final Object error;
+  final StackTrace stackTrace;
+
+  /// Rethrows the caller's original exception.
+  Never rethrowOriginal() => Error.throwWithStackTrace(error, stackTrace);
 }
 
 /// A validated, normalized `executeMany()` call: the prepared statement
