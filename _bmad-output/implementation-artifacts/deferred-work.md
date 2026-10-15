@@ -170,6 +170,7 @@ severity: medium
 reason: Retro action 12, a PROCESS decision for the operator: run an epic-boundary review for every epic, and run one for Epic 13 before Epic 14 starts. Not code work for a sweep bundle.
 status: open
 decision: 2026-10-15 Keep open until the boundary review is run
+decision: 2026-10-15 Keep open until the boundary review is run
 decision (Abibiano, 2026-10-09): fix DW-7 to DW-15 via the sweep, then run one epic-boundary review over the epic-13 diff to confirm convergence, and make a boundary review a standard step for every epic from Epic 14 on (operator process, not a sweep bundle).
 
 ### DW-19: CLOSED — `IN OUT` CLOB/BLOB OUT locator never freed under `fetchLobs: false` (was: 12-2 dev-story section, `target:` Epic 12 follow-up). Re-measured…
