@@ -2585,6 +2585,8 @@ void main() {
             // Both opt-outs are named: the raw Uint8List and the OracleLob.
             expect(e.message, contains('rawJsonBlobs: true'));
             expect(e.message, contains('fetchLobs: true'));
+            expect(e.message, contains('separate execute() SELECT'));
+            expect(e.message, contains('resultSet: true'));
           }
         }
       });

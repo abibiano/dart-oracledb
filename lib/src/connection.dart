@@ -179,7 +179,9 @@ class OracleExecuteOptions {
   /// [OracleLob] handle, whose `read()` yields the same untouched bytes.
   /// A BLOB inside a REF CURSOR OUT bind or nested `CURSOR(...)` row cannot be
   /// wrapped as a handle; with [fetchLobs] such a call fails instead.
-  /// `executeStream()` / `queryStream()` take no options and always decode.
+  /// `executeStream()` and `queryStream()` have no fetch options;
+  /// `executeMany()` has no [rawJsonBlobs] option for implicit result rows.
+  /// Use a separate `execute()` SELECT with this option to read raw bytes.
   final bool rawJsonBlobs;
 }
 

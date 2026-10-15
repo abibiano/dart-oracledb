@@ -965,7 +965,9 @@ location: lib/src/connection.dart (queryStream/executeStream), lib/src/protocol/
 source_spec: `spec-dw-8-blob-json-raw-optout.md`
 severity: low
 reason: The spec's Never list excludes new options there; the intent says per-query on OracleExecuteOptions. Documented in CHANGELOG/README/dartdoc. A stream caller hitting a lax or empty value cannot get raw bytes.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-stale-doc-and-hint-fixes
+resolution-undo: 1aaf2c5e40feb8dff42dff21e137a7bcc4afea70c9b6b296bbc53e1995ab6ac4 2026-10-15 7374617475733a206f70656e
 decision: 2026-10-14 Only fix the hint text — Leave the stream and executeMany signatures unchanged. Change the decode error hint in lib/src/protocol/oson.dart so it points stream callers at execute() with rawJsonBlobs, and document the limitation.
 decision: 2026-10-14 Only fix the hint text — Leave the stream and executeMany signatures unchanged. Change the decode error hint in lib/src/protocol/oson.dart so it points stream callers at execute() with rawJsonBlobs, and document the limitation.
 
@@ -1013,7 +1015,9 @@ location: _bmad-output/project-context.md:298
 source_spec: `bmad-build-auto-result-executemany-test-naming-hygiene.md`
 severity: low
 reason: _bmad-output/project-context.md:298 still names ttcExecOptionDmlRowCounts, which no longer exists. Future agents following that guidance would search for a nonexistent symbol. The review workflow routes agent-context edits to deferred work.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-stale-doc-and-hint-fixes
+resolution-undo: 1aaf2c5e40feb8dff42dff21e137a7bcc4afea70c9b6b296bbc53e1995ab6ac4 2026-10-15 7374617475733a206f70656e
 
 ### DW-132: After any throw inside _materializeLobValues, temporary or abstract locators in the same response that were not yet visited are never queued for freeing.
 origin: spec-deferred 9b17d4af9889

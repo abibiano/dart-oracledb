@@ -1588,8 +1588,11 @@ String _formatErrorSummary(FormatException e) {
 OracleException _jsonBlobError(String reason) => OracleException(
   errorCode: oraUnsupportedType,
   message:
-      'Cannot decode JSON stored in a BLOB: $reason. Fetch with '
-      'OracleExecuteOptions(rawJsonBlobs: true) to read the raw bytes as a '
-      'Uint8List, or with OracleExecuteOptions(fetchLobs: true) to read them '
-      'through an OracleLob instead.',
+      'Cannot decode JSON stored in a BLOB: $reason. Fetch the data with a '
+      'separate execute() SELECT and OracleExecuteOptions(rawJsonBlobs: true) '
+      'to read raw bytes as a Uint8List, or with fetchLobs: true to read them '
+      'through an OracleLob. For large results, add resultSet: true. '
+      'queryStream() and executeStream() have no fetch options; executeMany() '
+      'has no rawJsonBlobs option for implicit result rows. Do not replay a '
+      'statement with side effects just to fetch the bytes.',
 );

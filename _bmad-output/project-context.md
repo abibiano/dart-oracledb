@@ -295,7 +295,7 @@ There are ~33 `@visibleForTesting` and ~37 `@internal` annotations. Instrumentat
 - LOBs materialize by default; handles are opt-in via `fetchLobs: true`.
 - TNS timeout and socket timeout are distinct.
 - `SELECT ... FOR UPDATE` takes **no** statement-cache slot (`isCacheEligibleSql` in `lib/src/sql_classifier.dart` excludes locking selects); a repeated LOB SELECT holds exactly one.
-- Naming trap in `lib/src/protocol/constants.dart`: `ttcExecOptionDmlRowCounts` shares the `ttcExecOption*` prefix with siblings that live in the **`options`** word, but it rides the **`dmlOptions`/exec-flags** word. Read its doc comment before adding a neighbour.
+- Naming trap in `lib/src/protocol/constants.dart`: `ttcDmlOptionRowCounts` uses the **`dmlOptions`/exec-flags** word, unlike nearby `ttcExecOption*` constants in the **`options`** word. Read its doc comment before adding a neighbour.
 
 **Security:** never log or persist passwords (derived keys only) · credentials from environment variables only · bind parameters over string interpolation · close connections on error so the pool cannot be exhausted.
 

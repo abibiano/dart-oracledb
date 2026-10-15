@@ -1203,7 +1203,10 @@ final doc = result.rows.first['DOC'] as Map<String, Object?>; // not bytes
   batch of `resultSet: true`, implicit results (eager and `resultSet: true`),
   and REF CURSOR OUT bind / nested `CURSOR()` rows — and only to BLOB
   `IS JSON` columns: a native `JSON` column in the same row still decodes.
-  `queryStream()` / `executeStream()` take no options and always decode.
+  `queryStream()` and `executeStream()` have no fetch options;
+  `executeMany()` has options, but no `rawJsonBlobs` option for its implicit
+  result rows. To read such a column as bytes, use a separate `execute()`
+  SELECT with `rawJsonBlobs: true` (and `resultSet: true` for large results).
 
   ```dart
   final raw = await connection.execute(

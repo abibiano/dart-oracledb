@@ -97,7 +97,9 @@
   returns an `OracleLob` handle over the untouched bytes and wins when both are
   set for ordinary rows; a cursor-embedded BLOB fails with `fetchLobs: true`
   because those rows cannot return LOB handles. `queryStream()` /
-  `executeStream()` take no options and always decode.
+  `executeStream()` have no fetch options, while `executeMany()` has no
+  `rawJsonBlobs` option for implicit result rows; the decode error's hint
+  points callers at a separate `execute()` SELECT with `rawJsonBlobs`.
   Validated against Oracle 23ai and Oracle 21c.
 - **`OracleLob.trim(newSize)`** shortens a LOB to `newSize` units (characters
   for CLOB/NCLOB, bytes for BLOB) in one round trip and sets `length`
