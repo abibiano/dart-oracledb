@@ -129,6 +129,7 @@ location: test/integration/json_data_type_integration_test.dart
 severity: medium
 reason: Retro action 8 (F1). Recorded only in the 13-2 story notes (lines 161, 174); seen once again during the epic-13 retro, then 6 clean reruns. Find the cause or capture the failing output.
 status: open
+decision: 2026-10-15 Add failure-output capture in the eager-continuation test setup — In test/integration/json_data_type_integration_test.dart, wrap the eager-continuation setup so any failure logs the full OracleException, statement and connection state, then repeatedly rerun the suite on 23ai to try to reproduce and root-cause ORA-03125.
 decision: 2026-10-14 Keep open until it recurs
 
 ### DW-15: Ledger and doc drift: DW-4 and DW-5 lost their severity lines, doc/architecture.md still says execute_message.dart is ~1767 LOC (it is 3020), and skipWithoutNativeJson/_expectJsonValue are duplicated across two JSON integration files.
