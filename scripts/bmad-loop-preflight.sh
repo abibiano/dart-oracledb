@@ -69,7 +69,10 @@ wait_healthy() {  # <docker-context> <container-id> <label> <timeout-s>
 step "Oracle 23ai (Docker Desktop, localhost:1521)"
 docker --context desktop-linux info >/dev/null 2>&1 \
   || die "Docker Desktop is not running (docker context desktop-linux). Start it, then re-run."
-docker --context desktop-linux compose up -d oracle
+# The 23.9-pinned container lives in compose project `dart-oracledb-23ai` (its data volume
+# is dart-oracledb-23ai_oracle-data). Without -p, compose uses the directory name and
+# collides with the fixed container_name.
+docker --context desktop-linux compose -p dart-oracledb-23ai up -d oracle
 wait_healthy desktop-linux oracle23ai "oracle23ai" "$WAIT_23AI_S"
 
 step "Oracle 21c (Colima x86_64 VM, localhost:1522)"
