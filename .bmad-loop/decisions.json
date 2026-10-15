@@ -8,6 +8,15 @@
     "label": "Accept OracleBind on single-execute DML RETURNING",
     "resolution": ""
   },
+  "DW-116": {
+    "answered_at": "2026-10-15",
+    "bundle_name": "",
+    "effect": "keep-open",
+    "intent": "",
+    "key": "3",
+    "label": "Keep open",
+    "resolution": ""
+  },
   "DW-126": {
     "answered_at": "2026-10-14",
     "bundle_name": "",
