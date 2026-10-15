@@ -286,6 +286,17 @@ void main() {
       expect(slots[0].oraType, equals(oc.oraTypeNumber));
     });
 
+    test('OracleIntervalDS and Duration share the INTERVAL DAY TO SECOND '
+        'slot type (Story 15.1)', () async {
+      await conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
+        [OracleIntervalDS(days: 1)],
+        [const Duration(minutes: 5)],
+        [null],
+      ]);
+      final slots = transport.lastBindValues!.cast<BindVariable>();
+      expect(slots[0].oraType, equals(oc.oraTypeIntervalDS));
+    });
+
     test(
       'rejects non-finite NUMBER values before any wire round trip',
       () async {
@@ -358,11 +369,13 @@ void main() {
     test(
       'unsupported value types fail before wire without the value',
       () async {
+        // A top-level bool has no Oracle bind mapping (Duration, used here
+        // before Story 15.1, now binds as INTERVAL DAY TO SECOND).
         await expectRejectedBeforeWire(
           () => conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
-            [const Duration(seconds: 1)],
+            [true],
           ]),
-          ['Unsupported bind value type Duration'],
+          ['Unsupported bind value type bool'],
         );
       },
     );
@@ -894,6 +907,34 @@ void main() {
       } on OracleException catch (e) {
         expect(e.message, isNot(contains('9876')));
       }
+    });
+
+    OracleExecuteManyOptions ivDefs() => OracleExecuteManyOptions(
+      bindDefs: [OracleBindDef.inputOutput(type: OracleDbType.intervalDS)],
+    );
+
+    test('an intervalDS def takes OracleIntervalDS, Duration and null '
+        '(Story 15.1)', () async {
+      await conn.executeMany('BEGIN story_iv(:1); END;', [
+        [OracleIntervalDS(hours: 1)],
+        [const Duration(seconds: -2)],
+        [null],
+      ], ivDefs());
+      final slots = transport.lastBindValues!.cast<BindVariable>();
+      expect(slots[0].oraType, equals(oc.oraTypeIntervalDS));
+    });
+
+    test('an intervalDS def rejects any other value before wire', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany('BEGIN story_iv(:1); END;', [
+          ['1 02:03:04'],
+        ], ivDefs()),
+        [
+          'declared OracleDbType.intervalDS',
+          'String',
+          'OracleIntervalDS or Duration',
+        ],
+      );
     });
 
     test('non-finite doubles under a NUMBER def fail before wire', () async {

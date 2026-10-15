@@ -22,6 +22,7 @@ import 'dart:typed_data';
 import 'package:meta/meta.dart' show internal;
 
 import 'errors.dart';
+import 'oracle_interval.dart';
 // A LOB-typed bind may carry an OracleLob handle as its value (Story 12.2), so
 // the construction-time type check needs the type. `oracle_lob.dart` imports
 // this library back for OracleDbType — the same benign library cycle
@@ -170,6 +171,14 @@ enum OracleDbType {
   /// `AL16UTF16`; otherwise the bind/column fails loud. The empty string binds
   /// as SQL NULL, consistent with Oracle's `'' IS NULL` semantics.
   nClob,
+
+  /// Oracle INTERVAL DAY TO SECOND (decoded as [OracleIntervalDS]).
+  ///
+  /// IN OUT values may be an [OracleIntervalDS] (nanosecond fractional
+  /// seconds) or a Dart `Duration` (bound as the interval it spans, at its
+  /// microsecond resolution). Fixed 11-byte wire size, so `maxSize` is not
+  /// needed. Not accepted by `OracleExecuteOptions.fetchAsString`.
+  intervalDS,
 }
 
 /// Specification for an OUT or IN OUT bind variable.
@@ -361,6 +370,13 @@ class OracleBind {
             'DateTime, or null, got ${value.runtimeType}',
           );
         }
+      case OracleDbType.intervalDS:
+        if (value is! OracleIntervalDS && value is! Duration) {
+          throw ArgumentError(
+            'OracleBind(type: intervalDS) requires OracleIntervalDS, '
+            'Duration, or null, got ${value.runtimeType}',
+          );
+        }
       case OracleDbType.raw:
         if (value is! Uint8List) {
           throw ArgumentError(
@@ -496,6 +512,8 @@ int oracleTypeCodeFor(OracleDbType type) {
       return oc.oraTypeTimestamp;
     case OracleDbType.timestampTz:
       return oc.oraTypeTimestampTz;
+    case OracleDbType.intervalDS:
+      return oc.oraTypeIntervalDS;
     case OracleDbType.raw:
       return oc.oraTypeRaw;
     case OracleDbType.clob:

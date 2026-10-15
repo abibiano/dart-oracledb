@@ -39,6 +39,7 @@ void main() {
         expect(OracleDbType.cursor.index, equals(9));
         expect(OracleDbType.nVarchar.index, equals(10));
         expect(OracleDbType.nClob.index, equals(11));
+        expect(OracleDbType.intervalDS.index, equals(12));
       },
     );
   });
@@ -1220,6 +1221,55 @@ void main() {
         () => OracleBind.inOut(value: 'now', type: OracleDbType.timestampTz),
         throwsArgumentError,
       );
+    });
+  });
+
+  group('OracleDbType.intervalDS (Story 15.1)', () {
+    test('maps to wire type 183 and needs no maxSize', () {
+      final bind = OracleBind.out(type: OracleDbType.intervalDS);
+      expect(bind.oracleTypeCode, equals(183));
+      expect(bind.value, isNull);
+      expect(
+        OracleBindDef.output(type: OracleDbType.intervalDS).oracleTypeCode,
+        equals(183),
+      );
+    });
+
+    test('IN OUT accepts OracleIntervalDS, Duration and null', () {
+      for (final value in <Object?>[
+        OracleIntervalDS(days: 1, fseconds: 5),
+        const Duration(minutes: -3),
+        null,
+      ]) {
+        expect(
+          () => OracleBind.inOut(value: value, type: OracleDbType.intervalDS),
+          returnsNormally,
+          reason: '$value',
+        );
+      }
+    });
+
+    test('IN OUT rejects other values without echoing them', () {
+      const secret = '4111111111111111';
+      for (final value in <Object>[42, secret, DateTime.utc(2024)]) {
+        expect(
+          () => OracleBind.inOut(value: value, type: OracleDbType.intervalDS),
+          throwsA(
+            isA<ArgumentError>()
+                .having(
+                  (e) => e.message.toString(),
+                  'message',
+                  contains('requires OracleIntervalDS, Duration, or null'),
+                )
+                .having(
+                  (e) => e.toString(),
+                  'toString',
+                  isNot(contains(secret)),
+                ),
+          ),
+          reason: '${value.runtimeType}',
+        );
+      }
     });
   });
 

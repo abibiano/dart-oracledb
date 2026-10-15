@@ -248,6 +248,11 @@ const int oraTypeTimestamp = 180;
 /// TIMESTAMP WITH TIME ZONE data type.
 const int oraTypeTimestampTz = 181;
 
+/// INTERVAL DAY TO SECOND data type (node-oracledb
+/// `TNS_DATA_TYPE_INTERVAL_DS`, `DB_TYPE_INTERVAL_DS` bufferSizeFactor 11).
+/// Decoded as `OracleIntervalDS`; the wire value is always 11 bytes.
+const int oraTypeIntervalDS = 183;
+
 /// TIMESTAMP WITH LOCAL TIME ZONE data type.
 const int oraTypeTimestampLtz = 231;
 

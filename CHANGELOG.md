@@ -106,6 +106,30 @@
   true` the converter receives the `OracleLob` handle, which stays the
   caller's to close (a result set's `close()` still reaps the handles of rows
   never retrieved). Column metadata still reports the database type.
+- **`INTERVAL DAY TO SECOND` columns decode and bind.** They previously
+  decoded silently to `null` and could not be bound. Columns, PL/SQL OUT
+  binds, DML `RETURNING` values and REF CURSOR / nested `CURSOR()` /
+  implicit-result rows now decode to the new `OracleIntervalDS` (node-oracledb
+  `IntervalDS` parity: signed `days`, `hours`, `minutes`, `seconds` and
+  `fseconds` in nanoseconds; `==`/`hashCode`, `toString()` as
+  `OracleIntervalDS(+3 04:05:06.123456789)`, `toDuration()` / `OracleIntervalDS.fromDuration()`). An
+  `OracleIntervalDS` or a Dart `Duration` (microsecond resolution) binds as
+  an interval — inferred for IN binds and `executeMany()` rows, or declared
+  with the new `OracleDbType.intervalDS` (no `maxSize`) for OUT / IN OUT and
+  `OracleBindDef`. The constructor carries units like node-oracledb and
+  throws `ArgumentError` outside `INTERVAL DAY(9) TO SECOND(9)` and — unlike
+  node-oracledb — for components of mixed signs, which Oracle stores
+  verbatim and then renders inconsistently. A malformed wire value fails
+  with `OracleException` (`oraProtocolError`) instead of decoding.
+  `fetchTypeHandler` converters receive the `OracleIntervalDS`. Validated
+  against Oracle 23ai and Oracle 21c. `Duration` bind values, previously
+  rejected as unsupported, now bind as intervals.
+- **Limits:** `INTERVAL YEAR TO MONTH`, intervals inside native JSON, and
+  `fetchAsString` for intervals remain unsupported. Known issue (not
+  interval-specific, pre-existing): on Oracle 21c a SQL `NULL` of any type in a
+  REF CURSOR / nested `CURSOR()` / implicit-result row without a LOB or JSON
+  column fails the call with ORA-01405, so NULL intervals are not supported
+  inside cursors there (non-NULL values decode on both versions).
 
 ## 1.5.0
 

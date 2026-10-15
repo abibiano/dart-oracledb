@@ -338,9 +338,10 @@ void main() {
         expect(
           () => connection.execute(
             'SELECT :1 FROM dual',
-            // Duration has no Oracle mapping. (Map/List are valid native
-            // JSON binds, so they no longer serve as invalid.)
-            [const Duration(seconds: 1)],
+            // A top-level bool has no Oracle mapping. (Map/List are valid
+            // native JSON binds and Duration binds as INTERVAL DAY TO
+            // SECOND, so neither serves as invalid.)
+            [true],
           ),
           throwsA(
             isA<OracleException>().having(

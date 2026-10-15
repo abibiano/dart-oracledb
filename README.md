@@ -30,6 +30,7 @@ A pure Dart driver for Oracle Database. It speaks the thin-mode TNS/TTC wire pro
 - **Native JSON** — `JSON` columns (and `BLOB ... IS JSON`) decode to `Map` / `List`, including Oracle `DATE`/`TIMESTAMP`/`RAW` members, and fetched documents bind back unchanged
 - **Transactions** — commit, rollback, and transaction helper
 - **TIMESTAMP WITH TIME ZONE** — decoded as UTC `DateTime`, or as `OracleTimestampTz` preserving a numeric offset (opt-in); named-region values (e.g. `Europe/Madrid`) decode to the correct UTC instant with a reported `+00:00` offset and a region id that `timeZoneRegionName` resolves to the region name
+- **INTERVAL DAY TO SECOND** — decoded as `OracleIntervalDS` with nanosecond fractional seconds; binds from `OracleIntervalDS` or a Dart `Duration`
 - **Dates as strings** — `OracleExecuteOptions(fetchAsString: {...})` returns DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE columns as `String` (node-oracledb `fetchAsString` parity; see [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings))
 - **Per-column fetch converters** — `OracleExecuteOptions(fetchTypeHandler: ...)` picks a converter per result column (e.g. a NUMBER as `String`, your own date format) applied to every fetched value (node-oracledb `fetchTypeHandler` converter parity; see [Fetch type handlers](#fetch-type-handlers-per-column-converters))
 - **Statement caching** — transparent prepared-statement cache
@@ -401,6 +402,8 @@ print(r.outBinds['value']); // 42
 
 `TIMESTAMP WITH TIME ZONE` parameters bind with `OracleDbType.timestampTz`. OUT / IN OUT values follow the connection's decode contract: a UTC `DateTime` by default, or an `OracleTimestampTz` carrying the server-sent offset (`+00:00` plus a `regionId` for a [region-id](#region-id-time-zones) value) on a connection opened with `preserveTimestampTimeZone: true`. IN OUT input values may be an `OracleTimestampTz` (the offset travels on the wire; `regionId` is ignored) or a plain `DateTime`.
 
+`INTERVAL DAY TO SECOND` parameters bind with `OracleDbType.intervalDS` (no `maxSize`). OUT / IN OUT values decode to `OracleIntervalDS`; IN OUT input values may be an `OracleIntervalDS` or a `Duration`. See [INTERVAL DAY TO SECOND support](#interval-day-to-second-support).
+
 ### Result Sets & Streaming
 
 Large queries can be consumed incrementally instead of materializing every row up front. These paths have no 1,000-fetch safety cap — that bound applies only to eager `execute()`.
@@ -530,7 +533,7 @@ result.rows.first['UPDATED_AT']; // '2024-03-05 13:14:15.123456'
 
 - **The text comes from the driver, not from Oracle.** As in node-oracledb thin mode, the column is still fetched in its native binary form (Oracle sends these types in binary whatever the client asks for), and each decoded value is converted with its own `toString()`: `DateTime.toString()` for DATE / TIMESTAMP / LTZ, the UTC `DateTime.toString()` for TIMESTAMP WITH TIME ZONE (`'2024-03-05 12:14:15.123456Z'`), or `OracleTimestampTz.toString()` on a `preserveTimestampTimeZone: true` connection (offset and `regionId`, not the region name). It ignores the session's `NLS_DATE_FORMAT` / `NLS_TIMESTAMP_FORMAT` / `NLS_TIMESTAMP_TZ_FORMAT` and keeps microsecond precision only. **For Oracle's exact text** (an NLS or explicit format, nanoseconds, a region name), select `TO_CHAR(col, 'format')` in the SQL instead.
 - SQL `NULL` stays `null`; `result.columns` still reports the database type.
-- Any other `OracleDbType` in the set (NUMBER, CLOB, RAW, JSON, ...) throws `ArgumentError` before any round trip.
+- Any other `OracleDbType` in the set (NUMBER, CLOB, RAW, JSON, INTERVAL, ...) throws `ArgumentError` before any round trip.
 - It applies to the top-level query's rows: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set. The rows of a **REF CURSOR OUT bind, a nested `CURSOR(...)` column and PL/SQL implicit results keep their native types**, as do OUT bind values; `executeStream()` / `queryStream()` take no options.
 - For any other per-column representation (a NUMBER as text, your own date format, ...), use a [fetch type handler](#fetch-type-handlers-per-column-converters); its converter wins over `fetchAsString` for the columns it selects.
 
@@ -556,7 +559,7 @@ result.rows.first['SALARY']; // '7000' instead of 7000
 result.rows.first['HIRED'];  // '2024-03-05T00:00:00.000'
 ```
 
-- **The converter** receives each non-NULL value exactly as the row would otherwise hold it — `int` / `double` for NUMBER, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz` (on a `preserveTimestampTimeZone: true` connection), the decoded `Map` / `List` for JSON, `List<OracleRow>` for a nested `CURSOR(...)` column, `String` / `Uint8List` for CLOB / BLOB or an `OracleLob` under `fetchLobs: true` — and its return value (any `Object?`, including `null`) becomes the cell. SQL `NULL` stays `null` and the converter is not called. It runs synchronously, once per cell, on every fetch round: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set.
+- **The converter** receives each non-NULL value exactly as the row would otherwise hold it — `int` / `double` for NUMBER, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz` (on a `preserveTimestampTimeZone: true` connection), `OracleIntervalDS` for INTERVAL DAY TO SECOND, the decoded `Map` / `List` for JSON, `List<OracleRow>` for a nested `CURSOR(...)` column, `String` / `Uint8List` for CLOB / BLOB or an `OracleLob` under `fetchLobs: true` — and its return value (any `Object?`, including `null`) becomes the cell. SQL `NULL` stays `null` and the converter is not called. It runs synchronously, once per cell, on every fetch round: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set.
 - **No `type`.** Unlike node-oracledb, the handler cannot change the type Oracle sends: every column is fetched in its native form (no DEFINE, no SQL rewrite) and converted by the driver after decoding — so the result never follows the session's NLS settings. Select `TO_CHAR(col, 'format')` for Oracle's own text. `result.columns` still reports the database type.
 - **Precedence:** a column the handler returns a converter for is converted by that converter only; [`fetchAsString`](#fetching-dates-and-timestamps-as-strings) still applies to the columns the handler returned `null` for. A handler that always returns `null` changes nothing.
 - **Per call:** the handler runs on every `execute()` and nothing is cached, so re-executing a cached statement with a different handler (or none) returns that call's own representation.
@@ -637,6 +640,7 @@ final isAlive = await connection.ping();
 | DATE                      | `DateTime` — or `String` with `fetchAsString` (see [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings)) |
 | TIMESTAMP, TIMESTAMP WITH LOCAL TIME ZONE | `DateTime` — or `String` with `fetchAsString`                  |
 | TIMESTAMP WITH TIME ZONE  | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` (see [Region-id time zones](#region-id-time-zones)), or `String` with `fetchAsString` |
+| INTERVAL DAY TO SECOND    | `OracleIntervalDS` (nanosecond fractional seconds); binds from `OracleIntervalDS` or `Duration` (see [INTERVAL DAY TO SECOND support](#interval-day-to-second-support)) |
 | RAW                       | `Uint8List` (see [RAW support](#raw-support))                                    |
 | CLOB                      | `String` (see [CLOB support](#clob-support), [Character Set Support](#character-set-support)) |
 | BLOB                      | `Uint8List` (see [BLOB support](#blob-support)); a BLOB `IS JSON` column decodes like JSON (see [JSON stored in a BLOB](#json-stored-in-a-blob-is-json)) |
@@ -721,6 +725,50 @@ driver never computes a region's offset):
   offset (e.g. `JSON_ARRAY(ts)`) and 21c may store a `+00:00` offset, in which
   case the member arrives — and decodes — as an ordinary offset value without
   a `regionId`; the instant is the same either way.
+
+### INTERVAL DAY TO SECOND support
+
+`INTERVAL DAY TO SECOND` columns decode to `OracleIntervalDS` (node-oracledb
+`IntervalDS` parity): signed `days`, `hours`, `minutes`, `seconds` and
+`fseconds` (fractional seconds in **nanoseconds**, which a Dart `Duration`
+cannot hold). A negative interval carries the sign on every component.
+
+```dart
+final r = await connection.execute(
+  "SELECT INTERVAL '-2 01:02:03.5' DAY TO SECOND AS iv FROM dual",
+);
+final iv = r.rows.first['IV'] as OracleIntervalDS;
+iv.days;         // -2
+iv.fseconds;     // -500000000
+iv.toDuration(); // Duration (sub-microsecond digits truncated)
+
+// Bind an OracleIntervalDS or a plain Duration (microsecond resolution).
+await connection.execute('INSERT INTO t (iv) VALUES (:1)', [iv]);
+await connection.execute(
+  'INSERT INTO t (iv) VALUES (:1)',
+  [const Duration(hours: 1, minutes: 30)],
+);
+```
+
+- **Construction** — `OracleIntervalDS(days: ..., hours: ..., minutes: ...,
+  seconds: ..., fseconds: ...)` carries seconds into minutes, minutes into
+  hours and hours into days like node-oracledb (`fseconds` is never carried).
+  It throws `ArgumentError` outside `INTERVAL DAY(9) TO SECOND(9)`
+  (±999,999,999 days, ±999,999,999 ns) and — unlike node-oracledb — when
+  components mix signs (`hours: 1, minutes: -30`): Oracle stores such a value
+  verbatim and then renders and compares it inconsistently.
+- **Binds** — IN binds, `executeMany()` rows, PL/SQL OUT / IN OUT
+  (`OracleDbType.intervalDS`, no `maxSize`), DML `RETURNING`, and intervals in
+  REF CURSOR, nested `CURSOR()` and implicit-result rows all use the same
+  11-byte wire form (a bind always carries the full `DAY(9) TO SECOND(9)`
+  range). The server enforces the target column's own precision: a column
+  declared `INTERVAL DAY(2) TO SECOND(6)` rejects too many days with ORA-01873
+  and rounds extra fractional digits to its scale. Known issue (pre-existing,
+  not interval-specific): on Oracle 21c a SQL `NULL` in a REF CURSOR, nested
+  `CURSOR()` or implicit-result row without a LOB or JSON column fails with
+  ORA-01405, so NULL intervals cannot be fetched through cursors there.
+- **Not covered** — `INTERVAL YEAR TO MONTH`, intervals inside native JSON,
+  and `fetchAsString` (which accepts date and timestamp types only).
 
 ### RAW support
 
@@ -1482,7 +1530,7 @@ After the 1.0 release, the project roadmap includes larger API and compatibility
 | -------- | ----------------------------------------------------------------------------------------- |
 | 1        | Extended JSON / OSON parity (interval/VECTOR/`JsonId` JSON scalars, OSON-in-BLOB helpers) |
 | 2        | Optional temporal fetch formatting (fetch-as-string, fetch type handlers); region-id values already decode to the correct instant and their region names resolve through `timeZoneRegionName` |
-| 3        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
+| 3        | Type completeness for `INTERVAL YEAR TO MONTH`, `ROWID` / `UROWID`, and `VECTOR` (`INTERVAL DAY TO SECOND` is supported — see [Supported Data Types](#supported-data-types)) |
 
 ## Tests
 

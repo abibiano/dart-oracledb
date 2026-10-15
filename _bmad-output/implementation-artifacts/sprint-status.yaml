@@ -224,7 +224,7 @@ development_status:
 
   # Epic 15: Extended Data Type Completeness
   epic-15: backlog
-  15-1-interval-day-to-second: backlog
+  15-1-interval-day-to-second: done
   15-2-interval-year-to-month: backlog
   15-3-rowid-urowid: backlog
   15-4-vector: backlog

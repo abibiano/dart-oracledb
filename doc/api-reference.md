@@ -19,6 +19,7 @@ import 'package:oracledb/oracledb.dart';
 | `ColumnMetadata` | `messages/execute_message.dart` | Per-column metadata on a result |
 | `OracleBind`, `OracleDbType`, `OracleOutBinds` | `oracle_bind.dart` | OUT / IN OUT bind specs and results |
 | `OracleTimestampTz` | `oracle_timestamp_tz.dart` | Offset-preserving TIMESTAMP WITH TIME ZONE (region id for named regions) |
+| `OracleIntervalDS` | `oracle_interval.dart` | INTERVAL DAY TO SECOND value (nanosecond fractional seconds) |
 | `OracleException` | `errors.dart` | All driver/server errors |
 | `ora*` constants | `errors.dart`, `protocol/constants.dart` | Well-known Oracle error codes |
 | `TlsConfig` | `transport/tls.dart` | TLS/SSL configuration |
@@ -155,7 +156,7 @@ result.rows.first['SALARY']; // '7000'
   batch — Oracle's duplicate-column copies across rounds are converted from
   the decoded value, never re-converted). Receives the decoded value
   (`int`/`double`, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz`,
-  JSON `Map`/`List`/scalar, `List<OracleRow>` for a nested `CURSOR(...)`
+  `OracleIntervalDS`, JSON `Map`/`List`/scalar, `List<OracleRow>` for a nested `CURSOR(...)`
   column, `String`/`Uint8List` for CLOB/BLOB or `OracleLob` under
   `fetchLobs`); its return value (any `Object?`) becomes the cell. SQL `NULL`
   → `null`, converter not called. A returned `Future` is not awaited.
@@ -278,6 +279,7 @@ type-checked at construction (fails at the call site, not deep in wire encoding)
 | `clob` | `String` | **characters** (UTF-16 units) | wire = LOB locator; `'' → NULL` |
 | `blob` | `Uint8List` | bytes | wire = LOB locator; empty `Uint8List` → empty BLOB (≠ NULL) |
 | `json` | `Map<String,Object?>` / `List<Object?>` / scalar | **OSON bytes** | Oracle 21c+; members (and, with this declared type, a scalar root): null/bool/num/String/`DateTime`/`OracleTimestampTz`/`Uint8List`/nested map+list — everything a JSON fetch returns |
+| `intervalDS` | `OracleIntervalDS` (decoded); `OracleIntervalDS` or `Duration` (input) | — | 11-byte INTERVAL DAY TO SECOND; a `Duration` binds at microsecond resolution; not a `fetchAsString` entry |
 
 **Reading OUT binds:**
 
@@ -330,6 +332,27 @@ the name. `regionId` outside 0..8191 throws `ArgumentError`. `==`, `hashCode`,
 `toString` include `regionId`. Binding is offset-only: `regionId` is ignored,
 so a decoded region value binds back at `+00:00` without its region. See
 [oracle_timestamp_tz.dart](../lib/src/oracle_timestamp_tz.dart).
+
+## `OracleIntervalDS`
+
+```dart
+OracleIntervalDS({int days = 0, int hours = 0, int minutes = 0, int seconds = 0, int fseconds = 0});
+OracleIntervalDS.fromDuration(Duration duration);
+final int days, hours, minutes, seconds; // normalized, one shared sign
+final int fseconds;                       // fractional seconds in nanoseconds
+Duration toDuration();                    // sub-microsecond digits truncated
+```
+
+`INTERVAL DAY TO SECOND` value (node-oracledb `IntervalDS` parity). The
+constructor carries seconds → minutes → hours → days with truncating division
+(`fseconds` is never carried) and throws `ArgumentError` outside
+`INTERVAL DAY(9) TO SECOND(9)` (±999,999,999 days or ns) or when components
+mix signs (Oracle stores those verbatim and renders them inconsistently).
+`==`/`hashCode` compare the normalized components; `toString()` renders
+`OracleIntervalDS(+3 04:05:06.123456789)`. `toDuration()` throws `RangeError`
+beyond a `Duration`'s range (about ±106.75 million days). Binds as
+INTERVAL DAY TO SECOND (inferred, or `OracleDbType.intervalDS`), as does a
+plain `Duration`. See [oracle_interval.dart](../lib/src/oracle_interval.dart).
 
 ## `TlsConfig`
 

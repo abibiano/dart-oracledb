@@ -13,6 +13,7 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 
 import 'package:oracledb/src/errors.dart';
+import 'package:oracledb/src/oracle_interval.dart';
 import 'package:oracledb/src/oracle_timestamp_tz.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
@@ -6532,6 +6533,238 @@ void main() {
       expect(loc.oracleType, equals(oraTypeClob));
       expect(loc.length, equals(7));
       expect(loc.chunkSize, equals(8060));
+    });
+  });
+
+  group('INTERVAL DAY TO SECOND (type 183, Story 15.1)', () {
+    final iv = OracleIntervalDS(
+      days: 3,
+      hours: 4,
+      minutes: 5,
+      seconds: 6,
+      fseconds: 123456789,
+    );
+    // node-oracledb writeOracleIntervalDS bytes for `iv`.
+    const ivWire = [0x80, 0, 0, 3, 0x40, 0x41, 0x42, 0x87, 0x5B, 0xCD, 0x15];
+
+    /// Bind metadata block for a type-183 bind: buffer size 11
+    /// (node-oracledb bufferSizeFactor), no charset, no LOB prefetch.
+    const intervalMetadata = [
+      oraTypeIntervalDS, ttcBindUseIndicators, 0, 0,
+      1, 11, // UB4 buffer size = 11
+      0, // max num elements
+      0, // contFlag
+      0, // OID
+      0, // version
+      0, // UB2 charset = 0
+      0, // csfrm = 0
+      0, // prefetch length
+      0, // oaccolid
+    ];
+
+    test('OracleIntervalDS and Duration infer type 183', () {
+      expect(BindVariable(value: iv).oraType, equals(oraTypeIntervalDS));
+      expect(
+        BindVariable(value: const Duration(minutes: 1)).oraType,
+        equals(oraTypeIntervalDS),
+      );
+    });
+
+    test('an OracleIntervalDS IN bind writes the 11-byte value', () {
+      final bytes = ExecuteRequest(
+        sql: 'INSERT INTO t (iv) VALUES (:1)',
+        isQuery: false,
+        bindValues: [iv],
+      ).toBytes();
+      expect(_indexOfSub(bytes, intervalMetadata), greaterThanOrEqualTo(0));
+      expect(
+        _indexOfSub(bytes, [11, ...ivWire]),
+        greaterThanOrEqualTo(0),
+        reason: 'length-prefixed interval value not found in request',
+      );
+    });
+
+    test('a Duration IN bind writes the interval it spans', () {
+      final bytes = ExecuteRequest(
+        sql: 'INSERT INTO t (iv) VALUES (:1)',
+        isQuery: false,
+        bindValues: [const Duration(days: -1, hours: -2, microseconds: -5)],
+      ).toBytes();
+      // days -1, hours -2, minutes 0, seconds 0, fseconds -5000 ns.
+      const durationWire = [
+        0x7F, 0xFF, 0xFF, 0xFF, 58, 60, 60, //
+        0x7F, 0xFF, 0xEC, 0x78,
+      ];
+      expect(_indexOfSub(bytes, intervalMetadata), greaterThanOrEqualTo(0));
+      expect(
+        _indexOfSub(bytes, [11, ...durationWire]),
+        greaterThanOrEqualTo(0),
+      );
+    });
+
+    test('an interval OUT bind declares the 11-byte buffer', () {
+      final bytes = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: null,
+            oraType: oraTypeIntervalDS,
+            dir: BindDir.output,
+          ),
+        ],
+      ).toBytes();
+      expect(_indexOfSub(bytes, intervalMetadata), greaterThanOrEqualTo(0));
+    });
+
+    test('a wrong Dart value under the interval type fails loud', () {
+      final req = ExecuteRequest(
+        sql: 'INSERT INTO t (iv) VALUES (:1)',
+        isQuery: false,
+        bindValues: [BindVariable(value: 5, oraType: oraTypeIntervalDS)],
+      );
+      expect(
+        req.toBytes,
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+              .having((e) => e.message, 'message', contains('int')),
+        ),
+      );
+    });
+
+    test('a column decodes to OracleIntervalDS and the row stays in sync', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(ivWire),
+          ..._bytesWithLength(_oracleNumberFiveBytes()), // N = 5 after it
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      const columns = [
+        ColumnMetadata(name: 'IV', oracleType: oraTypeIntervalDS, maxLength: 0),
+        ColumnMetadata(name: 'N', oracleType: oraTypeNumber, maxLength: 0),
+      ];
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: columns,
+      );
+      expect(r.rows.single[0], equals(iv));
+      expect(r.rows.single[1], equals(5));
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+    });
+
+    test('a NULL interval column decodes to null', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [ttcMsgTypeRowData, 0, ..._bytesWithLength(_oracleNumberFiveBytes())],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: const [
+          ColumnMetadata(
+            name: 'IV',
+            oracleType: oraTypeIntervalDS,
+            maxLength: 0,
+          ),
+          ColumnMetadata(name: 'N', oracleType: oraTypeNumber, maxLength: 0),
+        ],
+      );
+      expect(r.rows.single, equals([null, 5]));
+    });
+
+    test('a malformed interval fails loud only in the strict pass', () {
+      // 8 bytes: the probe consumes them and reaches the terminal message;
+      // the strict decode rejects the payload instead of guessing.
+      final payload = _buildPayload([
+        _rowHeader(),
+        [ttcMsgTypeRowData, ..._bytesWithLength(ivWire.sublist(0, 8))],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      const columns = [
+        ColumnMetadata(name: 'IV', oracleType: oraTypeIntervalDS, maxLength: 0),
+      ];
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: columns,
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraProtocolError,
+          ),
+        ),
+      );
+    });
+
+    test('an interval OUT bind decodes through outBindValues', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(ivWire),
+          ..._ub4(0), // SB4 actualNumBytes trailer
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeIntervalDS, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindValues.single, equals(iv));
+    });
+
+    test('a define block declares the 11-byte interval buffer', () {
+      final bytes = ExecuteRequest(
+        sql: 'SELECT iv, c FROM t',
+        isQuery: true,
+        cursorId: 9,
+        defineColumns: const [
+          ColumnMetadata(
+            name: 'IV',
+            oracleType: oraTypeIntervalDS,
+            maxLength: 0,
+          ),
+          ColumnMetadata(name: 'C', oracleType: oraTypeClob, maxLength: 0),
+        ],
+      ).toBytes();
+      expect(_indexOfSub(bytes, intervalMetadata), greaterThanOrEqualTo(0));
+    });
+
+    test('an embedded cursor describe accepts an interval column', () {
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (
+            columns: [
+              _columnInfo(name: 'IV', oraType: oraTypeIntervalDS, maxSize: 0),
+            ],
+            cursorId: 612,
+          ),
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      final result = r.implicitResults.single;
+      expect(result.cursorId, equals(612));
+      expect(result.columns.single.oracleType, equals(oraTypeIntervalDS));
     });
   });
 }

@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:oracledb/src/errors.dart';
+import 'package:oracledb/src/oracle_interval.dart';
 import 'package:oracledb/src/oracle_timestamp_tz.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
@@ -1320,11 +1321,19 @@ void main() {
         inferOraTypeForValue(Uint8List.fromList([1, 2])),
         equals(oraTypeRaw),
       );
+      expect(
+        inferOraTypeForValue(OracleIntervalDS(days: 1)),
+        equals(oraTypeIntervalDS),
+      );
+      expect(
+        inferOraTypeForValue(const Duration(seconds: 1)),
+        equals(oraTypeIntervalDS),
+        reason: 'a Dart Duration binds as INTERVAL DAY TO SECOND (Story 15.1)',
+      );
     });
 
     test('returns null for unsupported Dart types', () {
       expect(inferOraTypeForValue(Object()), isNull);
-      expect(inferOraTypeForValue(const Duration(seconds: 1)), isNull);
       // Top-level bool binds stay unsupported: Oracle has no SQL BOOLEAN
       // bind in this driver's scope (bools are valid JSON *members* only).
       expect(inferOraTypeForValue(true), isNull);
@@ -1507,6 +1516,153 @@ void main() {
     test('rejects an invalid payload length', () {
       expect(
         () => decodeBinaryFloatingPoint([1, 2, 3]),
+        throwsA(isA<OracleException>()),
+      );
+    });
+  });
+
+  group('INTERVAL DAY TO SECOND codec', () {
+    Uint8List bytes(List<int> b) => Uint8List.fromList(b);
+
+    Matcher protocolError(String fragment) => throwsA(
+      isA<OracleException>()
+          .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+          .having((e) => e.message, 'message', contains(fragment)),
+    );
+
+    // node-oracledb writeOracleIntervalDS: UInt32BE(days + 0x80000000),
+    // hours/minutes/seconds + 60, UInt32BE(fseconds + 0x80000000).
+    final vectors = <String, (OracleIntervalDS, List<int>)>{
+      "INTERVAL '3 04:05:06.123456789'": (
+        OracleIntervalDS(
+          days: 3,
+          hours: 4,
+          minutes: 5,
+          seconds: 6,
+          fseconds: 123456789,
+        ),
+        [0x80, 0, 0, 3, 0x40, 0x41, 0x42, 0x87, 0x5B, 0xCD, 0x15],
+      ),
+      "INTERVAL '-2 01:02:03.5'": (
+        OracleIntervalDS(
+          days: -2,
+          hours: -1,
+          minutes: -2,
+          seconds: -3,
+          fseconds: -500000000,
+        ),
+        [0x7F, 0xFF, 0xFF, 0xFE, 0x3B, 0x3A, 0x39, 0x62, 0x32, 0x9B, 0x00],
+      ),
+      'zero': (
+        OracleIntervalDS(),
+        [0x80, 0, 0, 0, 0x3C, 0x3C, 0x3C, 0x80, 0, 0, 0],
+      ),
+      'max DAY(9) TO SECOND(9)': (
+        OracleIntervalDS(
+          days: 999999999,
+          hours: 23,
+          minutes: 59,
+          seconds: 59,
+          fseconds: 999999999,
+        ),
+        [0xBB, 0x9A, 0xC9, 0xFF, 0x53, 0x77, 0x77, 0xBB, 0x9A, 0xC9, 0xFF],
+      ),
+      'min DAY(9) TO SECOND(9)': (
+        OracleIntervalDS(
+          days: -999999999,
+          hours: -23,
+          minutes: -59,
+          seconds: -59,
+          fseconds: -999999999,
+        ),
+        [0x44, 0x65, 0x36, 0x01, 0x25, 0x01, 0x01, 0x44, 0x65, 0x36, 0x01],
+      ),
+    };
+
+    for (final MapEntry(key: label, value: (value, wire)) in vectors.entries) {
+      test('$label encodes to the node-oracledb wire bytes and back', () {
+        expect(encodeIntervalDS(value), equals(wire));
+        expect(decodeIntervalDS(bytes(wire)), equals(value));
+      });
+    }
+
+    test('decodes the server-captured INTERVAL \'3 04:05:06\' payload', () {
+      // The 11 value bytes of the OSON INTERVAL DS node the server sent for
+      // JSON_SCALAR(INTERVAL '3 04:05:06' DAY TO SECOND) on 23ai and 21c
+      // (oson_test.dart): the same layout as a column value.
+      final value = decodeIntervalDS(
+        bytes([0x80, 0, 0, 3, 0x40, 0x41, 0x42, 0x80, 0, 0, 0]),
+      );
+      expect(value.days, equals(3));
+      expect(value.hours, equals(4));
+      expect(value.minutes, equals(5));
+      expect(value.seconds, equals(6));
+      expect(value.fseconds, equals(0));
+    });
+
+    test('a negative sub-second interval keeps its sign', () {
+      final value = OracleIntervalDS(fseconds: -500000000);
+      final decoded = decodeIntervalDS(encodeIntervalDS(value));
+      expect(decoded, equals(value));
+      expect(decoded.fseconds, equals(-500000000));
+      expect(decoded.days, equals(0));
+    });
+
+    test('encode writes exactly intervalDSWireLength bytes', () {
+      expect(intervalDSWireLength, equals(11));
+      expect(
+        encodeIntervalDS(OracleIntervalDS(days: 1)),
+        hasLength(intervalDSWireLength),
+      );
+    });
+
+    test('rejects a payload that is not exactly 11 bytes', () {
+      expect(
+        () => decodeIntervalDS(bytes([0x80, 0, 0, 3, 0x40, 0x41, 0x42, 0x80])),
+        protocolError('has 8 bytes (expected 11)'),
+      );
+      expect(
+        () => decodeIntervalDS(
+          bytes([0x80, 0, 0, 0, 0x3C, 0x3C, 0x3C, 0x80, 0, 0, 0, 0]),
+        ),
+        protocolError('has 12 bytes (expected 11)'),
+      );
+      expect(() => decodeIntervalDS(Uint8List(0)), protocolError('0 bytes'));
+    });
+
+    test('rejects out-of-range component bytes as a protocol error', () {
+      // Each payload flips one field of the zero interval out of range.
+      final malformed = <String, List<int>>{
+        'hours 24': [0x80, 0, 0, 0, 84, 0x3C, 0x3C, 0x80, 0, 0, 0],
+        'hours -24': [0x7F, 0xFF, 0xFF, 0xFF, 36, 0x3C, 0x3C, 0x80, 0, 0, 0],
+        'minutes 60': [0x80, 0, 0, 0, 0x3C, 120, 0x3C, 0x80, 0, 0, 0],
+        'seconds -60': [0x7F, 0xFF, 0xFF, 0xFF, 0x3C, 0x3C, 0, 0x80, 0, 0, 0],
+        'days 1000000000': [
+          0xBB, 0x9A, 0xCA, 0x00, 0x3C, 0x3C, 0x3C, 0x80, 0, 0, 0, //
+        ],
+        'fseconds 1000000000': [
+          0x80, 0, 0, 0, 0x3C, 0x3C, 0x3C, 0xBB, 0x9A, 0xCA, 0x00, //
+        ],
+        'mixed signs (days 1, hours -1)': [
+          0x80, 0, 0, 1, 59, 0x3C, 0x3C, 0x80, 0, 0, 0, //
+        ],
+      };
+      for (final MapEntry(key: label, value: wire) in malformed.entries) {
+        expect(
+          () => decodeIntervalDS(bytes(wire)),
+          protocolError('out of range'),
+          reason: label,
+        );
+      }
+    });
+
+    test('decode never surfaces the wrapper ArgumentError', () {
+      // Mixed-sign bytes are exactly what the constructor would reject with
+      // ArgumentError; the decoder must answer with OracleException first.
+      expect(
+        () => decodeIntervalDS(
+          bytes([0x80, 0, 0, 0, 61, 59, 0x3C, 0x80, 0, 0, 0]),
+        ),
         throwsA(isA<OracleException>()),
       );
     });

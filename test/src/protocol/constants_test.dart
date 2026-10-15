@@ -61,6 +61,10 @@ void main() {
       expect(oraTypeTimestampTz, equals(181));
       expect(oraTypeTimestampLtz, equals(231));
     });
+
+    test('interval types match node-oracledb TNS_DATA_TYPE_INTERVAL_*', () {
+      expect(oraTypeIntervalDS, equals(183));
+    });
   });
 
   group('Protocol Capability Flags', () {

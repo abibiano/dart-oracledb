@@ -12,6 +12,7 @@ import 'dart:typed_data';
 import 'package:meta/meta.dart';
 
 import '../../errors.dart';
+import '../../oracle_interval.dart';
 import '../../oracle_timestamp_tz.dart';
 import '../buffer.dart';
 import '../constants.dart';
@@ -117,7 +118,8 @@ class BindVariable {
         message:
             'Unsupported bind value type: ${value.runtimeType}. '
             'Supported types: String, int, double, DateTime, '
-            'OracleTimestampTz, Uint8List, Map, List, null',
+            'OracleTimestampTz, OracleIntervalDS, Duration, Uint8List, Map, '
+            'List, null',
       );
     }
     return oraType;
@@ -727,6 +729,8 @@ class ExecuteRequest extends Message {
         return 11;
       case oraTypeTimestampTz:
         return 13;
+      case oraTypeIntervalDS:
+        return dt.intervalDSWireLength;
       case oraTypeCursor:
         // Cursor-valued SELECT columns (the `CURSOR(SELECT ...)` subquery
         // shape). node-oracledb DB_TYPE_CURSOR.bufferSizeFactor = 4; the
@@ -819,6 +823,25 @@ class ExecuteRequest extends Message {
           ),
         );
         return;
+      case oraTypeIntervalDS:
+        // A Dart Duration binds as the interval it spans (microsecond
+        // resolution); an OracleIntervalDS carries nanoseconds.
+        if (value is OracleIntervalDS) {
+          buffer.writeBytesWithLength(dt.encodeIntervalDS(value));
+          return;
+        }
+        if (value is Duration) {
+          buffer.writeBytesWithLength(
+            dt.encodeIntervalDS(OracleIntervalDS.fromDuration(value)),
+          );
+          return;
+        }
+        throw OracleException(
+          errorCode: oraBindTypeError,
+          message:
+              'INTERVAL DAY TO SECOND bind requires OracleIntervalDS or '
+              'Duration (got ${value.runtimeType})',
+        );
       case oraTypeClob:
       case oraTypeBlob:
         // CLOB/BLOB binds put a locator on the wire, never the value bytes
@@ -950,6 +973,8 @@ class ExecuteRequest extends Message {
         return 11;
       case oraTypeTimestampTz:
         return 13;
+      case oraTypeIntervalDS:
+        return dt.intervalDSWireLength;
       default:
         return 1;
     }
@@ -2286,6 +2311,14 @@ Object? _decodeValueByOraType(
       if (bytes.isEmpty) return null;
       if (!strict) return null; // probe pass: bytes consumed, value unused
       return dt.decodeTimestamp(ReadBuffer(bytes));
+    case oraTypeIntervalDS:
+      // node-oracledb readOracleIntervalDS: length-prefixed 11-byte value,
+      // zero length = SQL NULL. The decoder fails loud on a malformed
+      // payload, so the probe pass stops after consuming the bytes.
+      final bytes = buf.readBytesWithLength();
+      if (bytes.isEmpty) return null;
+      if (!strict) return null; // probe pass: bytes consumed, value unused
+      return dt.decodeIntervalDS(bytes);
     case oraTypeClob:
     case oraTypeBlob:
     case oraTypeBfile:
@@ -2605,6 +2638,7 @@ bool _isSupportedRefCursorColumn(ColumnMetadata col) {
     case oraTypeTimestamp:
     case oraTypeTimestampLtz:
     case oraTypeTimestampTz:
+    case oraTypeIntervalDS:
     case oraTypeBlob:
     case oraTypeJson:
       return true;

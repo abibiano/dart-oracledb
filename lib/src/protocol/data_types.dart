@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import '../errors.dart';
+import '../oracle_interval.dart';
 import '../oracle_timestamp_tz.dart';
 import 'buffer.dart';
 import 'constants.dart';
@@ -833,6 +834,109 @@ _TimestampWire _readTimestampWire(ReadBuffer buffer) {
 }
 
 // ============================================================================
+// Oracle INTERVAL DAY TO SECOND Encoding/Decoding
+// ============================================================================
+
+/// Wire length of an `INTERVAL DAY TO SECOND` value (node-oracledb
+/// `DB_TYPE_INTERVAL_DS` bufferSizeFactor).
+const int intervalDSWireLength = 11;
+
+/// Bias added to the 32-bit day and fractional-second fields
+/// (node-oracledb `TNS_DURATION_MID`).
+const int _durationMid = 0x80000000;
+
+/// Bias added to the one-byte hour, minute and second fields
+/// (node-oracledb `TNS_DURATION_OFFSET`).
+const int _durationOffset = 60;
+
+/// Encodes an [OracleIntervalDS] to the 11-byte Oracle `INTERVAL DAY TO
+/// SECOND` wire format, byte-for-byte with node-oracledb
+/// `writeOracleIntervalDS`:
+/// - Bytes 0-3: days + 0x80000000 (UInt32 big-endian)
+/// - Byte 4: hours + 60
+/// - Byte 5: minutes + 60
+/// - Byte 6: seconds + 60
+/// - Bytes 7-10: fseconds (nanoseconds) + 0x80000000 (UInt32 big-endian)
+///
+/// The wrapper's range checks keep every field inside its wire width.
+Uint8List encodeIntervalDS(OracleIntervalDS value) {
+  final data = ByteData(intervalDSWireLength)
+    ..setUint32(0, value.days + _durationMid)
+    ..setUint8(4, value.hours + _durationOffset)
+    ..setUint8(5, value.minutes + _durationOffset)
+    ..setUint8(6, value.seconds + _durationOffset)
+    ..setUint32(7, value.fseconds + _durationMid);
+  return data.buffer.asUint8List();
+}
+
+/// Decodes the 11-byte Oracle `INTERVAL DAY TO SECOND` wire format into an
+/// [OracleIntervalDS] (node-oracledb `parseOracleIntervalDS`).
+///
+/// The server always sends all 11 bytes — a zero interval included (its
+/// fractional-second field is `80 00 00 00`, yet it is not
+/// trailing-zero-truncated like a TIMESTAMP; verified on 23ai and 21c).
+///
+/// node-oracledb reads the fields without checking them. This decoder
+/// fails loud instead: a payload that is not exactly 11 bytes, or whose
+/// fields fall outside an `INTERVAL DAY(9) TO SECOND(9)` value (days or
+/// fseconds beyond ±999,999,999, hours beyond ±23, minutes or seconds
+/// beyond ±59, components of opposite signs), throws [OracleException]
+/// (`oraProtocolError`) — a misaligned stream or protocol drift is never
+/// turned into a plausible-looking interval, and the wrapper's
+/// [ArgumentError] can never surface from a decode path. Oracle's own
+/// arithmetic always yields same-signed components; a mixed-sign value can
+/// only be one another client stored verbatim, which Oracle itself renders
+/// inconsistently (see [OracleIntervalDS]).
+OracleIntervalDS decodeIntervalDS(Uint8List bytes) {
+  if (bytes.length != intervalDSWireLength) {
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message:
+          'INTERVAL DAY TO SECOND field has ${bytes.length} bytes '
+          '(expected $intervalDSWireLength)',
+    );
+  }
+  final data = ByteData.sublistView(bytes);
+  final days = data.getUint32(0) - _durationMid;
+  final hours = data.getUint8(4) - _durationOffset;
+  final minutes = data.getUint8(5) - _durationOffset;
+  final seconds = data.getUint8(6) - _durationOffset;
+  final fseconds = data.getUint32(7) - _durationMid;
+  const maxNine = 999999999;
+  final hasPositive =
+      days > 0 || hours > 0 || minutes > 0 || seconds > 0 || fseconds > 0;
+  final hasNegative =
+      days < 0 || hours < 0 || minutes < 0 || seconds < 0 || fseconds < 0;
+  if (days < -maxNine ||
+      days > maxNine ||
+      hours < -23 ||
+      hours > 23 ||
+      minutes < -59 ||
+      minutes > 59 ||
+      seconds < -59 ||
+      seconds > 59 ||
+      fseconds < -maxNine ||
+      fseconds > maxNine ||
+      (hasPositive && hasNegative)) {
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message:
+          'INTERVAL DAY TO SECOND field out of range: days $days, hours '
+          '$hours, minutes $minutes, seconds $seconds, fseconds $fseconds',
+    );
+  }
+  // In-range, same-signed components are already normalized, so the
+  // constructor stores them unchanged.
+  return OracleIntervalDS(
+    days: days,
+    hours: hours,
+    minutes: minutes,
+    seconds: seconds,
+    fseconds: fseconds,
+  );
+}
+
+// ============================================================================
 // VARCHAR2/String Encoding/Decoding
 // ============================================================================
 
@@ -879,6 +983,10 @@ String decodeVarchar(ReadBuffer buffer, int length) {
 /// `Map` and `List` map to native JSON (OSON, type 119). The
 /// `Uint8List` check must stay ahead of the `List` check: plain bytes are
 /// RAW, never JSON.
+///
+/// [OracleIntervalDS] and Dart [Duration] both map to `INTERVAL DAY TO
+/// SECOND` (a [Duration] is converted with [OracleIntervalDS.fromDuration]
+/// when encoded), so the two can share one `executeMany()` slot.
 int? inferOraTypeForValue(Object? value) {
   if (value == null) return oraTypeVarchar;
   if (value is String) return oraTypeVarchar;
@@ -886,6 +994,8 @@ int? inferOraTypeForValue(Object? value) {
   if (value is double) return oraTypeNumber;
   if (value is DateTime) return oraTypeDate;
   if (value is OracleTimestampTz) return oraTypeTimestampTz;
+  if (value is OracleIntervalDS) return oraTypeIntervalDS;
+  if (value is Duration) return oraTypeIntervalDS;
   if (value is Uint8List) return oraTypeRaw;
   if (value is Map) return oraTypeJson;
   if (value is List) return oraTypeJson;

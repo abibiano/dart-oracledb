@@ -446,16 +446,19 @@ void main() {
         'a genuinely unsupported column type in an implicit-result describe '
         'still fails loud AND reaps the cursor id — both envs (B2 preserved)',
         () async {
-          // INTERVAL DAY TO SECOND is not a supported embedded-describe column
-          // type. An implicit result projecting it fails loud at decode time
-          // (before any FETCH), reaping the implicit cursor id (B2).
+          // BFILE is not a supported embedded-describe column type (an
+          // INTERVAL DAY TO SECOND column served here until Story 15.1 made
+          // it decodable). An implicit result projecting it fails loud at
+          // decode time (before any FETCH), reaping the implicit cursor id
+          // (B2). BFILENAME only builds a locator, so the directory and file
+          // need not exist.
           final unsupportedBlock =
               '''
             DECLARE
               c_impl SYS_REFCURSOR;
             BEGIN
               OPEN c_impl FOR
-                SELECT p.id, TO_DSINTERVAL('1 02:03:04') AS iv
+                SELECT p.id, BFILENAME('DATA_PUMP_DIR', 'none.txt') AS bf
                 FROM $parentTab p
                 ORDER BY p.id;
               DBMS_SQL.RETURN_RESULT(c_impl);

@@ -1081,3 +1081,11 @@ source_spec: `14-1-tstz-region-name-decode.md`
 severity: low
 reason: Agent-context file; the story's fix edits agent-context, so it is deferred. Regenerate or edit project-context.md to say region-id TSTZ decodes to the UTC instant at +00:00.
 status: open
+
+### DW-138: On Oracle 21c a SQL NULL of any type in a REF CURSOR / nested CURSOR() / implicit-result row without a LOB or JSON column fails the whole call with ORA-01405.
+origin: spec-deferred 75e847c35a29
+location: lib/src/connection.dart ResultSetCursor constructions for REF CURSOR OUT binds (~L1088), nested cursors (~L1299) and implicit results (~L1412, ~L1531): `requiresFullExecute`
+source_spec: `15-1-interval-day-to-second.md`
+severity: high
+reason: Found while writing the 15.1 embedded-cursor tests; not interval-specific. Live probe on 21c (XEPDB1): an implicit result or nested CURSOR() projecting CAST(NULL AS NUMBER | DATE | TIMESTAMP | TIMESTAMP WITH TIME ZONE | BINARY_DOUBLE | RAW | INTERVAL DAY TO SECOND) fails with ORA-01405 "fetched column value is NULL", as did a REF CURSOR OUT bind whose rows held a NULL interval (first draft of the 15.1 suite); the same queries pass on 23ai, and on 21c too once a CLOB column forces the DEFINE round. Root cause: the first fetch of a describe-created cursor is a plain OFETCH unless the cursor has nested CURSOR() columns, whereas node-oracledb `createCursorFromDescribe` always sets `requiresFullExecute`. Verified remedy: forcing `requiresFullExecute: true` on the eager implicit-result ResultSetCursor made every NULL row above decode on 21c (diagnostic change, reverted). Left out of 15.1: it changes the fetch protocol for every describe-created cursor, outside this story's code map. The 15.1
+status: open
