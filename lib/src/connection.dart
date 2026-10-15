@@ -3796,6 +3796,12 @@ class OracleConnection {
                 outBindIndices: response.outBindIndices,
                 // Single-execute DML RETURNING: the one iteration's cells,
                 // each a List of the returned values (one per affected row).
+                // An absent row falls back to one empty list per RETURNING
+                // bind. A zero-row response normally carries a count-0
+                // ROW_DATA, but an absent row is tolerated too; a response with
+                // rowsAffected > 0 but no ROW_DATA has not been observed on
+                // 23ai/21c. It is pinned as lenient (empty lists, no throw)
+                // by connection_execute_many_test.dart (DW-136).
                 values: stmt.dmlReturning
                     ? (response.outBindRows.isEmpty
                           ? [

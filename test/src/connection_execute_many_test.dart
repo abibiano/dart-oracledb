@@ -1157,6 +1157,64 @@ void main() {
       expect(result.outBinds[0], equals(42));
     });
 
+    test('single-execute DML RETURNING: rowsAffected without any OUT bind '
+        'row falls back to empty lists (DW-136 pin)', () async {
+      // Protocol fixture for the anomalous shape: a successful response that
+      // reports affected rows but carries no ROW_DATA for the RETURNING bind.
+      // This synthetic response pins the connection fallback; it does not
+      // establish whether either Oracle version can send this wire shape.
+      // The driver keeps the lenient empty-list behavior instead of throwing.
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 3,
+          outBindIndices: const [0, 1],
+        ),
+      );
+      final result = await conn
+          .execute('UPDATE t SET n = n + 1 RETURNING id, n INTO :rid, :rn', {
+            'rid': OracleBind.out(type: OracleDbType.number),
+            'rn': OracleBind.out(type: OracleDbType.number),
+          });
+      expect(result.rowsAffected, equals(3));
+      expect(result.outBinds['rid'], equals(isEmpty));
+      expect(result.outBinds['rn'], equals(isEmpty));
+    });
+
+    test('single-execute DML RETURNING: a count-0 ROW_DATA row and a missing '
+        'row produce the same empty result', () async {
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 0,
+          outBindIndices: const [0],
+          outBindRows: const [
+            [<Object?>[]],
+          ],
+        ),
+      );
+      final result = await conn.execute(
+        'DELETE FROM t WHERE id = -1 RETURNING id INTO :rid',
+        {'rid': OracleBind.out(type: OracleDbType.number)},
+      );
+      expect(result.rowsAffected, equals(0));
+      expect(result.outBinds['rid'], equals(isEmpty));
+
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 0,
+          outBindIndices: const [0],
+        ),
+      );
+      final missingRowResult = await conn.execute(
+        'DELETE FROM t WHERE id = -1 RETURNING id INTO :rid',
+        {'rid': OracleBind.out(type: OracleDbType.number)},
+      );
+      expect(missingRowResult.rowsAffected, equals(result.rowsAffected));
+      expect(missingRowResult.outBinds['rid'], equals(result.outBinds['rid']));
+    });
+
     test('N>1 (REEXECUTE) row-major OUT results and cursor lifecycle are '
         'unaffected by the new batchErrors/dmlRowCounts options '
         '(regression)', () async {

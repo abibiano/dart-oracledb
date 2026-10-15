@@ -1070,4 +1070,6 @@ origin: spec-deferred ce3c499b82e9
 location: lib/src/connection.dart:3799
 source_spec: `spec-single-execute-dml-returning-binds.md`
 reason: The empty-row fallback would expose empty lists in that response shape. Both Oracle integration runs returned OUT data when rows were affected; a protocol fixture or server trace showing the anomalous response would settle reachability.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-dml-returning-empty-outbind-row
+resolution-undo: 8d36573e31d13b9d243c252480d9cfa367d8ba1dfb9a0c06967caf05a80c894c 2026-10-15 7374617475733a206f70656e
