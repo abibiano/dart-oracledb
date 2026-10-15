@@ -219,7 +219,7 @@ development_status:
   14-2-region-name-preservation: done
   14-3-fetch-as-string: done
   14-4-fetch-type-handler-hooks: done
-  14-5-dual-env-integration-tests: backlog
+  14-5-dual-env-integration-tests: done
   epic-14-retrospective: optional
 
   # Epic 15: Extended Data Type Completeness
