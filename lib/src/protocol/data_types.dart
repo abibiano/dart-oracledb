@@ -523,15 +523,15 @@ Uint8List encodeTimestamp(DateTime dt) {
 }
 
 /// Encodes an [OracleTimestampTz] to the 13-byte Oracle `TIMESTAMP WITH TIME
-/// ZONE` wire format, preserving the original offset.
+/// ZONE` wire format, preserving the wrapper's numeric offset.
 ///
 /// Bytes 0-10 carry the **UTC instant** (the server interprets TSTZ fields
 /// as UTC — same convention as the decode direction and node-oracledb's
 /// `writeOracleDate`, which writes `getUTC*()` components for TSTZ); byte 11
 /// is `tzHour + 20` and byte 12 is `tzMinute + 60`. node-oracledb always
 /// writes `+00:00` zone bytes for a bound Date; carrying the wrapper's
-/// original offset instead is exactly what preserves the zone across a
-/// SELECT → bind round-trip.
+/// offset instead preserves a numeric-offset zone across a SELECT → bind
+/// round-trip. A decoded region-id value binds at `+00:00`.
 Uint8List encodeTimestampTz(OracleTimestampTz value) {
   // value.utc is UTC-flagged, so encodeTimestamp's component reads
   // (.year/.hour/…) yield the UTC field values the server expects.
@@ -555,25 +555,31 @@ Uint8List encodeTimestampTz(OracleTimestampTz value) {
 /// The TZ bytes of a `TIMESTAMP WITH TIME ZONE` value, however, encode the
 /// offset as `hour + 20` / `minute + 60` — never zero, even for `+00:00`
 /// (bytes 20/60) — so a TSTZ payload always carries all 13 bytes and the
-/// fractional bytes can only be "missing" on non-TZ payloads.
+/// fractional bytes can only be "missing" on non-TZ payloads. A region-id
+/// zone's byte 12 *can* be `0x00` (e.g. `Africa/Windhoek` = `0x81 0x00`), yet
+/// the server still sends the full 13 bytes (verified live on 23ai and 21c
+/// across every region name), so the same holds.
 ///
 /// **Time-zone handling (13-byte payload):** for `TIMESTAMP WITH TIME ZONE`
 /// the server sends the date/time fields **already normalized to UTC**; byte
-/// 11 (`tzHour + 20`) and byte 12 (`tzMinute + 60`) carry the original zone
-/// as presentation metadata only (verified against a live server and
+/// 11-12 carry a numeric offset or region identifier as presentation metadata
+/// only (verified against a live server and
 /// node-oracledb's `parseOracleDate`, which reads the fields as UTC and
 /// discards the zone bytes). The returned [DateTime] is therefore the field
 /// values constructed directly in UTC — the absolute instant is preserved
 /// and the zone is dropped. Use a `preserveTimestampTimeZone: true`
-/// connection ([decodeTimestampTz]) to keep the zone.
+/// connection ([decodeTimestampTz]) to keep a numeric offset; a region-id
+/// value reports `+00:00`.
 /// ⚠️ An earlier revision shipped this path as `wallClock - offset`,
 /// double-applying the offset and shifting every TSTZ instant; it has since
 /// been corrected.
-/// When `byte11 & 0x80 != 0`, byte 11 encodes a *region id* (e.g.
-/// `'America/Los_Angeles'`) rather than a numeric offset; the region table is
-/// not bundled with the driver, so this case raises [OracleException]
-/// (`oraUnsupportedType`) instead of misinterpreting the value as a numeric
-/// offset.
+///
+/// **Region-id zones:** when `byte11 & 0x80 != 0`, bytes 11-12 encode a
+/// *region id* (e.g. `'Europe/Madrid'`) rather than a numeric offset. The
+/// fields are still the UTC instant, so such a value decodes exactly like an
+/// offset value — to the UTC [DateTime] — with the region bytes ignored, as
+/// in node-oracledb `parseOracleDate` (no region table is bundled or
+/// consulted). The offset-range check applies to numeric offsets only.
 ///
 /// **Sub-microsecond contract:** Oracle TIMESTAMP carries nanosecond
 /// precision; Dart [DateTime] supports only microseconds. Sub-microsecond
@@ -589,9 +595,10 @@ DateTime decodeTimestamp(ReadBuffer buffer) {
   final w = _readTimestampWire(buffer);
 
   if (w.tzHourOffset != null) {
-    // 13-byte TSTZ payload: the fields are already UTC (the offset bytes are
-    // presentation metadata — see the doc comment above). Return them as the
-    // UTC instant directly; subtracting the offset here would double-apply it.
+    // 13-byte TSTZ payload: the fields are already UTC (the zone bytes —
+    // numeric offset or region id — are presentation metadata; see the doc
+    // comment above). Return them as the UTC instant directly; subtracting
+    // the offset here would double-apply it.
     return w.fieldsAsUtc;
   }
 
@@ -608,17 +615,28 @@ DateTime decodeTimestamp(ReadBuffer buffer) {
 }
 
 /// Decodes Oracle `TIMESTAMP WITH TIME ZONE` wire bytes into the opt-in
-/// [OracleTimestampTz] wrapper, preserving the original offset alongside the
-/// absolute UTC instant.
+/// [OracleTimestampTz] wrapper, preserving a numeric offset alongside the
+/// absolute UTC instant. A region-id payload reports `+00:00` instead.
 ///
 /// Wire shape and validation are identical to [decodeTimestamp] (same parser:
-/// BCE rejection, payload-length check, region-id rejection, offset-range
-/// check). The fields are the UTC instant; bytes 11-12 are the zone. The zone
-/// bytes encode `hour + 20` / `minute + 60` — never zero, even for `+00:00` —
-/// so Oracle's trailing-zero truncation cannot remove them: a 7/11-byte
-/// payload reaching this decoder means the stream is misaligned or the column
-/// is not actually `TIMESTAMP WITH TIME ZONE`, and an [OracleException]
-/// (`oraProtocolError`) is thrown rather than fabricating a `+00:00` offset.
+/// BCE rejection, payload-length check, offset-range check for numeric
+/// offsets). The fields are the UTC instant; bytes 11-12 are the zone. The
+/// zone bytes of an offset zone encode `hour + 20` / `minute + 60` — never
+/// zero, even for `+00:00` — and the server sends a region-id zone's bytes
+/// in full too (see [decodeTimestamp]), so Oracle's trailing-zero truncation
+/// never removes them: a 7/11-byte payload reaching this decoder means the
+/// stream is misaligned or the column is not actually
+/// `TIMESTAMP WITH TIME ZONE`, and an [OracleException] (`oraProtocolError`)
+/// is thrown rather than fabricating a `+00:00` offset for a payload that
+/// carries no zone bytes at all.
+///
+/// **Region-id zones** (`byte11 & 0x80`, e.g. `Europe/Madrid`) decode to the
+/// correct UTC instant with a **`+00:00` offset**: the wire carries a region
+/// id, not an offset, and resolving it (to a name or to the zone's offset at
+/// that instant) needs Oracle's region table, which the driver does not
+/// bundle. `+00:00` is the UTC-normalized rendering of the same instant, not
+/// the region's offset. Binding such a value back stores it at `+00:00` —
+/// the instant survives, the region name does not.
 OracleTimestampTz decodeTimestampTz(ReadBuffer buffer) {
   final w = _readTimestampWire(buffer);
   final tzHour = w.tzHourOffset;
@@ -660,7 +678,8 @@ class _TimestampWire {
   final int millisecond;
   final int microsecond;
 
-  /// Null when the payload carried no TZ bytes (7/11-byte form).
+  /// Null when the payload carried no TZ bytes (7/11-byte form); `0` / `0`
+  /// for a region-id zone (no numeric offset travels on the wire).
   final int? tzHourOffset;
   final int? tzMinuteOffset;
 
@@ -678,6 +697,11 @@ class _TimestampWire {
     microsecond,
   );
 }
+
+/// Byte-11 flag of a `TIMESTAMP WITH TIME ZONE` payload marking a region-id
+/// zone (node-oracledb `TNS_HAS_REGION_ID`, `constants.js`). A numeric offset byte is
+/// `tzHour + 20` (8..34), so the bit is never set for an offset zone.
+const int _tzHasRegionId = 0x80;
 
 _TimestampWire _readTimestampWire(ReadBuffer buffer) {
   final centuryByte = buffer.readUint8();
@@ -725,36 +749,45 @@ _TimestampWire _readTimestampWire(ReadBuffer buffer) {
   if (remaining >= 6) {
     final byte11 = buffer.readUint8();
     final byte12 = buffer.readUint8();
-    if ((byte11 & 0x80) != 0) {
-      throw OracleException(
-        errorCode: oraUnsupportedType,
-        message:
-            'TIMESTAMP region-id time zones are not supported '
-            '(byte11=0x${byte11.toRadixString(16)})',
-      );
-    }
-    tzHourOffset = byte11 - 20;
-    tzMinuteOffset = byte12 - 60;
-    // Oracle's documented TZ offset range is [-12:59, +14:00]. A wire byte
-    // pair that decodes outside this band (e.g. byte11=0 → -20h), past the
-    // +14:00 ceiling (e.g. +14:30), or with conflicting hour/minute signs
-    // (e.g. +5:-30) indicates either a corrupted payload or a
-    // server-protocol drift. All malformed shapes are rejected HERE as a
-    // protocol error so the OracleTimestampTz constructor's ArgumentError
-    // can never surface from a decode path.
-    if (tzHourOffset < -12 ||
-        tzHourOffset > 14 ||
-        tzMinuteOffset < -59 ||
-        tzMinuteOffset > 59 ||
-        (tzHourOffset == 14 && tzMinuteOffset != 0) ||
-        (tzHourOffset > 0 && tzMinuteOffset < 0) ||
-        (tzHourOffset < 0 && tzMinuteOffset > 0)) {
-      throw OracleException(
-        errorCode: oraProtocolError,
-        message:
-            'TIMESTAMP TZ offset out of range: '
-            '$tzHourOffset:$tzMinuteOffset (bytes $byte11/$byte12)',
-      );
+    if ((byte11 & _tzHasRegionId) != 0) {
+      // Region-id zone (e.g. `Europe/Madrid`): byte 11 is the 0x80 flag plus
+      // the high 7 bits of the region id, byte 12 the low 6 bits and the DST
+      // flags — no numeric offset travels on the wire. The date/time fields
+      // are already the UTC instant (the server normalizes region zones
+      // exactly like offset zones; verified live on 23ai and 21c against
+      // SYS_EXTRACT_UTC), so the instant needs neither byte. Naming the zone
+      // or recovering its offset would need Oracle's region table, which is
+      // not bundled: like node-oracledb `parseOracleDate`, the zone bytes are
+      // ignored and the value reports the UTC-normalized `+00:00` offset. The
+      // offset-range check (else branch) does not apply — these bytes are
+      // not an offset — so every region id decodes, including ones whose
+      // byte 12 is 0x00 (e.g. `Africa/Windhoek` = 0x81/0x00).
+      tzHourOffset = 0;
+      tzMinuteOffset = 0;
+    } else {
+      tzHourOffset = byte11 - 20;
+      tzMinuteOffset = byte12 - 60;
+      // Oracle's documented TZ offset range is [-12:59, +14:00]. A wire byte
+      // pair that decodes outside this band (e.g. byte11=0 → -20h), past the
+      // +14:00 ceiling (e.g. +14:30), or with conflicting hour/minute signs
+      // (e.g. +5:-30) indicates either a corrupted payload or a
+      // server-protocol drift. All malformed shapes are rejected HERE as a
+      // protocol error so the OracleTimestampTz constructor's ArgumentError
+      // can never surface from a decode path.
+      if (tzHourOffset < -12 ||
+          tzHourOffset > 14 ||
+          tzMinuteOffset < -59 ||
+          tzMinuteOffset > 59 ||
+          (tzHourOffset == 14 && tzMinuteOffset != 0) ||
+          (tzHourOffset > 0 && tzMinuteOffset < 0) ||
+          (tzHourOffset < 0 && tzMinuteOffset > 0)) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'TIMESTAMP TZ offset out of range: '
+              '$tzHourOffset:$tzMinuteOffset (bytes $byte11/$byte12)',
+        );
+      }
     }
   }
 

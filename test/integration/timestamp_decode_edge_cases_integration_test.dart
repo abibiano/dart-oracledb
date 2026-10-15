@@ -12,13 +12,18 @@ import 'test_helper.dart';
 /// Three orthogonal concerns, each validated on BOTH Oracle 23ai (FAST_AUTH)
 /// and Oracle 21c (classical AUTH):
 ///
-/// 1. **Region-id rejection (error path).** A `TIMESTAMP WITH TIME ZONE`
-///    storing a *named region* (e.g. `US/Pacific`) arrives on the wire with
-///    byte 11's high bit set. The driver must raise `OracleException`
-///    (`oraUnsupportedType`, ORA-03115) rather than misreading the region id
-///    as a numeric offset — on default AND `preserveTimestampTimeZone`
-///    connections (both share `_readTimestampWire`). Contract:
-///    "the decoder raises rather than misreading the region id".
+/// 1. **Region-id decode (Story 14.1).** A `TIMESTAMP WITH TIME ZONE`
+///    storing a *named region* (e.g. `Europe/Madrid`) arrives on the wire with
+///    byte 11's high bit set and no numeric offset. The date/time fields are
+///    the UTC instant, so the driver decodes it — never misreading the region
+///    id as an offset — to the UTC `DateTime` on a default connection and to
+///    an `OracleTimestampTz` with the same instant at a `+00:00` offset on a
+///    `preserveTimestampTimeZone` connection (the region is not resolved).
+///    Every instant is proven against the server's own `SYS_EXTRACT_UTC`:
+///    summer / winter, both sides of a DST gap, both readings of a DST
+///    overlap, fractional seconds, half-hour and southern-hemisphere regions,
+///    every region name the server knows (a multi-round fetch), PL/SQL OUT
+///    binds, and the documented `+00:00` bind-back limit.
 ///
 /// 2. **Offset band edges + fractional-hour zones.** The `OracleTimestampTz`
 ///    bind-back path is exercised at the documented offset band edges
@@ -36,80 +41,377 @@ import 'test_helper.dart';
 ///    must decode without the ORA-12547 buffer underrun that originally broke
 ///    `plsql_integration_test.dart`.
 void main() {
-  // ── 1. Region-id rejection ────────────────────────────────────────────────
+  // ── 1. Region-id decode ───────────────────────────────────────────────────
   group(
-    'TIMESTAMP WITH TIME ZONE region-id rejection',
+    'TIMESTAMP WITH TIME ZONE region-id decode',
     skip: !integrationEnabled ? 'Integration tests disabled' : null,
     () {
       final table = uniqueTableName('tstz_region');
+      final sweepTable = uniqueTableName('tstz_rsweep');
       OracleConnection? setupHandle;
-      late int regionId;
+
+      const tzr = 'YYYY-MM-DD HH24:MI:SS TZR';
+      const tzrFf6 = 'YYYY-MM-DD HH24:MI:SS.FF6 TZR';
+      // TZD picks one reading of a DST-overlap wall clock deterministically.
+      const tzrTzd = 'YYYY-MM-DD HH24:MI:SS TZR TZD';
+
+      // Each value is written as a wall clock in a named region, so it is
+      // stored with a region id (verified per row via TIMEZONE_REGION), never
+      // a numeric offset. `utc` is the independently computed instant; every
+      // row is ALSO checked against the server's SYS_EXTRACT_UTC.
+      final cases =
+          <({String text, String format, String region, DateTime utc})>[
+            // Summer (CEST, UTC+2) and winter (CET, UTC+1).
+            (
+              text: '2024-07-15 12:00:00 Europe/Madrid',
+              format: tzr,
+              region: 'Europe/Madrid',
+              utc: DateTime.utc(2024, 7, 15, 10),
+            ),
+            (
+              text: '2024-01-15 12:00:00 Europe/Madrid',
+              format: tzr,
+              region: 'Europe/Madrid',
+              utc: DateTime.utc(2024, 1, 15, 11),
+            ),
+            // Fractional seconds (PDT, UTC-7) keep all six digits.
+            (
+              text: '2024-07-15 12:30:45.123456 US/Pacific',
+              format: tzrFf6,
+              region: 'US/Pacific',
+              utc: DateTime.utc(2024, 7, 15, 19, 30, 45, 123, 456),
+            ),
+            // Both sides of the 2024-03-31 02:00 → 03:00 Madrid DST gap: one
+            // microsecond apart as instants.
+            (
+              text: '2024-03-31 01:59:59.999999 Europe/Madrid',
+              format: tzrFf6,
+              region: 'Europe/Madrid',
+              utc: DateTime.utc(2024, 3, 31, 0, 59, 59, 999, 999),
+            ),
+            (
+              text: '2024-03-31 03:00:00 Europe/Madrid',
+              format: tzr,
+              region: 'Europe/Madrid',
+              utc: DateTime.utc(2024, 3, 31, 1),
+            ),
+            // Both readings of the 2024-10-27 02:30 Madrid DST overlap.
+            (
+              text: '2024-10-27 02:30:00 Europe/Madrid CEST',
+              format: tzrTzd,
+              region: 'Europe/Madrid',
+              utc: DateTime.utc(2024, 10, 27, 0, 30),
+            ),
+            (
+              text: '2024-10-27 02:30:00 Europe/Madrid CET',
+              format: tzrTzd,
+              region: 'Europe/Madrid',
+              utc: DateTime.utc(2024, 10, 27, 1, 30),
+            ),
+            // Southern-hemisphere summer (AEDT, UTC+11).
+            (
+              text: '2024-01-15 12:00:00 Australia/Sydney',
+              format: tzr,
+              region: 'Australia/Sydney',
+              utc: DateTime.utc(2024, 1, 15, 1),
+            ),
+            // Half-hour region (IST, UTC+5:30).
+            (
+              text: '2024-01-15 12:00:00 Asia/Kolkata',
+              format: tzr,
+              region: 'Asia/Kolkata',
+              utc: DateTime.utc(2024, 1, 15, 6, 30),
+            ),
+            // `UTC` as a region name is a region id, not the +00:00 offset.
+            (
+              text: '2024-07-15 12:00:00 UTC',
+              format: tzr,
+              region: 'UTC',
+              utc: DateTime.utc(2024, 7, 15, 12),
+            ),
+            // A region whose zone byte 12 is 0x00 (no DST, id ≡ 0 mod 64).
+            (
+              text: '2024-01-15 14:00:00 Africa/Windhoek',
+              format: tzr,
+              region: 'Africa/Windhoek',
+              utc: DateTime.utc(2024, 1, 15, 12),
+            ),
+          ];
+      final ids = <int>[];
+
+      // Every row of [table] in id (= [cases]) order, with the server's own
+      // UTC rendering and the stored region name.
+      String casesQuery() =>
+          'SELECT id, ts, '
+          "TO_CHAR(SYS_EXTRACT_UTC(ts), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"') "
+          'AS utc_text, '
+          'EXTRACT(TIMEZONE_REGION FROM ts) AS region '
+          'FROM $table WHERE id BETWEEN ${ids.first} AND ${ids.last} '
+          'ORDER BY id';
+
+      // The two sweep instants (summer and winter, so DST flags differ).
+      final sweepInstants = [
+        DateTime.utc(2024, 7, 15, 12, 0, 0, 500),
+        DateTime.utc(2024, 1, 15, 12, 0, 0, 0, 1),
+      ];
 
       setUpAll(() async {
         setupHandle = await connectForTest();
-        await setupHandle!.execute(
+        final setup = setupHandle!;
+        await setup.execute(
           'CREATE TABLE $table '
           '(id NUMBER PRIMARY KEY, ts TIMESTAMP(6) WITH TIME ZONE)',
         );
-        regionId = nextTestId();
-        // TZR (region) — stored as a named-region zone, not a numeric offset.
-        await setupHandle!.execute(
-          'INSERT INTO $table (id, ts) VALUES (:1, '
-          "TO_TIMESTAMP_TZ('2024-03-15 10:30:45 US/Pacific', "
-          "'YYYY-MM-DD HH24:MI:SS TZR'))",
-          [regionId],
+        for (final c in cases) {
+          final id = nextTestId();
+          ids.add(id);
+          await setup.execute(
+            'INSERT INTO $table (id, ts) VALUES (:1, '
+            'TO_TIMESTAMP_TZ(:2, :3))',
+            [id, c.text, c.format],
+          );
+        }
+        // One row per region name the server knows, at each sweep instant,
+        // anchored in UTC (AT TIME ZONE never lands in a DST gap).
+        await setup.execute(
+          'CREATE TABLE $sweepTable '
+          '(tzname VARCHAR2(64), w NUMBER, ts TIMESTAMP(6) WITH TIME ZONE)',
         );
-        await setupHandle!.execute('COMMIT');
+        for (var w = 0; w < sweepInstants.length; w++) {
+          final i = sweepInstants[w];
+          final literal =
+              '${i.year}-${_two(i.month)}-${_two(i.day)} '
+              '${_two(i.hour)}:${_two(i.minute)}:${_two(i.second)}.'
+              '${(i.millisecond * 1000 + i.microsecond).toString().padLeft(6, '0')}';
+          await setup.execute(
+            'INSERT INTO $sweepTable (tzname, w, ts) '
+            "SELECT tzname, $w, FROM_TZ(TIMESTAMP '$literal', 'UTC') "
+            'AT TIME ZONE tzname '
+            'FROM (SELECT DISTINCT tzname FROM v\$timezone_names)',
+          );
+        }
+        await setup.execute('COMMIT');
       });
 
       tearDownAll(() async {
         await cleanUpConnection(
           setupHandle,
-          dropStatements: ['DROP TABLE $table'],
+          dropStatements: ['DROP TABLE $table', 'DROP TABLE $sweepTable'],
         );
       });
 
-      test(
-        'default connection raises oraUnsupportedType (ORA-03115)',
-        () async {
-          final conn = await connectForTest();
-          try {
-            await expectLater(
-              conn.execute('SELECT ts FROM $table WHERE id = :1', [regionId]),
-              throwsA(
-                isA<OracleException>().having(
-                  (e) => e.errorCode,
-                  'errorCode',
-                  oraUnsupportedType,
-                ),
-              ),
-            );
-          } finally {
-            await conn.close();
-          }
-        },
-      );
+      // Shared per-row proof: the row is stored with its region (not an
+      // offset) and [decoded] is the server's SYS_EXTRACT_UTC instant.
+      void expectRegionRow(OracleRow row, DateTime decoded) {
+        final index = ids.indexOf((row['ID']! as num).toInt());
+        expect(index, isNot(-1));
+        final c = cases[index];
+        expect(
+          row['REGION'],
+          equals(c.region),
+          reason: '${c.text}: must be stored as a region id, not an offset',
+        );
+        expect(decoded.isUtc, isTrue, reason: c.text);
+        expect(decoded, equals(c.utc), reason: c.text);
+        expect(
+          decoded,
+          equals(DateTime.parse(row['UTC_TEXT']! as String)),
+          reason: '${c.text}: must equal SYS_EXTRACT_UTC',
+        );
+      }
 
-      test(
-        'preserve connection raises oraUnsupportedType (ORA-03115)',
-        () async {
-          final conn = await connectForTest(preserveTimestampTimeZone: true);
-          try {
-            await expectLater(
-              conn.execute('SELECT ts FROM $table WHERE id = :1', [regionId]),
-              throwsA(
-                isA<OracleException>().having(
-                  (e) => e.errorCode,
-                  'errorCode',
-                  oraUnsupportedType,
-                ),
+      test('default connection decodes every region row to its UTC '
+          'DateTime (== SYS_EXTRACT_UTC)', () async {
+        final conn = await connectForTest();
+        try {
+          final result = await conn.execute(casesQuery());
+          expect(result.rows, hasLength(cases.length));
+          for (final row in result.rows) {
+            final value = row['TS'];
+            expect(value, isA<DateTime>());
+            expect(value, isNot(isA<OracleTimestampTz>()));
+            expectRegionRow(row, value! as DateTime);
+          }
+          // Single-row bind lookup, the I/O-matrix summer case.
+          final single = await conn.execute(
+            'SELECT ts FROM $table WHERE id = :1',
+            [ids.first],
+          );
+          expect(
+            single.rows.single['TS'],
+            equals(DateTime.utc(2024, 7, 15, 10)),
+          );
+        } finally {
+          await conn.close();
+        }
+      });
+
+      test('preserve connection decodes every region row to an '
+          'OracleTimestampTz at +00:00 with the same instant, and the '
+          'connection stays usable', () async {
+        final conn = await connectForTest(preserveTimestampTimeZone: true);
+        try {
+          final result = await conn.execute(casesQuery());
+          expect(result.rows, hasLength(cases.length));
+          for (final row in result.rows) {
+            final value = row['TS'];
+            expect(value, isA<OracleTimestampTz>());
+            final tz = value! as OracleTimestampTz;
+            expect(
+              tz.offsetMinutes,
+              equals(0),
+              reason: 'the region is not resolved: UTC-normalized +00:00',
+            );
+            expectRegionRow(row, tz.utc);
+          }
+          // Same session: offset-based values still keep their offset, and
+          // ordinary statements run normally.
+          final offset = await conn.execute(
+            "SELECT TO_TIMESTAMP_TZ('2024-03-15 10:30:45 +05:30', "
+            "'YYYY-MM-DD HH24:MI:SS TZH:TZM') AS ts, 1 AS one FROM dual",
+          );
+          expect(
+            offset.rows.single['TS'],
+            equals(
+              OracleTimestampTz.fromHourMinute(
+                DateTime.utc(2024, 3, 15, 5, 0, 45),
+                5,
+                30,
               ),
+            ),
+          );
+          expect(offset.rows.single['ONE'], equals(1));
+          expect(conn.isHealthy, isTrue);
+        } finally {
+          await conn.close();
+        }
+      });
+
+      test('every region name the server knows decodes to its instant in '
+          'both modes (multi-round fetch sweep)', () async {
+        const sweepQuery =
+            'SELECT tzname, w, ts, '
+            "TO_CHAR(SYS_EXTRACT_UTC(ts), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"') "
+            'AS utc_text, '
+            "CASE WHEN DUMP(ts) LIKE '%,0' THEN 1 ELSE 0 END AS zero_byte12 "
+            'FROM ';
+        for (final preserve in [false, true]) {
+          final conn = await connectForTest(
+            preserveTimestampTimeZone: preserve,
+          );
+          try {
+            final result = await conn.execute(
+              '$sweepQuery$sweepTable ORDER BY tzname, w',
+            );
+            expect(
+              result.rows.length,
+              greaterThan(500 * sweepInstants.length),
+              reason: 'every V\$TIMEZONE_NAMES region at both instants',
+            );
+            var zeroByte12 = 0;
+            for (final row in result.rows) {
+              final label = '${row['TZNAME']} w=${row['W']} preserve=$preserve';
+              final expected = sweepInstants[(row['W']! as num).toInt()];
+              final value = row['TS'];
+              final DateTime instant;
+              if (preserve) {
+                expect(value, isA<OracleTimestampTz>(), reason: label);
+                final tz = value! as OracleTimestampTz;
+                expect(tz.offsetMinutes, equals(0), reason: label);
+                instant = tz.utc;
+              } else {
+                expect(value, isA<DateTime>(), reason: label);
+                instant = value! as DateTime;
+              }
+              expect(instant.isUtc, isTrue, reason: label);
+              expect(instant, equals(expected), reason: label);
+              expect(
+                instant,
+                equals(DateTime.parse(row['UTC_TEXT']! as String)),
+                reason: '$label: must equal SYS_EXTRACT_UTC',
+              );
+              zeroByte12 += (row['ZERO_BYTE12']! as num).toInt();
+            }
+            // Region ids whose zone byte 12 is 0x00 still travel as full
+            // 13-byte payloads (a truncated 12-byte payload would decode as
+            // a plain local TIMESTAMP and fail the isUtc check above).
+            expect(
+              zeroByte12,
+              greaterThan(0),
+              reason: 'the sweep must cover byte-12 == 0x00 region forms',
             );
           } finally {
             await conn.close();
           }
-        },
-      );
+        }
+      });
+
+      test('PL/SQL OUT bind of a region value decodes in both modes', () async {
+        const block =
+            'BEGIN '
+            ":ret := TO_TIMESTAMP_TZ('2024-07-15 12:00:00.25 Europe/Madrid', "
+            "'YYYY-MM-DD HH24:MI:SS.FF2 TZR'); "
+            'END;';
+        final instant = DateTime.utc(2024, 7, 15, 10, 0, 0, 250);
+        final plain = await connectForTest();
+        try {
+          final result = await plain.execute(block, {
+            'ret': OracleBind.out(type: OracleDbType.timestampTz),
+          });
+          expect(result.outBinds['ret'], equals(instant));
+        } finally {
+          await plain.close();
+        }
+        final preserving = await connectForTest(
+          preserveTimestampTimeZone: true,
+        );
+        try {
+          final result = await preserving.execute(block, {
+            'ret': OracleBind.out(type: OracleDbType.timestampTz),
+          });
+          expect(
+            result.outBinds['ret'],
+            equals(OracleTimestampTz(instant, offsetMinutes: 0)),
+          );
+        } finally {
+          await preserving.close();
+        }
+      });
+
+      test('binding a decoded region value back stores the instant at '
+          '+00:00 (region name not preserved — documented limit)', () async {
+        final conn = await connectForTest(preserveTimestampTimeZone: true);
+        try {
+          final fetched = await conn.execute(
+            'SELECT ts FROM $table WHERE id = :1',
+            [ids.first],
+          );
+          final value = fetched.rows.single['TS']! as OracleTimestampTz;
+          final copyId = nextTestId();
+          await conn.execute('INSERT INTO $table (id, ts) VALUES (:1, :2)', [
+            copyId,
+            value,
+          ]);
+          final stored = await conn.execute(
+            "SELECT TO_CHAR(ts, 'TZH:TZM') AS zone, "
+            'EXTRACT(TIMEZONE_REGION FROM ts) AS region, '
+            "TO_CHAR(SYS_EXTRACT_UTC(ts), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"') "
+            'AS utc_text '
+            'FROM $table WHERE id = :1',
+            [copyId],
+          );
+          final row = stored.rows.single;
+          expect(row['ZONE'], equals('+00:00'));
+          expect(row['REGION'], equals('UNKNOWN'), reason: 'offset, no region');
+          expect(
+            DateTime.parse(row['UTC_TEXT']! as String),
+            equals(DateTime.utc(2024, 7, 15, 10)),
+            reason: 'the instant survives the round-trip',
+          );
+        } finally {
+          await cleanUpConnection(conn, rollbackFirst: true);
+        }
+      });
     },
   );
 
@@ -355,3 +657,5 @@ void main() {
     },
   );
 }
+
+String _two(int value) => value.toString().padLeft(2, '0');

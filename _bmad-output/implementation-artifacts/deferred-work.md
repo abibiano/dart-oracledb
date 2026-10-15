@@ -1073,3 +1073,11 @@ reason: The empty-row fallback would expose empty lists in that response shape. 
 status: done 2026-10-15
 resolution: resolved by sweep bundle dw-dml-returning-empty-outbind-row
 resolution-undo: 8d36573e31d13b9d243c252480d9cfa367d8ba1dfb9a0c06967caf05a80c894c 2026-10-15 7374617475733a206f70656e
+
+### DW-137: `_bmad-output/project-context.md:294` still says the TSTZ region-id form is hard-rejected.
+origin: spec-deferred 1585e4c5e610
+location: _bmad-output/project-context.md:294
+source_spec: `14-1-tstz-region-name-decode.md`
+severity: low
+reason: Agent-context file; the story's fix edits agent-context, so it is deferred. Regenerate or edit project-context.md to say region-id TSTZ decodes to the UTC instant at +00:00.
+status: open

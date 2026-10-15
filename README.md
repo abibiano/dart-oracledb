@@ -29,7 +29,7 @@ A pure Dart driver for Oracle Database. It speaks the thin-mode TNS/TTC wire pro
 - **LOB streaming & temporary LOBs** — `OracleExecuteOptions(fetchLobs: true)` returns a server-backed `OracleLob` with bounded `read()`/`write()`, `trim()`, `refresh()` of the cached `length`/`chunkSize`, `textStream()`/`byteStream()`/`writeStream()` for piece-by-piece transfer, and `createTemporaryClob()`/`createTemporaryNClob()`/`createTemporaryBlob()` for session-duration temporary LOBs
 - **Native JSON** — `JSON` columns (and `BLOB ... IS JSON`) decode to `Map` / `List`, including Oracle `DATE`/`TIMESTAMP`/`RAW` members, and fetched documents bind back unchanged
 - **Transactions** — commit, rollback, and transaction helper
-- **TIMESTAMP WITH TIME ZONE** — decoded as UTC `DateTime`, or as `OracleTimestampTz` preserving the original offset (opt-in)
+- **TIMESTAMP WITH TIME ZONE** — decoded as UTC `DateTime`, or as `OracleTimestampTz` preserving a numeric offset (opt-in); named-region values (e.g. `Europe/Madrid`) decode to the correct UTC instant with a reported `+00:00` offset
 - **Statement caching** — transparent prepared-statement cache
 - **Async/await** — modern Dart async API throughout
 
@@ -397,7 +397,7 @@ print(r.outBinds['value']); // 42
 
 `maxSize` is required for `varchar` and `raw` OUT binds — size it for the largest value the procedure may return.
 
-`TIMESTAMP WITH TIME ZONE` parameters bind with `OracleDbType.timestampTz`. OUT / IN OUT values follow the connection's decode contract: a UTC `DateTime` by default, or an `OracleTimestampTz` carrying the server-sent offset on a connection opened with `preserveTimestampTimeZone: true`. IN OUT input values may be an `OracleTimestampTz` (the offset travels on the wire) or a plain `DateTime`.
+`TIMESTAMP WITH TIME ZONE` parameters bind with `OracleDbType.timestampTz`. OUT / IN OUT values follow the connection's decode contract: a UTC `DateTime` by default, or an `OracleTimestampTz` carrying the server-sent offset (`+00:00` for a [region-id](#region-id-time-zones) value) on a connection opened with `preserveTimestampTimeZone: true`. IN OUT input values may be an `OracleTimestampTz` (the offset travels on the wire) or a plain `DateTime`.
 
 ### Result Sets & Streaming
 
@@ -574,13 +574,41 @@ final isAlive = await connection.ping();
 | NUMBER                    | `num` / `int` / `double`                                                         |
 | DATE                      | `DateTime`                                                                       |
 | TIMESTAMP                 | `DateTime`                                                                       |
-| TIMESTAMP WITH TIME ZONE  | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` |
+| TIMESTAMP WITH TIME ZONE  | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` (see [Region-id time zones](#region-id-time-zones)) |
 | RAW                       | `Uint8List` (see [RAW support](#raw-support))                                    |
 | CLOB                      | `String` (see [CLOB support](#clob-support), [Character Set Support](#character-set-support)) |
 | BLOB                      | `Uint8List` (see [BLOB support](#blob-support)); a BLOB `IS JSON` column decodes like JSON (see [JSON stored in a BLOB](#json-stored-in-a-blob-is-json)) |
 | JSON (21c+)               | `Map<String, Object?>` / `List<Object?>` (see [JSON support](#json-support))     |
 | CURSOR / REF CURSOR       | `OracleResultSet` (OUT bind) / `List<OracleRow>` (nested `CURSOR()` column) — cursor-embedded CLOB/NCLOB/BLOB columns decode as materialized values; `fetchLobs: true` cannot wrap them as handles (see [Result Sets & Streaming](#result-sets--streaming), [Known Limitations](#known-limitations)) |
 | NULL                      | `null`                                                                           |
+
+### Region-id time zones
+
+A `TIMESTAMP WITH TIME ZONE` value can be stored with a numeric offset
+(`+02:00`) or with a named region (`Europe/Madrid`, `US/Pacific`, `UTC`, …).
+Both decode to the **correct absolute instant** — on Oracle 23ai and 21c,
+including DST-transition values and fractional seconds:
+
+| Stored value                         | Default connection        | `preserveTimestampTimeZone: true`             |
+| ------------------------------------ | ------------------------- | --------------------------------------------- |
+| `2024-07-15 12:00:00 +02:00`         | `DateTime.utc(2024, 7, 15, 10)` | `OracleTimestampTz` — 10:00Z at `+02:00` |
+| `2024-07-15 12:00:00 Europe/Madrid`  | `DateTime.utc(2024, 7, 15, 10)` | `OracleTimestampTz` — 10:00Z at **`+00:00`** |
+
+Limits of the region form (the driver bundles no Oracle region table, so it
+neither guesses a name nor looks up an offset):
+
+- **The region name is not returned**, and an opted-in `OracleTimestampTz`
+  reports `+00:00` — the UTC-normalized rendering of the instant, not the
+  region's offset at that moment (`wallClock` is the UTC wall clock). Select
+  `TO_CHAR(col, 'TZR')` or `EXTRACT(TIMEZONE_REGION FROM col)` alongside the
+  column when you need the name, or `TO_CHAR(col, 'TZH:TZM')` for the offset.
+- **Binding is offset-only.** Binding a fetched region value back stores the
+  same instant at `+00:00`; the region name is not carried back.
+- Inside native JSON, a region-id `TIMESTAMP WITH TIME ZONE` member decodes the
+  same way (`OracleTimestampTz` at `+00:00`). Oracle 23ai may instead resolve
+  the region to its offset when it builds nested JSON (e.g. `JSON_ARRAY(ts)`),
+  in which case the member arrives — and decodes — as an ordinary offset value;
+  the instant is the same either way.
 
 ### RAW support
 
@@ -1064,7 +1092,7 @@ Client, no LOB read round trips:
   | Scalar inside the JSON value          | Dart type (fetch)    | Bound from Dart as |
   | ------------------------------------- | -------------------- | ------------------ |
   | `DATE`, `TIMESTAMP`                   | `DateTime` — same as a `DATE` / `TIMESTAMP` column (local wall clock, fractional seconds truncated to microseconds) | A local `DateTime` → a `TIMESTAMP` (7 bytes with no sub-second part, else 11), written from its wall-clock fields exactly like a `DATE` / `TIMESTAMP` column bind. A UTC `DateTime` (`isUtc`) names an instant, so it travels as `TIMESTAMP WITH TIME ZONE` at `+00:00` instead and fetches back as an `OracleTimestampTz` for the same instant |
-  | `TIMESTAMP WITH TIME ZONE`            | Always `OracleTimestampTz` (UTC instant + original offset), regardless of `preserveTimestampTimeZone` — unlike a column, which returns a UTC `DateTime` by default | `OracleTimestampTz` → `TIMESTAMP WITH TIME ZONE`, offset preserved |
+  | `TIMESTAMP WITH TIME ZONE`            | Always `OracleTimestampTz` (UTC instant + original offset; `+00:00` for a [region-id](#region-id-time-zones) value), regardless of `preserveTimestampTimeZone` — unlike a column, which returns a UTC `DateTime` by default | `OracleTimestampTz` → `TIMESTAMP WITH TIME ZONE`, offset preserved |
   | `BINARY_FLOAT`, `BINARY_DOUBLE`       | `double` (NaN and ±Infinity included; `BINARY_FLOAT` widened from single precision) | Doubles outside Oracle `NUMBER`'s range (magnitude ≥ 1E126, or a non-zero magnitude below 1E-130) → `BINARY_DOUBLE`; every other finite `num`, including `0.0` / `-0.0`, stays `NUMBER`. NaN and ±Infinity are **rejected by default** (strict JSON has no such values) with an `ArgumentError` naming the member's path; opt in per bind with `OracleBind.inOut(..., type: OracleDbType.json, allowNonFinite: true)` to send them as `BINARY_DOUBLE`. node-oracledb sends NaN as `BINARY_DOUBLE` unasked and cannot bind ±Infinity or out-of-range doubles at all |
   | `RAW` / binary                        | `Uint8List` — an empty binary JSON scalar is an empty list of bytes; an empty `RAW` column decodes to `null` | `Uint8List` → binary (bytes, never an array of numbers) |
 
@@ -1080,12 +1108,15 @@ Client, no LOB read round trips:
     e.g. `3.140000104904175`);
   - `-0.0` re-binds as `NUMBER` zero and comes back as `0`;
   - nanoseconds were already truncated to microseconds on fetch;
+  - a region-id `TIMESTAMP WITH TIME ZONE` member decodes at `+00:00` and
+    re-binds as an offset node at `+00:00` (same instant, region name lost);
   - a fetched `DateTime` is a local wall-clock value (as from a `DATE`
     column), and re-binds from those same fields.
 
-  BCE dates and
-  region-name time zones (e.g. `US/Pacific`) fail loudly with
-  `OracleException` on fetch, as they do for columns; binding a `DateTime` /
+  BCE dates fail loudly with `OracleException` on fetch, as they do for
+  columns; a region-name time zone (e.g. `US/Pacific`) decodes to its UTC
+  instant at `+00:00`, as for a column (see
+  [Region-id time zones](#region-id-time-zones)); binding a `DateTime` /
   `OracleTimestampTz` outside years 1–9999 fails loudly at the call site.
   Fetched documents holding these Dart types are not plain JSON, so
   `jsonEncode()` on one can throw `JsonUnsupportedObjectError`.
@@ -1336,7 +1367,7 @@ After the 1.0 release, the project roadmap includes larger API and compatibility
 | Priority | Planned enhancement                                                                       |
 | -------- | ----------------------------------------------------------------------------------------- |
 | 1        | Extended JSON / OSON parity (interval/VECTOR/`JsonId` JSON scalars, OSON-in-BLOB helpers) |
-| 2        | TIMESTAMP WITH TIME ZONE region-name compatibility and optional temporal fetch formatting |
+| 2        | TIMESTAMP WITH TIME ZONE region-name preservation and optional temporal fetch formatting (region-id values already decode to the correct instant) |
 | 3        | Type completeness for `INTERVAL`, `ROWID` / `UROWID`, and `VECTOR`                        |
 
 ## Tests
@@ -1386,7 +1417,7 @@ RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
 - **Nested `CURSOR()` / REF CURSOR rows carrying a LOB with `fetchLobs: true`** — a `CLOB`/`NCLOB`/`BLOB` column projected by a nested `CURSOR(...)` column or a `SYS_REFCURSOR` OUT bind is **not** wrapped as an `OracleLob` handle: with `fetchLobs: true` the call fails loud with an `OracleException` (the cursor-embedded handle lifecycle is not built), after the execute round trip and leaving the connection usable. Without `fetchLobs` these rows decode normally on Oracle 23ai and 21c — LOBs materialize as `String` / `Uint8List`, and native `JSON` columns decode to their Dart values (the driver sends a DEFINE call before the cursor's first FETCH, as node-oracledb does). **Workaround for a handle:** project the LOB column outside the cursor (join it into the outer SELECT, or return its key from the cursor and read the LOB in a second statement). `DBMS_SQL.RETURN_RESULT` implicit result sets behave the same way: their LOB / JSON columns decode normally.
 - **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work. As of 1.4 an **open fetched `OracleLob`** (from `fetchLobs: true`) also holds that slot — for the handle's whole lifetime, not just during a round trip, and including handles a streaming result set prefetched but you never asked for — so an unclosed LOB handle is the most likely cause of a concurrent-operation error; a **created-temporary** handle (`createTemporaryClob()` and friends) is deliberately exempt and can be read, written, and bound while open. See [Incremental LOB access with `fetchLobs`](#incremental-lob-access-with-fetchlobs).
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
-- **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) are rejected on decode; offset-based zones (e.g. `+02:00`) are supported. Region-name compatibility is planned as a post-1.0 temporal enhancement.
+- **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) decode to the correct UTC instant, but the region name is not returned: with `preserveTimestampTimeZone: true` they report a `+00:00` offset (UTC-normalized, not the region's offset), and binding one back stores `+00:00`. Offset-based zones (e.g. `+02:00`) keep their offset. Region-name preservation is planned as a post-1.0 temporal enhancement. See [Region-id time zones](#region-id-time-zones).
 - **Very large result sets** — a single `execute()` is bounded by a safety cap of 1,000 fetch round-trips (about 50,000 rows at the default fetch size); if the cap is hit, a warning is logged, the rows fetched so far are returned, and `result.moreRowsAvailable` is `true` so the truncation is detectable. The same flag is also set (with a logged warning) in the rarer case where the server reports more rows pending but the driver has no usable cursor id to continue fetching — in either case `true` means the rows are an incomplete prefix of the full result set. Streaming (`queryStream()` / `executeStream()`) and result-set (`OracleExecuteOptions(resultSet: true)`) consumption have **no such cap** — prefer them for very large result sets.
 
 ## Thin Mode Limitations

@@ -307,7 +307,7 @@ class OracleConnection {
   final StatementCache _cache;
 
   /// Opt-in: when true, `TIMESTAMP WITH TIME ZONE` columns
-  /// decode to [OracleTimestampTz] (preserving the original offset) instead
+  /// decode to [OracleTimestampTz] (preserving a numeric offset) instead
   /// of a UTC [DateTime]. Connection-level because [execute]'s optional
   /// positional bind parameter rules out per-call named options.
   final bool _preserveTimestampTimeZone;
@@ -5706,12 +5706,15 @@ class OracleConnection {
   ///
   /// With [preserveTimestampTimeZone] set, `TIMESTAMP WITH
   /// TIME ZONE` columns decode to [OracleTimestampTz] — exposing both the
-  /// absolute UTC instant and the original offset — instead of the default
-  /// UTC [DateTime] (which applies the offset, then discards it). The flag
-  /// only affects `TIMESTAMP WITH TIME ZONE` result columns; `DATE`,
+  /// absolute UTC instant and the original numeric offset (or `+00:00` for a
+  /// named region) — instead of the default
+  /// UTC [DateTime] (which retains the UTC instant and discards the zone).
+  /// The flag only affects `TIMESTAMP WITH TIME ZONE` result columns; `DATE`,
   /// `TIMESTAMP`, and `TIMESTAMP WITH LOCAL TIME ZONE` decoding and all bind
   /// handling are unchanged. [OracleTimestampTz] values can be bound back on
-  /// any connection regardless of this flag.
+  /// any connection regardless of this flag. A value stored with a named
+  /// region (e.g. `Europe/Madrid`) decodes to its correct UTC instant at a
+  /// `+00:00` offset — the region is not resolved; see [OracleTimestampTz].
   ///
   /// Throws [OracleException] if connection fails with:
   /// - `errorCode`: ORA-xxxxx error code

@@ -4773,70 +4773,107 @@ void main() {
         );
       });
 
+      // 13-byte TSTZ slice with the region-id flag (byte 11 bit 0x80): UTC
+      // fields 2021-06-12 10:30:30 plus region bytes 0x80/0x01.
+      const regionTstzSlice = [
+        120,
+        121,
+        6,
+        12,
+        11,
+        31,
+        31,
+        0,
+        0,
+        0,
+        0,
+        0x80,
+        0x01,
+      ];
+      final regionTstzInstant = DateTime.utc(2021, 6, 12, 10, 30, 30);
+      const regionAndBceCols = [
+        ColumnMetadata(
+          name: 'TS',
+          oracleType: oraTypeTimestampTz,
+          maxLength: 13,
+        ),
+        ColumnMetadata(name: 'D', oracleType: oraTypeDate, maxLength: 7),
+      ];
+      Uint8List regionTstzRow(List<int> dateSlice) => _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(regionTstzSlice),
+          ..._bytesWithLength(dateSlice),
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+
       test('probe never throws on decodable-shape values the strict decoder '
-          'rejects (region-id TSTZ, BCE DATE)', () {
+          'rejects (BCE DATE), next to a region-id TSTZ', () {
         // Regression (code review of this change): the probe used to run the
-        // strict value decoders on DATE/TIMESTAMP slices, so a region-id
-        // TIMESTAMP WITH TIME ZONE or a BCE DATE — both legitimate wire
-        // data — escaped the probe as OracleException and poisoned the
-        // transport through the probe-throw path. The probe must stop at
-        // byte consumption; only the strict pass may reject the values.
-        final payload = _buildPayload([
-          _rowHeader(),
-          [
-            ttcMsgTypeRowData,
-            // 13-byte TSTZ slice with the region-id flag (byte 11 bit 0x80).
-            ..._bytesWithLength(const [
-              120,
-              121,
-              6,
-              12,
-              11,
-              31,
-              31,
-              0,
-              0,
-              0,
-              0,
-              0x80,
-              0x01,
-            ]),
-            // 7-byte BCE DATE slice (century byte 99 < 100).
-            ..._bytesWithLength(const [99, 150, 6, 12, 1, 1, 1]),
-          ],
-          _errorMessage(errorNum: 1403),
-          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
-        ]);
-        const cols = [
-          ColumnMetadata(
-            name: 'TS',
-            oracleType: oraTypeTimestampTz,
-            maxLength: 13,
-          ),
-          ColumnMetadata(name: 'D', oracleType: oraTypeDate, maxLength: 7),
-        ];
+        // strict value decoders on DATE/TIMESTAMP slices, so a BCE DATE —
+        // legitimate wire data — escaped the probe as OracleException and
+        // poisoned the transport through the probe-throw path. The probe
+        // must stop at byte consumption; only the strict pass may reject
+        // the value. (A region-id TSTZ was once a second rejected example;
+        // it now decodes, so it rides along as a must-not-throw slice.)
+        // 7-byte BCE DATE slice (century byte 99 < 100).
+        final payload = regionTstzRow(const [99, 150, 6, 12, 1, 1, 1]);
         expect(
-          ttcStreamIsComplete(payload, expectedColumns: cols),
+          ttcStreamIsComplete(payload, expectedColumns: regionAndBceCols),
           isTrue,
           reason:
               'the probe must consume the slices and locate the '
               'terminal messages without value-decoding them',
         );
-        // The strict pass still rejects the values loudly — a per-query
+        // The strict pass still rejects the BCE DATE loudly — a per-query
         // error, with no transport poisoning involved.
         expect(
           () => decodeExecuteResponse(
             payload,
             isQuery: true,
-            expectedColumns: cols,
+            expectedColumns: regionAndBceCols,
           ),
           throwsA(
-            isA<OracleException>().having(
-              (e) => e.errorCode,
-              'errorCode',
-              oraUnsupportedType,
-            ),
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+                .having((e) => e.message, 'message', contains('BCE DATE')),
           ),
+        );
+      });
+
+      test('strict pass decodes a region-id TSTZ column in both modes', () {
+        // Same region-id slice, valid DATE: the probe still completes and the
+        // strict pass now returns the UTC instant (default) or an
+        // OracleTimestampTz at the UTC-normalized +00:00 (preserve mode).
+        final payload = regionTstzRow(const [120, 124, 3, 15, 1, 1, 1]);
+        expect(
+          ttcStreamIsComplete(payload, expectedColumns: regionAndBceCols),
+          isTrue,
+        );
+        final instant = regionTstzInstant;
+
+        final byDefault = decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: regionAndBceCols,
+        );
+        expect(byDefault.rows, hasLength(1));
+        expect(byDefault.rows.single[0], equals(instant));
+        expect((byDefault.rows.single[0]! as DateTime).isUtc, isTrue);
+        expect(byDefault.rows.single[1], equals(DateTime(2024, 3, 15)));
+
+        final preserved = decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: regionAndBceCols,
+          preserveTimestampTimeZone: true,
+        );
+        expect(
+          preserved.rows.single[0],
+          equals(OracleTimestampTz(instant, offsetMinutes: 0)),
         );
       });
 

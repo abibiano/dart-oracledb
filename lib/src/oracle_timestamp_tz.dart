@@ -21,7 +21,7 @@ library;
 /// final result = await conn.execute('SELECT ts_col FROM t');
 /// final tz = result.rows.first['TS_COL'] as OracleTimestampTz;
 /// tz.utc;            // absolute instant (UTC DateTime)
-/// tz.tzHourOffset;   // original wire offset, e.g. 5
+/// tz.tzHourOffset;   // original wire offset, e.g. 5 (0 for a region-id zone)
 /// tz.tzMinuteOffset; // e.g. 30
 /// ```
 ///
@@ -31,10 +31,21 @@ library;
 /// the wire), and `DATE` columns keep returning [DateTime].
 ///
 /// An [OracleTimestampTz] can be bound back (IN bind) on any connection; the
-/// driver encodes the original offset on the wire so the zone survives
-/// INSERT/UPDATE round-trips. Region-id zones (e.g. `America/Los_Angeles`)
-/// remain unsupported in both directions — the decoder raises rather than
-/// misreading the region id as a numeric offset.
+/// driver encodes its offset on the wire. Numeric-offset zones survive
+/// INSERT/UPDATE round-trips; named regions do not.
+///
+/// ## Region-id zones
+///
+/// A value stored with a named region (e.g. `Europe/Madrid`,
+/// `America/Los_Angeles`) decodes to the correct UTC instant ([utc]) with a
+/// **`+00:00` offset**: the wire carries a region id, not an offset, and
+/// resolving it — to the region name, or to the zone's offset at that
+/// instant — needs Oracle's region table, which the driver does not bundle.
+/// `+00:00` is therefore the UTC-normalized rendering of the instant, not the
+/// region's offset ([wallClock] is the UTC wall clock). Binding is
+/// offset-only: such a value binds back at `+00:00`, preserving the instant
+/// but not the region name. Use `TO_CHAR(col, 'TZR')` (or
+/// `EXTRACT(TIMEZONE_REGION FROM col)`) server-side when the name matters.
 ///
 /// ## Equality vs ordering
 ///
@@ -117,24 +128,28 @@ class OracleTimestampTz implements Comparable<OracleTimestampTz> {
   /// decode path).
   final DateTime utc;
 
-  /// The original time-zone offset as a signed number of minutes
-  /// (−779..840, i.e. `[-12:59, +14:00]`).
+  /// The time-zone offset as a signed number of minutes
+  /// (−779..840, i.e. `[-12:59, +14:00]`); `0` for a region-id value (see
+  /// "Region-id zones" above).
   final int offsetMinutes;
 
-  /// Hour part of the original time-zone offset (−12..14).
+  /// Hour part of the reported time-zone offset (−12..14). A decoded
+  /// region-id value reports zero; its original offset is unavailable.
   int get tzHourOffset => offsetMinutes ~/ 60;
 
-  /// Minute part of the original time-zone offset (−59..59, same sign as
+  /// Minute part of the reported time-zone offset (−59..59, same sign as
   /// [tzHourOffset] — Dart's `~/` and `remainder` both truncate toward zero,
   /// so the two parts naturally share the offset's sign).
   int get tzMinuteOffset => offsetMinutes.remainder(60);
 
-  /// The original time-zone offset as a [Duration].
+  /// The reported time-zone offset as a [Duration] (`Duration.zero` for a
+  /// decoded region-id value).
   Duration get timeZoneOffset => Duration(minutes: offsetMinutes);
 
-  /// The wall-clock reading at the original offset, returned as a UTC-flagged
+  /// The wall-clock reading at the reported offset, returned as a UTC-flagged
   /// [DateTime] whose components are the local field values (Dart has no
-  /// offset-carrying DateTime; do not treat this value as an instant).
+  /// offset-carrying DateTime; do not treat this value as an instant). For a
+  /// decoded region-id value this is the UTC wall clock, not the region's.
   DateTime get wallClock => utc.add(timeZoneOffset);
 
   /// Orders by the absolute UTC instant first, tie-breaking on

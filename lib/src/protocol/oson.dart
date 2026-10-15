@@ -406,7 +406,8 @@ String? _unsupportedYearReason(int year) {
 /// DATE / TIMESTAMP column bind; a UTC `DateTime` (`isUtc`) as TIMESTAMP WITH
 /// TIME ZONE at offset `+00:00`, so its zone survives (it decodes back as an
 /// `OracleTimestampTz` holding the same instant); `OracleTimestampTz` as
-/// TIMESTAMP WITH TIME ZONE (13 bytes: UTC instant plus the original offset);
+/// TIMESTAMP WITH TIME ZONE (13 bytes: UTC instant plus its reported offset;
+/// a decoded region-id value reports `+00:00`);
 /// `Uint8List` as a binary node (uint16 length, uint32 from 65536 bytes).
 ///
 /// The document is OSON version 1 — byte-identical to node-oracledb — unless
@@ -900,7 +901,7 @@ class _OsonEncoder {
       }
     } else if (value is OracleTimestampTz) {
       _checkYear(value.utc.year);
-      // 13 bytes: the UTC instant plus the original offset, as the TSTZ
+      // 13 bytes: the UTC instant plus the reported offset, as the TSTZ
       // column bind writes it and the decoder reads it back.
       _treeSeg.writeUint8(_nodeTimestampTz);
       _treeSeg.writeBytes(dt.encodeTimestampTz(value));
@@ -1036,17 +1037,19 @@ class _OsonEncoder {
 /// - TIMESTAMP (11 bytes) → `DateTime` with fractional seconds (truncated to
 ///   microseconds, like a TIMESTAMP column);
 /// - TIMESTAMP WITH TIME ZONE (13 bytes) → `OracleTimestampTz` (UTC instant
-///   plus the original offset) always — unlike a column, this does not
-///   depend on `preserveTimestampTimeZone`;
+///   plus its reported offset) always — unlike a column, this does not
+///   depend on `preserveTimestampTimeZone`. A region-id zone (e.g.
+///   `US/Pacific`) yields the UTC instant at a `+00:00` offset, exactly as
+///   `decodeTimestampTz` does for a column (the region is not resolved);
 /// - BINARY_FLOAT / BINARY_DOUBLE → `double` (NaN and ±Infinity included);
 /// - binary (RAW) → `Uint8List` (a copy, never a view of [data]).
 ///
 /// Throws [OracleException]:
 /// - `oraProtocolError` for malformed/truncated payloads or bad magic bytes;
 /// - `oraUnsupportedType` for unsupported OSON versions, BCE dates/timestamps,
-///   region-id time zones, and Oracle-specific scalar node types without a
-///   driver type yet (intervals, JsonId, extended/VECTOR, unknown) — never
-///   decoded silently to `null`, and never returned partially.
+///   and Oracle-specific scalar node types without a driver type yet
+///   (intervals, JsonId, extended/VECTOR, unknown) — never decoded silently
+///   to `null`, and never returned partially.
 Object? decodeOson(Uint8List data) {
   try {
     return _OsonDecoder(data).decode();
@@ -1241,7 +1244,8 @@ class _OsonDecoder {
       // fixed-length payloads (node-oracledb oson.js `_decodeNode`: 7 / 7 /
       // 11 / 13-byte dates through the column codecs, 4 / 8-byte binary
       // float / double through _decodeBinaryFloatingPoint). Codec errors
-      // (BCE century, region-id or out-of-range zone) propagate unchanged; a
+      // (BCE century, out-of-range numeric zone offset) propagate unchanged
+      // — a region-id zone is not an error and decodes like a column; a
       // short payload underflows into the BufferException → oraProtocolError
       // path.
       case _nodeDate:

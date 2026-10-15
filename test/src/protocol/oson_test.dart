@@ -1102,13 +1102,67 @@ void main() {
         );
       });
 
-      test('region-id zone raises the existing oraUnsupportedType', () {
+      test('region-id zone decodes to the UTC instant at +00:00', () {
         // JSON_SCALAR(TO_TIMESTAMP_TZ('2024-03-15 10:20:30 US/Pacific',
-        // ... TZR)), captured from both servers: byte 11 has its high bit set.
+        // ... TZR)), captured from both servers: a 13-byte TSTZ node whose
+        // byte 11 has its high bit set (region bytes 0x89/0x9c). The fields
+        // are the UTC instant — 10:20:30 PDT (UTC-7) == 17:20:30Z — and the
+        // region is not resolved, so the offset is the UTC-normalized +00:00.
+        final value = decodeOson(
+          _hex('ff4a5a010016000e7c787c030f12151f00000000899c'),
+        );
+        expect(value, isA<OracleTimestampTz>());
         expect(
-          () =>
-              decodeOson(_hex('ff4a5a010016000e7c787c030f12151f00000000899c')),
-          _throwsOracle(oraUnsupportedType, 'region-id'),
+          value,
+          equals(
+            OracleTimestampTz(
+              DateTime.utc(2024, 3, 15, 17, 20, 30),
+              offsetMinutes: 0,
+            ),
+          ),
+        );
+        // Same result as the column codec on the node's 13-byte payload.
+        expect(
+          value,
+          equals(
+            dt.decodeTimestampTz(
+              ReadBuffer(_hex('787c030f12151f00000000899c')),
+            ),
+          ),
+        );
+      });
+
+      test('region-id zone with fractional seconds, embedded in a document, '
+          'decodes alongside its neighbours', () {
+        // Hand-built TSTZ node: UTC 2024-07-15 19:30:45.123456 with the
+        // US/Pacific region bytes, nested in an object next to other members.
+        final doc = _embedNodes(
+          ['7c 787c070f141f2e 075bca00 899c'],
+          (slots) => <String, Object?>{
+            'before': 1,
+            'tz': slots[0],
+            'after': <Object?>['x', true],
+          },
+        );
+        final value = decodeOson(doc)! as Map<String, Object?>;
+        expect(value.keys.toList(), equals(['before', 'tz', 'after']));
+        expect(value['before'], equals(1));
+        expect(
+          value['tz'],
+          equals(
+            OracleTimestampTz(
+              DateTime.utc(2024, 7, 15, 19, 30, 45, 123, 456),
+              offsetMinutes: 0,
+            ),
+          ),
+        );
+        expect(value['after'], equals(['x', true]));
+      });
+
+      test('a BCE region-id TSTZ still raises oraUnsupportedType', () {
+        expect(
+          () => decodeOson(_scalarDoc('7c 6364010101 0101 00000000 899c')),
+          _throwsOracle(oraUnsupportedType, 'BCE TIMESTAMP'),
         );
       });
 

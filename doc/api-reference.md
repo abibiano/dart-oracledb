@@ -166,10 +166,12 @@ String get code;           // 'ORA-01017' (5-digit pad floor); negative → 'ORA
 
 ## `OracleTimestampTz`
 
-Wrapper that preserves the original UTC offset of a `TIMESTAMP WITH TIME ZONE`
+Wrapper that preserves a numeric offset of a `TIMESTAMP WITH TIME ZONE`
 (default decode collapses to a UTC `DateTime`). Opt in per connection with
 `preserveTimestampTimeZone: true`; it then applies to both column decode and
-OUT/IN OUT binds. See [oracle_timestamp_tz.dart](../lib/src/oracle_timestamp_tz.dart).
+OUT/IN OUT binds. A value stored with a named region (e.g. `Europe/Madrid`)
+decodes to its correct UTC instant at a `+00:00` offset (the region is not
+resolved). See [oracle_timestamp_tz.dart](../lib/src/oracle_timestamp_tz.dart).
 
 ## `TlsConfig`
 

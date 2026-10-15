@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Region-id `TIMESTAMP WITH TIME ZONE` values now decode** instead of
+  failing the whole fetch with `oraUnsupportedType`. A value stored with a
+  named region (e.g. `Europe/Madrid`, `US/Pacific`) decodes to its correct
+  UTC instant — the same instant as the server's `SYS_EXTRACT_UTC`,
+  including DST-transition values and fractional seconds — in columns,
+  PL/SQL OUT binds, and native JSON members: a UTC `DateTime` by default, or
+  an `OracleTimestampTz` on a `preserveTimestampTimeZone: true` connection
+  (and always inside JSON). Validated against Oracle 23ai and Oracle 21c,
+  across every region name each server knows.
+- **Limits:** the region name is not returned and is not resolved to an
+  offset (no region table is bundled): an `OracleTimestampTz` decoded from a
+  region-id value reports `+00:00` (the UTC-normalized instant, not the
+  region's offset), and binding it back stores the instant at `+00:00`.
+  Binding stays offset-only. Select `TO_CHAR(col, 'TZR')` /
+  `EXTRACT(TIMEZONE_REGION FROM col)` when the name is needed. Inside nested
+  JSON, Oracle 23ai may resolve the region to its offset itself; such members
+  decode as ordinary offset values. Region-name preservation is planned
+  separately.
+- **Behavior change:** queries over region-id `TIMESTAMP WITH TIME ZONE` data
+  that previously threw `OracleException` (`oraUnsupportedType`) now return
+  rows. BCE values and malformed numeric zone offsets still fail loudly
+  (unchanged).
+
 ## 1.5.0
 
 ### Features
@@ -21,7 +48,9 @@
   `OracleTimestampTz` regardless of `preserveTimestampTimeZone` (a column
   returns a UTC `DateTime` by default), and `BINARY_FLOAT` / `BINARY_DOUBLE`
   to `double` (NaN and ±Infinity included). BCE dates and region-name time
-  zones still fail loudly, as they do for columns. Surrounding members and
+  zones still failed loudly in this release, as they did for columns
+  (superseded: region-name zones now decode; see the newer entry above).
+  Surrounding members and
   key order are unaffected. Validated against Oracle 23ai and Oracle 21c.
 - **Behavior change:** documents that previously failed with
   `oraUnsupportedType` now return maps/lists containing `DateTime`,

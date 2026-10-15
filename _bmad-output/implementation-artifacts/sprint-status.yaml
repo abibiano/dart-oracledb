@@ -215,7 +215,7 @@ development_status:
 
   # Epic 14: Temporal Compatibility & Fetch Type Handlers [extends Epic 4 / Story 7.9]
   epic-14: backlog
-  14-1-tstz-region-name-decode: backlog
+  14-1-tstz-region-name-decode: done
   14-2-region-name-preservation: backlog
   14-3-fetch-as-string: backlog
   14-4-fetch-type-handler-hooks: backlog
