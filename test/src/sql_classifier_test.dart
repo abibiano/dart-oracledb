@@ -620,4 +620,20 @@ void main() {
       expect(hasReturningIntoClause('INSERT INTO t (a) VALUES (:1)'), isFalse);
     });
   });
+
+  test('RETURNING target scanner ignores input binds and quoted text', () {
+    expect(
+      returningIntoBindTokens(
+        "UPDATE t SET name = ':fake', id = :id "
+        'RETURNING id, name INTO :rid, :rname /* :ignored */',
+      ),
+      ['RID', 'RNAME'],
+    );
+    expect(
+      returningIntoBindTokens(
+        'INSERT INTO t (id) VALUES (:1) RETURNING id INTO :2',
+      ),
+      ['2'],
+    );
+  });
 }

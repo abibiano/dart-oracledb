@@ -411,10 +411,8 @@ void main() {
       test('writeStream into a PL/SQL RETURNING ... INTO LOB OUT bind under '
           'fetchLobs (node\'s canonical streamed-insert pattern)', () async {
         final id = nextTestId();
-        // NOTE: this driver accepts OracleBind specs only inside PL/SQL, so
-        // node-oracledb's plain `INSERT ... RETURNING c INTO :lobbv` is wrapped
-        // in a BEGIN/END block (a bare execute() of that DML raises ORA-06502,
-        // "OracleBind specs are only supported in PL/SQL blocks").
+        // The BEGIN/END-wrapped form; the bare DML RETURNING form is pinned in
+        // single_execute_dml_returning_integration_test.dart (DW-106).
         final result = await connection.execute(
           'BEGIN INSERT INTO $testTable (id, doc) VALUES '
           '($id, EMPTY_CLOB()) RETURNING doc INTO :out; END;',

@@ -448,6 +448,62 @@ bool hasReturningIntoClause(String sql) {
   return false;
 }
 
+/// Bind tokens in the top-level DML `RETURNING ... INTO` target list, in SQL
+/// order. The caller first establishes that this is a DML RETURNING statement.
+/// Tokens are upper-cased because Oracle bind names are case-insensitive.
+List<String> returningIntoBindTokens(String sql) {
+  final tokens = <String>[];
+  final n = sql.length;
+  var pos = 0;
+  var depth = 0;
+  var sawReturning = false;
+  var sawInto = false;
+  while (pos < n) {
+    final skipped = _skipNonCode(sql, pos);
+    if (skipped != pos) {
+      pos = skipped;
+      continue;
+    }
+    final c = sql.codeUnitAt(pos);
+    if (c == 0x28) {
+      depth++;
+      pos++;
+      continue;
+    }
+    if (c == 0x29) {
+      if (depth > 0) depth--;
+      pos++;
+      continue;
+    }
+    if (depth == 0 && _isIdentStart(c)) {
+      if (!sawReturning && matchesKeyword(sql, pos, 'RETURNING')) {
+        sawReturning = true;
+      } else if (sawReturning && !sawInto && matchesKeyword(sql, pos, 'INTO')) {
+        sawInto = true;
+      }
+      pos++;
+      while (pos < n && _isIdentChar(sql.codeUnitAt(pos))) {
+        pos++;
+      }
+      continue;
+    }
+    if (sawInto && c == 0x3A && pos + 1 < n) {
+      final next = sql.codeUnitAt(pos + 1);
+      if (_isIdentStart(next) || (next >= 0x30 && next <= 0x39)) {
+        final start = pos + 1;
+        pos = start;
+        while (pos < n && _isIdentChar(sql.codeUnitAt(pos))) {
+          pos++;
+        }
+        tokens.add(sql.substring(start, pos).toUpperCase());
+        continue;
+      }
+    }
+    pos++;
+  }
+  return tokens;
+}
+
 /// For a DML `RETURNING ... INTO` statement, returns the first bind
 /// placeholder token that appears BOTH before and after the (paren-depth-0)
 /// `RETURNING` keyword, or null when no placeholder spans that boundary.

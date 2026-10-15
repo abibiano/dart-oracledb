@@ -295,6 +295,22 @@ final result = await connection.executeMany(
 print(result.outBinds.toList()); // [[[1]], [[2]]]
 ```
 
+**Single-statement `RETURNING ... INTO`.** A plain `execute()` of an
+INSERT/UPDATE/DELETE with a `RETURNING ... INTO` clause accepts
+`OracleBind.out(...)` specs for the INTO targets (the same wire path as
+`executeMany()`, one iteration). Each OUT bind yields a `List` of the returned
+values, one per affected row (empty when no row matched). `OracleBind` specs on
+any other non-PL/SQL statement are still rejected (ORA-06502). Oracle 23ai
+also supports `MERGE ... RETURNING`; Oracle 21c does not.
+
+```dart
+final r = await connection.execute(
+  'UPDATE emp SET sal = sal * 1.1 WHERE dept = :d RETURNING id INTO :ids',
+  {'d': 10, 'ids': OracleBind.out(type: OracleDbType.number)},
+);
+print(r.outBinds['ids']); // [1, 4, 9]
+```
+
 **Bulk PL/SQL.** A `BEGIN`/`DECLARE`/`CALL` block runs once per row (or
 `numIterations` times). OUT / IN OUT placeholders are declared once via
 `bindDefs`; OUT results are row-major, one entry per iteration:
@@ -793,15 +809,16 @@ try {
 ```
 
 ```dart
-// Write: node-oracledb's canonical streamed insert. This driver accepts
-// OracleBind specs only inside PL/SQL, so the DML RETURNING is wrapped in a block.
+// Write: node-oracledb's canonical streamed insert. A DML RETURNING ... INTO
+// statement takes OracleBind OUT specs directly; each OUT bind returns a List
+// with one value per affected row (a PL/SQL BEGIN/END wrapper also works).
 final result = await connection.execute(
-  'BEGIN INSERT INTO articles (id, doc) VALUES (:id, EMPTY_CLOB()) '
-  'RETURNING doc INTO :out; END;',
+  'INSERT INTO articles (id, doc) VALUES (:id, EMPTY_CLOB()) '
+  'RETURNING doc INTO :out',
   {'id': 1, 'out': OracleBind.out(type: OracleDbType.clob, maxSize: 1)},
   OracleExecuteOptions(fetchLobs: true),
 );
-final lob = result.outBinds['out'] as OracleLob;
+final lob = (result.outBinds['out'] as List).single as OracleLob;
 try {
   final written = await lob.writeStream(pieces); // Stream<String>; returns units
   await connection.commit();

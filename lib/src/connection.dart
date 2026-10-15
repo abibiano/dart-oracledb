@@ -1542,6 +1542,15 @@ class OracleConnection {
   /// `lib/src/sql_classifier.dart` for the full rules (comment skipping,
   /// CTE terminal-verb resolution, q-quote handling).
   ///
+  /// ## DML `RETURNING ... INTO`
+  ///
+  /// An INSERT/UPDATE/DELETE/MERGE with a `RETURNING ... INTO` clause accepts
+  /// [OracleBind.out] specs for its INTO targets (IN OUT is rejected; the `executeMany`
+  /// wire path with one iteration). Each OUT bind in [OracleResult.outBinds] is
+  /// a `List` of the returned values, one per affected row. A placeholder may
+  /// not appear both before and after `RETURNING`. [OracleBind] specs on any
+  /// other non-PL/SQL statement are rejected (ORA-06502).
+  ///
   /// Throws [OracleException] if:
   /// - Another `execute()` is already in progress on this connection
   /// - Bind value count doesn't match placeholder count (ORA-01008)
@@ -3512,7 +3521,7 @@ class OracleConnection {
       executeManyIters: bulk?.numIterations,
       batchErrors: bulk?.batchErrors ?? false,
       dmlRowCounts: bulk?.dmlRowCounts ?? false,
-      dmlReturning: bulk?.dmlReturning ?? false,
+      dmlReturning: bulk?.dmlReturning ?? stmt.dmlReturning,
     );
     StatementCacheEntry? cacheEntry = open.cacheEntry;
     var unhandledCursorId = open.response.cursorId;
@@ -3635,7 +3644,7 @@ class OracleConnection {
       response = await _transport.materializeLobs(
         response,
         bindMetadata: stmt.bindMetadata,
-        dmlReturning: bulk?.dmlReturning ?? false,
+        dmlReturning: bulk?.dmlReturning ?? stmt.dmlReturning,
         wrapLob: fetchLobs ? _registerLob : null,
         rawJsonBlobs: rawJsonBlobs,
       );
@@ -3785,7 +3794,16 @@ class OracleConnection {
               )
             : _buildOutBinds(
                 outBindIndices: response.outBindIndices,
-                values: outBindValues,
+                // Single-execute DML RETURNING: the one iteration's cells,
+                // each a List of the returned values (one per affected row).
+                values: stmt.dmlReturning
+                    ? (response.outBindRows.isEmpty
+                          ? [
+                              for (final _ in response.outBindIndices)
+                                const <Object?>[],
+                            ]
+                          : response.outBindRows.first)
+                    : outBindValues,
                 bindNames: stmt.bindNames,
                 outBindNameIndex: stmt.outBindNameIndex,
               ),
@@ -4081,6 +4099,58 @@ class OracleConnection {
 
     final isQuery = isQuerySql(sql);
     final isPlSql = !isQuery && isPlSqlSql(sql);
+    // A DML `RETURNING ... INTO` statement takes OracleBind OUT specs
+    // for its INTO targets (the executeMany wire shape with one iteration).
+    final isDmlReturning = !isQuery && !isPlSql && hasReturningIntoClause(sql);
+    if (isDmlReturning && bindList != null) {
+      // node-oracledb NJS-149: a placeholder is an input OR a RETURNING target.
+      final reused = returningBindReusedName(sql);
+      if (reused != null) {
+        throw OracleException(
+          errorCode: oraBindMismatch,
+          message:
+              'The bind placeholder ":$reused" cannot be used both before and '
+              'after the RETURNING clause in a DML RETURNING statement; a '
+              'placeholder is either an input bind or a RETURNING INTO '
+              'target, not both. [SQL: ${_truncateSql(sql)}]',
+          sql: sql,
+        );
+      }
+      final targets = returningIntoBindTokens(sql);
+      final targetNames = targets.toSet();
+      if (targets.length != targetNames.length) {
+        throw OracleException(
+          errorCode: oraBindMismatch,
+          message:
+              'DML RETURNING INTO targets must use distinct bind '
+              'placeholders. [SQL: ${_truncateSql(sql)}]',
+          sql: sql,
+        );
+      }
+      for (var i = 0; i < bindList.length; i++) {
+        final name = bindNames == null ? '${i + 1}' : bindNames[i];
+        final isTarget = targetNames.contains(name.toUpperCase());
+        final raw = bindList[i];
+        if (isTarget &&
+            (raw is! OracleBind || raw.direction == BindDir.input)) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'DML RETURNING INTO target ":$name" requires '
+                'OracleBind.out',
+          );
+        }
+        if (!isTarget && raw is OracleBind) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'OracleBind specs in DML RETURNING statements are '
+                'supported only for RETURNING INTO targets (":$name" '
+                'is an input placeholder)',
+          );
+        }
+      }
+    }
     // [forceUncacheable] keeps the internal startup charset-detection query out
     // of the statement cache (Story 10.1): no cached cursor, no held server
     // cursor, no cache slot consumed.
@@ -4094,10 +4164,31 @@ class OracleConnection {
       for (var i = 0; i < bindList.length; i++) {
         final raw = bindList[i];
         if (raw is OracleBind) {
-          if (!isPlSql) {
+          if (!isPlSql && !isDmlReturning) {
             throw const OracleException(
               errorCode: oraBindTypeError,
-              message: 'OracleBind specs are only supported in PL/SQL blocks',
+              message:
+                  'OracleBind specs are only supported in PL/SQL blocks and '
+                  'DML RETURNING ... INTO statements',
+            );
+          }
+          if (isDmlReturning && raw.direction == BindDir.inputOutput) {
+            // A RETURNING ... INTO target is server-populated and takes no
+            // input: the wire shape omits it from ROW_DATA, so an IN OUT
+            // value would be dropped silently. Fail loud instead.
+            throw const OracleException(
+              errorCode: oraBindTypeError,
+              message:
+                  'IN OUT binds are not supported as DML RETURNING ... INTO '
+                  'targets; use OracleBind.out',
+            );
+          }
+          if (isDmlReturning && raw.type == OracleDbType.cursor) {
+            throw const OracleException(
+              errorCode: oraBindTypeError,
+              message:
+                  'SYS_REFCURSOR binds are not supported as DML RETURNING '
+                  '... INTO targets',
             );
           }
           // raw.value is null for OUT-only binds and carries the input value
@@ -4254,6 +4345,9 @@ class OracleConnection {
       isPlSql: isPlSql,
       eligible: eligible,
       cacheKey: cacheKey,
+      dmlReturning:
+          isDmlReturning &&
+          (bindMetadata?.any((m) => m.dir != BindDir.input) ?? false),
     );
   }
 
@@ -5837,7 +5931,12 @@ class _PreparedStatement {
     required this.isPlSql,
     required this.eligible,
     required this.cacheKey,
+    this.dmlReturning = false,
   });
+
+  /// A single-execute DML `RETURNING ... INTO` statement carrying at least one
+  /// OUT / IN OUT bind: sent on the executeMany DML RETURNING wire shape.
+  final bool dmlReturning;
 
   final List<dynamic>? bindList;
   final List<String>? bindNames;

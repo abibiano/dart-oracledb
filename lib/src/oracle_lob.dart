@@ -903,20 +903,21 @@ class OracleLob {
   /// exactly where repeated [write] calls would leave it.
   ///
   /// The canonical shape for a streamed insert is node-oracledb's
-  /// `RETURNING INTO` pattern — wrapped in a `BEGIN ... END;` block, because this
-  /// driver accepts `OracleBind` specs only inside PL/SQL:
+  /// `RETURNING INTO` pattern. A DML `RETURNING ... INTO` statement takes
+  /// `OracleBind` OUT specs directly (each OUT bind returns a `List` with one
+  /// value per affected row); wrapping it in a `BEGIN ... END;` block works too:
   ///
   /// ```dart
   /// final result = await connection.execute(
-  ///   'BEGIN INSERT INTO articles (id, doc) VALUES (:id, EMPTY_CLOB()) '
-  ///   'RETURNING doc INTO :out; END;',
+  ///   'INSERT INTO articles (id, doc) VALUES (:id, EMPTY_CLOB()) '
+  ///   'RETURNING doc INTO :out',
   ///   {
   ///     'id': 1,
   ///     'out': OracleBind.out(type: OracleDbType.clob, maxSize: 1),
   ///   },
   ///   const OracleExecuteOptions(fetchLobs: true),
   /// );
-  /// final lob = result.outBinds['out']! as OracleLob;
+  /// final lob = (result.outBinds['out']! as List).single as OracleLob;
   /// try {
   ///   await lob.writeStream(pieces); // Stream<String>
   ///   await connection.commit();

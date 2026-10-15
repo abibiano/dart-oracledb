@@ -510,13 +510,27 @@ class ExecuteRequest extends Message {
       final rows = bulkRows;
       if (rows == null) {
         // Single ROW_DATA message containing all bind values for one
-        // iteration.
-        _writeRowData(
-          buffer,
-          binds,
-          isPlSql: isPlSql,
-          ttcFieldVersion: ttcFieldVersion,
-        );
+        // iteration. A DML RETURNING statement omits its RETURNING ... INTO
+        // targets (OUT / IN OUT binds) from the row data — they are declared
+        // in the metadata block above and populated by the server — exactly
+        // like each executeMany iteration below.
+        final rowBinds = dmlReturning
+            ? [
+                for (final b in binds)
+                  if (!b.hasOutput) b,
+              ]
+            : binds;
+        // node-oracledb sends no ROW_DATA at all when every bind is a
+        // RETURNING target (its bindParams list is empty): an empty ROW_DATA
+        // draws ORA-03146 from the server.
+        if (rowBinds.isNotEmpty) {
+          _writeRowData(
+            buffer,
+            rowBinds,
+            isPlSql: isPlSql,
+            ttcFieldVersion: ttcFieldVersion,
+          );
+        }
       } else {
         // executeMany (array DML and PL/SQL iteration): one ROW_DATA message
         // per iteration (node-oracledb execute.js encode() writes

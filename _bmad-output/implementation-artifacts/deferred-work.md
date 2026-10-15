@@ -783,7 +783,9 @@ resolution-undo: 6f2476ee3635524df4a84e2c90789c9c743b51f88f02597b6e756b6ebe64c3a
 origin: migrated from legacy ledger ("Deferred from: dev-story of 12-3-chunked-streaming-transfer (2026-07-26)"), 2026-10-09
 location: lib/src/connection.dart
 reason: **A plain (non-PL/SQL) `execute()` cannot take an `OracleBind` spec, so node-oracledb's canonical `INSERT ... RETURNING c INTO :lobbv` needs a `BEGIN/END` wrapper.** Found while closing the 12.1 ledger item that asked for `fetchLobs: true` + a DML `RETURNING ... INTO` OUT bind. `_prepareStatement` rejects an `OracleBind` on any non-PL/SQL statement with `ORA-06502: OracleBind specs are only supported in PL/SQL blocks`, so the DML-RETURNING half of the README's "a LOB OUT / IN OUT bind" writable-locator category is only reachable as `BEGIN INSERT ... RETURNING doc INTO :out; END;`. That wrapped form is now tested dual-env and documented (in `writeStream`'s dartdoc and the README), so nothing is broken — but the restriction is a real usability gap versus the reference driver, and it is wider than LOBs (it applies to every OUT bind on a DML RETURNING statement, which `executeMany` supports via `bindDefs` while single `execute()` does not). Decide whether single-execute DML RETURNING should accept `OracleBind` specs (Oracle's wire protocol supports it — `executeMany` already does it) or whether the PL/SQL wrapper is the documented answer. target: Epic 12 follow-up / a bind-surface story. [lib/src/connection.dart `_prepareStatement`]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-single-execute-dml-returning-binds
+resolution-undo: e92ee0018edf2a062cc9083196397491ada2f339661032729151bd798f7dc733 2026-10-15 7374617475733a206f70656e
 decision: 2026-10-15 Accept OracleBind on single-execute DML RETURNING — Allow OracleBind OUT specs for DML RETURNING ... INTO in single execute(), reusing the executeMany wire path, with dual-env tests and README updates.
 decision: 2026-10-14 Keep open for a bind-surface story
 
@@ -1054,4 +1056,11 @@ origin: spec-deferred 0ef98a82d6b9
 location: lib/src/transport/transport.dart:2364
 source_spec: `bmad-build-auto-result-temp-lob-materialize-sweep.md`
 reason: The wrap path skips the new materialize sweep. A deliberately throwing test callback demonstrates a claim without a handle, but the production _registerLob callback is synchronous and documented as nonthrowing. Confirm whether a production response can fail after wrapping has begun, then account for registered and unvisited locators together.
+status: open
+
+### DW-136: Determine whether a successful DML RETURNING response can report affected rows without an OUT bind row.
+origin: spec-deferred ce3c499b82e9
+location: lib/src/connection.dart:3799
+source_spec: `spec-single-execute-dml-returning-binds.md`
+reason: The empty-row fallback would expose empty lists in that response shape. Both Oracle integration runs returned OUT data when rows were affected; a protocol fixture or server trace showing the anomalous response would settle reachability.
 status: open
