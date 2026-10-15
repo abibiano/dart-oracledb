@@ -2347,15 +2347,22 @@ class Transport {
   /// result — but the bracket that holds the connection is the caller's, and on
   /// the streaming path the enclosing round trip is a FETCH, not an execute.
   ///
-  /// DW-132 — when materialization throws on the materialize path
-  /// (`wrapLob == null`: the maxSize guards, a failed read, a BLOB IS JSON
-  /// decode failure, an OUT-bind index misalignment), every temporary locator
-  /// in [response] that was not yet visited is queued for free before the
-  /// exception propagates. They are discarded with the response, so nothing
-  /// else can ever free them. The sweep goes through
+  /// DW-132 — when materialization throws (the maxSize guards, a failed read,
+  /// a BLOB IS JSON decode failure, an OUT-bind index misalignment), every
+  /// temporary locator in [response] that was not yet visited is queued for
+  /// free before the exception propagates. They are discarded with the
+  /// response, so nothing else can ever free them. The sweep goes through
   /// [_queueMaterializedTempLobToFree], so it stays ownership-aware and
-  /// deduped. Under `fetchLobs` the handles own their locators and nothing is
-  /// swept.
+  /// deduped.
+  ///
+  /// DW-135 — the same sweep runs under `fetchLobs` (`wrapLob != null`). A
+  /// failure is reachable mid-wrap: [resolveOutBindMaxSize] throws on a
+  /// misaligned OUT-bind index even when wrapping, after earlier row locators
+  /// were already wrapped. A locator reaches `visited` before its `wrapLob`
+  /// call, so every registered handle's locator is skipped (the handle frees it
+  /// on close(); queueing it would double-free) and only the locators never
+  /// reached are queued. The production `_registerLob` callback is synchronous
+  /// and nonthrowing, so no claim is left without a handle.
   Future<ExecuteResponse> _materializeLobValues(
     ExecuteResponse response, {
     List<BindMetadata>? bindMetadata,
@@ -2378,7 +2385,7 @@ class Transport {
         rawJsonBlobs: rawJsonBlobs,
       );
     } catch (_) {
-      if (wrapLob == null) _sweepUnvisitedTempLobs(response, visited);
+      _sweepUnvisitedTempLobs(response, visited);
       rethrow;
     }
   }
@@ -2386,7 +2393,8 @@ class Transport {
   /// DW-132 sweep: queues every temporary [LobLocator] reachable from
   /// [response] (rows, OUT binds, executeMany OUT rows, DML RETURNING cells)
   /// that [visited] does not contain. A visited locator was already queued by
-  /// the read's `finally` or by `rejectOversized`.
+  /// the read's `finally` or by `rejectOversized`, or belongs to a registered
+  /// handle on the wrap path.
   void _sweepUnvisitedTempLobs(
     ExecuteResponse response,
     Set<LobLocator> visited,

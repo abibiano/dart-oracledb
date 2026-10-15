@@ -1532,6 +1532,67 @@ void main() {
       },
     );
 
+    test('DW-135: a misaligned OUT-bind index under fetchLobs queues only the '
+        'unwrapped temp locators, never a registered handle\'s', () async {
+      final t = _ChunkedReadTransport([]);
+      final wrappedRow = _fetchedTempLocator(
+        oracleType: oraTypeBlob,
+        length: 1,
+        tag: 1,
+      );
+      final unvisitedOut = _fetchedTempLocator(
+        oracleType: oraTypeBlob,
+        length: 1,
+        tag: 2,
+      );
+      final wrapped = <LobLocator>[];
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            rows: [
+              [wrappedRow],
+            ],
+            outBindValues: [unvisitedOut],
+            outBindIndices: const [],
+          ),
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeBlob, dir: BindDir.output, maxSize: 9),
+          ],
+          wrapLob: (l) {
+            wrapped.add(l);
+            return _WrapMarker(l);
+          },
+        ),
+        throwsA(isA<OracleException>()),
+      );
+      expect(wrapped, [same(wrappedRow)]);
+      expect(t.requests, isEmpty);
+      expect(
+        t.debugPendingTempLobCount,
+        equals(1),
+        reason:
+            'only the unvisited OUT locator; the wrapped one is the '
+            'handle\'s to free',
+      );
+    });
+
+    test('DW-135: the production-shaped wrap callback is nonthrowing, so a '
+        'clean wrap queues nothing', () async {
+      final t = _ChunkedReadTransport([]);
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          rows: [
+            [_fetchedTempLocator(oracleType: oraTypeBlob, length: 1, tag: 1)],
+          ],
+        ),
+        wrapLob: _WrapMarker.new,
+      );
+      expect(out.rows.single.single, isA<_WrapMarker>());
+      expect(t.debugPendingTempLobCount, equals(0));
+    });
+
     test('an OUT-bind index misalignment queues every temp locator', () async {
       final t = _ChunkedReadTransport([]);
       await expectLater(

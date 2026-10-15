@@ -1061,7 +1061,9 @@ origin: spec-deferred 0ef98a82d6b9
 location: lib/src/transport/transport.dart:2364
 source_spec: `bmad-build-auto-result-temp-lob-materialize-sweep.md`
 reason: The wrap path skips the new materialize sweep. A deliberately throwing test callback demonstrates a claim without a handle, but the production _registerLob callback is synchronous and documented as nonthrowing. Confirm whether a production response can fail after wrapping has begun, then account for registered and unvisited locators together.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-lob-wrap-failure-accounting
+resolution-undo: a4f8761f60598653dc0a5b717fd7a40765f4e183e66842d7ef4c000412400b9a 2026-10-15 7374617475733a206f70656e
 
 ### DW-136: Determine whether a successful DML RETURNING response can report affected rows without an OUT bind row.
 origin: spec-deferred ce3c499b82e9
