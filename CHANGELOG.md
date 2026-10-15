@@ -124,12 +124,30 @@
   `fetchTypeHandler` converters receive the `OracleIntervalDS`. Validated
   against Oracle 23ai and Oracle 21c. `Duration` bind values, previously
   rejected as unsupported, now bind as intervals.
-- **Limits:** `INTERVAL YEAR TO MONTH`, intervals inside native JSON, and
+- **`INTERVAL YEAR TO MONTH` columns decode and bind.** They previously
+  decoded silently to `null` and could not be bound. Columns, PL/SQL OUT
+  binds, DML `RETURNING` values and REF CURSOR / nested `CURSOR()` /
+  implicit-result rows now decode to the new `OracleIntervalYM`
+  (node-oracledb `IntervalYM` parity: signed `years` and `months`;
+  `==`/`hashCode`, `toString()` as `OracleIntervalYM(+3-05)`). An
+  `OracleIntervalYM` binds as an interval — inferred for IN binds and
+  `executeMany()` rows, or declared with the new `OracleDbType.intervalYM`
+  (no `maxSize`) for OUT / IN OUT and `OracleBindDef`. No Dart-native type
+  binds as one (a `Duration` stays INTERVAL DAY TO SECOND). The constructor
+  carries every 12 months into a year like node-oracledb and throws
+  `ArgumentError` outside `INTERVAL YEAR(9) TO MONTH` and — unlike
+  node-oracledb — for years and months of opposite signs, which Oracle stores
+  verbatim and then renders and compares inconsistently (measured on 23ai
+  and 21c). A malformed wire value fails with `OracleException`
+  (`oraProtocolError`) instead of decoding. `fetchTypeHandler` converters
+  receive the `OracleIntervalYM`. Validated against Oracle 23ai and Oracle
+  21c.
+- **Limits (both interval types):** intervals inside native JSON and
   `fetchAsString` for intervals remain unsupported. Known issue (not
-  interval-specific, pre-existing): on Oracle 21c a SQL `NULL` of any type in a
-  REF CURSOR / nested `CURSOR()` / implicit-result row without a LOB or JSON
-  column fails the call with ORA-01405, so NULL intervals are not supported
-  inside cursors there (non-NULL values decode on both versions).
+  interval-specific, pre-existing): on Oracle 21c a SQL `NULL` of any type
+  in a REF CURSOR / nested `CURSOR()` / implicit-result row without a LOB or
+  JSON column fails the call with ORA-01405, so NULL intervals are not supported inside cursors there
+  (non-NULL values decode on both versions).
 
 ## 1.5.0
 

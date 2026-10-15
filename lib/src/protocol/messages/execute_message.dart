@@ -118,8 +118,8 @@ class BindVariable {
         message:
             'Unsupported bind value type: ${value.runtimeType}. '
             'Supported types: String, int, double, DateTime, '
-            'OracleTimestampTz, OracleIntervalDS, Duration, Uint8List, Map, '
-            'List, null',
+            'OracleTimestampTz, OracleIntervalDS, Duration, OracleIntervalYM, '
+            'Uint8List, Map, List, null',
       );
     }
     return oraType;
@@ -731,6 +731,8 @@ class ExecuteRequest extends Message {
         return 13;
       case oraTypeIntervalDS:
         return dt.intervalDSWireLength;
+      case oraTypeIntervalYM:
+        return dt.intervalYMWireLength;
       case oraTypeCursor:
         // Cursor-valued SELECT columns (the `CURSOR(SELECT ...)` subquery
         // shape). node-oracledb DB_TYPE_CURSOR.bufferSizeFactor = 4; the
@@ -841,6 +843,18 @@ class ExecuteRequest extends Message {
           message:
               'INTERVAL DAY TO SECOND bind requires OracleIntervalDS or '
               'Duration (got ${value.runtimeType})',
+        );
+      case oraTypeIntervalYM:
+        // No Dart-native year/month span exists, so only the wrapper binds.
+        if (value is OracleIntervalYM) {
+          buffer.writeBytesWithLength(dt.encodeIntervalYM(value));
+          return;
+        }
+        throw OracleException(
+          errorCode: oraBindTypeError,
+          message:
+              'INTERVAL YEAR TO MONTH bind requires OracleIntervalYM (got '
+              '${value.runtimeType})',
         );
       case oraTypeClob:
       case oraTypeBlob:
@@ -975,6 +989,8 @@ class ExecuteRequest extends Message {
         return 13;
       case oraTypeIntervalDS:
         return dt.intervalDSWireLength;
+      case oraTypeIntervalYM:
+        return dt.intervalYMWireLength;
       default:
         return 1;
     }
@@ -2319,6 +2335,14 @@ Object? _decodeValueByOraType(
       if (bytes.isEmpty) return null;
       if (!strict) return null; // probe pass: bytes consumed, value unused
       return dt.decodeIntervalDS(bytes);
+    case oraTypeIntervalYM:
+      // node-oracledb readOracleIntervalYM: length-prefixed 5-byte value,
+      // zero length = SQL NULL. The decoder fails loud on a malformed
+      // payload, so the probe pass stops after consuming the bytes.
+      final bytes = buf.readBytesWithLength();
+      if (bytes.isEmpty) return null;
+      if (!strict) return null; // probe pass: bytes consumed, value unused
+      return dt.decodeIntervalYM(bytes);
     case oraTypeClob:
     case oraTypeBlob:
     case oraTypeBfile:
@@ -2639,6 +2663,7 @@ bool _isSupportedRefCursorColumn(ColumnMetadata col) {
     case oraTypeTimestampLtz:
     case oraTypeTimestampTz:
     case oraTypeIntervalDS:
+    case oraTypeIntervalYM:
     case oraTypeBlob:
     case oraTypeJson:
       return true;

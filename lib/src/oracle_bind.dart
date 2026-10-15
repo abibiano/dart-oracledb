@@ -179,6 +179,13 @@ enum OracleDbType {
   /// microsecond resolution). Fixed 11-byte wire size, so `maxSize` is not
   /// needed. Not accepted by `OracleExecuteOptions.fetchAsString`.
   intervalDS,
+
+  /// Oracle INTERVAL YEAR TO MONTH (decoded as [OracleIntervalYM]).
+  ///
+  /// IN OUT values must be an [OracleIntervalYM] (Dart has no native
+  /// year/month span type). Fixed 5-byte wire size, so `maxSize` is not
+  /// needed. Not accepted by `OracleExecuteOptions.fetchAsString`.
+  intervalYM,
 }
 
 /// Specification for an OUT or IN OUT bind variable.
@@ -377,6 +384,13 @@ class OracleBind {
             'Duration, or null, got ${value.runtimeType}',
           );
         }
+      case OracleDbType.intervalYM:
+        if (value is! OracleIntervalYM) {
+          throw ArgumentError(
+            'OracleBind(type: intervalYM) requires OracleIntervalYM or null, '
+            'got ${value.runtimeType}',
+          );
+        }
       case OracleDbType.raw:
         if (value is! Uint8List) {
           throw ArgumentError(
@@ -514,6 +528,8 @@ int oracleTypeCodeFor(OracleDbType type) {
       return oc.oraTypeTimestampTz;
     case OracleDbType.intervalDS:
       return oc.oraTypeIntervalDS;
+    case OracleDbType.intervalYM:
+      return oc.oraTypeIntervalYM;
     case OracleDbType.raw:
       return oc.oraTypeRaw;
     case OracleDbType.clob:

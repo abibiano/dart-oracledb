@@ -40,6 +40,7 @@ void main() {
         expect(OracleDbType.nVarchar.index, equals(10));
         expect(OracleDbType.nClob.index, equals(11));
         expect(OracleDbType.intervalDS.index, equals(12));
+        expect(OracleDbType.intervalYM.index, equals(13));
       },
     );
   });
@@ -1270,6 +1271,77 @@ void main() {
           reason: '${value.runtimeType}',
         );
       }
+    });
+  });
+
+  group('OracleDbType.intervalYM (Story 15.2)', () {
+    test('maps to wire type 182 and needs no maxSize', () {
+      final bind = OracleBind.out(type: OracleDbType.intervalYM);
+      expect(bind.oracleTypeCode, equals(182));
+      expect(bind.value, isNull);
+      expect(
+        OracleBindDef.output(type: OracleDbType.intervalYM).oracleTypeCode,
+        equals(182),
+      );
+      expect(
+        OracleBindDef.inputOutput(type: OracleDbType.intervalYM).maxSize,
+        isNull,
+      );
+    });
+
+    test('IN OUT accepts OracleIntervalYM and null', () {
+      for (final value in <Object?>[
+        OracleIntervalYM(years: 1, months: 6),
+        OracleIntervalYM(months: -3),
+        null,
+      ]) {
+        expect(
+          () => OracleBind.inOut(value: value, type: OracleDbType.intervalYM),
+          returnsNormally,
+          reason: '$value',
+        );
+      }
+    });
+
+    test('IN OUT rejects other values without echoing them', () {
+      const secret = '4111111111111111';
+      for (final value in <Object>[
+        42,
+        secret,
+        DateTime.utc(2024),
+        // No Dart-native year/month span: a Duration or a DAY TO SECOND
+        // wrapper is a different Oracle type.
+        const Duration(days: 365),
+        OracleIntervalDS(days: 1),
+      ]) {
+        expect(
+          () => OracleBind.inOut(value: value, type: OracleDbType.intervalYM),
+          throwsA(
+            isA<ArgumentError>()
+                .having(
+                  (e) => e.message.toString(),
+                  'message',
+                  contains('requires OracleIntervalYM or null'),
+                )
+                .having(
+                  (e) => e.toString(),
+                  'toString',
+                  isNot(contains(secret)),
+                ),
+          ),
+          reason: '${value.runtimeType}',
+        );
+      }
+    });
+
+    test('an intervalDS bind rejects an OracleIntervalYM value', () {
+      expect(
+        () => OracleBind.inOut(
+          value: OracleIntervalYM(years: 1),
+          type: OracleDbType.intervalDS,
+        ),
+        throwsArgumentError,
+      );
     });
   });
 

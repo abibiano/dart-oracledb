@@ -64,6 +64,7 @@ void main() {
 
     test('interval types match node-oracledb TNS_DATA_TYPE_INTERVAL_*', () {
       expect(oraTypeIntervalDS, equals(183));
+      expect(oraTypeIntervalYM, equals(182));
     });
   });
 

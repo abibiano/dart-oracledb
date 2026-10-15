@@ -294,4 +294,149 @@ void main() {
       });
     });
   });
+
+  group('OracleIntervalYM (Story 15.2)', () {
+    List<int> parts(OracleIntervalYM v) => [v.years, v.months];
+
+    test('defaults both components to zero', () {
+      expect(parts(OracleIntervalYM()), equals([0, 0]));
+    });
+
+    test('keeps already-normalized components unchanged', () {
+      expect(parts(OracleIntervalYM(years: 3, months: 5)), equals([3, 5]));
+      expect(parts(OracleIntervalYM(years: -2, months: -3)), equals([-2, -3]));
+    });
+
+    test('carries months into years like node-oracledb', () {
+      expect(parts(OracleIntervalYM(months: 14)), equals([1, 2]));
+      expect(parts(OracleIntervalYM(months: 12)), equals([1, 0]));
+      expect(parts(OracleIntervalYM(months: 11)), equals([0, 11]));
+      expect(parts(OracleIntervalYM(years: 1, months: 35)), equals([3, 11]));
+    });
+
+    test('negative months carry with truncation, keeping one sign', () {
+      // node: months = -14 % 12 = -2, years = trunc(-14 / 12) = -1.
+      expect(parts(OracleIntervalYM(months: -14)), equals([-1, -2]));
+      expect(parts(OracleIntervalYM(months: -12)), equals([-1, 0]));
+      expect(parts(OracleIntervalYM(years: -1, months: -25)), equals([-3, -1]));
+    });
+
+    test('rejects years outside the INTERVAL YEAR(9) range', () {
+      expect(() => OracleIntervalYM(years: 1000000000), throwsArgumentError);
+      expect(() => OracleIntervalYM(years: -1000000000), throwsArgumentError);
+      expect(OracleIntervalYM(years: 999999999).years, equals(999999999));
+      expect(OracleIntervalYM(years: -999999999).years, equals(-999999999));
+      expect(
+        parts(OracleIntervalYM(years: 999999999, months: 11)),
+        equals([999999999, 11]),
+      );
+    });
+
+    test('rejects a value that only leaves the range after the carry', () {
+      expect(
+        () => OracleIntervalYM(years: 999999999, months: 12),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => e.message,
+            'message',
+            contains('normalizes to 1000000000 years'),
+          ),
+        ),
+      );
+      expect(
+        () => OracleIntervalYM(years: -999999999, months: -12),
+        throwsArgumentError,
+      );
+      // The top and bottom of the range are still reachable through the
+      // carry alone.
+      expect(
+        parts(OracleIntervalYM(months: 999999999 * 12 + 11)),
+        equals([999999999, 11]),
+      );
+      expect(
+        parts(OracleIntervalYM(months: -(999999999 * 12 + 11))),
+        equals([-999999999, -11]),
+      );
+      expect(
+        () => OracleIntervalYM(months: 999999999 * 12 + 12),
+        throwsArgumentError,
+      );
+    });
+
+    test('absurd components cannot overflow back into range', () {
+      // Without the pre-carry bounds, `years + months ~/ 12` on the 64-bit
+      // extremes could wrap around instead of failing.
+      const maxInt = 0x7FFFFFFFFFFFFFFF;
+      const minInt = -maxInt - 1;
+      for (final make in <OracleIntervalYM Function()>[
+        () => OracleIntervalYM(years: maxInt),
+        () => OracleIntervalYM(years: minInt),
+        () => OracleIntervalYM(months: maxInt),
+        () => OracleIntervalYM(months: minInt),
+        () => OracleIntervalYM(years: minInt, months: minInt),
+      ]) {
+        expect(make, throwsArgumentError);
+      }
+    });
+
+    test('rejects components of opposite signs', () {
+      // Measured on 23ai and 21c: Oracle stores such a value verbatim and
+      // renders / compares it inconsistently, so the driver refuses to build
+      // (and therefore bind) one.
+      for (final make in <OracleIntervalYM Function()>[
+        () => OracleIntervalYM(years: 1, months: -6),
+        () => OracleIntervalYM(years: -1, months: 6),
+        () => OracleIntervalYM(years: 2, months: -14),
+      ]) {
+        expect(
+          make,
+          throwsA(
+            isA<ArgumentError>().having(
+              (e) => e.message,
+              'message',
+              contains('share one sign'),
+            ),
+          ),
+        );
+      }
+      // Zero carries no sign, so it mixes with either.
+      expect(parts(OracleIntervalYM(months: -6)), equals([0, -6]));
+      expect(parts(OracleIntervalYM(years: -6)), equals([-6, 0]));
+    });
+
+    test('equality and hashCode compare the normalized components', () {
+      final a = OracleIntervalYM(months: 14);
+      final b = OracleIntervalYM(years: 1, months: 2);
+      expect(a, equals(b));
+      expect(a.hashCode, equals(b.hashCode));
+      expect(a, isNot(equals(OracleIntervalYM(months: 15))));
+      expect(
+        OracleIntervalYM(months: 1),
+        isNot(equals(OracleIntervalYM(months: -1))),
+      );
+      expect({a, b}, hasLength(1));
+      // Never equal to the day-to-second wrapper, even for a zero span.
+      expect(OracleIntervalYM(), isNot(equals(OracleIntervalDS())));
+    });
+
+    test('toString renders the Oracle literal layout', () {
+      expect(
+        OracleIntervalYM(years: 3, months: 5).toString(),
+        equals('OracleIntervalYM(+3-05)'),
+      );
+      expect(
+        OracleIntervalYM(years: -2, months: -3).toString(),
+        equals('OracleIntervalYM(-2-03)'),
+      );
+      expect(
+        OracleIntervalYM(months: -3).toString(),
+        equals('OracleIntervalYM(-0-03)'),
+      );
+      expect(OracleIntervalYM().toString(), equals('OracleIntervalYM(+0-00)'));
+      expect(
+        OracleIntervalYM(years: 999999999, months: 11).toString(),
+        equals('OracleIntervalYM(+999999999-11)'),
+      );
+    });
+  });
 }

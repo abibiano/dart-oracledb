@@ -63,8 +63,8 @@ export 'src/oracle_bind.dart'
 // Time-zone-preserving TIMESTAMP WITH TIME ZONE wrapper
 export 'src/oracle_timestamp_tz.dart' show OracleTimestampTz;
 
-// INTERVAL DAY TO SECOND wrapper (Story 15.1)
-export 'src/oracle_interval.dart' show OracleIntervalDS;
+// INTERVAL DAY TO SECOND (Story 15.1) and YEAR TO MONTH (Story 15.2) wrappers
+export 'src/oracle_interval.dart' show OracleIntervalDS, OracleIntervalYM;
 
 // TLS/SSL Configuration
 export 'src/transport/tls.dart' show TlsConfig;

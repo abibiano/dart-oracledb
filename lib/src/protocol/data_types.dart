@@ -841,12 +841,12 @@ _TimestampWire _readTimestampWire(ReadBuffer buffer) {
 /// `DB_TYPE_INTERVAL_DS` bufferSizeFactor).
 const int intervalDSWireLength = 11;
 
-/// Bias added to the 32-bit day and fractional-second fields
-/// (node-oracledb `TNS_DURATION_MID`).
+/// Bias added to the 32-bit day, fractional-second and (INTERVAL YEAR TO
+/// MONTH) year fields (node-oracledb `TNS_DURATION_MID`).
 const int _durationMid = 0x80000000;
 
-/// Bias added to the one-byte hour, minute and second fields
-/// (node-oracledb `TNS_DURATION_OFFSET`).
+/// Bias added to the one-byte hour, minute, second and (INTERVAL YEAR TO
+/// MONTH) month fields (node-oracledb `TNS_DURATION_OFFSET`).
 const int _durationOffset = 60;
 
 /// Encodes an [OracleIntervalDS] to the 11-byte Oracle `INTERVAL DAY TO
@@ -937,6 +937,75 @@ OracleIntervalDS decodeIntervalDS(Uint8List bytes) {
 }
 
 // ============================================================================
+// Oracle INTERVAL YEAR TO MONTH Encoding/Decoding
+// ============================================================================
+
+/// Wire length of an `INTERVAL YEAR TO MONTH` value (node-oracledb
+/// `DB_TYPE_INTERVAL_YM` bufferSizeFactor).
+const int intervalYMWireLength = 5;
+
+/// Encodes an [OracleIntervalYM] to the 5-byte Oracle `INTERVAL YEAR TO
+/// MONTH` wire format, byte-for-byte with node-oracledb
+/// `writeOracleIntervalYM`:
+/// - Bytes 0-3: years + 0x80000000 (UInt32 big-endian)
+/// - Byte 4: months + 60
+///
+/// The wrapper's range checks keep both fields inside their wire width.
+Uint8List encodeIntervalYM(OracleIntervalYM value) {
+  final data = ByteData(intervalYMWireLength)
+    ..setUint32(0, value.years + _durationMid)
+    ..setUint8(4, value.months + _durationOffset);
+  return data.buffer.asUint8List();
+}
+
+/// Decodes the 5-byte Oracle `INTERVAL YEAR TO MONTH` wire format into an
+/// [OracleIntervalYM] (node-oracledb `parseOracleIntervalYM`).
+///
+/// The server always sends all 5 bytes — a zero interval included (`80 00
+/// 00 00 3C`; verified on 23ai and 21c).
+///
+/// node-oracledb reads the fields without checking them. This decoder
+/// fails loud instead: a payload that is not exactly 5 bytes, or whose
+/// fields fall outside an `INTERVAL YEAR(9) TO MONTH` value (years beyond
+/// ±999,999,999, months beyond ±11, components of opposite signs), throws
+/// [OracleException] (`oraProtocolError`) — a misaligned stream or protocol
+/// drift is never turned into a plausible-looking interval, and the
+/// wrapper's [ArgumentError] can never surface from a decode path. Oracle's
+/// own arithmetic always yields same-signed components; a mixed-sign value
+/// can only be one another client stored verbatim, which Oracle itself
+/// renders inconsistently (see [OracleIntervalYM]).
+OracleIntervalYM decodeIntervalYM(Uint8List bytes) {
+  if (bytes.length != intervalYMWireLength) {
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message:
+          'INTERVAL YEAR TO MONTH field has ${bytes.length} bytes '
+          '(expected $intervalYMWireLength)',
+    );
+  }
+  final data = ByteData.sublistView(bytes);
+  final years = data.getUint32(0) - _durationMid;
+  final months = data.getUint8(4) - _durationOffset;
+  const maxYears = 999999999;
+  if (years < -maxYears ||
+      years > maxYears ||
+      months < -11 ||
+      months > 11 ||
+      (years > 0 && months < 0) ||
+      (years < 0 && months > 0)) {
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message:
+          'INTERVAL YEAR TO MONTH field out of range: years $years, months '
+          '$months',
+    );
+  }
+  // In-range, same-signed components are already normalized, so the
+  // constructor stores them unchanged.
+  return OracleIntervalYM(years: years, months: months);
+}
+
+// ============================================================================
 // VARCHAR2/String Encoding/Decoding
 // ============================================================================
 
@@ -987,6 +1056,8 @@ String decodeVarchar(ReadBuffer buffer, int length) {
 /// [OracleIntervalDS] and Dart [Duration] both map to `INTERVAL DAY TO
 /// SECOND` (a [Duration] is converted with [OracleIntervalDS.fromDuration]
 /// when encoded), so the two can share one `executeMany()` slot.
+/// [OracleIntervalYM] maps to `INTERVAL YEAR TO MONTH`; no Dart-native type
+/// does.
 int? inferOraTypeForValue(Object? value) {
   if (value == null) return oraTypeVarchar;
   if (value is String) return oraTypeVarchar;
@@ -996,6 +1067,7 @@ int? inferOraTypeForValue(Object? value) {
   if (value is OracleTimestampTz) return oraTypeTimestampTz;
   if (value is OracleIntervalDS) return oraTypeIntervalDS;
   if (value is Duration) return oraTypeIntervalDS;
+  if (value is OracleIntervalYM) return oraTypeIntervalYM;
   if (value is Uint8List) return oraTypeRaw;
   if (value is Map) return oraTypeJson;
   if (value is List) return oraTypeJson;

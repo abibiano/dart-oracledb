@@ -316,6 +316,7 @@ class OracleExecuteOptions {
   /// * TIMESTAMP WITH TIME ZONE: a UTC `DateTime`, or an [OracleTimestampTz]
   ///   on a `preserveTimestampTimeZone: true` connection;
   /// * INTERVAL DAY TO SECOND: an [OracleIntervalDS];
+  /// * INTERVAL YEAR TO MONTH: an [OracleIntervalYM];
   /// * CLOB / NCLOB: `String`, BLOB: `Uint8List` — or an [OracleLob] handle
   ///   under [fetchLobs] (see below);
   /// * JSON (and a BLOB `IS JSON` column): the decoded `Map` / `List` /
@@ -2895,7 +2896,7 @@ class OracleConnection {
                 'Unsupported bind value type ${value.runtimeType} in '
                 'executeMany() row $r, $slotLabel. Supported types: String, '
                 'int, double, DateTime, OracleTimestampTz, OracleIntervalDS, '
-                'Duration, Uint8List, Map, List, null',
+                'Duration, OracleIntervalYM, Uint8List, Map, List, null',
           );
         }
         if (value is double && !value.isFinite) {
@@ -3524,6 +3525,8 @@ class OracleConnection {
         if (value is! OracleIntervalDS && value is! Duration) {
           mismatch('OracleIntervalDS or Duration');
         }
+      case OracleDbType.intervalYM:
+        if (value is! OracleIntervalYM) mismatch('OracleIntervalYM');
       case OracleDbType.json:
         // Declared JSON slot: a scalar JSON root is allowed (mirrors
         // OracleBind(type: json)); re-wrap so no bind value reaches the text.

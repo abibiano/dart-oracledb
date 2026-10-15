@@ -6767,6 +6767,272 @@ void main() {
       expect(result.columns.single.oracleType, equals(oraTypeIntervalDS));
     });
   });
+
+  group('INTERVAL YEAR TO MONTH (type 182, Story 15.2)', () {
+    final iv = OracleIntervalYM(years: 3, months: 5);
+    // node-oracledb writeOracleIntervalYM bytes for `iv`.
+    const ivWire = [0x80, 0, 0, 3, 0x41];
+
+    /// Bind metadata block for a type-182 bind: buffer size 5
+    /// (node-oracledb bufferSizeFactor), no charset, no LOB prefetch.
+    const intervalMetadata = [
+      oraTypeIntervalYM, ttcBindUseIndicators, 0, 0,
+      1, 5, // UB4 buffer size = 5
+      0, // max num elements
+      0, // contFlag
+      0, // OID
+      0, // version
+      0, // UB2 charset = 0
+      0, // csfrm = 0
+      0, // prefetch length
+      0, // oaccolid
+    ];
+
+    test('OracleIntervalYM infers type 182', () {
+      expect(BindVariable(value: iv).oraType, equals(oraTypeIntervalYM));
+    });
+
+    test('an OracleIntervalYM IN bind writes the 5-byte value', () {
+      final bytes = ExecuteRequest(
+        sql: 'INSERT INTO t (iv) VALUES (:1)',
+        isQuery: false,
+        bindValues: [iv],
+      ).toBytes();
+      expect(_indexOfSub(bytes, intervalMetadata), greaterThanOrEqualTo(0));
+      expect(
+        _indexOfSub(bytes, [5, ...ivWire]),
+        greaterThanOrEqualTo(0),
+        reason: 'length-prefixed interval value not found in request',
+      );
+    });
+
+    test('a negative OracleIntervalYM IN bind keeps its sign', () {
+      final bytes = ExecuteRequest(
+        sql: 'INSERT INTO t (iv) VALUES (:1)',
+        isQuery: false,
+        bindValues: [OracleIntervalYM(years: -2, months: -3)],
+      ).toBytes();
+      expect(
+        _indexOfSub(bytes, [5, 0x7F, 0xFF, 0xFF, 0xFE, 0x39]),
+        greaterThanOrEqualTo(0),
+      );
+    });
+
+    test('a NULL IN bind under the interval type writes a null indicator', () {
+      final bytes = ExecuteRequest(
+        sql: 'INSERT INTO t (iv) VALUES (:1)',
+        isQuery: false,
+        bindValues: [BindVariable(value: null, oraType: oraTypeIntervalYM)],
+      ).toBytes();
+      expect(_indexOfSub(bytes, intervalMetadata), greaterThanOrEqualTo(0));
+    });
+
+    test('an interval OUT bind declares the 5-byte buffer', () {
+      final bytes = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: null,
+            oraType: oraTypeIntervalYM,
+            dir: BindDir.output,
+          ),
+        ],
+      ).toBytes();
+      expect(_indexOfSub(bytes, intervalMetadata), greaterThanOrEqualTo(0));
+    });
+
+    test('a wrong Dart value under the interval type fails loud', () {
+      // A Duration is a DAY TO SECOND value, never a YEAR TO MONTH one.
+      for (final (value, typeName) in <(Object, String)>[
+        (5, 'int'),
+        (const Duration(days: 30), 'Duration'),
+        (OracleIntervalDS(days: 1), 'OracleIntervalDS'),
+      ]) {
+        final req = ExecuteRequest(
+          sql: 'INSERT INTO t (iv) VALUES (:1)',
+          isQuery: false,
+          bindValues: [BindVariable(value: value, oraType: oraTypeIntervalYM)],
+        );
+        expect(
+          req.toBytes,
+          throwsA(
+            isA<OracleException>()
+                .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  allOf(contains('OracleIntervalYM'), contains(typeName)),
+                ),
+          ),
+          reason: typeName,
+        );
+      }
+    });
+
+    test('a column decodes to OracleIntervalYM and the row stays in sync', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(ivWire),
+          ..._bytesWithLength(_oracleNumberFiveBytes()), // N = 5 after it
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      const columns = [
+        ColumnMetadata(name: 'IV', oracleType: oraTypeIntervalYM, maxLength: 0),
+        ColumnMetadata(name: 'N', oracleType: oraTypeNumber, maxLength: 0),
+      ];
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: columns,
+      );
+      expect(r.rows.single[0], equals(iv));
+      expect(r.rows.single[1], equals(5));
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+    });
+
+    test('a NULL interval column decodes to null', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [ttcMsgTypeRowData, 0, ..._bytesWithLength(_oracleNumberFiveBytes())],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: const [
+          ColumnMetadata(
+            name: 'IV',
+            oracleType: oraTypeIntervalYM,
+            maxLength: 0,
+          ),
+          ColumnMetadata(name: 'N', oracleType: oraTypeNumber, maxLength: 0),
+        ],
+      );
+      expect(r.rows.single, equals([null, 5]));
+    });
+
+    test('a malformed interval fails loud only in the strict pass', () {
+      // 4 bytes: the probe consumes them and reaches the terminal message;
+      // the strict decode rejects the payload instead of guessing.
+      final payload = _buildPayload([
+        _rowHeader(),
+        [ttcMsgTypeRowData, ..._bytesWithLength(ivWire.sublist(0, 4))],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      const columns = [
+        ColumnMetadata(name: 'IV', oracleType: oraTypeIntervalYM, maxLength: 0),
+      ];
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: columns,
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraProtocolError,
+          ),
+        ),
+      );
+    });
+
+    test('a mixed-sign interval fails loud only in the strict pass', () {
+      // years 1, months -6: a value only another client can have stored.
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength([0x80, 0, 0, 1, 54]),
+        ],
+        _errorMessage(errorNum: 1403),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      const columns = [
+        ColumnMetadata(name: 'IV', oracleType: oraTypeIntervalYM, maxLength: 0),
+      ];
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: columns,
+        ),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+              .having((e) => e.message, 'message', contains('out of range')),
+        ),
+      );
+    });
+
+    test('an interval OUT bind decodes through outBindValues', () {
+      final payload = _buildPayload([
+        _ioVector([16]),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(ivWire),
+          ..._ub4(0), // SB4 actualNumBytes trailer
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: const [
+          BindMetadata(oraType: oraTypeIntervalYM, dir: BindDir.output),
+        ],
+      );
+      expect(r.outBindValues.single, equals(iv));
+    });
+
+    test('a define block declares the 5-byte interval buffer', () {
+      final bytes = ExecuteRequest(
+        sql: 'SELECT iv, c FROM t',
+        isQuery: true,
+        cursorId: 9,
+        defineColumns: const [
+          ColumnMetadata(
+            name: 'IV',
+            oracleType: oraTypeIntervalYM,
+            maxLength: 0,
+          ),
+          ColumnMetadata(name: 'C', oracleType: oraTypeClob, maxLength: 0),
+        ],
+      ).toBytes();
+      expect(_indexOfSub(bytes, intervalMetadata), greaterThanOrEqualTo(0));
+    });
+
+    test('an embedded cursor describe accepts an interval column', () {
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (
+            columns: [
+              _columnInfo(name: 'IV', oraType: oraTypeIntervalYM, maxSize: 0),
+            ],
+            cursorId: 613,
+          ),
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      final result = r.implicitResults.single;
+      expect(result.cursorId, equals(613));
+      expect(result.columns.single.oracleType, equals(oraTypeIntervalYM));
+    });
+  });
 }
 
 /// Reads only the execute-options word (the UB4 right after the function

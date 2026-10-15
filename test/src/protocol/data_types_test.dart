@@ -1330,6 +1330,10 @@ void main() {
         equals(oraTypeIntervalDS),
         reason: 'a Dart Duration binds as INTERVAL DAY TO SECOND (Story 15.1)',
       );
+      expect(
+        inferOraTypeForValue(OracleIntervalYM(years: 1)),
+        equals(oraTypeIntervalYM),
+      );
     });
 
     test('returns null for unsupported Dart types', () {
@@ -1663,6 +1667,110 @@ void main() {
         () => decodeIntervalDS(
           bytes([0x80, 0, 0, 0, 61, 59, 0x3C, 0x80, 0, 0, 0]),
         ),
+        throwsA(isA<OracleException>()),
+      );
+    });
+  });
+
+  group('INTERVAL YEAR TO MONTH codec (Story 15.2)', () {
+    Uint8List bytes(List<int> b) => Uint8List.fromList(b);
+
+    Matcher protocolError(String fragment) => throwsA(
+      isA<OracleException>()
+          .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+          .having((e) => e.message, 'message', contains(fragment)),
+    );
+
+    // node-oracledb writeOracleIntervalYM: UInt32BE(years + 0x80000000),
+    // then months + 60.
+    final vectors = <String, (OracleIntervalYM, List<int>)>{
+      "INTERVAL '3-5'": (
+        OracleIntervalYM(years: 3, months: 5),
+        [0x80, 0, 0, 3, 0x41],
+      ),
+      "INTERVAL '-2-3'": (
+        OracleIntervalYM(years: -2, months: -3),
+        [0x7F, 0xFF, 0xFF, 0xFE, 0x39],
+      ),
+      "INTERVAL '-0-3'": (OracleIntervalYM(months: -3), [0x80, 0, 0, 0, 0x39]),
+      'zero': (OracleIntervalYM(), [0x80, 0, 0, 0, 0x3C]),
+      'max YEAR(9) TO MONTH': (
+        OracleIntervalYM(years: 999999999, months: 11),
+        [0xBB, 0x9A, 0xC9, 0xFF, 0x47],
+      ),
+      'min YEAR(9) TO MONTH': (
+        OracleIntervalYM(years: -999999999, months: -11),
+        [0x44, 0x65, 0x36, 0x01, 0x31],
+      ),
+    };
+
+    for (final MapEntry(key: label, value: (value, wire)) in vectors.entries) {
+      test('$label encodes to the node-oracledb wire bytes and back', () {
+        expect(encodeIntervalYM(value), equals(wire));
+        expect(decodeIntervalYM(bytes(wire)), equals(value));
+      });
+    }
+
+    test('decodes the server-captured INTERVAL \'1-2\' payload', () {
+      // The 5 value bytes of the OSON INTERVAL YM node the server sent for
+      // JSON_SCALAR(INTERVAL '1-2' YEAR TO MONTH) on 23ai and 21c
+      // (oson_test.dart): the same layout as a column value.
+      final value = decodeIntervalYM(bytes([0x80, 0, 0, 1, 0x3E]));
+      expect(value.years, equals(1));
+      expect(value.months, equals(2));
+    });
+
+    test('encode writes exactly intervalYMWireLength bytes', () {
+      expect(intervalYMWireLength, equals(5));
+      expect(
+        encodeIntervalYM(OracleIntervalYM(months: 14)),
+        equals([0x80, 0, 0, 1, 0x3E]),
+      );
+    });
+
+    test('rejects a payload that is not exactly 5 bytes', () {
+      expect(
+        () => decodeIntervalYM(bytes([0x80, 0, 0, 3])),
+        protocolError('has 4 bytes (expected 5)'),
+      );
+      expect(
+        () => decodeIntervalYM(bytes([0x80, 0, 0, 3, 0x41, 0])),
+        protocolError('has 6 bytes (expected 5)'),
+      );
+      // An INTERVAL DAY TO SECOND payload is not a YEAR TO MONTH one.
+      expect(
+        () => decodeIntervalYM(
+          bytes([0x80, 0, 0, 0, 0x3C, 0x3C, 0x3C, 0x80, 0, 0, 0]),
+        ),
+        protocolError('has 11 bytes (expected 5)'),
+      );
+      expect(() => decodeIntervalYM(Uint8List(0)), protocolError('0 bytes'));
+    });
+
+    test('rejects out-of-range component bytes as a protocol error', () {
+      final malformed = <String, List<int>>{
+        'months 12': [0x80, 0, 0, 0, 72],
+        'months -12': [0x7F, 0xFF, 0xFF, 0xFF, 48],
+        'months 195 (byte 0xFF)': [0x80, 0, 0, 0, 0xFF],
+        'years 1000000000': [0xBB, 0x9A, 0xCA, 0x00, 0x3C],
+        'years -1000000000': [0x44, 0x65, 0x36, 0x00, 0x3C],
+        'mixed signs (years 1, months -6)': [0x80, 0, 0, 1, 54],
+        'mixed signs (years -1, months 6)': [0x7F, 0xFF, 0xFF, 0xFF, 66],
+      };
+      for (final MapEntry(key: label, value: wire) in malformed.entries) {
+        expect(
+          () => decodeIntervalYM(bytes(wire)),
+          protocolError('out of range'),
+          reason: label,
+        );
+      }
+    });
+
+    test('decode never surfaces the wrapper ArgumentError', () {
+      // Mixed-sign bytes are exactly what the constructor would reject with
+      // ArgumentError; the decoder must answer with OracleException first.
+      expect(
+        () => decodeIntervalYM(bytes([0x80, 0, 0, 2, 59])),
         throwsA(isA<OracleException>()),
       );
     });

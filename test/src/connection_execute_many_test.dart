@@ -297,6 +297,36 @@ void main() {
       expect(slots[0].oraType, equals(oc.oraTypeIntervalDS));
     });
 
+    test('OracleIntervalYM rows infer the INTERVAL YEAR TO MONTH slot type '
+        '(Story 15.2)', () async {
+      await conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
+        [null],
+        [OracleIntervalYM(years: 1, months: 2)],
+        [OracleIntervalYM(months: -3)],
+      ]);
+      final slots = transport.lastBindValues!.cast<BindVariable>();
+      expect(slots[0].oraType, equals(oc.oraTypeIntervalYM));
+    });
+
+    test('INTERVAL YEAR TO MONTH and DAY TO SECOND values cannot share a '
+        'slot (Story 15.2)', () async {
+      await expectLater(
+        () => conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
+          [OracleIntervalYM(years: 1)],
+          [const Duration(days: 365)],
+        ]),
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+              .having(
+                (e) => e.message,
+                'message',
+                contains('Inconsistent bind value types'),
+              ),
+        ),
+      );
+    });
+
     test(
       'rejects non-finite NUMBER values before any wire round trip',
       () async {
@@ -935,6 +965,36 @@ void main() {
           'OracleIntervalDS or Duration',
         ],
       );
+    });
+
+    OracleExecuteManyOptions ymDefs() => OracleExecuteManyOptions(
+      bindDefs: [OracleBindDef.inputOutput(type: OracleDbType.intervalYM)],
+    );
+
+    test('an intervalYM def takes OracleIntervalYM and null '
+        '(Story 15.2)', () async {
+      await conn.executeMany('BEGIN story_iv(:1); END;', [
+        [OracleIntervalYM(years: 1)],
+        [null],
+        [OracleIntervalYM(months: -7)],
+      ], ymDefs());
+      final slots = transport.lastBindValues!.cast<BindVariable>();
+      expect(slots[0].oraType, equals(oc.oraTypeIntervalYM));
+    });
+
+    test('an intervalYM def rejects any other value before wire', () async {
+      for (final (value, typeName) in <(Object, String)>[
+        ('1-2', 'String'),
+        (const Duration(days: 30), 'Duration'),
+        (OracleIntervalDS(days: 1), 'OracleIntervalDS'),
+      ]) {
+        await expectRejectedBeforeWire(
+          () => conn.executeMany('BEGIN story_iv(:1); END;', [
+            [value],
+          ], ymDefs()),
+          ['declared OracleDbType.intervalYM', typeName, 'OracleIntervalYM'],
+        );
+      }
     });
 
     test('non-finite doubles under a NUMBER def fail before wire', () async {

@@ -20,6 +20,7 @@ import 'package:oracledb/oracledb.dart';
 | `OracleBind`, `OracleDbType`, `OracleOutBinds` | `oracle_bind.dart` | OUT / IN OUT bind specs and results |
 | `OracleTimestampTz` | `oracle_timestamp_tz.dart` | Offset-preserving TIMESTAMP WITH TIME ZONE (region id for named regions) |
 | `OracleIntervalDS` | `oracle_interval.dart` | INTERVAL DAY TO SECOND value (nanosecond fractional seconds) |
+| `OracleIntervalYM` | `oracle_interval.dart` | INTERVAL YEAR TO MONTH value (signed years and months) |
 | `OracleException` | `errors.dart` | All driver/server errors |
 | `ora*` constants | `errors.dart`, `protocol/constants.dart` | Well-known Oracle error codes |
 | `TlsConfig` | `transport/tls.dart` | TLS/SSL configuration |
@@ -156,7 +157,7 @@ result.rows.first['SALARY']; // '7000'
   batch — Oracle's duplicate-column copies across rounds are converted from
   the decoded value, never re-converted). Receives the decoded value
   (`int`/`double`, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz`,
-  `OracleIntervalDS`, JSON `Map`/`List`/scalar, `List<OracleRow>` for a nested `CURSOR(...)`
+  `OracleIntervalDS`, `OracleIntervalYM`, JSON `Map`/`List`/scalar, `List<OracleRow>` for a nested `CURSOR(...)`
   column, `String`/`Uint8List` for CLOB/BLOB or `OracleLob` under
   `fetchLobs`); its return value (any `Object?`) becomes the cell. SQL `NULL`
   → `null`, converter not called. A returned `Future` is not awaited.
@@ -280,6 +281,7 @@ type-checked at construction (fails at the call site, not deep in wire encoding)
 | `blob` | `Uint8List` | bytes | wire = LOB locator; empty `Uint8List` → empty BLOB (≠ NULL) |
 | `json` | `Map<String,Object?>` / `List<Object?>` / scalar | **OSON bytes** | Oracle 21c+; members (and, with this declared type, a scalar root): null/bool/num/String/`DateTime`/`OracleTimestampTz`/`Uint8List`/nested map+list — everything a JSON fetch returns |
 | `intervalDS` | `OracleIntervalDS` (decoded); `OracleIntervalDS` or `Duration` (input) | — | 11-byte INTERVAL DAY TO SECOND; a `Duration` binds at microsecond resolution; not a `fetchAsString` entry |
+| `intervalYM` | `OracleIntervalYM` | — | 5-byte INTERVAL YEAR TO MONTH; no Dart-native input type; not a `fetchAsString` entry |
 
 **Reading OUT binds:**
 
@@ -353,6 +355,24 @@ mix signs (Oracle stores those verbatim and renders them inconsistently).
 beyond a `Duration`'s range (about ±106.75 million days). Binds as
 INTERVAL DAY TO SECOND (inferred, or `OracleDbType.intervalDS`), as does a
 plain `Duration`. See [oracle_interval.dart](../lib/src/oracle_interval.dart).
+
+## `OracleIntervalYM`
+
+```dart
+OracleIntervalYM({int years = 0, int months = 0});
+final int years;  // normalized, -999,999,999..999,999,999
+final int months; // -11..11, never the opposite sign of years
+```
+
+`INTERVAL YEAR TO MONTH` value (node-oracledb `IntervalYM` parity). The
+constructor carries every 12 months into a year with truncating division
+(`months: 14` is years 1, months 2) and throws `ArgumentError` outside
+`INTERVAL YEAR(9) TO MONTH` (±999,999,999 years and 11 months) or when the
+components mix signs (Oracle stores those verbatim and renders them
+inconsistently). `==`/`hashCode` compare the normalized components;
+`toString()` renders `OracleIntervalYM(+3-05)`. Binds as INTERVAL YEAR TO
+MONTH (inferred, or `OracleDbType.intervalYM`); no Dart-native type does. See
+[oracle_interval.dart](../lib/src/oracle_interval.dart).
 
 ## `TlsConfig`
 
