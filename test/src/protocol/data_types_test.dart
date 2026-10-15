@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/oracle_interval.dart';
 import 'package:oracledb/src/oracle_timestamp_tz.dart';
+import 'package:oracledb/src/oracle_vector.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/data_types.dart';
@@ -1352,6 +1353,397 @@ void main() {
       expect(inferOraTypeForValue(<Object?>[1, 2, 3]), equals(oraTypeJson));
       // Regression trap: Uint8List is a List<int> but must stay RAW.
       expect(inferOraTypeForValue(Uint8List(3)), equals(oraTypeRaw));
+    });
+
+    test('Float32List, Float64List, Int8List and OracleSparseVector infer '
+        'VECTOR; Uint8List and plain lists keep RAW / JSON (Story 15.4)', () {
+      expect(inferOraTypeForValue(Float32List(3)), equals(oraTypeVector));
+      expect(inferOraTypeForValue(Float64List(3)), equals(oraTypeVector));
+      expect(inferOraTypeForValue(Int8List(3)), equals(oraTypeVector));
+      expect(
+        inferOraTypeForValue(
+          OracleSparseVector(numDimensions: 4, indices: [1], values: [2.0]),
+        ),
+        equals(oraTypeVector),
+      );
+      // Backward compatibility: these never infer VECTOR.
+      expect(inferOraTypeForValue(Uint8List(2)), equals(oraTypeRaw));
+      expect(inferOraTypeForValue(<double>[1.5, 2.5]), equals(oraTypeJson));
+      expect(inferOraTypeForValue(<num>[1, 2.5]), equals(oraTypeJson));
+      // Other typed lists are plain number lists: JSON arrays, as before.
+      expect(inferOraTypeForValue(Int16List(2)), equals(oraTypeJson));
+      expect(inferOraTypeForValue(Uint8ClampedList(2)), equals(oraTypeJson));
+    });
+  });
+
+  group('VECTOR codec (Story 15.4)', () {
+    Uint8List bytes(List<int> b) => Uint8List.fromList(b);
+    const zeroNorm = [0, 0, 0, 0, 0, 0, 0, 0];
+
+    Matcher oracleError(int code, String fragment) => throwsA(
+      isA<OracleException>()
+          .having((e) => e.errorCode, 'errorCode', code)
+          .having((e) => e.message, 'message', contains(fragment)),
+    );
+
+    // Bind images captured from node-oracledb's wire bytes (VectorEncoder) on
+    // 23ai: dense versions carry NORMSRC | NORM with a zero norm, BINARY
+    // carries NORMSRC with reserved space, sparse adds the SPARSE flag.
+    final nodeImages = <String, (Object, List<int>)>{
+      'FLOAT32 [1.5, -2.25, 3]': (
+        Float32List.fromList([1.5, -2.25, 3]),
+        [
+          0xDB, 0, 0x00, 0x12, 2, 0, 0, 0, 3, ...zeroNorm, //
+          0xBF, 0xC0, 0, 0, 0x3F, 0xEF, 0xFF, 0xFF, 0xC0, 0x40, 0, 0,
+        ],
+      ),
+      'FLOAT64 [1.5, -2.25]': (
+        Float64List.fromList([1.5, -2.25]),
+        [
+          0xDB, 0, 0x00, 0x12, 3, 0, 0, 0, 2, ...zeroNorm, //
+          0xBF, 0xF8, 0, 0, 0, 0, 0, 0, //
+          0x3F, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        ],
+      ),
+      'INT8 [1, -2, 127, -128]': (
+        Int8List.fromList([1, -2, 127, -128]),
+        [
+          0xDB, 0, 0x00, 0x12, 4, 0, 0, 0, 4, ...zeroNorm, //
+          0x01, 0xFE, 0x7F, 0x80,
+        ],
+      ),
+      'BINARY [255, 1] (16 dimensions)': (
+        Uint8List.fromList([255, 1]),
+        [0xDB, 1, 0x00, 0x10, 5, 0, 0, 0, 16, ...zeroNorm, 0xFF, 0x01],
+      ),
+      'sparse FLOAT32 8 dims {1: 1.5, 5: -2.5}': (
+        OracleSparseVector(
+          numDimensions: 8,
+          indices: [1, 5],
+          values: Float32List.fromList([1.5, -2.5]),
+        ),
+        [
+          0xDB, 2, 0x00, 0x32, 2, 0, 0, 0, 8, ...zeroNorm, //
+          0, 2, 0, 0, 0, 1, 0, 0, 0, 5, //
+          0xBF, 0xC0, 0, 0, 0x3F, 0xDF, 0xFF, 0xFF,
+        ],
+      ),
+      // node-oracledb encodes this shape but cannot decode it; the server
+      // stores it and returns exactly these bytes (23ai capture).
+      'sparse BINARY 16 dims {0, 9}': (
+        OracleSparseVector(
+          numDimensions: 16,
+          indices: [0, 9],
+          values: Uint8List.fromList([1, 1]),
+        ),
+        [
+          0xDB, 2, 0x00, 0x30, 5, 0, 0, 0, 16, ...zeroNorm, //
+          0, 2, 0, 0, 0, 0, 0, 0, 0, 9, 1, 1,
+        ],
+      ),
+    };
+
+    for (final MapEntry(key: label, value: (value, image))
+        in nodeImages.entries) {
+      test('$label encodes to the node-oracledb image and decodes back', () {
+        expect(encodeVector(value), equals(image));
+        final decoded = decodeVector(bytes(image));
+        expect(decoded, equals(value));
+        // The decoded Dart type is the format's typed list (or the sparse
+        // wrapper, whose == compares the values' format too).
+        expect(decoded, switch (value) {
+          OracleSparseVector() => isA<OracleSparseVector>(),
+          Float32List() => isA<Float32List>(),
+          Float64List() => isA<Float64List>(),
+          Int8List() => isA<Int8List>(),
+          _ => isA<Uint8List>(),
+        });
+      });
+    }
+
+    test('a plain List of numbers encodes as FLOAT64', () {
+      final image = encodeVector(<num>[1, 2.5]);
+      expect(image.sublist(0, 9), equals([0xDB, 0, 0, 0x12, 3, 0, 0, 0, 2]));
+      expect(decodeVector(image), equals(Float64List.fromList([1, 2.5])));
+      expect(decodeVector(image), isA<Float64List>());
+      // A sparse vector built from a plain list is FLOAT64 too.
+      final sparse = OracleSparseVector(
+        numDimensions: 3,
+        indices: [2],
+        values: <double>[0.5],
+      );
+      expect(encodeVector(sparse)[4], equals(vectorFormatFloat64));
+    });
+
+    test('decodes server-sent images (norm present) captured on 23ai', () {
+      // VECTOR(3, FLOAT32) '[1.5, -2.25, 3]': the server fills the norm.
+      expect(
+        decodeVector(
+          bytes([
+            0xDB, 0, 0x00, 0x12, 2, 0, 0, 0, 3, //
+            0xC0, 0x10, 0x27, 0xCE, 0x7B, 0x7E, 0xA3, 0x76, //
+            0xBF, 0xC0, 0, 0, 0x3F, 0xEF, 0xFF, 0xFF, 0xC0, 0x40, 0, 0,
+          ]),
+        ),
+        equals([1.5, -2.25, 3.0]),
+      );
+      // VECTOR(*, *) '[1, 2]': flags 0x16 carry a bit the decoder ignores.
+      expect(
+        decodeVector(
+          bytes([
+            0xDB, 0, 0x00, 0x16, 2, 0, 0, 0, 2, //
+            0xC0, 0x01, 0xE3, 0x77, 0x9B, 0x97, 0xF4, 0xA8, //
+            0xBF, 0x80, 0, 0, 0xC0, 0, 0, 0,
+          ]),
+        ),
+        equals([1.0, 2.0]),
+      );
+      // VECTOR(16, BINARY) '[255, 1]': reserved norm space is skipped.
+      final binary = decodeVector(
+        bytes([
+          0xDB, 1, 0x00, 0x10, 5, 0, 0, 0, 16, //
+          0x80, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0x01,
+        ]),
+      );
+      expect(binary, isA<Uint8List>());
+      expect(binary, equals([255, 1]));
+      // VECTOR(8, FLOAT32, SPARSE) '[8, [1, 5], [1.5, -2.5]]'.
+      expect(
+        decodeVector(
+          bytes([
+            0xDB, 2, 0x00, 0x32, 2, 0, 0, 0, 8, //
+            0xC0, 0x07, 0x52, 0xE5, 0x0D, 0xB3, 0xA3, 0xA2, //
+            0, 2, 0, 0, 0, 1, 0, 0, 0, 5, //
+            0xBF, 0xC0, 0, 0, 0x3F, 0xDF, 0xFF, 0xFF,
+          ]),
+        ),
+        equals(
+          OracleSparseVector(
+            numDimensions: 8,
+            indices: [1, 5],
+            values: Float32List.fromList([1.5, -2.5]),
+          ),
+        ),
+      );
+    });
+
+    test('an image without the NORM flag carries no norm bytes', () {
+      final decoded = decodeVector(
+        bytes([0xDB, 0, 0x00, 0x10, 4, 0, 0, 0, 2, 0x05, 0xFB]),
+      );
+      expect(decoded, isA<Int8List>());
+      expect(decoded, equals([5, -5]));
+    });
+
+    test('special floats survive the byte-comparable transform', () {
+      for (final v in [
+        double.nan,
+        double.infinity,
+        double.negativeInfinity,
+        0.0,
+        -0.0,
+        double.minPositive,
+        double.maxFinite,
+      ]) {
+        final d64 = decodeVector(encodeVector(Float64List.fromList([v])));
+        final got = (d64 as Float64List).single;
+        if (v.isNaN) {
+          expect(got.isNaN, isTrue);
+        } else {
+          expect(got, equals(v));
+          expect(got.isNegative, equals(v.isNegative), reason: '$v sign');
+        }
+        final d32 = decodeVector(encodeVector(Float32List.fromList([v])));
+        final got32 = (d32 as Float32List).single;
+        final expected32 = Float32List.fromList([v]).single;
+        if (v.isNaN) {
+          expect(got32.isNaN, isTrue);
+        } else {
+          expect(got32, equals(expected32));
+          expect(got32.isNegative, equals(expected32.isNegative));
+        }
+      }
+    });
+
+    test('an empty vector encodes a zero element count (the server rejects '
+        'it)', () {
+      final image = encodeVector(Float32List(0));
+      expect(image, hasLength(vectorImageHeaderLength + 8));
+      expect(decodeVector(image), isEmpty);
+    });
+
+    group('malformed images fail loud', () {
+      test('a bad magic byte', () {
+        expect(
+          () => decodeVector(
+            bytes([0xDA, 0, 0, 0x12, 2, 0, 0, 0, 1, ...zeroNorm, 0, 0, 0, 0]),
+          ),
+          oracleError(oraProtocolError, 'magic byte 0xda'),
+        );
+      });
+
+      test('an image version above 2', () {
+        expect(
+          () => decodeVector(
+            bytes([0xDB, 3, 0, 0x12, 2, 0, 0, 0, 1, ...zeroNorm, 0, 0, 0, 0]),
+          ),
+          oracleError(oraUnsupportedType, 'version 3'),
+        );
+      });
+
+      test('an unknown format', () {
+        for (final format in [0, 1, 6, 0xFF]) {
+          expect(
+            () => decodeVector(
+              bytes([0xDB, 0, 0, 0x12, format, 0, 0, 0, 0, ...zeroNorm]),
+            ),
+            oracleError(oraUnsupportedType, 'format $format'),
+            reason: 'format $format',
+          );
+        }
+      });
+
+      test('an image cut short anywhere', () {
+        final full = encodeVector(
+          OracleSparseVector(
+            numDimensions: 8,
+            indices: [1, 5],
+            values: Float32List.fromList([1.5, -2.5]),
+          ),
+        );
+        for (var len = 0; len < full.length; len++) {
+          expect(
+            () => decodeVector(Uint8List.sublistView(full, 0, len)),
+            oracleError(oraProtocolError, 'truncated'),
+            reason: 'length $len',
+          );
+        }
+        expect(decodeVector(full), isA<OracleSparseVector>());
+      });
+
+      test('a huge declared element count fails before allocating', () {
+        // FLOAT32, element count 0xFFFFFFFF (16 GB of elements), 2 bytes.
+        expect(
+          () => decodeVector(
+            bytes([
+              0xDB, 0, 0, 0x12, 2, 0xFF, 0xFF, 0xFF, 0xFF, ...zeroNorm, 0, 0, //
+            ]),
+          ),
+          oracleError(oraProtocolError, '4294967295 elements'),
+        );
+        // Sparse: 65535 indices declared, none present.
+        expect(
+          () => decodeVector(
+            bytes([0xDB, 2, 0, 0x32, 2, 0, 0, 0, 8, ...zeroNorm, 0xFF, 0xFF]),
+          ),
+          oracleError(oraProtocolError, '65535 sparse indices'),
+        );
+      });
+
+      test('a BINARY dimension count that is not a multiple of 8', () {
+        expect(
+          () => decodeVector(
+            bytes([0xDB, 1, 0, 0x10, 5, 0, 0, 0, 12, ...zeroNorm, 0xFF, 0x0F]),
+          ),
+          oracleError(oraProtocolError, 'not a multiple of 8'),
+        );
+        expect(
+          () => decodeVector(
+            bytes([
+              0xDB, 2, 0, 0x30, 5, 0, 0, 0, 12, ...zeroNorm, //
+              0, 1, 0, 0, 0, 3, 1,
+            ]),
+          ),
+          oracleError(oraProtocolError, 'not a multiple of 8'),
+        );
+      });
+
+      test('a sparse index outside the dimension count', () {
+        expect(
+          () => decodeVector(
+            bytes([
+              0xDB, 2, 0, 0x32, 2, 0, 0, 0, 8, ...zeroNorm, //
+              0, 1, 0, 0, 0, 8, 0xBF, 0x80, 0, 0,
+            ]),
+          ),
+          oracleError(oraProtocolError, 'sparse index 0 is 8'),
+        );
+      });
+
+      test('duplicate or descending sparse indices fail loud', () {
+        for (final second in [2, 1]) {
+          expect(
+            () => decodeVector(
+              bytes([
+                0xDB,
+                2,
+                0,
+                0x32,
+                2,
+                0,
+                0,
+                0,
+                8,
+                ...zeroNorm,
+                0,
+                2,
+                0,
+                0,
+                0,
+                2,
+                0,
+                0,
+                0,
+                second,
+              ]),
+            ),
+            oracleError(oraProtocolError, 'strictly ascending'),
+          );
+        }
+      });
+    });
+
+    group('encode rejects', () {
+      test('a value that is not a vector, without echoing it', () {
+        for (final value in <Object>[
+          'secret-text',
+          42,
+          <String, Object?>{'k': 'secret-text'},
+          <Object?>[1, 'secret-text'],
+          <Object?>[1, null],
+        ]) {
+          expect(
+            () => encodeVector(value),
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    allOf(
+                      contains('VECTOR bind requires'),
+                      contains(value.runtimeType.toString()),
+                      isNot(contains('secret-text')),
+                    ),
+                  ),
+            ),
+            reason: '${value.runtimeType}',
+          );
+        }
+      });
+
+      test('an image over the 1 MB VECTOR bind size', () {
+        // 9 header + 8 norm + 131069 * 8 = 1048569 bytes: fits.
+        expect(
+          encodeVector(Float64List(131069)),
+          hasLength(tnsVectorMaxLength - 7),
+        );
+        // 131070 * 8 + 17 = 1048577 bytes: one over.
+        expect(
+          () => encodeVector(Float64List(131070)),
+          oracleError(oraBindTypeError, '1048577 bytes'),
+        );
+      });
     });
   });
 

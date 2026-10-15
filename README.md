@@ -25,7 +25,7 @@ A pure Dart driver for Oracle Database. It speaks the thin-mode TNS/TTC wire pro
 - **Bulk DML** — `executeMany()` runs one statement across many bind sets in a single round trip, with array `RETURNING`, per-iteration PL/SQL binds, batch errors, and per-row counts
 - **PL/SQL** — stored procedures and functions with OUT / IN OUT bind parameters
 - **Result sets & streaming** — consume large queries incrementally via `OracleResultSet` or `queryStream()` / `executeStream()` instead of materializing every row
-- **REF CURSOR & implicit results** — PL/SQL `SYS_REFCURSOR` OUT binds, `DBMS_SQL.RETURN_RESULT` implicit result sets (including rows that carry CLOB/NCLOB/BLOB/JSON columns), and nested `CURSOR()` columns (nested-cursor and REF CURSOR rows must not carry a CLOB/NCLOB/BLOB column — see [Known Limitations](#known-limitations))
+- **REF CURSOR & implicit results** — PL/SQL `SYS_REFCURSOR` OUT binds, `DBMS_SQL.RETURN_RESULT` implicit result sets (including rows that carry CLOB/NCLOB/BLOB/JSON/VECTOR columns), and nested `CURSOR()` columns (nested-cursor and REF CURSOR rows must not carry a CLOB/NCLOB/BLOB column — see [Known Limitations](#known-limitations))
 - **LOB streaming & temporary LOBs** — `OracleExecuteOptions(fetchLobs: true)` returns a server-backed `OracleLob` with bounded `read()`/`write()`, `trim()`, `refresh()` of the cached `length`/`chunkSize`, `textStream()`/`byteStream()`/`writeStream()` for piece-by-piece transfer, and `createTemporaryClob()`/`createTemporaryNClob()`/`createTemporaryBlob()` for session-duration temporary LOBs
 - **Native JSON** — `JSON` columns (and `BLOB ... IS JSON`) decode to `Map` / `List`, including Oracle `DATE`/`TIMESTAMP`/`RAW` members, and fetched documents bind back unchanged
 - **Transactions** — commit, rollback, and transaction helper
@@ -33,6 +33,7 @@ A pure Dart driver for Oracle Database. It speaks the thin-mode TNS/TTC wire pro
 - **INTERVAL DAY TO SECOND** — decoded as `OracleIntervalDS` with nanosecond fractional seconds; binds from `OracleIntervalDS` or a Dart `Duration`
 - **INTERVAL YEAR TO MONTH** — decoded as `OracleIntervalYM` (signed years and months); binds from `OracleIntervalYM`
 - **ROWID / UROWID** — decoded as the rowid's `String` text (`ROWIDTOCHAR` for a physical rowid; an index-organized table's logical rowid starts with `*` and matches `CAST(rowid AS VARCHAR2(4000))`); a fetched rowid binds back as a plain `String` (`WHERE rowid = :1`)
+- **VECTOR (Oracle 23ai)** — dense vectors decode to `Float32List` / `Float64List` / `Int8List` / `Uint8List` (BINARY) by storage format and sparse vectors to `OracleSparseVector`; a `Float32List`, `Float64List`, `Int8List` or `OracleSparseVector` binds as a vector (e.g. for `VECTOR_DISTANCE`), while a `Uint8List` (BINARY) still binds as RAW unless declared `OracleDbType.vector`; see [VECTOR support](#vector-support)
 - **Dates as strings** — `OracleExecuteOptions(fetchAsString: {...})` returns DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE columns as `String` (node-oracledb `fetchAsString` parity; see [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings))
 - **Per-column fetch converters** — `OracleExecuteOptions(fetchTypeHandler: ...)` picks a converter per result column (e.g. a NUMBER as `String`, your own date format) applied to every fetched value (node-oracledb `fetchTypeHandler` converter parity; see [Fetch type handlers](#fetch-type-handlers-per-column-converters))
 - **Statement caching** — transparent prepared-statement cache
@@ -410,6 +411,8 @@ print(r.outBinds['value']); // 42
 
 `ROWID` / `UROWID` parameters and `RETURNING rowid INTO` targets bind with `OracleDbType.rowid` / `OracleDbType.urowid` (no `maxSize`). OUT / IN OUT values decode to the rowid's `String` text, and IN OUT input values must be a `String`. See [ROWID / UROWID support](#rowid--urowid-support).
 
+`VECTOR` parameters and `RETURNING vec INTO` targets bind with `OracleDbType.vector` (Oracle 23ai, no `maxSize`). OUT / IN OUT values decode exactly like a fetched column (a typed list per format, or an `OracleSparseVector`); IN OUT input values may be any of those or a plain `List` of numbers, which travels as `FLOAT64`. See [VECTOR support](#vector-support).
+
 ### Result Sets & Streaming
 
 Large queries can be consumed incrementally instead of materializing every row up front. These paths have no 1,000-fetch safety cap — that bound applies only to eager `execute()`.
@@ -540,7 +543,7 @@ result.rows.first['UPDATED_AT']; // '2024-03-05 13:14:15.123456'
 - **The text comes from the driver, not from Oracle.** As in node-oracledb thin mode, the column is still fetched in its native binary form (Oracle sends these types in binary whatever the client asks for), and each decoded value is converted with its own `toString()`: `DateTime.toString()` for DATE / TIMESTAMP / LTZ, the UTC `DateTime.toString()` for TIMESTAMP WITH TIME ZONE (`'2024-03-05 12:14:15.123456Z'`), or `OracleTimestampTz.toString()` on a `preserveTimestampTimeZone: true` connection (offset and `regionId`, not the region name). It ignores the session's `NLS_DATE_FORMAT` / `NLS_TIMESTAMP_FORMAT` / `NLS_TIMESTAMP_TZ_FORMAT` and keeps microsecond precision only. **For Oracle's exact text** (an NLS or explicit format, nanoseconds, a region name), select `TO_CHAR(col, 'format')` in the SQL instead.
 - SQL `NULL` stays `null`; `result.columns` still reports the database type.
 - `OracleDbType.rowid` / `OracleDbType.urowid` are accepted and change nothing: `ROWID` / `UROWID` columns always decode to their `String` text.
-- Any other `OracleDbType` in the set (NUMBER, CLOB, RAW, JSON, INTERVAL, ...) throws `ArgumentError` before any round trip.
+- Any other `OracleDbType` in the set (NUMBER, CLOB, RAW, JSON, INTERVAL, VECTOR, ...) throws `ArgumentError` before any round trip. For a VECTOR's text, select `FROM_VECTOR(col)` or convert the value with a [fetch type handler](#fetch-type-handlers-per-column-converters).
 - It applies to the top-level query's rows: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set. The rows of a **REF CURSOR OUT bind, a nested `CURSOR(...)` column and PL/SQL implicit results keep their native types**, as do OUT bind values; `executeStream()` / `queryStream()` take no options.
 - For any other per-column representation (a NUMBER as text, your own date format, ...), use a [fetch type handler](#fetch-type-handlers-per-column-converters); its converter wins over `fetchAsString` for the columns it selects.
 
@@ -566,7 +569,7 @@ result.rows.first['SALARY']; // '7000' instead of 7000
 result.rows.first['HIRED'];  // '2024-03-05T00:00:00.000'
 ```
 
-- **The converter** receives each non-NULL value exactly as the row would otherwise hold it — `int` / `double` for NUMBER, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz` (on a `preserveTimestampTimeZone: true` connection), `OracleIntervalDS` for INTERVAL DAY TO SECOND, `OracleIntervalYM` for INTERVAL YEAR TO MONTH, the rowid's `String` text for ROWID / UROWID, the decoded `Map` / `List` for JSON, `List<OracleRow>` for a nested `CURSOR(...)` column, `String` / `Uint8List` for CLOB / BLOB or an `OracleLob` under `fetchLobs: true` — and its return value (any `Object?`, including `null`) becomes the cell. SQL `NULL` stays `null` and the converter is not called. It runs synchronously, once per cell, on every fetch round: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set.
+- **The converter** receives each non-NULL value exactly as the row would otherwise hold it — `int` / `double` for NUMBER, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz` (on a `preserveTimestampTimeZone: true` connection), `OracleIntervalDS` for INTERVAL DAY TO SECOND, `OracleIntervalYM` for INTERVAL YEAR TO MONTH, the rowid's `String` text for ROWID / UROWID, the decoded `Map` / `List` for JSON, a `Float32List` / `Float64List` / `Int8List` / `Uint8List` or an `OracleSparseVector` for VECTOR, `List<OracleRow>` for a nested `CURSOR(...)` column, `String` / `Uint8List` for CLOB / BLOB or an `OracleLob` under `fetchLobs: true` — and its return value (any `Object?`, including `null`) becomes the cell. SQL `NULL` stays `null` and the converter is not called. It runs synchronously, once per cell, on every fetch round: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set.
 - **No `type`.** Unlike node-oracledb, the handler cannot change the type Oracle sends: every column is fetched in its native form (no DEFINE, no SQL rewrite) and converted by the driver after decoding — so the result never follows the session's NLS settings. Select `TO_CHAR(col, 'format')` for Oracle's own text. `result.columns` still reports the database type.
 - **Precedence:** a column the handler returns a converter for is converted by that converter only; [`fetchAsString`](#fetching-dates-and-timestamps-as-strings) still applies to the columns the handler returned `null` for. A handler that always returns `null` changes nothing.
 - **Per call:** the handler runs on every `execute()` and nothing is cached, so re-executing a cached statement with a different handler (or none) returns that call's own representation.
@@ -654,6 +657,7 @@ final isAlive = await connection.ping();
 | CLOB                      | `String` (see [CLOB support](#clob-support), [Character Set Support](#character-set-support)) |
 | BLOB                      | `Uint8List` (see [BLOB support](#blob-support)); a BLOB `IS JSON` column decodes like JSON (see [JSON stored in a BLOB](#json-stored-in-a-blob-is-json)) |
 | JSON (21c+)               | `Map<String, Object?>` / `List<Object?>` (see [JSON support](#json-support))     |
+| VECTOR (23ai)             | `Float32List` (FLOAT32), `Float64List` (FLOAT64), `Int8List` (INT8), `Uint8List` (BINARY, 8 dimensions per byte), `OracleSparseVector` (sparse); `Float32List` / `Float64List` / `Int8List` / `OracleSparseVector` bind as vectors, a `Uint8List` binds as RAW unless declared `OracleDbType.vector` (see [VECTOR support](#vector-support)) |
 | CURSOR / REF CURSOR       | `OracleResultSet` (OUT bind) / `List<OracleRow>` (nested `CURSOR()` column) — cursor-embedded CLOB/NCLOB/BLOB columns decode as materialized values; `fetchLobs: true` cannot wrap them as handles (see [Result Sets & Streaming](#result-sets--streaming), [Known Limitations](#known-limitations)) |
 | NULL                      | `null`                                                                           |
 
@@ -884,6 +888,99 @@ ins.outBinds['rid']; // ['AAAR3sAAEAAAACZAAA']
   would differ); a malformed fetched `UROWID` fails loud as above, where
   node-oracledb reads the bytes unchecked or throws a `TypeError`. As in
   node-oracledb, an all-zero physical rowid decodes to `null`.
+
+### VECTOR support
+
+Oracle 23ai `VECTOR` columns decode by storage format, as node-oracledb thin
+returns a typed array per format:
+
+| Column format              | Dart value                                                       |
+| -------------------------- | ---------------------------------------------------------------- |
+| `FLOAT32`                  | `Float32List`                                                    |
+| `FLOAT64`                  | `Float64List`                                                    |
+| `INT8`                     | `Int8List`                                                       |
+| `BINARY`                   | `Uint8List` — packed bits, one byte per 8 dimensions             |
+| `SPARSE` (any format)      | `OracleSparseVector` — `numDimensions`, `indices` (`Uint32List`), `values` (the format's typed list) |
+
+A flexible `VECTOR(*, *)` column returns each value in the format it was
+stored in. A SQL `NULL` is `null`.
+
+```dart
+// docs.embedding is VECTOR(3, FLOAT32).
+final r = await connection.execute('SELECT id, embedding FROM docs');
+final v = r.rows.first['EMBEDDING'] as Float32List;
+
+// Float32List / Float64List / Int8List and OracleSparseVector bind as vectors
+// without a declared type. VECTOR_DISTANCE needs both operands in the same
+// format, so bind a Float32List against this FLOAT32 column (ORA-51812
+// otherwise).
+final hits = await connection.execute(
+  'SELECT id FROM docs '
+  'ORDER BY VECTOR_DISTANCE(embedding, :1, COSINE) FETCH FIRST 5 ROWS ONLY',
+  [Float32List.fromList([0.12, -0.5, 0.33])],
+);
+
+await connection.execute('INSERT INTO terms (id, vs) VALUES (:1, :2)', [
+  7,
+  OracleSparseVector(
+    numDimensions: 30000,
+    indices: [12, 4011],
+    values: Float32List.fromList([0.8, 0.25]),
+  ),
+]);
+```
+
+- **Binds** — a `Float32List`, `Float64List`, `Int8List` or
+  `OracleSparseVector` binds as a vector of that format (the server converts
+  it to the column's format). A `Uint8List` keeps binding as RAW and a plain
+  `List<double>` as JSON, as before this support existed — the server
+  converts a JSON array into a `VECTOR` column, but vector functions such as
+  `VECTOR_DISTANCE` need a typed list. Where the type is declared —
+  `OracleBind.out` / `OracleBind.inOut(type: OracleDbType.vector)` and
+  `OracleBindDef`s — a plain `List` of numbers travels as `FLOAT64` and a
+  `Uint8List` as a `BINARY` vector. A single `execute()` cannot declare an IN
+  bind's type, so a dense `BINARY` vector is bound through a PL/SQL block
+  (`OracleBind.inOut`), an `executeMany()` with `bindDefs` (PL/SQL or DML
+  `RETURNING`), or `TO_VECTOR('[255, 1]', 16, BINARY)` text. Every vector
+  bind declares the 1 MB vector buffer (node-oracledb parity), so `maxSize`
+  is not needed.
+- **Migrating JSON array binds** — a `Float32List`, `Float64List` or
+  `Int8List` used to bind as a JSON array; to keep that, convert it to a plain
+  list first (`v.toList()`), which still binds as
+  JSON.
+- **Everywhere rows are returned** — top-level queries (eager and
+  `resultSet: true`), PL/SQL OUT / IN OUT binds, DML `RETURNING` targets,
+  REF CURSOR OUT binds, nested `CURSOR()` columns, implicit results and
+  `executeMany()` decode the same values; `fetchTypeHandler` converters
+  receive them, and `fetchLobs: true` leaves them as values (they are never
+  `OracleLob` handles). `fetchAsString: {OracleDbType.vector}` throws
+  `ArgumentError`, as for JSON — select `FROM_VECTOR(col)` for Oracle's text.
+- **Server-side checks** — the dimension count must match the column
+  (ORA-51803), NaN / ±Infinity are rejected (ORA-51805), sparse indices must
+  be strictly ascending (ORA-51822), an empty vector is rejected
+  (ORA-51862), and `VECTOR_DISTANCE` over two different formats is rejected
+  (ORA-51812) — the server converts a bound vector into a column's format on
+  INSERT / UPDATE, but not inside vector functions, so bind the column's own
+  format there. `OracleSparseVector` itself checks the shape (positive
+  dimension count, one value per index, every index in range, at most 65535
+  non-zero elements) and throws `ArgumentError`.
+- **Fail loud** — a malformed fetched vector image raises `OracleException`:
+  `oraProtocolError` for a bad magic byte, a truncated image, a `BINARY`
+  dimension count that is not a multiple of 8 or a sparse index outside the
+  dimensions; `oraUnsupportedType` for an image version or format this driver
+  does not know.
+- **Deviation from node-oracledb** — a sparse `BINARY` vector decodes to an
+  `OracleSparseVector` with one `Uint8List` byte per listed dimension, the
+  form the server stores and node-oracledb itself encodes; node-oracledb
+  cannot decode it.
+- **Oracle 23ai only** — Oracle 21c rejects a `VECTOR` column with ORA-00902
+  and a vector bind with ORA-03115. A table holding vectors must live in an
+  automatic segment space management tablespace: the `SYSTEM` tablespace
+  draws ORA-43853 (create it `TABLESPACE USERS`, for example).
+- **Not covered** — vectors inside native JSON (OSON), the describe's
+  dimension / format / sparse metadata (only `ColumnMetadata.oracleType`
+  `127` identifies a vector column), and node-oracledb's fetch of a vector
+  as text or a CLOB.
 
 ### RAW support
 
@@ -1645,7 +1742,6 @@ After the 1.0 release, the project roadmap includes larger API and compatibility
 | -------- | ----------------------------------------------------------------------------------------- |
 | 1        | Extended JSON / OSON parity (interval/VECTOR/`JsonId` JSON scalars, OSON-in-BLOB helpers) |
 | 2        | Optional temporal fetch formatting (fetch-as-string, fetch type handlers); region-id values already decode to the correct instant and their region names resolve through `timeZoneRegionName` |
-| 3        | Type completeness for `VECTOR` (`INTERVAL DAY TO SECOND`, `INTERVAL YEAR TO MONTH` and `ROWID` / `UROWID` are supported — see [Supported Data Types](#supported-data-types)) |
 
 ## Tests
 
@@ -1689,13 +1785,13 @@ RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
 
 - **Character sets** — primary character data (`VARCHAR2`/`CHAR`/`CLOB`) is handled via Oracle's server-side conversion while the client always negotiates UTF-8, so both `AL32UTF8` and non-`AL32UTF8` database character sets are supported (validated against `WE8MSWIN1252`). National types (`NCHAR`/`NVARCHAR2`/`NCLOB`) require the `AL16UTF16` national charset and otherwise fail loud — there is no client-side codec and `NLS_LANG` is ignored. See [Character Set Support](#character-set-support) for the full matrix.
 - **Statement cache and external DDL** — top-level DDL executed on the same connection clears the statement cache, but DDL issued from another session (or inside a PL/SQL block) can leave stale cached SELECT metadata. This matches node-oracledb thin-mode behavior.
-- **CLOB/BLOB/JSON cursor re-parse** — result cursors for queries selecting CLOB, BLOB or native JSON columns are always re-parsed, never blind-reused from the statement cache (fresh defines are required to keep the LOB-prefetch metadata); RAW queries keep normal cursor reuse.
+- **CLOB/BLOB/JSON/VECTOR cursor re-parse** — result cursors for queries selecting CLOB, BLOB, native JSON or VECTOR columns are always re-parsed, never blind-reused from the statement cache (fresh defines are required to keep the LOB-prefetch metadata); RAW queries keep normal cursor reuse.
 - **NUMBER beyond 2⁵³** — integer-valued NUMBERs larger than 2⁵³ decode to `double` and lose precision (Dart `double` limit; matches node-oracledb).
-- **Nested `CURSOR()` / REF CURSOR rows carrying a LOB with `fetchLobs: true`** — a `CLOB`/`NCLOB`/`BLOB` column projected by a nested `CURSOR(...)` column or a `SYS_REFCURSOR` OUT bind is **not** wrapped as an `OracleLob` handle: with `fetchLobs: true` the call fails loud with an `OracleException` (the cursor-embedded handle lifecycle is not built), after the execute round trip and leaving the connection usable. Without `fetchLobs` these rows decode normally on Oracle 23ai and 21c — LOBs materialize as `String` / `Uint8List`, and native `JSON` columns decode to their Dart values (the driver sends a DEFINE call before the cursor's first FETCH, as node-oracledb does). **Workaround for a handle:** project the LOB column outside the cursor (join it into the outer SELECT, or return its key from the cursor and read the LOB in a second statement). `DBMS_SQL.RETURN_RESULT` implicit result sets behave the same way: their LOB / JSON columns decode normally.
+- **Nested `CURSOR()` / REF CURSOR rows carrying a LOB with `fetchLobs: true`** — a `CLOB`/`NCLOB`/`BLOB` column projected by a nested `CURSOR(...)` column or a `SYS_REFCURSOR` OUT bind is **not** wrapped as an `OracleLob` handle: with `fetchLobs: true` the call fails loud with an `OracleException` (the cursor-embedded handle lifecycle is not built), after the execute round trip and leaving the connection usable. Without `fetchLobs` these rows decode normally on Oracle 23ai and 21c — LOBs materialize as `String` / `Uint8List`, and native `JSON` (and, on 23ai, `VECTOR`) columns decode to their Dart values (the driver sends a DEFINE call before the cursor's first FETCH, as node-oracledb does). **Workaround for a handle:** project the LOB column outside the cursor (join it into the outer SELECT, or return its key from the cursor and read the LOB in a second statement). `DBMS_SQL.RETURN_RESULT` implicit result sets behave the same way: their LOB / JSON / VECTOR columns decode normally.
 - **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work. As of 1.4 an **open fetched `OracleLob`** (from `fetchLobs: true`) also holds that slot — for the handle's whole lifetime, not just during a round trip, and including handles a streaming result set prefetched but you never asked for — so an unclosed LOB handle is the most likely cause of a concurrent-operation error; a **created-temporary** handle (`createTemporaryClob()` and friends) is deliberately exempt and can be read, written, and bound while open. See [Incremental LOB access with `fetchLobs`](#incremental-lob-access-with-fetchlobs).
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
 - **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) decode to the correct UTC instant; with `preserveTimestampTimeZone: true` they report a `+00:00` offset (UTC-normalized — the driver never computes the region's offset) and carry the server's region id, which `OracleConnection.timeZoneRegionName` resolves to the name (`'EUROPE/MADRID'`, as `TZR` renders it) from the connected database's `V$TIMEZONE_NAMES` (first lookup per connection runs one query; needs read access to that view, granted to `PUBLIC` by default). Binding one back stores `+00:00` without the region. Offset-based zones (e.g. `+02:00`) keep their offset. See [Region-id time zones](#region-id-time-zones).
-- **`fetchAsString` text is client-side** — `OracleExecuteOptions(fetchAsString: ...)` renders DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE values with the decoded Dart value's `toString()` (node-oracledb thin parity), not with Oracle's NLS formats; microsecond precision, no region names. Use `TO_CHAR(...)` in SQL for Oracle's exact text. The option covers only the top-level query's rows: REF CURSOR OUT bind, nested `CURSOR(...)` and implicit-result rows keep native types. Only `OracleDbType.date`, `timestamp` and `timestampTz` convert (`rowid` / `urowid` are accepted as no-ops — those columns are already strings); no NUMBER/CLOB/RAW/JSON as string. See [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings).
+- **`fetchAsString` text is client-side** — `OracleExecuteOptions(fetchAsString: ...)` renders DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE values with the decoded Dart value's `toString()` (node-oracledb thin parity), not with Oracle's NLS formats; microsecond precision, no region names. Use `TO_CHAR(...)` in SQL for Oracle's exact text. The option covers only the top-level query's rows: REF CURSOR OUT bind, nested `CURSOR(...)` and implicit-result rows keep native types. Only `OracleDbType.date`, `timestamp` and `timestampTz` convert (`rowid` / `urowid` are accepted as no-ops — those columns are already strings); no NUMBER/CLOB/RAW/JSON/VECTOR as string. See [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings).
 - **`fetchTypeHandler` is converter-only and client-side** — `OracleExecuteOptions(fetchTypeHandler: ...)` cannot request a different fetch type (no node-oracledb `type`, no DEFINE): each column is fetched natively and the converter maps the decoded value in the driver, synchronously. It covers only the top-level query's rows (not REF CURSOR OUT bind, nested `CURSOR(...)`, implicit-result or OUT bind values), is per call (no connection-level or global default), and `executeMany()` / `executeStream()` / `queryStream()` do not take it. See [Fetch type handlers](#fetch-type-handlers-per-column-converters).
 - **Very large result sets** — a single `execute()` is bounded by a safety cap of 1,000 fetch round-trips (about 50,000 rows at the default fetch size); if the cap is hit, a warning is logged, the rows fetched so far are returned, and `result.moreRowsAvailable` is `true` so the truncation is detectable. The same flag is also set (with a logged warning) in the rarer case where the server reports more rows pending but the driver has no usable cursor id to continue fetching — in either case `true` means the rows are an incomplete prefix of the full result set. Streaming (`queryStream()` / `executeStream()`) and result-set (`OracleExecuteOptions(resultSet: true)`) consumption have **no such cap** — prefer them for very large result sets.
 

@@ -308,6 +308,59 @@ void main() {
       expect(slots[0].oraType, equals(oc.oraTypeIntervalYM));
     });
 
+    test('typed-list and sparse vectors infer one VECTOR slot whatever their '
+        'format (Story 15.4)', () async {
+      await conn.executeMany('INSERT INTO t (a, b) VALUES (:1, :2)', [
+        [
+          Float32List.fromList([1]),
+          null,
+        ],
+        [
+          Float64List.fromList([1]),
+          OracleSparseVector(numDimensions: 2, indices: [0], values: [1]),
+        ],
+        [
+          Int8List.fromList([1]),
+          null,
+        ],
+      ]);
+      final slots = transport.lastBindValues!.cast<BindVariable>();
+      expect(slots[0].oraType, equals(oc.oraTypeVector));
+      expect(slots[1].oraType, equals(oc.oraTypeVector));
+      expect(slots[0].maxSize, isNull);
+      expect(
+        transport.lastBindMetadata!.map((m) => m.oraType),
+        equals([oc.oraTypeVector, oc.oraTypeVector]),
+      );
+    });
+
+    test('a typed-list vector and a plain List<double> (JSON) cannot share a '
+        'slot (Story 15.4)', () async {
+      await expectRejectedBeforeWire(
+        () => conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
+          [
+            Float32List.fromList([1]),
+          ],
+          [
+            <double>[1],
+          ],
+        ]),
+        ['Inconsistent bind value types', 'row 1'],
+      );
+      // A Uint8List stays RAW, so it cannot share a VECTOR slot either.
+      await expectRejectedBeforeWire(
+        () => conn.executeMany('INSERT INTO t (a) VALUES (:1)', [
+          [
+            Int8List.fromList([1]),
+          ],
+          [
+            Uint8List.fromList([1]),
+          ],
+        ]),
+        ['Inconsistent bind value types', 'row 1 has Uint8List'],
+      );
+    });
+
     test('INTERVAL YEAR TO MONTH and DAY TO SECOND values cannot share a '
         'slot (Story 15.2)', () async {
       await expectLater(
@@ -1062,6 +1115,71 @@ void main() {
       });
     }
 
+    OracleExecuteManyOptions vectorDefs() => OracleExecuteManyOptions(
+      bindDefs: [OracleBindDef.inputOutput(type: OracleDbType.vector)],
+    );
+
+    test('a vector def takes every vector value, a plain list of numbers and '
+        'null, with type code 127 and no maxSize (Story 15.4)', () async {
+      await conn.executeMany('BEGIN story_vec(:1); END;', [
+        [
+          Float32List.fromList([1]),
+        ],
+        [
+          Float64List.fromList([1]),
+        ],
+        [
+          Int8List.fromList([1]),
+        ],
+        [
+          Uint8List.fromList([0xFF]),
+        ],
+        [
+          OracleSparseVector(numDimensions: 2, indices: [1], values: [1]),
+        ],
+        [
+          <double>[1.5, 2.5],
+        ],
+        [null],
+      ], vectorDefs());
+      final slots = transport.lastBindValues!.cast<BindVariable>();
+      expect(slots[0].oraType, equals(oc.oraTypeVector));
+      expect(slots[0].maxSize, isNull);
+      expect(
+        transport.lastBindMetadata!.single.oraType,
+        equals(oc.oraTypeVector),
+      );
+    });
+
+    test('a vector def rejects any other value before wire, naming no '
+        'value', () async {
+      for (final (value, typeName) in <(Object, String)>[
+        ('secret-text', 'String'),
+        (42, 'int'),
+        (<Object?>[1, 'secret-text'], 'List<Object?>'),
+        (<String, Object?>{'k': 'secret-text'}, 'Map'),
+      ]) {
+        await expectRejectedBeforeWire(
+          () => conn.executeMany('BEGIN story_vec(:1); END;', [
+            [value],
+          ], vectorDefs()),
+          ['declared OracleDbType.vector', typeName, 'OracleSparseVector'],
+        );
+        await expectLater(
+          () => conn.executeMany('BEGIN story_vec(:1); END;', [
+            [value],
+          ], vectorDefs()),
+          throwsA(
+            isA<OracleException>().having(
+              (e) => e.message,
+              'message',
+              isNot(contains('secret-text')),
+            ),
+          ),
+        );
+      }
+    });
+
     test('non-finite doubles under a NUMBER def fail before wire', () async {
       await expectRejectedBeforeWire(
         () => conn.executeMany(sql, [
@@ -1719,6 +1837,52 @@ void main() {
         [
           ['AAAR3sAAEAAAACXAAA'],
           ['*BAAAtAkCwQIBeP4'],
+        ],
+      ]);
+    });
+
+    test('declared vector IN slots take a plain List<double> / Uint8List and '
+        'RETURNING vector targets use vector OUT slots (Story 15.4)', () async {
+      final returned = Float32List.fromList([0.5, 1.5]);
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 1,
+          outBindIndices: const [2],
+          outBindRows: [
+            [
+              [returned],
+            ],
+          ],
+        ),
+      );
+      final result = await conn.executeMany(
+        'INSERT INTO t (v, b) VALUES (:1, :2) RETURNING v INTO :3',
+        [
+          [
+            <double>[0.5, 1.5],
+            Uint8List.fromList([0xFF]),
+          ],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.vector),
+            OracleBindDef.input(type: OracleDbType.vector),
+            OracleBindDef.output(type: OracleDbType.vector),
+          ],
+        ),
+      );
+      final slots = transport.lastBindValues!.cast<BindVariable>();
+      expect(
+        slots.map((s) => s.oraType),
+        equals([oc.oraTypeVector, oc.oraTypeVector, oc.oraTypeVector]),
+      );
+      expect(slots[2].dir, equals(BindDir.output));
+      expect(transport.lastBulkRows!.single[0], equals([0.5, 1.5]));
+      expect(transport.lastBulkRows!.single[1], isA<Uint8List>());
+      expect(result.outBinds.toList(), [
+        [
+          [returned],
         ],
       ]);
     });

@@ -77,6 +77,27 @@ void main() {
       expect(tnsMaxRowidLength, equals(18));
       expect(tnsMaxUrowidLength, equals(3950));
     });
+
+    test('VECTOR type, size and image header constants match node-oracledb '
+        '(Story 15.4)', () {
+      // TNS_DATA_TYPE_VECTOR / TNS_VECTOR_MAX_LENGTH (constants.js).
+      expect(oraTypeVector, equals(127));
+      expect(tnsVectorMaxLength, equals(1048576));
+      // impl/datahandlers/constants.js.
+      expect(tnsVectorMagicByte, equals(0xDB));
+      expect(tnsVectorVersionBase, equals(0));
+      expect(tnsVectorVersionWithBinary, equals(1));
+      expect(tnsVectorVersionWithSparse, equals(2));
+      expect(tnsVectorFlagNormSrc, equals(0x0010));
+      expect(tnsVectorFlagNorm, equals(0x0002));
+      expect(tnsVectorFlagSparse, equals(0x0020));
+      // VECTOR_FORMAT_* (constants.js).
+      expect(vectorFormatFlex, equals(0));
+      expect(vectorFormatFloat32, equals(2));
+      expect(vectorFormatFloat64, equals(3));
+      expect(vectorFormatInt8, equals(4));
+      expect(vectorFormatBinary, equals(5));
+    });
   });
 
   group('Protocol Capability Flags', () {

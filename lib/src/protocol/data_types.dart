@@ -10,6 +10,7 @@ import 'dart:typed_data';
 import '../errors.dart';
 import '../oracle_interval.dart';
 import '../oracle_timestamp_tz.dart';
+import '../oracle_vector.dart';
 import 'buffer.dart';
 import 'constants.dart';
 
@@ -1172,6 +1173,367 @@ String _encodeLogicalUrowid(Uint8List bytes) {
 }
 
 // ============================================================================
+// VECTOR Encoding/Decoding (Oracle 23ai)
+// ============================================================================
+
+/// Bytes of a VECTOR image header before the norm, sparse indices and
+/// elements: magic byte, version, UInt16BE flags, format byte, UInt32BE
+/// element count.
+const int vectorImageHeaderLength = 9;
+
+/// Bytes the norm occupies after the header (present when the image sets
+/// [tnsVectorFlagNorm], and always reserved for [vectorFormatBinary]).
+const int _vectorNormLength = 8;
+
+/// Element size in bytes for each image format (BINARY: one byte packs
+/// eight dimensions).
+int? _vectorElementSize(int format) => switch (format) {
+  vectorFormatFloat32 => 4,
+  vectorFormatFloat64 => 8,
+  vectorFormatInt8 => 1,
+  vectorFormatBinary => 1,
+  _ => null,
+};
+
+/// Decodes a VECTOR image — the bytes inside a fetched VECTOR value's
+/// locator shape — into its Dart value (node-oracledb
+/// `VectorDecoder.decode`):
+///
+/// * a dense vector: a `Float32List` (`FLOAT32`), `Float64List`
+///   (`FLOAT64`), `Int8List` (`INT8`) or `Uint8List` (`BINARY`, one byte per
+///   eight dimensions);
+/// * a sparse vector: an [OracleSparseVector] whose `values` take the same
+///   typed list per format. A sparse `BINARY` image carries one byte per
+///   listed dimension (measured on 23ai), so its values are not divided by
+///   eight.
+///
+/// Image layout: magic byte [tnsVectorMagicByte], version, UInt16BE flags,
+/// format, UInt32BE element count (the dimension count of a sparse vector),
+/// 8 norm bytes when the flags carry [tnsVectorFlagNorm] or the format is
+/// `BINARY` (skipped), then for a sparse vector a UInt16BE non-zero count and
+/// that many UInt32BE indices, then the elements. FLOAT32 / FLOAT64 elements
+/// use Oracle's byte-comparable IEEE form (the BINARY_FLOAT / BINARY_DOUBLE
+/// encoding).
+///
+/// Fails loud with [OracleException] instead of guessing:
+/// * [oraProtocolError] for a bad magic byte, an image cut short (every
+///   declared size is checked against the remaining bytes BEFORE anything is
+///   allocated), a `BINARY` dimension count that is not a multiple of 8, or a
+///   sparse index outside the dimension count;
+/// * [oraUnsupportedType] for an image version above
+///   [tnsVectorVersionWithSparse] or an unknown format.
+///
+/// Bytes after the last element are ignored, as node-oracledb does.
+Object decodeVector(Uint8List image) {
+  var pos = 0;
+  void need(int count, String what) {
+    if (count > image.length - pos) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'VECTOR image is truncated: $what take $count bytes but only '
+            '${image.length - pos} remain',
+      );
+    }
+  }
+
+  need(vectorImageHeaderLength, 'the header fields');
+  final data = ByteData.sublistView(image);
+  final magic = image[0];
+  if (magic != tnsVectorMagicByte) {
+    throw OracleException(
+      errorCode: oraProtocolError,
+      message:
+          'VECTOR image has an unexpected magic byte '
+          '0x${magic.toRadixString(16).padLeft(2, '0')} (expected 0xdb)',
+    );
+  }
+  final version = image[1];
+  if (version > tnsVectorVersionWithSparse) {
+    throw OracleException(
+      errorCode: oraUnsupportedType,
+      message:
+          'VECTOR image version $version is not supported (this driver '
+          'decodes versions $tnsVectorVersionBase..'
+          '$tnsVectorVersionWithSparse)',
+    );
+  }
+  final flags = data.getUint16(2);
+  final format = image[4];
+  final elementSize = _vectorElementSize(format);
+  if (elementSize == null) {
+    throw OracleException(
+      errorCode: oraUnsupportedType,
+      message: 'VECTOR format $format is not supported',
+    );
+  }
+  var numElements = data.getUint32(5);
+  pos = vectorImageHeaderLength;
+  if (format == vectorFormatBinary || (flags & tnsVectorFlagNorm) != 0) {
+    // The norm (or, for BINARY, the space reserved for it) is not exposed.
+    need(_vectorNormLength, 'the norm bytes');
+    pos += _vectorNormLength;
+  }
+
+  // The header count is the dimension count, dense or sparse; a sparse image
+  // then names how many elements it actually carries.
+  Uint32List? indices;
+  final numDimensions = numElements;
+  if ((flags & tnsVectorFlagSparse) != 0) {
+    need(2, 'the sparse element count bytes');
+    numElements = data.getUint16(pos);
+    pos += 2;
+    need(numElements * 4, 'the $numElements sparse indices');
+    final idx = indices = Uint32List(numElements);
+    for (var i = 0; i < numElements; i++) {
+      final index = data.getUint32(pos);
+      if (index >= numDimensions) {
+        throw OracleException(
+          errorCode: oraProtocolError,
+          message:
+              'VECTOR image sparse index $i is $index, outside its '
+              '$numDimensions dimensions',
+        );
+      }
+      if (i > 0 && index <= idx[i - 1]) {
+        throw const OracleException(
+          errorCode: oraProtocolError,
+          message: 'VECTOR image sparse indices must be strictly ascending',
+        );
+      }
+      idx[i] = index;
+      pos += 4;
+    }
+  }
+
+  if (format == vectorFormatBinary) {
+    // Dimensions are packed eight to a byte, so the count must be a whole
+    // number of bytes (node-oracledb raises ERR_UNEXPECTED_DATA likewise).
+    if (numDimensions % 8 != 0) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'VECTOR BINARY image declares $numDimensions dimensions, which is '
+            'not a multiple of 8',
+      );
+    }
+    // A dense BINARY vector carries one byte per eight dimensions; a sparse
+    // one carries one byte per listed dimension.
+    if (indices == null) numElements = numDimensions ~/ 8;
+  }
+  need(numElements * elementSize, 'the $numElements elements');
+
+  final List<num> values;
+  switch (format) {
+    case vectorFormatFloat32:
+      final out = Float32List(numElements);
+      for (var i = 0; i < numElements; i++, pos += 4) {
+        out[i] = _readComparableFloat32(data, pos);
+      }
+      values = out;
+    case vectorFormatFloat64:
+      final out = Float64List(numElements);
+      for (var i = 0; i < numElements; i++, pos += 8) {
+        out[i] = _readComparableFloat64(data, pos);
+      }
+      values = out;
+    case vectorFormatInt8:
+      // Int8List stores the low 8 bits, so each byte keeps its sign.
+      values = Int8List(numElements)..setRange(0, numElements, image, pos);
+    default: // vectorFormatBinary (any other format was rejected above)
+      values = Uint8List.fromList(
+        Uint8List.sublistView(image, pos, pos + numElements),
+      );
+  }
+  if (indices != null) {
+    return sparseVectorFromWire(numDimensions, indices, values);
+  }
+  return values;
+}
+
+/// Encodes a VECTOR bind value into its image (node-oracledb
+/// `VectorEncoder.encode` / `_updateVectorHeader`), byte-for-byte:
+///
+/// * `Float32List` → `FLOAT32`, `Float64List` → `FLOAT64`, `Int8List` →
+///   `INT8` (version [tnsVectorVersionBase], flags
+///   `NORMSRC | NORM` with 8 zero norm bytes — the server computes the norm);
+/// * `Uint8List` → `BINARY` (version [tnsVectorVersionWithBinary], flags
+///   `NORMSRC`, 8 reserved bytes, element count = bytes × 8);
+/// * any other `List` of numbers → `FLOAT64` (node-oracledb converts a plain
+///   array declared `DB_TYPE_VECTOR` to a `Float64Array`);
+/// * an [OracleSparseVector] → the header its `values` select, with version
+///   [tnsVectorVersionWithSparse], [tnsVectorFlagSparse] added, the
+///   dimension count as element count, then a UInt16BE non-zero count, the
+///   UInt32BE indices and the values.
+///
+/// FLOAT32 / FLOAT64 elements are written in Oracle's byte-comparable IEEE
+/// form (node-oracledb `writeBinaryFloat` / `writeBinaryDouble`).
+///
+/// Throws [OracleException] ([oraBindTypeError]) for any other value, a list
+/// holding a non-number, or an image over [tnsVectorMaxLength] — the buffer
+/// every VECTOR bind declares (no valid vector comes near it: 65535 FLOAT64
+/// dimensions take about 512 KB). The value never appears in the message.
+Uint8List encodeVector(Object value) {
+  final sparse = value is OracleSparseVector ? value : null;
+  final Object elements = sparse != null ? sparse.values : value;
+  final List<num> list;
+  final int format;
+  switch (elements) {
+    case Float32List():
+      list = elements;
+      format = vectorFormatFloat32;
+    case Float64List():
+      list = elements;
+      format = vectorFormatFloat64;
+    case Int8List():
+      list = elements;
+      format = vectorFormatInt8;
+    case Uint8List():
+      list = elements;
+      format = vectorFormatBinary;
+    case List() when elements.every((e) => e is num):
+      list = Float64List.fromList([
+        for (final e in elements) (e as num).toDouble(),
+      ]);
+      format = vectorFormatFloat64;
+    default:
+      throw OracleException(
+        errorCode: oraBindTypeError,
+        message:
+            'VECTOR bind requires a Float32List, Float64List, Int8List, '
+            'Uint8List, OracleSparseVector or a List of numbers (got '
+            '${value.runtimeType})',
+      );
+  }
+
+  var version = tnsVectorVersionBase;
+  var flags = tnsVectorFlagNormSrc | tnsVectorFlagNorm;
+  var headerCount = list.length;
+  if (format == vectorFormatBinary) {
+    version = tnsVectorVersionWithBinary;
+    flags = tnsVectorFlagNormSrc; // the norm's space is reserved, never set
+    headerCount = list.length * 8;
+  }
+  if (sparse != null) {
+    version = tnsVectorVersionWithSparse;
+    flags |= tnsVectorFlagSparse;
+    headerCount = sparse.numDimensions;
+  }
+  final elementSize = _vectorElementSize(format)!;
+  final numIndices = sparse?.indices.length ?? 0;
+  final size =
+      vectorImageHeaderLength +
+      _vectorNormLength +
+      (sparse != null ? 2 + numIndices * 4 : 0) +
+      list.length * elementSize;
+  // Also bounds the header's UInt32 element count: a BINARY count of bytes
+  // × 8 is far below 2^32 for any image under 1 MB, and an
+  // OracleSparseVector's dimension count is UInt32-checked at construction.
+  if (size > tnsVectorMaxLength) {
+    throw OracleException(
+      errorCode: oraBindTypeError,
+      message:
+          'VECTOR bind image is $size bytes, over the $tnsVectorMaxLength-byte '
+          'VECTOR bind size',
+    );
+  }
+
+  final image = Uint8List(size);
+  final data = ByteData.sublistView(image);
+  image[0] = tnsVectorMagicByte;
+  image[1] = version;
+  data.setUint16(2, flags);
+  image[4] = format;
+  data.setUint32(5, headerCount);
+  // Bytes 9..16 stay zero: the norm (or its reserved space).
+  var pos = vectorImageHeaderLength + _vectorNormLength;
+  if (sparse != null) {
+    // OracleSparseVector caps the non-zero count at the UInt16 maximum.
+    data.setUint16(pos, numIndices);
+    pos += 2;
+    for (final index in sparse.indices) {
+      data.setUint32(pos, index);
+      pos += 4;
+    }
+  }
+  switch (format) {
+    case vectorFormatFloat32:
+      for (final v in list) {
+        _writeComparableFloat32(data, pos, v.toDouble());
+        pos += 4;
+      }
+    case vectorFormatFloat64:
+      for (final v in list) {
+        _writeComparableFloat64(data, pos, v.toDouble());
+        pos += 8;
+      }
+    default:
+      // INT8 / BINARY: one byte each. An Int8List element lands as its
+      // two's-complement byte (a Uint8List keeps the low 8 bits).
+      image.setRange(pos, pos + list.length, list as List<int>);
+  }
+  return image;
+}
+
+/// Scratch space for the comparable-float transforms below.
+final ByteData _floatScratch = ByteData(8);
+
+/// Reads a FLOAT32 element in Oracle's byte-comparable form (node-oracledb
+/// `parseBinaryFloat`): a non-negative value has its sign bit set, a negative
+/// one every bit inverted.
+double _readComparableFloat32(ByteData data, int pos) {
+  var bits = data.getUint32(pos);
+  bits = (bits & 0x80000000) != 0 ? bits & 0x7FFFFFFF : ~bits & 0xFFFFFFFF;
+  _floatScratch.setUint32(0, bits);
+  return _floatScratch.getFloat32(0);
+}
+
+/// Reads a FLOAT64 element in Oracle's byte-comparable form (node-oracledb
+/// `parseBinaryDouble`).
+double _readComparableFloat64(ByteData data, int pos) {
+  var hi = data.getUint32(pos);
+  var lo = data.getUint32(pos + 4);
+  if ((hi & 0x80000000) != 0) {
+    hi &= 0x7FFFFFFF;
+  } else {
+    hi = ~hi & 0xFFFFFFFF;
+    lo = ~lo & 0xFFFFFFFF;
+  }
+  _floatScratch
+    ..setUint32(0, hi)
+    ..setUint32(4, lo);
+  return _floatScratch.getFloat64(0);
+}
+
+/// Writes [value] as a FLOAT32 element in Oracle's byte-comparable form
+/// (node-oracledb `writeBinaryFloat`).
+void _writeComparableFloat32(ByteData data, int pos, double value) {
+  _floatScratch.setFloat32(0, value);
+  final bits = _floatScratch.getUint32(0);
+  data.setUint32(
+    pos,
+    (bits & 0x80000000) == 0 ? bits | 0x80000000 : ~bits & 0xFFFFFFFF,
+  );
+}
+
+/// Writes [value] as a FLOAT64 element in Oracle's byte-comparable form
+/// (node-oracledb `writeBinaryDouble`).
+void _writeComparableFloat64(ByteData data, int pos, double value) {
+  _floatScratch.setFloat64(0, value);
+  final hi = _floatScratch.getUint32(0);
+  final lo = _floatScratch.getUint32(4);
+  if ((hi & 0x80000000) == 0) {
+    data
+      ..setUint32(pos, hi | 0x80000000)
+      ..setUint32(pos + 4, lo);
+  } else {
+    data
+      ..setUint32(pos, ~hi & 0xFFFFFFFF)
+      ..setUint32(pos + 4, ~lo & 0xFFFFFFFF);
+  }
+}
+
+// ============================================================================
 // VARCHAR2/String Encoding/Decoding
 // ============================================================================
 
@@ -1224,6 +1586,12 @@ String decodeVarchar(ReadBuffer buffer, int length) {
 /// when encoded), so the two can share one `executeMany()` slot.
 /// [OracleIntervalYM] maps to `INTERVAL YEAR TO MONTH`; no Dart-native type
 /// does.
+///
+/// `Float32List`, `Float64List`, `Int8List` and [OracleSparseVector] map to
+/// `VECTOR` (Story 15.4); the check stays ahead of the `List` check, which
+/// would otherwise claim the typed lists as JSON arrays. A `Uint8List` stays
+/// RAW and a plain `List<double>` stays JSON — each binds as a vector only
+/// under a declared `OracleDbType.vector`.
 int? inferOraTypeForValue(Object? value) {
   if (value == null) return oraTypeVarchar;
   if (value is String) return oraTypeVarchar;
@@ -1234,6 +1602,7 @@ int? inferOraTypeForValue(Object? value) {
   if (value is OracleIntervalDS) return oraTypeIntervalDS;
   if (value is Duration) return oraTypeIntervalDS;
   if (value is OracleIntervalYM) return oraTypeIntervalYM;
+  if (isInferredVectorValue(value)) return oraTypeVector;
   if (value is Uint8List) return oraTypeRaw;
   if (value is Map) return oraTypeJson;
   if (value is List) return oraTypeJson;

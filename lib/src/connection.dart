@@ -12,6 +12,7 @@ import 'oracle_charset_info.dart';
 import 'oracle_interval.dart';
 import 'oracle_lob.dart';
 import 'oracle_timestamp_tz.dart';
+import 'oracle_vector.dart';
 import 'protocol/bind_parser.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/data_types.dart' as dt;
@@ -240,8 +241,10 @@ class OracleExecuteOptions {
   /// [OracleDbType.rowid] and [OracleDbType.urowid] are accepted and change
   /// nothing: `ROWID` / `UROWID` columns always decode to their `String`
   /// text. Any other [OracleDbType] throws [ArgumentError] before any wire
-  /// round trip (NUMBER, CLOB, RAW, JSON and INTERVAL cannot be fetched as
-  /// strings). The default empty set changes nothing.
+  /// round trip (NUMBER, CLOB, RAW, JSON, INTERVAL and VECTOR cannot be
+  /// fetched as strings — for a VECTOR's text select `FROM_VECTOR(col)` or
+  /// map the value with [fetchTypeHandler]). The default empty set changes
+  /// nothing.
   ///
   /// **The text is produced by the driver, not by Oracle.** As in
   /// node-oracledb thin mode, the column is still fetched in its native
@@ -325,6 +328,8 @@ class OracleExecuteOptions {
   ///   under [fetchLobs] (see below);
   /// * JSON (and a BLOB `IS JSON` column): the decoded `Map` / `List` /
   ///   scalar, or the raw `Uint8List` under [rawJsonBlobs];
+  /// * VECTOR: a `Float32List`, `Float64List`, `Int8List` or `Uint8List`
+  ///   (BINARY) by storage format, or an `OracleSparseVector`;
   /// * a nested `CURSOR(...)` column: its rows, a `List<OracleRow>`.
   ///
   /// **No `type`.** Unlike node-oracledb's handler, this one cannot change
@@ -958,13 +963,18 @@ class OracleConnection {
   /// rejected rather than wrapped — see [_rejectCursorEmbeddedLob].
   ///
   /// Derived from [ColumnMetadata.requiresDefine] (the one "LOB-like column"
-  /// predicate) with native JSON DELIBERATELY excluded: the reject exists
-  /// because a cursor-embedded LOB would need a tracked [OracleLob] handle,
-  /// while a native JSON value decodes inline to a `Map` / `List` / scalar
-  /// with no handle lifecycle at all — rejecting it would regress a shape
-  /// that works under `fetchLobs: true`.
-  static bool _cursorCarriesLob(List<ColumnMetadata> columns) =>
-      columns.any((c) => c.requiresDefine && c.oracleType != oc.oraTypeJson);
+  /// predicate) with native JSON and VECTOR DELIBERATELY excluded: the reject
+  /// exists because a cursor-embedded LOB would need a tracked [OracleLob]
+  /// handle, while a native JSON value decodes inline to a `Map` / `List` /
+  /// scalar and a VECTOR value to a typed list / `OracleSparseVector`, with
+  /// no handle lifecycle at all — rejecting them would regress shapes that
+  /// work under `fetchLobs: true`.
+  static bool _cursorCarriesLob(List<ColumnMetadata> columns) => columns.any(
+    (c) =>
+        c.requiresDefine &&
+        c.oracleType != oc.oraTypeJson &&
+        c.oracleType != oc.oraTypeVector,
+  );
 
   /// Fails loud when `fetchLobs: true` would have to hand back a LOB carried by
   /// a nested `CURSOR(...)` result column or a REF CURSOR OUT bind's rows.
@@ -1338,7 +1348,7 @@ class OracleConnection {
   /// Whether a describe-created cursor described by [columns] needs a DEFINE
   /// call before its first FETCH (node-oracledb `requiresDefine`, set in
   /// `withData.js` `postProcess` for every describe-created cursor with a CLOB /
-  /// NCLOB / BLOB / JSON column).
+  /// NCLOB / BLOB / JSON / VECTOR column).
   ///
   /// Without the defines the server ships those values as bare locators that
   /// cannot be decoded: measured on Oracle 23ai and 21c, any implicit result
@@ -1937,6 +1947,12 @@ class OracleConnection {
   /// `DB_TYPE_TIMESTAMP` entry converts all four timestamp types; this driver
   /// keeps one public type per column family instead.) Returns an
   /// unmodifiable snapshot, empty for an empty request.
+  ///
+  /// [OracleDbType.vector] is rejected, as [OracleDbType.json] is (Story
+  /// 15.4): node-oracledb's STRING fetch of a VECTOR is a server-side
+  /// conversion (a LONG define) and this hook only converts decoded values
+  /// client-side, so accepting it would either change nothing or invent a
+  /// text form Oracle never produced.
   static Set<int> _fetchAsStringOraTypes(Set<OracleDbType> requested) {
     if (requested.isEmpty) return const <int>{};
     final oraTypes = <int>{};
@@ -2909,7 +2925,8 @@ class OracleConnection {
                 'Unsupported bind value type ${value.runtimeType} in '
                 'executeMany() row $r, $slotLabel. Supported types: String, '
                 'int, double, DateTime, OracleTimestampTz, OracleIntervalDS, '
-                'Duration, OracleIntervalYM, Uint8List, Map, List, null',
+                'Duration, OracleIntervalYM, Float32List, Float64List, '
+                'Int8List, OracleSparseVector, Uint8List, Map, List, null',
           );
         }
         if (value is double && !value.isFinite) {
@@ -3571,6 +3588,13 @@ class OracleConnection {
             message:
                 'Invalid JSON bind value in executeMany() row $rowIndex, '
                 '$slotLabel: ${e.message}',
+          );
+        }
+      case OracleDbType.vector:
+        if (!isVectorBindValue(value)) {
+          mismatch(
+            'Float32List, Float64List, Int8List, Uint8List, '
+            'OracleSparseVector or a List of numbers',
           );
         }
       case OracleDbType.cursor:
@@ -4427,13 +4451,13 @@ class OracleConnection {
       cacheEntry = _cache.acquire(stmt.cacheKey);
       if (cacheEntry != null) {
         // A cursor whose result shape needs column defines — a locator LOB
-        // (CLOB / NCLOB / BLOB) or a native JSON column
+        // (CLOB / NCLOB / BLOB) or a native JSON / VECTOR column
         // ([ColumnMetadata.requiresDefine]) — is never blind-re-executed.
         // For a locator LOB a blind re-execute misaligns the row stream (the
-        // server stops sending the LOB-prefetch metadata); native JSON follows
-        // the same rule so every define decision shares one predicate. Close
-        // the old cursor (via the piggyback on this same execute) and re-parse
-        // to re-establish the prefetch shape.
+        // server stops sending the LOB-prefetch metadata); native JSON and
+        // VECTOR follow the same rule so every define decision shares one
+        // predicate. Close the old cursor (via the piggyback on this same
+        // execute) and re-parse to re-establish the prefetch shape.
         final needsFreshDefines = _cursorRequiresDefine(
           cacheEntry.columnMetadata,
         );

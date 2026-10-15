@@ -13,6 +13,8 @@
 /// other wire change is made.
 library;
 
+import 'dart:typed_data';
+
 import 'package:oracledb/oracledb.dart';
 import 'package:oracledb/src/protocol/constants.dart';
 import 'package:oracledb/src/protocol/fetch_as_string.dart';
@@ -300,6 +302,61 @@ void main() {
       expect(result.rows.single.toList(), equals(row()));
       expect(result.rows.single['D'], isA<DateTime>());
       expect(t.defines, equals(0), reason: 'no DEFINE round');
+    });
+
+    test('vector is rejected like json while a date entry leaves VECTOR '
+        'columns as their typed values (Story 15.4)', () async {
+      final dense = Float32List.fromList([1.5, -2.25]);
+      final sparse = OracleSparseVector(
+        numDimensions: 4,
+        indices: [3],
+        values: Float64List.fromList([2]),
+      );
+      const vectorCols = [
+        _id,
+        _d,
+        ColumnMetadata(name: 'V', oracleType: oraTypeVector, maxLength: 8200),
+        ColumnMetadata(name: 'S', oracleType: oraTypeVector, maxLength: 8200),
+      ];
+      final t = _FakeTransport(
+        firstBatch: () => _batch(
+          [
+            [1, _date, dense, sparse],
+          ],
+          more: false,
+          columns: vectorCols,
+        ),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+      for (final types in [
+        {OracleDbType.vector},
+        {OracleDbType.date, OracleDbType.vector},
+      ]) {
+        await expectLater(
+          conn.execute(
+            'SELECT * FROM t',
+            null,
+            OracleExecuteOptions(fetchAsString: types),
+          ),
+          throwsA(
+            isA<ArgumentError>().having(
+              (e) => e.invalidValue,
+              'invalidValue',
+              OracleDbType.vector,
+            ),
+          ),
+        );
+      }
+      expect(t.executes, equals(0), reason: 'no wire traffic');
+      final result = await conn.execute(
+        'SELECT * FROM t',
+        null,
+        const OracleExecuteOptions(fetchAsString: {OracleDbType.date}),
+      );
+      final row = result.rows.single;
+      expect(row['D'], isA<String>());
+      expect(row['V'], same(dense));
+      expect(row['S'], same(sparse));
     });
 
     test(

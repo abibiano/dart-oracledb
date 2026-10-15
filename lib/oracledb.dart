@@ -66,5 +66,8 @@ export 'src/oracle_timestamp_tz.dart' show OracleTimestampTz;
 // INTERVAL DAY TO SECOND (Story 15.1) and YEAR TO MONTH (Story 15.2) wrappers
 export 'src/oracle_interval.dart' show OracleIntervalDS, OracleIntervalYM;
 
+// Sparse VECTOR values (Story 15.4; dense vectors are Dart typed lists)
+export 'src/oracle_vector.dart' show OracleSparseVector;
+
 // TLS/SSL Configuration
 export 'src/transport/tls.dart' show TlsConfig;

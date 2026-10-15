@@ -119,6 +119,7 @@ class BindVariable {
             'Unsupported bind value type: ${value.runtimeType}. '
             'Supported types: String, int, double, DateTime, '
             'OracleTimestampTz, OracleIntervalDS, Duration, OracleIntervalYM, '
+            'Float32List, Float64List, Int8List, OracleSparseVector, '
             'Uint8List, Map, List, null',
       );
     }
@@ -610,11 +611,14 @@ class ExecuteRequest extends Message {
     buffer.writeUint8(ttcMsgTypeRowData);
     final deferredLongBinds = <BindVariable>[];
     for (final bind in rowBinds) {
-      // JSON is excluded from the deferral despite its 32 MB metadata
-      // maxSize: node-oracledb classifies long binds by the variable's own
-      // (small) maxSize, so JSON values stay in bind order on the wire.
+      // JSON and VECTOR are excluded from the deferral despite their 32 MB /
+      // 1 MB metadata maxSize: node-oracledb classifies long binds by the
+      // variable's own (small) maxSize, so their values stay in bind order
+      // on the wire.
+      final wireType = _wireTypeFor(bind);
       if (!isPlSql &&
-          _wireTypeFor(bind) != oraTypeJson &&
+          wireType != oraTypeJson &&
+          wireType != oraTypeVector &&
           _maxSizeFor(bind) > ttcMaxVarcharBindBytes) {
         deferredLongBinds.add(bind);
         continue;
@@ -647,28 +651,44 @@ class ExecuteRequest extends Message {
       buffer.writeUint8(0); // scale
       buffer.writeUB4(maxSize);
       buffer.writeUB4(0); // max num elements (not array)
-      // LOB and JSON binds request prefetch metadata — node-oracledb
+      // LOB, JSON and VECTOR binds request prefetch metadata — node-oracledb
       // writeColumnMetadata sets TNS_LOB_PREFETCH_FLAG for every LOB-typed
-      // bind and for DB_TYPE_JSON (whose document then travels inline).
-      buffer.writeUB4(
-        oraType == oraTypeClob ||
-                oraType == oraTypeBlob ||
-                oraType == oraTypeJson
-            ? tnsLobPrefetchFlag
-            : 0,
-      );
+      // bind and for DB_TYPE_JSON / DB_TYPE_VECTOR (whose value then travels
+      // inline).
+      buffer.writeUB4(_lobPrefetchContFlag(oraType));
       buffer.writeUB4(0); // OID
       buffer.writeUB2(0); // version
       buffer.writeUB2(_charsetFieldFor(csfrm));
       buffer.writeUint8(csfrm);
-      // Max chars (LOB prefetch length): TNS_JSON_MAX_LENGTH for JSON
-      // (node-oracledb sets lobPrefetchLength = maxSize = 32 MB), 0 otherwise.
-      buffer.writeUB4(oraType == oraTypeJson ? tnsJsonMaxLength : 0);
+      // Max chars (LOB prefetch length): TNS_JSON_MAX_LENGTH for JSON and
+      // TNS_VECTOR_MAX_LENGTH for VECTOR (node-oracledb sets
+      // lobPrefetchLength = maxSize), 0 otherwise.
+      buffer.writeUB4(_lobPrefetchLength(oraType));
       if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
         buffer.writeUB4(0); // oaccolid
       }
     }
   }
+
+  /// The cont-flag word of a bind / define block: [tnsLobPrefetchFlag] for
+  /// the types node-oracledb `writeColumnMetadata` marks (CLOB / NCLOB /
+  /// BLOB, JSON, VECTOR), 0 otherwise.
+  static int _lobPrefetchContFlag(int wireType) =>
+      wireType == oraTypeClob ||
+          wireType == oraTypeBlob ||
+          wireType == oraTypeJson ||
+          wireType == oraTypeVector
+      ? tnsLobPrefetchFlag
+      : 0;
+
+  /// The LOB-prefetch length of a bind / define block: the inline-value
+  /// maximum for JSON ([tnsJsonMaxLength]) and VECTOR ([tnsVectorMaxLength]),
+  /// 0 otherwise (node-oracledb `writeColumnMetadata` `lobPrefetchLength`).
+  static int _lobPrefetchLength(int wireType) => switch (wireType) {
+    oraTypeJson => tnsJsonMaxLength,
+    oraTypeVector => tnsVectorMaxLength,
+    _ => 0,
+  };
 
   /// Writes one define block per query column — the same field layout as
   /// bind metadata (node-oracledb shares `writeColumnMetadata` between the
@@ -692,20 +712,15 @@ class ExecuteRequest extends Message {
       buffer.writeUint8(0);
       buffer.writeUB4(_defineBufferSize(col));
       buffer.writeUB4(0); // max num elements (not array)
-      buffer.writeUB4(
-        oraType == oraTypeClob ||
-                oraType == oraTypeBlob ||
-                oraType == oraTypeJson
-            ? tnsLobPrefetchFlag
-            : 0,
-      );
+      buffer.writeUB4(_lobPrefetchContFlag(oraType));
       buffer.writeUB4(0); // OID
       buffer.writeUB2(0); // version
       buffer.writeUB2(_charsetFieldFor(col.csfrm));
       buffer.writeUint8(col.csfrm);
       // Max chars (LOB prefetch length): mirrors bind metadata — JSON
-      // defines declare the 32 MB document bound.
-      buffer.writeUB4(oraType == oraTypeJson ? tnsJsonMaxLength : 0);
+      // defines declare the 32 MB document bound, VECTOR defines the 1 MB
+      // image bound (verified against node-oracledb's define bytes on 23ai).
+      buffer.writeUB4(_lobPrefetchLength(oraType));
       if (ttcFieldVersion >= ttcCcapFieldVersion12_2) {
         buffer.writeUB4(0); // oaccolid
       }
@@ -722,6 +737,11 @@ class ExecuteRequest extends Message {
         return _lobLocatorBindBufferSize;
       case oraTypeJson:
         return tnsJsonMaxLength;
+      case oraTypeVector:
+        // node-oracledb writeColumnMetadata: maxSize = TNS_VECTOR_MAX_LENGTH
+        // (the describe reports 8200 for every VECTOR column, whatever its
+        // dimension count — measured on 23ai).
+        return tnsVectorMaxLength;
       case oraTypeNumber:
       case oraTypeInteger:
       case oraTypeFloat:
@@ -877,6 +897,15 @@ class ExecuteRequest extends Message {
               'INTERVAL YEAR TO MONTH bind requires OracleIntervalYM (got '
               '${value.runtimeType})',
         );
+      case oraTypeVector:
+        // node-oracledb writeBindParamsColumn → packet.js writeVector: the
+        // 40-byte value-based QLocator, then the vector image. (A NULL took
+        // the null-indicator branch above, as node-oracledb writes it.)
+        // encodeVector fails loud on a value that is not a vector.
+        final image = dt.encodeVector(value);
+        _writeQLocator(buffer, image.length);
+        buffer.writeBytesWithLength(image);
+        return;
       case oraTypeClob:
       case oraTypeBlob:
         // CLOB/BLOB binds put a locator on the wire, never the value bytes
@@ -918,6 +947,15 @@ class ExecuteRequest extends Message {
       allowNonFinite: allowNonFinite,
       allowLongFieldNames: allowLongFieldNames,
     );
+    _writeQLocator(buffer, oson.length);
+    buffer.writeBytesWithLength(oson);
+  }
+
+  /// Writes the 40-byte value-based "QLocator" that precedes an inline JSON
+  /// (OSON) or VECTOR bind value, declaring [payloadLength] payload bytes
+  /// (node-oracledb `packet.js writeQLocator`, byte-for-byte): UB4 40, the
+  /// repeated length byte, then the locator.
+  static void _writeQLocator(WriteBuffer buffer, int payloadLength) {
     final locator = WriteBuffer()
       ..writeUint16BE(38) // internal length
       ..writeUint16BE(tnsLobQLocatorVersion)
@@ -928,7 +966,7 @@ class ExecuteRequest extends Message {
       ..writeUint16BE(0) // additional flags
       ..writeUint16BE(1) // byt1
       ..writeUint32BE(0) // payload length (UInt64BE high word)
-      ..writeUint32BE(oson.length) // payload length (UInt64BE low word)
+      ..writeUint32BE(payloadLength) // payload length (UInt64BE low word)
       ..writeUint16BE(0) // unused
       ..writeUint16BE(0) // csid
       ..writeUint16BE(0) // unused
@@ -940,7 +978,6 @@ class ExecuteRequest extends Message {
     assert(locatorBytes.length == 40, 'QLocator must be exactly 40 bytes');
     buffer.writeUB4(locatorBytes.length);
     buffer.writeBytesWithLength(locatorBytes);
-    buffer.writeBytesWithLength(oson);
   }
 
   static int _wireTypeFor(BindVariable bind) {
@@ -972,6 +1009,12 @@ class ExecuteRequest extends Message {
       // writeColumnMetadata); the user's OracleBind maxSize only guards the
       // returned document client-side and never reaches the wire.
       return tnsJsonMaxLength;
+    }
+    if (wireType == oraTypeVector) {
+      // node-oracledb writeColumnMetadata: a VECTOR bind always declares
+      // TNS_VECTOR_MAX_LENGTH, IN and OUT alike; a declared maxSize is
+      // ignored.
+      return tnsVectorMaxLength;
     }
     if (wireType == oraTypeCursor) {
       // node-oracledb DB_TYPE_CURSOR bufferSizeFactor = 4.
@@ -1268,10 +1311,12 @@ class ColumnMetadata {
   /// Whether a query cursor carrying this column must announce column defines
   /// (a DEFINE call with the LOB-prefetch cont-flag) before rows can be
   /// decoded: a locator LOB — CLOB, NCLOB (which shares the CLOB type code),
-  /// BLOB — or a native `JSON` column. node-oracledb sets `requiresDefine` for
-  /// exactly these types (`withData.js` `postProcess`, `connection.js`
-  /// `_handleDefines`). Without the defines the server ships bare locators /
-  /// bare JSON values that the decoder cannot read.
+  /// BLOB — or a native `JSON` or `VECTOR` column. node-oracledb sets
+  /// `requiresDefine` for exactly these types (`withData.js` `postProcess`,
+  /// `connection.js` `_handleDefines`). Without the defines the server ships
+  /// bare locators / bare JSON values that the decoder cannot read; a
+  /// `VECTOR` query's first execute returns no rows at all until the defines
+  /// arrive (measured on 23ai).
   ///
   /// The single source of truth for every "needs a DEFINE" decision: the
   /// top-level DEFINE round in `Transport.sendExecute`, the describe-created
@@ -1283,7 +1328,8 @@ class ColumnMetadata {
   bool get requiresDefine =>
       oracleType == oraTypeClob ||
       oracleType == oraTypeBlob ||
-      oracleType == oraTypeJson;
+      oracleType == oraTypeJson ||
+      oracleType == oraTypeVector;
 }
 
 /// Decoder-side bind metadata used to interpret OUT bind values returned in
@@ -2499,6 +2545,25 @@ Object? _decodeValueByOraType(
         );
       }
       return decodeOson(Uint8List.fromList(osonBytes));
+    case oraTypeVector:
+      // VECTOR wire shape (node-oracledb packet.js readVector), the same
+      // LOB-prefetch form as JSON with the vector image inline: UB4 locator
+      // length (0 ⇒ SQL NULL, nothing follows), UB8 size + UB4 chunk size
+      // (both unused), the length-prefixed (chunked when long) image, then
+      // the length-prefixed locator (unused). SELECT columns, OUT binds and
+      // DML RETURNING values all ship this shape (measured on 23ai; no
+      // null-indicator / return-code trailer follows a column value, as the
+      // describe reports maxSize 8200 for every VECTOR column).
+      final vectorMarker = buf.readUB4();
+      if (vectorMarker == 0) return null; // SQL NULL
+      buf.skipUB8(); // size (unused)
+      buf.skipUB4(); // chunk size (unused)
+      final image = buf.readBytesWithLength();
+      buf.skipBytesChunked(); // locator (unused)
+      // The decoder fails loud on a malformed image, so the probe pass stops
+      // after consuming the bytes.
+      if (!strict) return null;
+      return dt.decodeVector(image);
     case oraTypeCursor:
       // Cursor OUT bind wire shape (node-oracledb processColumnData cursor
       // branch): one UInt8 length byte (0 or 0xFF = SQL NULL / empty slot),
@@ -2743,6 +2808,13 @@ bool _isSupportedRefCursorColumn(ColumnMetadata col) {
     case oraTypeURowid:
     case oraTypeBlob:
     case oraTypeJson:
+      return true;
+    case oraTypeVector:
+      // Like JSON, a VECTOR column makes the describe-created cursor open
+      // with a DEFINE round ([ColumnMetadata.requiresDefine]), after which
+      // its rows ship the same inline image a top-level fetch does —
+      // verified live on 23ai for REF CURSOR OUT binds, nested CURSOR()
+      // columns and implicit results.
       return true;
     case oraTypeClob:
       // CLOB and NCLOB (csfrm == NChar) are both fetchable: the locator's

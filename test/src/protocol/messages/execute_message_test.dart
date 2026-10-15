@@ -15,9 +15,11 @@ import 'package:test/test.dart';
 import 'package:oracledb/src/errors.dart';
 import 'package:oracledb/src/oracle_interval.dart';
 import 'package:oracledb/src/oracle_timestamp_tz.dart';
+import 'package:oracledb/src/oracle_vector.dart';
 import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:oracledb/src/protocol/constants.dart';
-import 'package:oracledb/src/protocol/data_types.dart' show encodeNumber;
+import 'package:oracledb/src/protocol/data_types.dart'
+    show encodeNumber, encodeVector;
 import 'package:oracledb/src/protocol/lob_locator.dart';
 import 'package:oracledb/src/protocol/messages/execute_message.dart';
 import 'package:oracledb/src/protocol/oson.dart' show encodeOson;
@@ -7523,6 +7525,533 @@ void main() {
         result.columns.map((c) => c.oracleType),
         equals([oraTypeRowid, oraTypeURowid]),
       );
+    });
+  });
+
+  group('VECTOR (type 127, Story 15.4)', () {
+    // The FLOAT32 image of [1.5, -2.25, 3] as node-oracledb binds it (zero
+    // norm) and as the server returns it (norm filled), captured on 23ai.
+    const boundImage = [
+      0xDB, 0, 0x00, 0x12, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, //
+      0xBF, 0xC0, 0, 0, 0x3F, 0xEF, 0xFF, 0xFF, 0xC0, 0x40, 0, 0,
+    ];
+    const fetchedImage = [
+      0xDB, 0, 0x00, 0x12, 2, 0, 0, 0, 3, //
+      0xC0, 0x10, 0x27, 0xCE, 0x7B, 0x7E, 0xA3, 0x76, //
+      0xBF, 0xC0, 0, 0, 0x3F, 0xEF, 0xFF, 0xFF, 0xC0, 0x40, 0, 0,
+    ];
+    final value = Float32List.fromList([1.5, -2.25, 3]);
+
+    /// The 40-byte value-based QLocator node-oracledb writes before a VECTOR
+    /// bind image of [payloadLength] bytes (packet.js writeQLocator).
+    List<int> qLocator(int payloadLength) => [
+      0, 38, 0, 4, 0x61, 0x08, 0, 0, 0, 1, //
+      ..._u64be(payloadLength),
+      0, 0, 0, 0, 0, 0, ...List<int>.filled(16, 0),
+    ];
+
+    /// The bind / define metadata of a VECTOR slot, byte-for-byte as
+    /// node-oracledb writeColumnMetadata emits it (captured on 23ai): 1 MB
+    /// buffer, LOB-prefetch cont-flag, no charset form, 1 MB prefetch length.
+    const vectorMetadata = [
+      oraTypeVector, ttcBindUseIndicators, 0, 0, //
+      4, 0x00, 0x10, 0x00, 0x00, // UB4 buffer size = 1048576
+      0, // max num elements
+      4, 0x02, 0x00, 0x00, 0x00, // UB4 cont-flag = TNS_LOB_PREFETCH_FLAG
+      0, // OID
+      0, // version
+      0, // UB2 charset = 0
+      0, // csfrm = 0
+      4, 0x00, 0x10, 0x00, 0x00, // UB4 LOB prefetch length = 1048576
+      0, // oaccolid
+    ];
+
+    /// One fetched VECTOR value in the LOB-prefetch shape (node-oracledb
+    /// readVector): UB4 locator length, UB8 size, UB4 chunk size, the
+    /// length-prefixed image, then the length-prefixed locator.
+    List<int> fetchedValue(List<int> image) => [
+      ..._ub4(40),
+      ..._ub8(image.length),
+      ..._ub4(0x7F58), // chunk size
+      ..._bytesWithLength(image),
+      ..._bytesWithLength(qLocator(image.length)),
+    ];
+
+    const v = ColumnMetadata(
+      name: 'V',
+      oracleType: oraTypeVector,
+      maxLength: 8200,
+    );
+    const n5 = ColumnMetadata(
+      name: 'N',
+      oracleType: oraTypeNumber,
+      maxLength: 0,
+    );
+
+    Matcher protocolError() => throwsA(
+      isA<OracleException>().having(
+        (e) => e.errorCode,
+        'errorCode',
+        oraProtocolError,
+      ),
+    );
+
+    List<int> endOfFetch() => [
+      ..._errorMessage(errorNum: 1403),
+      ttcMsgTypeStatus,
+      ..._ub4(0),
+      ..._ub2(0),
+    ];
+
+    test('typed lists and sparse vectors infer VECTOR; Uint8List and plain '
+        'lists keep RAW / JSON', () {
+      expect(BindVariable(value: value).oraType, equals(oraTypeVector));
+      expect(
+        BindVariable(value: Float64List(2)).oraType,
+        equals(oraTypeVector),
+      );
+      expect(BindVariable(value: Int8List(2)).oraType, equals(oraTypeVector));
+      expect(
+        BindVariable(
+          value: OracleSparseVector(
+            numDimensions: 2,
+            indices: [0],
+            values: [1],
+          ),
+        ).oraType,
+        equals(oraTypeVector),
+      );
+      expect(BindVariable(value: Uint8List(2)).oraType, equals(oraTypeRaw));
+      expect(BindVariable(value: <double>[1.5]).oraType, equals(oraTypeJson));
+    });
+
+    test('an IN bind writes the node-oracledb metadata, QLocator and image '
+        'byte-for-byte', () {
+      final bytes = ExecuteRequest(
+        sql: 'INSERT INTO t (v) VALUES (:1)',
+        isQuery: false,
+        bindValues: [value],
+      ).toBytes();
+      expect(_indexOfSub(bytes, vectorMetadata), greaterThanOrEqualTo(0));
+      // ROW_DATA: UB4 40, the repeated length byte, the 40-byte locator, then
+      // the length-prefixed image (node-oracledb writeVector, as captured).
+      final rowData = [
+        ttcMsgTypeRowData,
+        1, 40, 40, ...qLocator(boundImage.length), //
+        boundImage.length, ...boundImage,
+      ];
+      final at = _indexOfSub(bytes, rowData);
+      expect(at, greaterThanOrEqualTo(0));
+      expect(at + rowData.length, equals(bytes.length), reason: 'last bytes');
+    });
+
+    test('a NULL IN bind writes the null indicator; an OUT bind the same '
+        'metadata with a null placeholder', () {
+      final nullIn = ExecuteRequest(
+        sql: 'INSERT INTO t (v) VALUES (:1)',
+        isQuery: false,
+        bindValues: [BindVariable(value: null, oraType: oraTypeVector)],
+      ).toBytes();
+      expect(_indexOfSub(nullIn, vectorMetadata), greaterThanOrEqualTo(0));
+      expect(nullIn.sublist(nullIn.length - 2), equals([ttcMsgTypeRowData, 0]));
+
+      for (final maxSize in [null, 10]) {
+        final out = ExecuteRequest(
+          sql: 'BEGIN SELECT v INTO :1 FROM t; END;',
+          isQuery: false,
+          isPlSql: true,
+          bindValues: [
+            BindVariable(
+              value: null,
+              oraType: oraTypeVector,
+              maxSize: maxSize,
+              dir: BindDir.output,
+            ),
+          ],
+        ).toBytes();
+        expect(
+          _indexOfSub(out, vectorMetadata),
+          greaterThanOrEqualTo(0),
+          reason: 'maxSize $maxSize is ignored: the 1 MB buffer is declared',
+        );
+        expect(out.sublist(out.length - 2), equals([ttcMsgTypeRowData, 0]));
+      }
+    });
+
+    test('a declared VECTOR bind encodes a plain list as FLOAT64 and a '
+        'Uint8List as BINARY', () {
+      for (final (declared, format) in <(Object, int)>[
+        (<double>[1.5, 2.5], vectorFormatFloat64),
+        (Uint8List.fromList([0xFF, 0x01]), vectorFormatBinary),
+      ]) {
+        final bytes = ExecuteRequest(
+          sql: 'BEGIN p(:1); END;',
+          isQuery: false,
+          isPlSql: true,
+          bindValues: [
+            BindVariable(
+              value: declared,
+              oraType: oraTypeVector,
+              dir: BindDir.inputOutput,
+            ),
+          ],
+        ).toBytes();
+        final image = encodeVector(declared);
+        expect(image[4], equals(format));
+        expect(
+          _indexOfSub(bytes, [...qLocator(image.length), image.length]),
+          greaterThanOrEqualTo(0),
+        );
+        expect(_indexOfSub(bytes, image), greaterThanOrEqualTo(0));
+      }
+    });
+
+    test('a non-vector value under a declared VECTOR type fails loud', () {
+      final req = ExecuteRequest(
+        sql: 'BEGIN p(:1); END;',
+        isQuery: false,
+        isPlSql: true,
+        bindValues: [
+          BindVariable(
+            value: 'secret-text',
+            oraType: oraTypeVector,
+            dir: BindDir.inputOutput,
+          ),
+        ],
+      );
+      expect(
+        req.toBytes,
+        throwsA(
+          isA<OracleException>()
+              .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+              .having(
+                (e) => e.message,
+                'message',
+                allOf(
+                  contains('VECTOR bind requires'),
+                  isNot(contains('secret-text')),
+                ),
+              ),
+        ),
+      );
+    });
+
+    test('a VECTOR bind is not deferred as long data despite its 1 MB '
+        'buffer', () {
+      // A 40000-byte VARCHAR IS long data and moves after the vector; a
+      // vector bound before a short VARCHAR stays first (node-oracledb
+      // classifies long binds by the variable's own small maxSize).
+      final long = 'L' * 40000;
+      final bytes = ExecuteRequest(
+        sql: 'INSERT INTO t (a, v, b) VALUES (:1, :2, :3)',
+        isQuery: false,
+        bindValues: [long, value, 'short'],
+      ).toBytes();
+      final image = _indexOfSub(bytes, boundImage);
+      final short = _indexOfSub(bytes, [5, ...utf8.encode('short')]);
+      final longAt = _indexOfSub(bytes, utf8.encode('L' * 100));
+      expect(image, greaterThan(0));
+      expect(short, greaterThan(image), reason: 'bind order kept');
+      expect(longAt, greaterThan(short), reason: 'long data last');
+    });
+
+    test('a define block declares a VECTOR column like node-oracledb', () {
+      final bytes = ExecuteRequest(
+        sql: 'SELECT v FROM t',
+        isQuery: true,
+        cursorId: 9,
+        defineColumns: const [v],
+      ).toBytes();
+      expect(_indexOfSub(bytes, vectorMetadata), greaterThanOrEqualTo(0));
+    });
+
+    test('requiresDefine is true for a VECTOR column', () {
+      expect(v.requiresDefine, isTrue);
+      expect(n5.requiresDefine, isFalse);
+    });
+
+    test('a VECTOR column decodes and the row stays in sync (dense, sparse, '
+        'NULL)', () {
+      final sparseImage = encodeVector(
+        OracleSparseVector(
+          numDimensions: 8,
+          indices: [1, 5],
+          values: Float32List.fromList([1.5, -2.5]),
+        ),
+      );
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ...fetchedValue(fetchedImage),
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+        ],
+        [
+          ttcMsgTypeRowData,
+          ...fetchedValue(sparseImage),
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+        ],
+        // SQL NULL: a zero locator length and nothing else.
+        [ttcMsgTypeRowData, 0, ..._bytesWithLength(_oracleNumberFiveBytes())],
+        endOfFetch(),
+      ]);
+      const columns = [v, n5];
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: columns,
+      );
+      expect(r.rows, hasLength(3));
+      expect(r.rows[0][0], isA<Float32List>());
+      expect(r.rows[0], equals([value, 5]));
+      expect(r.rows[1][0], isA<OracleSparseVector>());
+      expect(r.rows[1][1], equals(5));
+      expect(r.rows[2], equals([null, 5]));
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+    });
+
+    test('a long image arrives chunked and decodes', () {
+      final wide = Float64List.fromList([for (var i = 0; i < 400; i++) i / 3]);
+      final image = encodeVector(wide);
+      expect(image.length, greaterThan(252));
+      // Long-length indicator, then two chunks and the terminating 0.
+      final chunked = [
+        0xFE,
+        ..._ub4(1000),
+        ...image.sublist(0, 1000),
+        ..._ub4(image.length - 1000),
+        ...image.sublist(1000),
+        0,
+      ];
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._ub4(40),
+          ..._ub8(image.length),
+          ..._ub4(8060),
+          ...chunked,
+          ..._bytesWithLength(qLocator(image.length)),
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+        ],
+        endOfFetch(),
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: const [v, n5],
+      );
+      expect(r.rows.single[0], equals(wide));
+      expect(r.rows.single[1], equals(5));
+    });
+
+    test('a duplicate-column VECTOR is copied from the prior row', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ...fetchedValue(fetchedImage),
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+        ],
+        // Row 2: column 0 duplicated (bit clear), column 1 on the wire.
+        _bitVector(2, [0x02]),
+        [ttcMsgTypeRowData, ..._bytesWithLength(_oracleNumberFiveBytes())],
+        endOfFetch(),
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: const [v, n5],
+      );
+      expect(
+        r.rows,
+        equals([
+          [value, 5],
+          [value, 5],
+        ]),
+      );
+    });
+
+    test('a malformed image fails loud only in the strict pass', () {
+      final malformed = <String, List<int>>{
+        'bad magic byte': [0xDA, ...fetchedImage.skip(1)],
+        'truncated elements': fetchedImage.sublist(0, fetchedImage.length - 1),
+        'empty image': const [],
+      };
+      for (final MapEntry(key: label, value: image) in malformed.entries) {
+        final payload = _buildPayload([
+          _rowHeader(),
+          [ttcMsgTypeRowData, ...fetchedValue(image)],
+          endOfFetch(),
+        ]);
+        // The probe consumes the bytes and reaches the terminal message; the
+        // strict decode rejects the value instead of guessing.
+        expect(
+          ttcStreamIsComplete(payload, expectedColumns: const [v]),
+          isTrue,
+          reason: label,
+        );
+        expect(
+          () => decodeExecuteResponse(
+            payload,
+            isQuery: true,
+            expectedColumns: const [v],
+          ),
+          protocolError(),
+          reason: label,
+        );
+      }
+    });
+
+    test('an unsupported image version fails loud with '
+        'oraUnsupportedType', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ...fetchedValue([0xDB, 3, ...fetchedImage.skip(2)]),
+        ],
+        endOfFetch(),
+      ]);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: const [v],
+        ),
+        throwsA(
+          isA<OracleException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            oraUnsupportedType,
+          ),
+        ),
+      );
+    });
+
+    test('a truncated stream needs more packets in the probe and fails loud '
+        'in the strict pass', () {
+      final full = fetchedValue(fetchedImage);
+      final payload = _buildPayload([
+        _rowHeader(),
+        [ttcMsgTypeRowData, ...full.sublist(0, full.length - 10)],
+      ]);
+      expect(ttcStreamIsComplete(payload, expectedColumns: const [v]), isFalse);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: const [v],
+        ),
+        protocolError(),
+      );
+    });
+
+    test('a PL/SQL OUT bind decodes the returned vector and NULL', () {
+      final payload = _buildPayload([
+        _ioVector([tnsBindDirOutput, tnsBindDirOutput]),
+        [
+          ttcMsgTypeRowData,
+          ...fetchedValue(fetchedImage),
+          ..._ub4(0), // SB4 actualNumBytes trailer
+          0, // NULL
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final bindMetadata = [
+        const BindMetadata(oraType: oraTypeVector, dir: BindDir.output),
+        const BindMetadata(oraType: oraTypeVector, dir: BindDir.output),
+      ];
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: bindMetadata,
+      );
+      expect(r.outBindValues, equals([value, null]));
+      expect(ttcStreamIsComplete(payload, bindMetadata: bindMetadata), isTrue);
+    });
+
+    test('a DML RETURNING target decodes the returned vectors (the image '
+        'chunked, as captured on 23ai)', () {
+      final payload = _buildPayload([
+        [
+          ttcMsgTypeRowData,
+          ..._ub4(2),
+          // The server ships a RETURNING image in the chunked form.
+          ..._ub4(40),
+          ..._ub8(fetchedImage.length),
+          ..._ub4(8060),
+          0xFE, ..._ub4(fetchedImage.length), ...fetchedImage, 0, //
+          ..._bytesWithLength(qLocator(fetchedImage.length)),
+          ..._ub4(0),
+          0, // NULL
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0, rowCount: 2),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: false,
+        bindMetadata: [
+          const BindMetadata(oraType: oraTypeVector, dir: BindDir.output),
+        ],
+        dmlReturning: true,
+        presetOutBindIndices: const [0],
+      );
+      expect(
+        r.outBindRows,
+        equals([
+          [
+            [value, null],
+          ],
+        ]),
+      );
+    });
+
+    test('a VECTOR describe with dimensions, format and flags set keeps the '
+        'stream aligned, and an embedded cursor accepts VECTOR', () {
+      List<int> vectorColumn(String name, int dims, int format, int flags) {
+        final col = _columnInfo(
+          name: name,
+          oraType: oraTypeVector,
+          maxSize: 8200,
+        );
+        // Replace the zeroed 23.4 tail (UB4 dimensions, format, flags).
+        return [
+          ...col.sublist(0, col.length - 3),
+          ..._ub4(dims),
+          format,
+          flags,
+        ];
+      }
+
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (
+            columns: [
+              vectorColumn('V', 65535, vectorFormatFloat64, 0),
+              vectorColumn('S', 8, vectorFormatInt8, 2), // sparse
+              vectorColumn('F', 0, vectorFormatFlex, 1), // flexible
+              _columnInfo(name: 'N', oraType: oraTypeNumber, maxSize: 22),
+            ],
+            cursorId: 615,
+          ),
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      final result = r.implicitResults.single;
+      expect(result.cursorId, equals(615));
+      expect(
+        result.columns.map((c) => c.oracleType),
+        equals([oraTypeVector, oraTypeVector, oraTypeVector, oraTypeNumber]),
+      );
+      expect(result.columns.map((c) => c.name), equals(['V', 'S', 'F', 'N']));
+      expect(result.columns.first.maxLength, equals(8200));
     });
   });
 }

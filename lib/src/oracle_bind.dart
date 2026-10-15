@@ -29,6 +29,7 @@ import 'oracle_interval.dart';
 // `connection.dart` <-> `oracle_lob.dart` already forms.
 import 'oracle_lob.dart';
 import 'oracle_timestamp_tz.dart';
+import 'oracle_vector.dart';
 import 'protocol/constants.dart' as oc;
 import 'protocol/messages/execute_message.dart' show BindDir;
 import 'protocol/oson.dart' show assertValidJsonBindValue;
@@ -209,6 +210,23 @@ enum OracleDbType {
   /// logical rowids alike. Accepted by `OracleExecuteOptions.fetchAsString`,
   /// where it changes nothing.
   urowid,
+
+  /// Oracle 23ai `VECTOR`, decoded by storage format as a `Float32List`
+  /// (`FLOAT32`), `Float64List` (`FLOAT64`), `Int8List` (`INT8`) or
+  /// `Uint8List` (`BINARY`, eight dimensions per byte) — or as an
+  /// [OracleSparseVector] for a sparse vector.
+  ///
+  /// IN OUT values may be any of those, or a plain `List` of numbers
+  /// (`List<double>`, `List<num>`, ...), which travels as `FLOAT64`. The
+  /// format follows the value's Dart type and the server converts it to the
+  /// column's format. Declaring this type is needed only where inference
+  /// would pick another one: a `Uint8List` otherwise binds as RAW and a
+  /// plain `List<double>` as JSON (a `Float32List`, `Float64List`, `Int8List`
+  /// or [OracleSparseVector] binds as a vector undeclared). The bind always
+  /// declares the 1 MB vector buffer (node-oracledb `DB_TYPE_VECTOR`
+  /// parity), so `maxSize` is not needed and is ignored. Not accepted by
+  /// `OracleExecuteOptions.fetchAsString`. Requires Oracle 23ai.
+  vector,
 }
 
 /// Specification for an OUT or IN OUT bind variable.
@@ -429,6 +447,14 @@ class OracleBind {
             '${value.runtimeType}',
           );
         }
+      case OracleDbType.vector:
+        if (!isVectorBindValue(value)) {
+          throw ArgumentError(
+            'OracleBind(type: vector) requires Float32List, Float64List, '
+            'Int8List, Uint8List, OracleSparseVector, a List of numbers, or '
+            'null, got ${value.runtimeType}',
+          );
+        }
       // A LOB-typed bind also accepts an OracleLob handle (Story 12.2): the
       // handle binds as its server-side LOB locator instead of a materialized
       // value. Whether the HANDLE's own LOB kind matches [type], whether it is
@@ -582,6 +608,8 @@ int oracleTypeCodeFor(OracleDbType type) {
       return oc.oraTypeJson;
     case OracleDbType.cursor:
       return oc.oraTypeCursor;
+    case OracleDbType.vector:
+      return oc.oraTypeVector;
   }
 }
 

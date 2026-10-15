@@ -43,8 +43,85 @@ void main() {
         expect(OracleDbType.intervalYM.index, equals(13));
         expect(OracleDbType.rowid.index, equals(14));
         expect(OracleDbType.urowid.index, equals(15));
+        expect(OracleDbType.vector.index, equals(16));
+        expect(OracleDbType.values.last, equals(OracleDbType.vector));
       },
     );
+  });
+
+  group('OracleDbType.vector (Story 15.4)', () {
+    test('maps to type code 127 and needs no maxSize', () {
+      expect(OracleBind.out(type: OracleDbType.vector).oracleTypeCode, 127);
+      expect(
+        OracleBindDef.output(type: OracleDbType.vector).oracleTypeCode,
+        equals(127),
+      );
+      expect(
+        OracleBindDef.inputOutput(type: OracleDbType.vector).maxSize,
+        isNull,
+      );
+      expect(
+        OracleBindDef.input(type: OracleDbType.vector).oracleTypeCode,
+        equals(127),
+      );
+    });
+
+    test('IN OUT accepts every vector value, a plain list of numbers and '
+        'null', () {
+      for (final value in <Object?>[
+        Float32List.fromList([1.5]),
+        Float64List.fromList([1.5]),
+        Int8List.fromList([-1]),
+        Uint8List.fromList([0xFF]),
+        OracleSparseVector(numDimensions: 4, indices: [2], values: [1.0]),
+        <double>[1.5, 2.5],
+        <num>[1, 2.5],
+        <int>[1, 2],
+        null,
+      ]) {
+        expect(
+          () => OracleBind.inOut(value: value, type: OracleDbType.vector),
+          returnsNormally,
+          reason: '${value.runtimeType}',
+        );
+      }
+    });
+
+    test('IN OUT rejects other values without echoing them', () {
+      for (final value in <Object>[
+        'secret-text',
+        42,
+        <Object?>[1, 'secret-text'],
+        <String, Object?>{'k': 'secret-text'},
+      ]) {
+        expect(
+          () => OracleBind.inOut(value: value, type: OracleDbType.vector),
+          throwsA(
+            isA<ArgumentError>().having(
+              (e) => e.toString(),
+              'toString',
+              allOf(
+                contains('OracleBind(type: vector) requires Float32List'),
+                contains(value.runtimeType.toString()),
+                isNot(contains('secret-text')),
+              ),
+            ),
+          ),
+          reason: '${value.runtimeType}',
+        );
+      }
+    });
+
+    test('allowNonFinite stays JSON-only', () {
+      expect(
+        () => OracleBind.inOut(
+          value: Float32List(1),
+          type: OracleDbType.vector,
+          allowNonFinite: true,
+        ),
+        throwsA(isA<OracleException>()),
+      );
+    });
   });
 
   group('OracleBind.out', () {

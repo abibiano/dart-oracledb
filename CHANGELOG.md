@@ -180,6 +180,43 @@
 - **Known issue:** the same 21c ORA-01405 issue applies to a SQL `NULL`
   rowid inside a REF CURSOR / nested `CURSOR()` / implicit-result row
   without a LOB or JSON column.
+- **Oracle 23ai `VECTOR` columns decode and bind.** They previously decoded
+  silently to `null` and could not be bound. Columns (eager and
+  `resultSet: true`), PL/SQL OUT / IN OUT binds, DML `RETURNING` values,
+  `executeMany()` and REF CURSOR / nested `CURSOR()` / implicit-result rows
+  now decode by storage format, as node-oracledb thin does: `FLOAT32` to a
+  `Float32List`, `FLOAT64` to a `Float64List`, `INT8` to an `Int8List`,
+  `BINARY` to a `Uint8List` (one byte per 8 dimensions), and a sparse vector
+  to the new `OracleSparseVector` (`numDimensions`, `Uint32List indices`,
+  `values` as the format's typed list; `==`/`hashCode`, `toString()`). A
+  `Float32List`, `Float64List`, `Int8List` or `OracleSparseVector` binds as a
+  vector — inferred for IN binds and `executeMany()` rows — and the new
+  `OracleDbType.vector` (no `maxSize`) declares OUT / IN OUT binds,
+  `RETURNING ... INTO` targets and `OracleBindDef`s, where a plain `List` of
+  numbers travels as `FLOAT64` and a `Uint8List` as a `BINARY` vector. The
+  wire shape (value-based locator, image header, 1 MB bind / define buffer,
+  DEFINE round before the first rows) matches node-oracledb byte for byte.
+  A malformed vector image fails with `OracleException` (`oraProtocolError`;
+  `oraUnsupportedType` for an unknown image version or format) instead of
+  decoding. `fetchTypeHandler` converters receive the typed list or
+  `OracleSparseVector`; `fetchAsString: {OracleDbType.vector}` throws
+  `ArgumentError`, as for JSON. Validated against Oracle 23ai; on Oracle 21c,
+  which has no `VECTOR` type (ORA-00902), the VECTOR integration tests skip
+  with that reason.
+- **Behavior change:** a `Float32List`, `Float64List` or `Int8List` bind
+  value now binds as a `VECTOR` instead of a JSON array. A `Uint8List` still
+  binds as RAW and a plain `List<double>` as JSON (the server converts a
+  JSON array into a `VECTOR` column). To keep the old JSON-array binding,
+  convert the typed list to a plain list first (`List<double>.of(v)` or
+  `v.toList()`).
+- **Limits:** a single `execute()` cannot declare an IN bind's type, so a
+  dense `BINARY` vector (`Uint8List`) is bound through a PL/SQL block
+  (`OracleBind.inOut`), an `executeMany()` with `bindDefs` (PL/SQL or DML
+  `RETURNING`), or `TO_VECTOR(...)` text. Vectors inside native JSON, the describe's
+  dimension / format / sparse metadata, and fetching a vector as text or a
+  CLOB are not supported. Deviation from node-oracledb: a sparse `BINARY`
+  vector decodes (one byte per listed dimension, the form the server stores)
+  where node-oracledb fails.
 
 ## 1.5.0
 

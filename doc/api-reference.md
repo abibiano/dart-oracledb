@@ -21,6 +21,7 @@ import 'package:oracledb/oracledb.dart';
 | `OracleTimestampTz` | `oracle_timestamp_tz.dart` | Offset-preserving TIMESTAMP WITH TIME ZONE (region id for named regions) |
 | `OracleIntervalDS` | `oracle_interval.dart` | INTERVAL DAY TO SECOND value (nanosecond fractional seconds) |
 | `OracleIntervalYM` | `oracle_interval.dart` | INTERVAL YEAR TO MONTH value (signed years and months) |
+| `OracleSparseVector` | `oracle_vector.dart` | Sparse VECTOR value (Oracle 23ai; dense vectors are Dart typed lists) |
 | `OracleException` | `errors.dart` | All driver/server errors |
 | `ora*` constants | `errors.dart`, `protocol/constants.dart` | Well-known Oracle error codes |
 | `TlsConfig` | `transport/tls.dart` | TLS/SSL configuration |
@@ -102,7 +103,9 @@ const OracleExecuteOptions({
 | `OracleDbType.rowid`, `OracleDbType.urowid` | none — accepted as no-ops: `ROWID` / `UROWID` columns already decode to `String` |
 
 - Any other `OracleDbType` → `ArgumentError` (name `options.fetchAsString`)
-  before any wire round trip. An empty set (the default) changes nothing.
+  before any wire round trip — `vector` included, as `json` (select
+  `FROM_VECTOR(col)` for a vector's text). An empty set (the default) changes
+  nothing.
 - **Client-side text.** The column is still fetched natively (Oracle sends
   these types in binary whatever the client asks) and each decoded value is
   converted with its own `toString()`: `DateTime.toString()` for DATE /
@@ -159,8 +162,9 @@ result.rows.first['SALARY']; // '7000'
   the decoded value, never re-converted). Receives the decoded value
   (`int`/`double`, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz`,
   `OracleIntervalDS`, `OracleIntervalYM`, the rowid `String` for ROWID /
-  UROWID, JSON `Map`/`List`/scalar, `List<OracleRow>` for a nested `CURSOR(...)`
-  column, `String`/`Uint8List` for CLOB/BLOB or `OracleLob` under
+  UROWID, JSON `Map`/`List`/scalar, a `Float32List`/`Float64List`/`Int8List`/
+  `Uint8List` or `OracleSparseVector` for VECTOR, `List<OracleRow>` for a
+  nested `CURSOR(...)` column, `String`/`Uint8List` for CLOB/BLOB or `OracleLob` under
   `fetchLobs`); its return value (any `Object?`) becomes the cell. SQL `NULL`
   → `null`, converter not called. A returned `Future` is not awaited.
 - **No `type`:** the fetch type cannot be changed — columns are fetched
@@ -286,6 +290,7 @@ type-checked at construction (fails at the call site, not deep in wire encoding)
 | `intervalYM` | `OracleIntervalYM` | — | 5-byte INTERVAL YEAR TO MONTH; no Dart-native input type; not a `fetchAsString` entry |
 | `rowid` | `String` | — | ROWID text (`ROWIDTOCHAR`); travels as VARCHAR with a fixed 3950-byte buffer (`maxSize` ignored); a plain `String` IN bind needs no declaration; a no-op `fetchAsString` entry |
 | `urowid` | `String` | — | UROWID text (a logical rowid starts with `*`); same wire shape as `rowid`, and either receives physical and logical rowids |
+| `vector` | `Float32List` / `Float64List` / `Int8List` / `Uint8List` (BINARY) / `OracleSparseVector` (decoded, by format); those or a plain `List` of numbers (input, sent as FLOAT64) | — | Oracle 23ai VECTOR; always declares the 1 MB vector buffer (`maxSize` ignored); `Float32List`, `Float64List`, `Int8List` and `OracleSparseVector` bind undeclared, while a `Uint8List` (RAW) and a plain `List<double>` (JSON) need this type to bind as a vector; not a `fetchAsString` entry |
 
 **Reading OUT binds:**
 
@@ -377,6 +382,33 @@ inconsistently). `==`/`hashCode` compare the normalized components;
 `toString()` renders `OracleIntervalYM(+3-05)`. Binds as INTERVAL YEAR TO
 MONTH (inferred, or `OracleDbType.intervalYM`); no Dart-native type does. See
 [oracle_interval.dart](../lib/src/oracle_interval.dart).
+
+## `OracleSparseVector`
+
+```dart
+OracleSparseVector({required int numDimensions, required List<int> indices, required List<num> values});
+final int numDimensions;   // the vector's dimension count
+final Uint32List indices;  // non-zero positions, ascending (unmodifiable)
+final List<num> values;    // Float32List / Float64List / Int8List / Uint8List — the format (unmodifiable)
+```
+
+A plain value type for a sparse Oracle 23ai `VECTOR` (the counterpart of
+node-oracledb's `SparseVector` data, without its dense conversion or text
+parsing):
+`VECTOR(n, format, SPARSE)` columns decode to it and it binds as a sparse
+vector without a declared type. The runtime type of `values` is the storage
+format both ways; any other list of numbers is copied into a `Float64List`.
+The constructor copies both lists and throws `ArgumentError` for a
+dimension count outside 1..4294967295, a values/indices length mismatch,
+more than 65535 elements or an index outside `0..numDimensions - 1`
+(index order is checked by the server, ORA-51822). `==`/`hashCode` compare
+the dimension count, format, indices and values; `toString()` renders
+`OracleSparseVector(numDimensions: 8, indices: [1, 5], values: [1.5, -2.5])`.
+Dense `VECTOR` values are plain typed lists — `Float32List` (FLOAT32),
+`Float64List` (FLOAT64), `Int8List` (INT8), `Uint8List` (BINARY, one byte per
+8 dimensions) — of which the first three bind as vectors undeclared. See
+[oracle_vector.dart](../lib/src/oracle_vector.dart) and the README's VECTOR
+support section.
 
 ## `TlsConfig`
 

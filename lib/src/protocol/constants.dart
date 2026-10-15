@@ -259,6 +259,66 @@ const int oraTypeBfile = 114;
 /// JSON data type (Oracle 21c+).
 const int oraTypeJson = 119;
 
+/// VECTOR data type (Oracle 23ai; node-oracledb `TNS_DATA_TYPE_VECTOR`).
+/// Travels in the LOB-prefetch shape native JSON uses — a value-based
+/// locator around an inline vector image (see [tnsVectorMagicByte]) — and
+/// decodes to a `Float32List` / `Float64List` / `Int8List` / `Uint8List` or
+/// an `OracleSparseVector`.
+const int oraTypeVector = 127;
+
+/// Maximum VECTOR image size declared in bind and define metadata
+/// (node-oracledb `TNS_VECTOR_MAX_LENGTH`, 1 MB): a VECTOR bind or define
+/// always declares this buffer and LOB-prefetch length, whatever the value.
+const int tnsVectorMaxLength = 1048576;
+
+// ----------------------------------------------------------------------------
+// VECTOR image header (node-oracledb `impl/datahandlers/constants.js` and
+// `constants.js`). An image is: magic byte, version, UInt16BE flags, format
+// byte, UInt32BE element count, 8 norm bytes (when [tnsVectorFlagNorm] is set
+// or the format is [vectorFormatBinary]), then — for a sparse vector — a
+// UInt16BE non-zero count and that many UInt32BE indices, then the elements.
+// ----------------------------------------------------------------------------
+
+/// First byte of every VECTOR image (`TNS_VECTOR_MAGIC_BYTE`).
+const int tnsVectorMagicByte = 0xDB;
+
+/// Image version of a dense FLOAT32 / FLOAT64 / INT8 vector
+/// (`TNS_VECTOR_VERSION_BASE`).
+const int tnsVectorVersionBase = 0;
+
+/// Image version of a dense BINARY vector (`TNS_VECTOR_VERSION_WITH_BINARY`).
+const int tnsVectorVersionWithBinary = 1;
+
+/// Image version of a sparse vector (`TNS_VECTOR_VERSION_WITH_SPARSE`) — the
+/// highest version this driver (and node-oracledb) can decode.
+const int tnsVectorVersionWithSparse = 2;
+
+/// Image flag: the norm's space is reserved (`TNS_VECTOR_FLAG_NORMSRC`).
+const int tnsVectorFlagNormSrc = 0x0010;
+
+/// Image flag: 8 norm bytes follow the header (`TNS_VECTOR_FLAG_NORM`).
+const int tnsVectorFlagNorm = 0x0002;
+
+/// Image flag: the vector is sparse (`TNS_VECTOR_FLAG_SPARSE`).
+const int tnsVectorFlagSparse = 0x0020;
+
+/// Vector format of a `VECTOR(*, *)` (flexible) column in the describe
+/// (`VECTOR_FORMAT_FLEX`); never the format of an image.
+const int vectorFormatFlex = 0;
+
+/// Vector format: 32-bit IEEE floats (`VECTOR_FORMAT_FLOAT32`).
+const int vectorFormatFloat32 = 2;
+
+/// Vector format: 64-bit IEEE floats (`VECTOR_FORMAT_FLOAT64`).
+const int vectorFormatFloat64 = 3;
+
+/// Vector format: signed 8-bit integers (`VECTOR_FORMAT_INT8`).
+const int vectorFormatInt8 = 4;
+
+/// Vector format: packed bits, 8 dimensions per byte
+/// (`VECTOR_FORMAT_BINARY`).
+const int vectorFormatBinary = 5;
+
 /// TIMESTAMP data type.
 const int oraTypeTimestamp = 180;
 
