@@ -32,6 +32,7 @@ A pure Dart driver for Oracle Database. It speaks the thin-mode TNS/TTC wire pro
 - **TIMESTAMP WITH TIME ZONE** — decoded as UTC `DateTime`, or as `OracleTimestampTz` preserving a numeric offset (opt-in); named-region values (e.g. `Europe/Madrid`) decode to the correct UTC instant with a reported `+00:00` offset and a region id that `timeZoneRegionName` resolves to the region name
 - **INTERVAL DAY TO SECOND** — decoded as `OracleIntervalDS` with nanosecond fractional seconds; binds from `OracleIntervalDS` or a Dart `Duration`
 - **INTERVAL YEAR TO MONTH** — decoded as `OracleIntervalYM` (signed years and months); binds from `OracleIntervalYM`
+- **ROWID / UROWID** — decoded as the rowid's `String` text (`ROWIDTOCHAR` for a physical rowid; an index-organized table's logical rowid starts with `*` and matches `CAST(rowid AS VARCHAR2(4000))`); a fetched rowid binds back as a plain `String` (`WHERE rowid = :1`)
 - **Dates as strings** — `OracleExecuteOptions(fetchAsString: {...})` returns DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE columns as `String` (node-oracledb `fetchAsString` parity; see [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings))
 - **Per-column fetch converters** — `OracleExecuteOptions(fetchTypeHandler: ...)` picks a converter per result column (e.g. a NUMBER as `String`, your own date format) applied to every fetched value (node-oracledb `fetchTypeHandler` converter parity; see [Fetch type handlers](#fetch-type-handlers-per-column-converters))
 - **Statement caching** — transparent prepared-statement cache
@@ -407,6 +408,8 @@ print(r.outBinds['value']); // 42
 
 `INTERVAL YEAR TO MONTH` parameters bind with `OracleDbType.intervalYM` (no `maxSize`). OUT / IN OUT values decode to `OracleIntervalYM`, and IN OUT input values must be an `OracleIntervalYM`. See [INTERVAL YEAR TO MONTH support](#interval-year-to-month-support).
 
+`ROWID` / `UROWID` parameters and `RETURNING rowid INTO` targets bind with `OracleDbType.rowid` / `OracleDbType.urowid` (no `maxSize`). OUT / IN OUT values decode to the rowid's `String` text, and IN OUT input values must be a `String`. See [ROWID / UROWID support](#rowid--urowid-support).
+
 ### Result Sets & Streaming
 
 Large queries can be consumed incrementally instead of materializing every row up front. These paths have no 1,000-fetch safety cap — that bound applies only to eager `execute()`.
@@ -536,6 +539,7 @@ result.rows.first['UPDATED_AT']; // '2024-03-05 13:14:15.123456'
 
 - **The text comes from the driver, not from Oracle.** As in node-oracledb thin mode, the column is still fetched in its native binary form (Oracle sends these types in binary whatever the client asks for), and each decoded value is converted with its own `toString()`: `DateTime.toString()` for DATE / TIMESTAMP / LTZ, the UTC `DateTime.toString()` for TIMESTAMP WITH TIME ZONE (`'2024-03-05 12:14:15.123456Z'`), or `OracleTimestampTz.toString()` on a `preserveTimestampTimeZone: true` connection (offset and `regionId`, not the region name). It ignores the session's `NLS_DATE_FORMAT` / `NLS_TIMESTAMP_FORMAT` / `NLS_TIMESTAMP_TZ_FORMAT` and keeps microsecond precision only. **For Oracle's exact text** (an NLS or explicit format, nanoseconds, a region name), select `TO_CHAR(col, 'format')` in the SQL instead.
 - SQL `NULL` stays `null`; `result.columns` still reports the database type.
+- `OracleDbType.rowid` / `OracleDbType.urowid` are accepted and change nothing: `ROWID` / `UROWID` columns always decode to their `String` text.
 - Any other `OracleDbType` in the set (NUMBER, CLOB, RAW, JSON, INTERVAL, ...) throws `ArgumentError` before any round trip.
 - It applies to the top-level query's rows: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set. The rows of a **REF CURSOR OUT bind, a nested `CURSOR(...)` column and PL/SQL implicit results keep their native types**, as do OUT bind values; `executeStream()` / `queryStream()` take no options.
 - For any other per-column representation (a NUMBER as text, your own date format, ...), use a [fetch type handler](#fetch-type-handlers-per-column-converters); its converter wins over `fetchAsString` for the columns it selects.
@@ -562,7 +566,7 @@ result.rows.first['SALARY']; // '7000' instead of 7000
 result.rows.first['HIRED'];  // '2024-03-05T00:00:00.000'
 ```
 
-- **The converter** receives each non-NULL value exactly as the row would otherwise hold it — `int` / `double` for NUMBER, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz` (on a `preserveTimestampTimeZone: true` connection), `OracleIntervalDS` for INTERVAL DAY TO SECOND, `OracleIntervalYM` for INTERVAL YEAR TO MONTH, the decoded `Map` / `List` for JSON, `List<OracleRow>` for a nested `CURSOR(...)` column, `String` / `Uint8List` for CLOB / BLOB or an `OracleLob` under `fetchLobs: true` — and its return value (any `Object?`, including `null`) becomes the cell. SQL `NULL` stays `null` and the converter is not called. It runs synchronously, once per cell, on every fetch round: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set.
+- **The converter** receives each non-NULL value exactly as the row would otherwise hold it — `int` / `double` for NUMBER, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz` (on a `preserveTimestampTimeZone: true` connection), `OracleIntervalDS` for INTERVAL DAY TO SECOND, `OracleIntervalYM` for INTERVAL YEAR TO MONTH, the rowid's `String` text for ROWID / UROWID, the decoded `Map` / `List` for JSON, `List<OracleRow>` for a nested `CURSOR(...)` column, `String` / `Uint8List` for CLOB / BLOB or an `OracleLob` under `fetchLobs: true` — and its return value (any `Object?`, including `null`) becomes the cell. SQL `NULL` stays `null` and the converter is not called. It runs synchronously, once per cell, on every fetch round: `result.rows` (with or without `maxRows`) and every batch of a `resultSet: true` result set.
 - **No `type`.** Unlike node-oracledb, the handler cannot change the type Oracle sends: every column is fetched in its native form (no DEFINE, no SQL rewrite) and converted by the driver after decoding — so the result never follows the session's NLS settings. Select `TO_CHAR(col, 'format')` for Oracle's own text. `result.columns` still reports the database type.
 - **Precedence:** a column the handler returns a converter for is converted by that converter only; [`fetchAsString`](#fetching-dates-and-timestamps-as-strings) still applies to the columns the handler returned `null` for. A handler that always returns `null` changes nothing.
 - **Per call:** the handler runs on every `execute()` and nothing is cached, so re-executing a cached statement with a different handler (or none) returns that call's own representation.
@@ -645,6 +649,7 @@ final isAlive = await connection.ping();
 | TIMESTAMP WITH TIME ZONE  | `DateTime` (UTC) — or `OracleTimestampTz` with `preserveTimestampTimeZone: true` (see [Region-id time zones](#region-id-time-zones)), or `String` with `fetchAsString` |
 | INTERVAL DAY TO SECOND    | `OracleIntervalDS` (nanosecond fractional seconds); binds from `OracleIntervalDS` or `Duration` (see [INTERVAL DAY TO SECOND support](#interval-day-to-second-support)) |
 | INTERVAL YEAR TO MONTH    | `OracleIntervalYM` (signed years and months); binds from `OracleIntervalYM` (see [INTERVAL YEAR TO MONTH support](#interval-year-to-month-support)) |
+| ROWID, UROWID             | `String` — `ROWIDTOCHAR` text for a physical rowid; a logical UROWID starts with `*` and matches `CAST(rowid AS VARCHAR2(4000))`; binds from `String` (see [ROWID / UROWID support](#rowid--urowid-support)) |
 | RAW                       | `Uint8List` (see [RAW support](#raw-support))                                    |
 | CLOB                      | `String` (see [CLOB support](#clob-support), [Character Set Support](#character-set-support)) |
 | BLOB                      | `Uint8List` (see [BLOB support](#blob-support)); a BLOB `IS JSON` column decodes like JSON (see [JSON stored in a BLOB](#json-stored-in-a-blob-is-json)) |
@@ -772,7 +777,7 @@ await connection.execute(
   `CURSOR()` or implicit-result row without a LOB or JSON column fails with
   ORA-01405, so NULL intervals cannot be fetched through cursors there.
 - **Not covered** — intervals inside native JSON, and `fetchAsString` (which
-  accepts date and timestamp types only).
+  converts date and timestamp types only).
 
 ### INTERVAL YEAR TO MONTH support
 
@@ -816,7 +821,69 @@ await connection.execute(
   Oracle 21c a SQL `NULL` in a REF CURSOR, nested `CURSOR()` or
   implicit-result row without a LOB or JSON column fails with ORA-01405.
 - **Not covered** — intervals inside native JSON, and `fetchAsString` (which
-  accepts date and timestamp types only).
+  converts date and timestamp types only).
+
+### ROWID / UROWID support
+
+`ROWID` and `UROWID` values decode to their `String` text, as node-oracledb
+thin returns them (see the deviations below) and as the server renders them:
+
+- a **heap table's `rowid`** (and a `ROWID` column) is the 18-character base64
+  text `ROWIDTOCHAR` returns, e.g. `AAAR3sAAEAAAACXAAA`;
+- an **index-organized table's `rowid`** is a logical rowid, described as
+  `UROWID`: its text starts with `*` (e.g. `*BAAAtAkCwQIBeP4`) and equals
+  `CAST(rowid AS VARCHAR2(4000))` (`ROWIDTOCHAR` rejects logical rowids with
+  ORA-01410);
+- a **`UROWID` column** holds either form.
+
+```dart
+final r = await connection.execute('SELECT rowid AS rid, name FROM emp');
+final rid = r.rows.first['RID'] as String; // 'AAAR3sAAEAAAACXAAA'
+
+// A fetched rowid binds back as a plain String.
+await connection.execute(
+  'UPDATE emp SET name = :1 WHERE rowid = :2',
+  ['Smith', rid],
+);
+
+// OUT binds and RETURNING targets declare the rowid type.
+final ins = await connection.execute(
+  'INSERT INTO emp (name) VALUES (:name) RETURNING rowid INTO :rid',
+  {'name': 'Jones', 'rid': OracleBind.out(type: OracleDbType.rowid)},
+);
+ins.outBinds['rid']; // ['AAAR3sAAEAAAACZAAA']
+```
+
+- **Binds** — any `String` binds to a `ROWID` / `UROWID` column or a
+  `WHERE rowid = :1` predicate (the server converts the text; an invalid one
+  fails with ORA-01410). PL/SQL OUT / IN OUT binds, DML `RETURNING` targets
+  and `OracleBindDef`s declare `OracleDbType.rowid` or `OracleDbType.urowid`
+  (no `maxSize`): both travel as text with a fixed 3950-byte buffer
+  (node-oracledb parity) — room for any physical rowid and for logical
+  rowids up to 3950 characters — and either type receives physical and
+  logical rowids alike. A value is always a
+  `String` — there is no rowid wrapper type.
+- **Everywhere rows are returned** — top-level queries (eager and
+  `resultSet: true`), REF CURSOR OUT binds, nested `CURSOR()` columns,
+  implicit results and `executeMany()` RETURNING values all decode the same
+  text. `fetchTypeHandler` converters receive the `String`;
+  `fetchAsString: {OracleDbType.rowid, OracleDbType.urowid}` is accepted and
+  changes nothing. The same known issue applies as for intervals: on Oracle
+  21c a SQL `NULL` in a REF CURSOR, nested `CURSOR()` or implicit-result row
+  without a LOB or JSON column fails with ORA-01405.
+- **Fail loud (fetch shapes only)** — a fetched `UROWID` value with no rowid
+  bytes, or a physical one that is not exactly 13 bytes, and a `ROWID` or
+  `UROWID` fetch payload cut short, raise `OracleException`
+  (`oraProtocolError`). The `ROWID` fetch shape's leading length byte is not
+  checked (the server sends 14 for every rowid; node-oracledb ignores it
+  too), and OUT bind / `RETURNING` values arrive as plain text that is
+  returned unchecked.
+- **Deviations from node-oracledb** — the rowid components are encoded as
+  unsigned numbers, so a data object or block number of 2^31 or more
+  renders with the leading digit Oracle uses (node-oracledb's signed shift
+  would differ); a malformed fetched `UROWID` fails loud as above, where
+  node-oracledb reads the bytes unchecked or throws a `TypeError`. As in
+  node-oracledb, an all-zero physical rowid decodes to `null`.
 
 ### RAW support
 
@@ -1578,7 +1645,7 @@ After the 1.0 release, the project roadmap includes larger API and compatibility
 | -------- | ----------------------------------------------------------------------------------------- |
 | 1        | Extended JSON / OSON parity (interval/VECTOR/`JsonId` JSON scalars, OSON-in-BLOB helpers) |
 | 2        | Optional temporal fetch formatting (fetch-as-string, fetch type handlers); region-id values already decode to the correct instant and their region names resolve through `timeZoneRegionName` |
-| 3        | Type completeness for `ROWID` / `UROWID` and `VECTOR` (`INTERVAL DAY TO SECOND` and `INTERVAL YEAR TO MONTH` are supported — see [Supported Data Types](#supported-data-types)) |
+| 3        | Type completeness for `VECTOR` (`INTERVAL DAY TO SECOND`, `INTERVAL YEAR TO MONTH` and `ROWID` / `UROWID` are supported — see [Supported Data Types](#supported-data-types)) |
 
 ## Tests
 
@@ -1628,7 +1695,7 @@ RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
 - **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work. As of 1.4 an **open fetched `OracleLob`** (from `fetchLobs: true`) also holds that slot — for the handle's whole lifetime, not just during a round trip, and including handles a streaming result set prefetched but you never asked for — so an unclosed LOB handle is the most likely cause of a concurrent-operation error; a **created-temporary** handle (`createTemporaryClob()` and friends) is deliberately exempt and can be read, written, and bound while open. See [Incremental LOB access with `fetchLobs`](#incremental-lob-access-with-fetchlobs).
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).
 - **Region-id time zones** — `TIMESTAMP WITH TIME ZONE` values stored with a region id (e.g. `Europe/Madrid`) decode to the correct UTC instant; with `preserveTimestampTimeZone: true` they report a `+00:00` offset (UTC-normalized — the driver never computes the region's offset) and carry the server's region id, which `OracleConnection.timeZoneRegionName` resolves to the name (`'EUROPE/MADRID'`, as `TZR` renders it) from the connected database's `V$TIMEZONE_NAMES` (first lookup per connection runs one query; needs read access to that view, granted to `PUBLIC` by default). Binding one back stores `+00:00` without the region. Offset-based zones (e.g. `+02:00`) keep their offset. See [Region-id time zones](#region-id-time-zones).
-- **`fetchAsString` text is client-side** — `OracleExecuteOptions(fetchAsString: ...)` renders DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE values with the decoded Dart value's `toString()` (node-oracledb thin parity), not with Oracle's NLS formats; microsecond precision, no region names. Use `TO_CHAR(...)` in SQL for Oracle's exact text. The option covers only the top-level query's rows: REF CURSOR OUT bind, nested `CURSOR(...)` and implicit-result rows keep native types. Only `OracleDbType.date`, `timestamp` and `timestampTz` are accepted (no NUMBER/CLOB/RAW/JSON as string). See [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings).
+- **`fetchAsString` text is client-side** — `OracleExecuteOptions(fetchAsString: ...)` renders DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE values with the decoded Dart value's `toString()` (node-oracledb thin parity), not with Oracle's NLS formats; microsecond precision, no region names. Use `TO_CHAR(...)` in SQL for Oracle's exact text. The option covers only the top-level query's rows: REF CURSOR OUT bind, nested `CURSOR(...)` and implicit-result rows keep native types. Only `OracleDbType.date`, `timestamp` and `timestampTz` convert (`rowid` / `urowid` are accepted as no-ops — those columns are already strings); no NUMBER/CLOB/RAW/JSON as string. See [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings).
 - **`fetchTypeHandler` is converter-only and client-side** — `OracleExecuteOptions(fetchTypeHandler: ...)` cannot request a different fetch type (no node-oracledb `type`, no DEFINE): each column is fetched natively and the converter maps the decoded value in the driver, synchronously. It covers only the top-level query's rows (not REF CURSOR OUT bind, nested `CURSOR(...)`, implicit-result or OUT bind values), is per call (no connection-level or global default), and `executeMany()` / `executeStream()` / `queryStream()` do not take it. See [Fetch type handlers](#fetch-type-handlers-per-column-converters).
 - **Very large result sets** — a single `execute()` is bounded by a safety cap of 1,000 fetch round-trips (about 50,000 rows at the default fetch size); if the cap is hit, a warning is logged, the rows fetched so far are returned, and `result.moreRowsAvailable` is `true` so the truncation is detectable. The same flag is also set (with a logged warning) in the rarer case where the server reports more rows pending but the driver has no usable cursor id to continue fetching — in either case `true` means the rows are an incomplete prefix of the full result set. Streaming (`queryStream()` / `executeStream()`) and result-set (`OracleExecuteOptions(resultSet: true)`) consumption have **no such cap** — prefer them for very large result sets.
 

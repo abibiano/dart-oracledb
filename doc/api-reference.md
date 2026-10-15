@@ -99,6 +99,7 @@ const OracleExecuteOptions({
 | `OracleDbType.date` | `DATE` |
 | `OracleDbType.timestamp` | `TIMESTAMP`, `TIMESTAMP WITH LOCAL TIME ZONE` |
 | `OracleDbType.timestampTz` | `TIMESTAMP WITH TIME ZONE` |
+| `OracleDbType.rowid`, `OracleDbType.urowid` | none — accepted as no-ops: `ROWID` / `UROWID` columns already decode to `String` |
 
 - Any other `OracleDbType` → `ArgumentError` (name `options.fetchAsString`)
   before any wire round trip. An empty set (the default) changes nothing.
@@ -157,7 +158,8 @@ result.rows.first['SALARY']; // '7000'
   batch — Oracle's duplicate-column copies across rounds are converted from
   the decoded value, never re-converted). Receives the decoded value
   (`int`/`double`, `String`, `Uint8List`, `DateTime`, `OracleTimestampTz`,
-  `OracleIntervalDS`, `OracleIntervalYM`, JSON `Map`/`List`/scalar, `List<OracleRow>` for a nested `CURSOR(...)`
+  `OracleIntervalDS`, `OracleIntervalYM`, the rowid `String` for ROWID /
+  UROWID, JSON `Map`/`List`/scalar, `List<OracleRow>` for a nested `CURSOR(...)`
   column, `String`/`Uint8List` for CLOB/BLOB or `OracleLob` under
   `fetchLobs`); its return value (any `Object?`) becomes the cell. SQL `NULL`
   → `null`, converter not called. A returned `Future` is not awaited.
@@ -282,6 +284,8 @@ type-checked at construction (fails at the call site, not deep in wire encoding)
 | `json` | `Map<String,Object?>` / `List<Object?>` / scalar | **OSON bytes** | Oracle 21c+; members (and, with this declared type, a scalar root): null/bool/num/String/`DateTime`/`OracleTimestampTz`/`Uint8List`/nested map+list — everything a JSON fetch returns |
 | `intervalDS` | `OracleIntervalDS` (decoded); `OracleIntervalDS` or `Duration` (input) | — | 11-byte INTERVAL DAY TO SECOND; a `Duration` binds at microsecond resolution; not a `fetchAsString` entry |
 | `intervalYM` | `OracleIntervalYM` | — | 5-byte INTERVAL YEAR TO MONTH; no Dart-native input type; not a `fetchAsString` entry |
+| `rowid` | `String` | — | ROWID text (`ROWIDTOCHAR`); travels as VARCHAR with a fixed 3950-byte buffer (`maxSize` ignored); a plain `String` IN bind needs no declaration; a no-op `fetchAsString` entry |
+| `urowid` | `String` | — | UROWID text (a logical rowid starts with `*`); same wire shape as `rowid`, and either receives physical and logical rowids |
 
 **Reading OUT binds:**
 

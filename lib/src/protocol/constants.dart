@@ -202,7 +202,9 @@ const int oraTypeLong = 8;
 /// VARCHAR2 data type (alternate).
 const int oraTypeVarchar2 = 9;
 
-/// ROWID data type.
+/// ROWID data type (node-oracledb `TNS_DATA_TYPE_ROWID`). A fetched value
+/// arrives in a binary form the driver encodes into the 18-character base64
+/// `String` (`ROWIDTOCHAR`); binds travel as VARCHAR text.
 const int oraTypeRowid = 11;
 
 /// DATE data type.
@@ -227,8 +229,23 @@ const int oraTypeBinaryFloat = 100;
 /// BINARY_DOUBLE data type (8-byte IEEE 754, byte-comparable form).
 const int oraTypeBinaryDouble = 101;
 
-/// UROWID data type.
-const int oraTypeURowid = 104;
+/// UROWID data type — the TTC wire id node-oracledb uses
+/// (`TNS_DATA_TYPE_UROWID`), which the server reports in a describe and
+/// ships on the wire. (104 is the OCI external `SQLT_RDD` code; the TTC data
+/// type negotiation converts it to ROWID, so it never appears in a describe.)
+/// A fetched value arrives as a length-prefixed physical or logical rowid the
+/// driver encodes into its `String` form; binds travel as VARCHAR text.
+const int oraTypeURowid = 208;
+
+/// Length of the base64 text of a physical rowid (node-oracledb
+/// `TNS_MAX_ROWID_LENGTH`): 6 + 3 + 6 + 3 characters for the data object
+/// number, relative file number, block number and row slot.
+const int tnsMaxRowidLength = 18;
+
+/// Buffer size a ROWID / UROWID bind declares on the wire (node-oracledb
+/// `TNS_MAX_UROWID_LENGTH`): such a bind always travels as VARCHAR text of at
+/// most this many bytes, whatever its declared `maxSize`.
+const int tnsMaxUrowidLength = 3950;
 
 /// CLOB data type.
 const int oraTypeClob = 112;

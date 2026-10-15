@@ -1089,3 +1089,11 @@ source_spec: `15-1-interval-day-to-second.md`
 severity: high
 reason: Found while writing the 15.1 embedded-cursor tests; not interval-specific. Live probe on 21c (XEPDB1): an implicit result or nested CURSOR() projecting CAST(NULL AS NUMBER | DATE | TIMESTAMP | TIMESTAMP WITH TIME ZONE | BINARY_DOUBLE | RAW | INTERVAL DAY TO SECOND) fails with ORA-01405 "fetched column value is NULL", as did a REF CURSOR OUT bind whose rows held a NULL interval (first draft of the 15.1 suite); the same queries pass on 23ai, and on 21c too once a CLOB column forces the DEFINE round. Root cause: the first fetch of a describe-created cursor is a plain OFETCH unless the cursor has nested CURSOR() columns, whereas node-oracledb `createCursorFromDescribe` always sets `requiresFullExecute`. Verified remedy: forcing `requiresFullExecute: true` on the eager implicit-result ResultSetCursor made every NULL row above decode on 21c (diagnostic change, reverted). Left out of 15.1: it changes the fetch protocol for every describe-created cursor, outside this story's code map. The 15.1
 status: open
+
+### DW-139: A SELECT with a constant-false outer join to an IOT (LEFT JOIN iot ON 1=0) omits the column bytes from the row, shearing the stream.
+origin: spec-deferred be8917e30cb6
+location: lib/src/protocol/messages/execute_message.dart (row decode)
+source_spec: `15-3-rowid-urowid.md`
+severity: medium
+reason: Pre-existing: affects NUMBER and VARCHAR columns too and node-oracledb fails identically; 23ai gives ORA-12547, 21c poisons the transport with "Unknown TTC message type 1". Not caused by 15.3.
+status: open

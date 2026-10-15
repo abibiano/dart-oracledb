@@ -186,6 +186,29 @@ enum OracleDbType {
   /// year/month span type). Fixed 5-byte wire size, so `maxSize` is not
   /// needed. Not accepted by `OracleExecuteOptions.fetchAsString`.
   intervalYM,
+
+  /// Oracle ROWID (decoded as a `String`, the 18-character base64 text
+  /// `ROWIDTOCHAR` returns, e.g. `AAAR3sAAEAAAACXAAA`).
+  ///
+  /// IN OUT values must be a `String`. The bind travels as VARCHAR text with
+  /// a fixed 3950-byte buffer (node-oracledb `DB_TYPE_ROWID` parity), so
+  /// `maxSize` is not needed and does not change the wire size. A plain
+  /// `String` bind works for `WHERE rowid = :1` without declaring this type;
+  /// declare it for an OUT bind or a `RETURNING rowid INTO` target.
+  /// Accepted by `OracleExecuteOptions.fetchAsString`, where it changes
+  /// nothing (ROWID columns already decode to `String`).
+  rowid,
+
+  /// Oracle UROWID (decoded as a `String`): a physical rowid's 18-character
+  /// text, or an index-organized table's logical rowid, which starts with
+  /// `*` (e.g. `*BAAAtAkCwQIBeP4`) — the text `CAST(rowid AS VARCHAR2(4000))`
+  /// returns.
+  ///
+  /// Binds exactly like [rowid] (VARCHAR text, fixed 3950-byte buffer, IN
+  /// OUT values must be a `String`); either type receives physical and
+  /// logical rowids alike. Accepted by `OracleExecuteOptions.fetchAsString`,
+  /// where it changes nothing.
+  urowid,
 }
 
 /// Specification for an OUT or IN OUT bind variable.
@@ -391,6 +414,14 @@ class OracleBind {
             'got ${value.runtimeType}',
           );
         }
+      case OracleDbType.rowid:
+      case OracleDbType.urowid:
+        if (value is! String) {
+          throw ArgumentError(
+            'OracleBind(type: ${type.name}) requires String or null, got '
+            '${value.runtimeType}',
+          );
+        }
       case OracleDbType.raw:
         if (value is! Uint8List) {
           throw ArgumentError(
@@ -509,7 +540,8 @@ String? jsonLongFieldNamePathOf(OracleBind bind) => bind._jsonLongFieldNamePath;
 /// so the two public bind spec types cannot drift. National types
 /// (NVARCHAR2/NCHAR, NCLOB) share the VARCHAR/CLOB wire type; the NCHAR
 /// charset form (`csfrm == ttcCsfrmNChar`) is what marks them national on the
-/// wire. Package-internal: not exported from `lib/oracledb.dart`.
+/// wire. ROWID / UROWID map to their own codes, which the request encoder
+/// sends as VARCHAR. Package-internal: not exported from `lib/oracledb.dart`.
 int oracleTypeCodeFor(OracleDbType type) {
   switch (type) {
     case OracleDbType.number:
@@ -530,6 +562,13 @@ int oracleTypeCodeFor(OracleDbType type) {
       return oc.oraTypeIntervalDS;
     case OracleDbType.intervalYM:
       return oc.oraTypeIntervalYM;
+    case OracleDbType.rowid:
+      // ROWID / UROWID keep their own codes so a returned value decodes
+      // through the rowid path; the request encoder sends both as VARCHAR
+      // text with a 3950-byte buffer (node-oracledb writeColumnMetadata).
+      return oc.oraTypeRowid;
+    case OracleDbType.urowid:
+      return oc.oraTypeURowid;
     case OracleDbType.raw:
       return oc.oraTypeRaw;
     case OracleDbType.clob:

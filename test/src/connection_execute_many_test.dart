@@ -997,6 +997,71 @@ void main() {
       }
     });
 
+    for (final type in [OracleDbType.rowid, OracleDbType.urowid]) {
+      OracleExecuteManyOptions rowidDefs() => OracleExecuteManyOptions(
+        bindDefs: [OracleBindDef.inputOutput(type: type)],
+      );
+
+      test('a ${type.name} def takes String and null and keeps its own type '
+          'code (Story 15.3)', () async {
+        await conn.executeMany('BEGIN story_rid(:1); END;', [
+          ['AAAR3sAAEAAAACXAAA'],
+          [null],
+          ['*BAAAtAkCwQIBeP4'],
+        ], rowidDefs());
+        final slots = transport.lastBindValues!.cast<BindVariable>();
+        final code = type == OracleDbType.rowid
+            ? oc.oraTypeRowid
+            : oc.oraTypeURowid;
+        expect(slots[0].oraType, equals(code));
+        expect(transport.lastBindMetadata!.single.oraType, equals(code));
+      });
+
+      test('a ${type.name} def rejects any other value before wire', () async {
+        for (final (value, typeName) in <(Object, String)>[
+          (42, 'int'),
+          (Uint8List.fromList([1, 2]), 'Uint8List'),
+          (DateTime.utc(2024), 'DateTime'),
+        ]) {
+          await expectRejectedBeforeWire(
+            () => conn.executeMany('BEGIN story_rid(:1); END;', [
+              [value],
+            ], rowidDefs()),
+            ['declared OracleDbType.${type.name}', typeName, 'String'],
+          );
+        }
+      });
+
+      test('a ${type.name} value over the 3950-byte rowid bind size fails '
+          'before wire, naming no value', () async {
+        // 6 + 3945 = 3951 bytes: one over the limit, with a distinctive
+        // prefix the message must not echo.
+        final long = 'SECRET${'A' * 3945}';
+        expect(long.length, equals(oc.tnsMaxUrowidLength + 1));
+        Future<OracleResult> call() =>
+            conn.executeMany('BEGIN story_rid(:1); END;', [
+              ['AAAR3sAAEAAAACXAAA'],
+              [long],
+            ], rowidDefs());
+        await expectRejectedBeforeWire(call, [
+          'row 1, bind :1',
+          '${oc.tnsMaxUrowidLength + 1} bytes',
+          '${oc.tnsMaxUrowidLength}-byte',
+          'OracleDbType.${type.name}',
+        ]);
+        try {
+          await call();
+          fail('expected an OracleException');
+        } on OracleException catch (e) {
+          expect(e.message, isNot(contains('SECRET')));
+        }
+        // Exactly at the limit is accepted.
+        await conn.executeMany('BEGIN story_rid(:1); END;', [
+          ['A' * oc.tnsMaxUrowidLength],
+        ], rowidDefs());
+      });
+    }
+
     test('non-finite doubles under a NUMBER def fail before wire', () async {
       await expectRejectedBeforeWire(
         () => conn.executeMany(sql, [
@@ -1616,6 +1681,47 @@ void main() {
   group('executeMany() DML RETURNING', () {
     const insertReturningPos =
         'INSERT INTO t (name) VALUES (:1) RETURNING id INTO :2';
+
+    test('RETURNING rowid / urowid targets use rowid OUT slots and come back '
+        'as the decoded text (Story 15.3)', () async {
+      transport.nextResponses.add(
+        ExecuteResponse(
+          isSuccess: true,
+          rowsAffected: 1,
+          outBindIndices: const [1, 2],
+          outBindRows: const [
+            [
+              ['AAAR3sAAEAAAACXAAA'],
+              ['*BAAAtAkCwQIBeP4'],
+            ],
+          ],
+        ),
+      );
+      final result = await conn.executeMany(
+        'INSERT INTO t (name) VALUES (:1) RETURNING rowid, ur INTO :2, :3',
+        [
+          ['Alice'],
+        ],
+        OracleExecuteManyOptions(
+          bindDefs: [
+            OracleBindDef.input(type: OracleDbType.varchar, maxSize: 10),
+            OracleBindDef.output(type: OracleDbType.rowid),
+            OracleBindDef.output(type: OracleDbType.urowid),
+          ],
+        ),
+      );
+      final slots = transport.lastBindValues!.cast<BindVariable>();
+      expect(slots[1].oraType, equals(oc.oraTypeRowid));
+      expect(slots[2].oraType, equals(oc.oraTypeURowid));
+      expect(slots[1].dir, equals(BindDir.output));
+      expect(transport.lastBindMetadata![1].oraType, equals(oc.oraTypeRowid));
+      expect(result.outBinds.toList(), [
+        [
+          ['AAAR3sAAEAAAACXAAA'],
+          ['*BAAAtAkCwQIBeP4'],
+        ],
+      ]);
+    });
 
     test('routes DML RETURNING to the wire with OUT placeholders omitted from '
         'the metadata-less inference but present in the row data', () async {

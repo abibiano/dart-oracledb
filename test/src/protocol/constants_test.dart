@@ -50,7 +50,6 @@ void main() {
     });
 
     test('advanced data types are defined correctly', () {
-      expect(oraTypeURowid, equals(104));
       expect(oraTypeClob, equals(112));
       expect(oraTypeBlob, equals(113));
       expect(oraTypeJson, equals(119));
@@ -65,6 +64,18 @@ void main() {
     test('interval types match node-oracledb TNS_DATA_TYPE_INTERVAL_*', () {
       expect(oraTypeIntervalDS, equals(183));
       expect(oraTypeIntervalYM, equals(182));
+    });
+
+    test('rowid types and sizes match node-oracledb (Story 15.3)', () {
+      // TNS_DATA_TYPE_ROWID / TNS_DATA_TYPE_UROWID: the TTC wire ids the
+      // server describes. UROWID is 208 — not 104, the OCI SQLT_RDD code
+      // (which the data type negotiation converts to ROWID).
+      expect(oraTypeRowid, equals(11));
+      expect(oraTypeURowid, equals(208));
+      expect(oraTypeURowid, isNot(equals(104)));
+      // TNS_MAX_ROWID_LENGTH / TNS_MAX_UROWID_LENGTH.
+      expect(tnsMaxRowidLength, equals(18));
+      expect(tnsMaxUrowidLength, equals(3950));
     });
   });
 

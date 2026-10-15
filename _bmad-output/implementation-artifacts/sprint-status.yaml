@@ -226,7 +226,7 @@ development_status:
   epic-15: backlog
   15-1-interval-day-to-second: done
   15-2-interval-year-to-month: done
-  15-3-rowid-urowid: backlog
+  15-3-rowid-urowid: done
   15-4-vector: backlog
   15-5-dual-env-integration-tests: backlog
   epic-15-retrospective: optional

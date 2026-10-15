@@ -1006,6 +1006,172 @@ OracleIntervalYM decodeIntervalYM(Uint8List bytes) {
 }
 
 // ============================================================================
+// ROWID / UROWID Decoding
+// ============================================================================
+
+/// The alphabet Oracle renders rowids with (node-oracledb
+/// `TNS_BASE64_ALPHABET_ARRAY`): the standard base64 alphabet, never padded.
+const String _tnsBase64Alphabet =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/// The four components of a physical rowid as the fetch wire shape carries
+/// them (node-oracledb `readRowID`).
+typedef RowidFields = ({int rba, int partitionId, int blockNum, int slotNum});
+
+/// Reads the physical-rowid fields of a fetched `ROWID` value, after its
+/// one-byte length (node-oracledb `packet.js readRowID`): UB4 data object
+/// number (`rba`), UB2 relative file number (`partitionId`), one skipped
+/// byte, UB4 block number, UB2 row slot.
+///
+/// A truncated stream throws the buffer's own exception, which the decode
+/// pass reports as a protocol error and the completion probe as "more
+/// packets needed".
+RowidFields readRowidFields(ReadBuffer buffer) {
+  final rba = buffer.readUB4();
+  final partitionId = buffer.readUB2();
+  buffer.skipUB1();
+  final blockNum = buffer.readUB4();
+  final slotNum = buffer.readUB2();
+  return (
+    rba: rba,
+    partitionId: partitionId,
+    blockNum: blockNum,
+    slotNum: slotNum,
+  );
+}
+
+/// Encodes a physical rowid into Oracle's 18-character text form, the one
+/// `ROWIDTOCHAR` returns (node-oracledb `utils.js encodeRowID`): each
+/// component in big-endian base64 digits — 6 for [RowidFields.rba], 3 for
+/// [RowidFields.partitionId], 6 for [RowidFields.blockNum] and 3 for
+/// [RowidFields.slotNum] — e.g. `AAAR3sAAEAAAACXAAA`.
+///
+/// Returns `null` when every component is zero, as node-oracledb does (it
+/// returns no value for that rowid).
+///
+/// The components are unsigned: node-oracledb's 32-bit signed shift would
+/// render a data object or block number of 2^31 and above with a different
+/// leading digit than Oracle; this encoder matches Oracle. Throws
+/// [ArgumentError] for a component outside its wire width (UB4 / UB2), which
+/// a decoded value can never be.
+String? encodeRowid(RowidFields rowid) {
+  _checkRowidComponent(rowid.rba, 'rba', 0xFFFFFFFF);
+  _checkRowidComponent(rowid.partitionId, 'partitionId', 0xFFFF);
+  _checkRowidComponent(rowid.blockNum, 'blockNum', 0xFFFFFFFF);
+  _checkRowidComponent(rowid.slotNum, 'slotNum', 0xFFFF);
+  if (rowid.rba == 0 &&
+      rowid.partitionId == 0 &&
+      rowid.blockNum == 0 &&
+      rowid.slotNum == 0) {
+    return null;
+  }
+  final out = StringBuffer();
+  _writeBase64Digits(out, rowid.rba, 6);
+  _writeBase64Digits(out, rowid.partitionId, 3);
+  _writeBase64Digits(out, rowid.blockNum, 6);
+  _writeBase64Digits(out, rowid.slotNum, 3);
+  assert(out.length == tnsMaxRowidLength, 'a physical rowid is 18 digits');
+  return out.toString();
+}
+
+void _checkRowidComponent(int value, String name, int max) {
+  if (value < 0 || value > max) {
+    throw ArgumentError.value(value, name, 'must be within 0..$max');
+  }
+}
+
+/// Writes [value] as [digits] big-endian base64 digits (node-oracledb
+/// `_convertBase64`).
+void _writeBase64Digits(StringBuffer out, int value, int digits) {
+  for (var shift = (digits - 1) * 6; shift >= 0; shift -= 6) {
+    out.writeCharCode(_tnsBase64Alphabet.codeUnitAt((value >> shift) & 0x3f));
+  }
+}
+
+/// Byte length of a physical rowid inside a fetched `UROWID` value: a type
+/// byte of 1, then the UInt32 data object number, UInt16 relative file
+/// number, UInt32 block number and UInt16 row slot, all big-endian.
+const int physicalUrowidLength = 13;
+
+/// Decodes the rowid bytes of a fetched `UROWID` value (the second
+/// length-prefixed field of the wire shape; node-oracledb `packet.js
+/// readURowID`) into its text form:
+///
+/// * first byte 1 — a physical rowid (a heap table's rowid stored in a
+///   `UROWID` column): the 18-character text [encodeRowid] produces, or
+///   `null` for the all-zero rowid;
+/// * any other first byte — a logical rowid (an index-organized table's) or
+///   a foreign one: `*` followed by the bytes after the first, base64-encoded
+///   with the rowid alphabet and no padding, exactly as node-oracledb renders
+///   it (and as the server's `CAST(rowid AS VARCHAR2(4000))` does — verified
+///   on 23ai and 21c; `ROWIDTOCHAR` rejects a logical rowid).
+///
+/// node-oracledb reads the bytes unchecked. This decoder fails loud instead:
+/// an empty value, or a physical rowid that is not exactly
+/// [physicalUrowidLength] bytes, throws [OracleException]
+/// (`oraProtocolError`) rather than producing a plausible-looking rowid from
+/// a misaligned stream.
+String? decodeUrowid(Uint8List bytes) {
+  if (bytes.isEmpty) {
+    throw const OracleException(
+      errorCode: oraProtocolError,
+      message: 'UROWID field has no rowid bytes',
+    );
+  }
+  if (bytes[0] == 1) {
+    if (bytes.length != physicalUrowidLength) {
+      throw OracleException(
+        errorCode: oraProtocolError,
+        message:
+            'UROWID physical rowid field has ${bytes.length} bytes '
+            '(expected $physicalUrowidLength)',
+      );
+    }
+    final data = ByteData.sublistView(bytes);
+    return encodeRowid((
+      rba: data.getUint32(1),
+      partitionId: data.getUint16(5),
+      blockNum: data.getUint32(7),
+      slotNum: data.getUint16(11),
+    ));
+  }
+  return _encodeLogicalUrowid(bytes);
+}
+
+/// Port of the logical branch of node-oracledb `readURowID`: `*`, then the
+/// bytes after the first as unpadded base64. A trailing group of one byte
+/// yields two digits and a group of two yields three — so the text is always
+/// as long as node-oracledb's preallocated output (its length formula over
+/// the whole input works out to exactly `1 +` the digits written).
+String _encodeLogicalUrowid(Uint8List bytes) {
+  final out = StringBuffer('*');
+  var offset = 1;
+  var remaining = bytes.length - 1;
+  void digit(int index) =>
+      out.writeCharCode(_tnsBase64Alphabet.codeUnitAt(index));
+  while (remaining > 0) {
+    final b0 = bytes[offset];
+    digit(b0 >> 2);
+    if (remaining == 1) {
+      digit((b0 & 0x3) << 4);
+      break;
+    }
+    final b1 = bytes[offset + 1];
+    digit(((b0 & 0x3) << 4) | ((b1 & 0xf0) >> 4));
+    if (remaining == 2) {
+      digit((b1 & 0xf) << 2);
+      break;
+    }
+    final b2 = bytes[offset + 2];
+    digit(((b1 & 0xf) << 2) | ((b2 & 0xc0) >> 6));
+    digit(b2 & 0x3f);
+    offset += 3;
+    remaining -= 3;
+  }
+  return out.toString();
+}
+
+// ============================================================================
 // VARCHAR2/String Encoding/Decoding
 // ============================================================================
 

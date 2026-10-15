@@ -148,6 +148,38 @@
   in a REF CURSOR / nested `CURSOR()` / implicit-result row without a LOB or
   JSON column fails the call with ORA-01405, so NULL intervals are not supported inside cursors there
   (non-NULL values decode on both versions).
+- **`ROWID` and `UROWID` columns decode.** They previously decoded silently
+  to `null`. Columns, REF CURSOR / nested `CURSOR()` / implicit-result rows,
+  PL/SQL OUT binds and DML `RETURNING` values now decode to the rowid's
+  `String` text, as node-oracledb thin returns it (deviations below): a heap
+  table's `rowid` (described as ROWID) is the 18-character physical text
+  `ROWIDTOCHAR` returns; an
+  index-organized table's `rowid` (described as UROWID) is its logical text,
+  which starts with `*` and equals `CAST(rowid AS VARCHAR2(4000))`; a
+  `UROWID` column holds either. A fetched rowid binds back as a plain
+  `String` (`WHERE rowid = :1`, or into a `ROWID` / `UROWID` column). The new
+  `OracleDbType.rowid` / `OracleDbType.urowid` (no `maxSize`) declare PL/SQL
+  OUT / IN OUT binds, `RETURNING rowid INTO` targets and `OracleBindDef`s;
+  they travel as text with a fixed 3950-byte buffer (node-oracledb parity),
+  and an `executeMany()` value over that size fails before any round trip.
+  `fetchTypeHandler` converters receive the `String`, and
+  `fetchAsString` accepts `rowid` / `urowid` as no-ops. In the fetch shapes,
+  a `UROWID` value with no rowid bytes or a physical one that is not exactly
+  13 bytes, and a `ROWID` / `UROWID` payload cut short, fail with
+  `OracleException` (`oraProtocolError`); the `ROWID` length byte is not
+  checked (as in node-oracledb) and OUT bind / `RETURNING` text is returned
+  unchecked. Deviations from node-oracledb: rowid components are encoded
+  unsigned (a data object or block number of 2^31 or more gets Oracle's
+  leading digit, not node-oracledb's), and a malformed fetched `UROWID`
+  fails loud where node-oracledb reads it unchecked. As in node-oracledb, an
+  all-zero physical rowid decodes to `null`. Validated against Oracle 23ai
+  and Oracle 21c.
+- **Fix:** the internal UROWID type code was the OCI `SQLT_RDD` value 104 —
+  which the server never sends — instead of the TTC wire id 208, so a
+  UROWID describe never matched it.
+- **Known issue:** the same 21c ORA-01405 issue applies to a SQL `NULL`
+  rowid inside a REF CURSOR / nested `CURSOR()` / implicit-result row
+  without a LOB or JSON column.
 
 ## 1.5.0
 

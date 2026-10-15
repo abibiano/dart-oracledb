@@ -236,6 +236,9 @@ void main() {
       OracleDbType.date,
       OracleDbType.timestamp,
       OracleDbType.timestampTz,
+      // Accepted and inert (Story 15.3): rowid columns are already strings.
+      OracleDbType.rowid,
+      OracleDbType.urowid,
     };
     final unsupported = OracleDbType.values.where(
       (t) => !supported.contains(t),
@@ -267,6 +270,37 @@ void main() {
         expect(conn.hasOpenResultSet, isFalse);
       });
     }
+
+    test('rowid and urowid are accepted and change nothing: rowid columns '
+        'are already strings and the date/time columns keep their native '
+        'types (Story 15.3)', () async {
+      const rowidCols = [
+        _id,
+        _d,
+        ColumnMetadata(name: 'RID', oracleType: oraTypeRowid, maxLength: 0),
+        ColumnMetadata(name: 'URID', oracleType: oraTypeURowid, maxLength: 0),
+      ];
+      List<Object?> row() => [
+        1,
+        _date,
+        'AAAR3sAAEAAAACXAAA',
+        '*BAAAtAkCwQIBeP4',
+      ];
+      final t = _FakeTransport(
+        firstBatch: () => _batch([row()], more: false, columns: rowidCols),
+      );
+      final conn = OracleConnection.forTesting(transport: t);
+      final result = await conn.execute(
+        'SELECT * FROM t',
+        null,
+        const OracleExecuteOptions(
+          fetchAsString: {OracleDbType.rowid, OracleDbType.urowid},
+        ),
+      );
+      expect(result.rows.single.toList(), equals(row()));
+      expect(result.rows.single['D'], isA<DateTime>());
+      expect(t.defines, equals(0), reason: 'no DEFINE round');
+    });
 
     test(
       'a supported entry does not excuse an unsupported one beside it',

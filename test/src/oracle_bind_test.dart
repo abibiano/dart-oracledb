@@ -41,6 +41,8 @@ void main() {
         expect(OracleDbType.nClob.index, equals(11));
         expect(OracleDbType.intervalDS.index, equals(12));
         expect(OracleDbType.intervalYM.index, equals(13));
+        expect(OracleDbType.rowid.index, equals(14));
+        expect(OracleDbType.urowid.index, equals(15));
       },
     );
   });
@@ -1343,6 +1345,67 @@ void main() {
         throwsArgumentError,
       );
     });
+  });
+
+  group('OracleDbType.rowid / urowid (Story 15.3)', () {
+    test('map to their own type codes (sent as VARCHAR) and need no '
+        'maxSize', () {
+      expect(OracleBind.out(type: OracleDbType.rowid).oracleTypeCode, 11);
+      expect(OracleBind.out(type: OracleDbType.urowid).oracleTypeCode, 208);
+      expect(
+        OracleBindDef.output(type: OracleDbType.rowid).oracleTypeCode,
+        equals(11),
+      );
+      expect(
+        OracleBindDef.inputOutput(type: OracleDbType.urowid).oracleTypeCode,
+        equals(208),
+      );
+      expect(OracleBindDef.output(type: OracleDbType.urowid).maxSize, isNull);
+    });
+
+    for (final type in [OracleDbType.rowid, OracleDbType.urowid]) {
+      test('${type.name} IN OUT accepts a String and null', () {
+        for (final value in <Object?>[
+          'AAAR3sAAEAAAACXAAA',
+          '*BAAAtAkCwQIBeP4',
+          null,
+        ]) {
+          expect(
+            () => OracleBind.inOut(value: value, type: type),
+            returnsNormally,
+            reason: '$value',
+          );
+        }
+      });
+
+      test('${type.name} IN OUT rejects other values without echoing '
+          'them', () {
+        final secret = Uint8List.fromList([0x41, 0x41, 0x41]);
+        for (final value in <Object>[42, secret, DateTime.utc(2024)]) {
+          expect(
+            () => OracleBind.inOut(value: value, type: type),
+            throwsA(
+              isA<ArgumentError>()
+                  .having(
+                    (e) => e.message.toString(),
+                    'message',
+                    allOf(
+                      contains('OracleBind(type: ${type.name})'),
+                      contains('requires String or null'),
+                      contains(value.runtimeType.toString()),
+                    ),
+                  )
+                  .having(
+                    (e) => e.toString(),
+                    'toString',
+                    isNot(contains('[65, 65, 65]')),
+                  ),
+            ),
+            reason: '${value.runtimeType}',
+          );
+        }
+      });
+    }
   });
 
   group('OracleOutBinds lookup contract', () {

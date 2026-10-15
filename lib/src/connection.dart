@@ -237,8 +237,10 @@ class OracleExecuteOptions {
   ///   `TIMESTAMP WITH LOCAL TIME ZONE`;
   /// * [OracleDbType.timestampTz] — `TIMESTAMP WITH TIME ZONE`.
   ///
-  /// Any other [OracleDbType] throws [ArgumentError] before any wire round
-  /// trip (NUMBER, CLOB, RAW, JSON and INTERVAL cannot be fetched as
+  /// [OracleDbType.rowid] and [OracleDbType.urowid] are accepted and change
+  /// nothing: `ROWID` / `UROWID` columns always decode to their `String`
+  /// text. Any other [OracleDbType] throws [ArgumentError] before any wire
+  /// round trip (NUMBER, CLOB, RAW, JSON and INTERVAL cannot be fetched as
   /// strings). The default empty set changes nothing.
   ///
   /// **The text is produced by the driver, not by Oracle.** As in
@@ -317,6 +319,8 @@ class OracleExecuteOptions {
   ///   on a `preserveTimestampTimeZone: true` connection;
   /// * INTERVAL DAY TO SECOND: an [OracleIntervalDS];
   /// * INTERVAL YEAR TO MONTH: an [OracleIntervalYM];
+  /// * ROWID / UROWID: the rowid's `String` text — `ROWIDTOCHAR` for a
+  ///   physical rowid, `CAST(rowid AS VARCHAR2(4000))` for a logical one;
   /// * CLOB / NCLOB: `String`, BLOB: `Uint8List` — or an [OracleLob] handle
   ///   under [fetchLobs] (see below);
   /// * JSON (and a BLOB `IS JSON` column): the decoded `Map` / `List` /
@@ -1922,15 +1926,17 @@ class OracleConnection {
 
   /// Maps `OracleExecuteOptions.fetchAsString` to the Oracle column type codes
   /// it converts (Story 14.3), rejecting any entry other than
-  /// [OracleDbType.date], [OracleDbType.timestamp] and
-  /// [OracleDbType.timestampTz] with [ArgumentError].
+  /// [OracleDbType.date], [OracleDbType.timestamp],
+  /// [OracleDbType.timestampTz], [OracleDbType.rowid] and
+  /// [OracleDbType.urowid] with [ArgumentError].
   ///
   /// The mapping follows the story contract: `date` is `DATE`; `timestamp` is
   /// `TIMESTAMP` and `TIMESTAMP WITH LOCAL TIME ZONE`; `timestampTz` is
-  /// `TIMESTAMP WITH TIME ZONE`. (node-oracledb's `DB_TYPE_TIMESTAMP` entry
-  /// converts all four types; this driver keeps one public type per column
-  /// family instead.) Returns an unmodifiable snapshot, empty for an empty
-  /// request.
+  /// `TIMESTAMP WITH TIME ZONE`; `rowid` / `urowid` add no type code (Story
+  /// 15.3: those columns are already strings). (node-oracledb's
+  /// `DB_TYPE_TIMESTAMP` entry converts all four timestamp types; this driver
+  /// keeps one public type per column family instead.) Returns an
+  /// unmodifiable snapshot, empty for an empty request.
   static Set<int> _fetchAsStringOraTypes(Set<OracleDbType> requested) {
     if (requested.isEmpty) return const <int>{};
     final oraTypes = <int>{};
@@ -1944,12 +1950,19 @@ class OracleConnection {
             ..add(oc.oraTypeTimestampLtz);
         case OracleDbType.timestampTz:
           oraTypes.add(oc.oraTypeTimestampTz);
+        case OracleDbType.rowid:
+        case OracleDbType.urowid:
+          // Accepted and inert: ROWID / UROWID columns already decode to
+          // their `String` text (node-oracledb maps a STRING fetch of a rowid
+          // column to the rowid type itself), so there is nothing to convert.
+          break;
         default:
           throw ArgumentError.value(
             type,
             'options.fetchAsString',
-            'only OracleDbType.date, OracleDbType.timestamp and '
-                'OracleDbType.timestampTz can be fetched as strings',
+            'only OracleDbType.date, OracleDbType.timestamp, '
+                'OracleDbType.timestampTz, OracleDbType.rowid and '
+                'OracleDbType.urowid can be fetched as strings',
           );
       }
     }
@@ -2094,7 +2107,7 @@ class OracleConnection {
   ///   OracleExecuteManyOptions(bindDefs: [
   ///     OracleBindDef.input(type: OracleDbType.varchar, maxSize: 100),
   ///     OracleBindDef.output(type: OracleDbType.number),
-  ///     OracleBindDef.output(type: OracleDbType.varchar, maxSize: 18),
+  ///     OracleBindDef.output(type: OracleDbType.rowid),
   ///   ]),
   /// );
   /// // Row-major, one entry per INPUT row; each entry holds one list per OUT
@@ -3527,6 +3540,21 @@ class OracleConnection {
         }
       case OracleDbType.intervalYM:
         if (value is! OracleIntervalYM) mismatch('OracleIntervalYM');
+      case OracleDbType.rowid:
+      case OracleDbType.urowid:
+        if (value is! String) mismatch('String');
+        // The slot always declares the fixed rowid buffer, so a longer value
+        // could only fail at the server, naming no row or bind.
+        final len = utf8.encode(value).length;
+        if (len > oc.tnsMaxUrowidLength) {
+          throw OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                'executeMany() row $rowIndex, $slotLabel value is $len bytes '
+                'long, which exceeds the ${oc.tnsMaxUrowidLength}-byte '
+                'OracleDbType.${def.type.name} bind size.',
+          );
+        }
       case OracleDbType.json:
         // Declared JSON slot: a scalar JSON root is allowed (mirrors
         // OracleBind(type: json)); re-wrap so no bind value reaches the text.

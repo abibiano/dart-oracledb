@@ -676,7 +676,12 @@ class ExecuteRequest extends Message {
   /// keeps sending length + chunk size with every locator on FETCH rounds.
   void _writeDefineMetadata(WriteBuffer buffer, List<ColumnMetadata> columns) {
     for (final col in columns) {
-      final oraType = col.oracleType == oraTypeVarchar2
+      // A ROWID / UROWID column is defined as VARCHAR with the 3950-byte
+      // rowid buffer, exactly like node-oracledb writeColumnMetadata; the
+      // server keeps sending the binary fetch shape regardless (verified on
+      // 23ai and 21c), so the column still decodes through the rowid path.
+      final oraType =
+          col.oracleType == oraTypeVarchar2 || _isRowidType(col.oracleType)
           ? oraTypeVarchar
           : col.oracleType;
       buffer.writeUint8(oraType);
@@ -733,6 +738,12 @@ class ExecuteRequest extends Message {
         return dt.intervalDSWireLength;
       case oraTypeIntervalYM:
         return dt.intervalYMWireLength;
+      case oraTypeRowid:
+      case oraTypeURowid:
+        // Defined as VARCHAR text (see _writeDefineMetadata): node-oracledb
+        // writeColumnMetadata's TNS_MAX_UROWID_LENGTH. The describe reports
+        // size 0 for both, so `default` would declare 1 byte.
+        return tnsMaxUrowidLength;
       case oraTypeCursor:
         // Cursor-valued SELECT columns (the `CURSOR(SELECT ...)` subquery
         // shape). node-oracledb DB_TYPE_CURSOR.bufferSizeFactor = 4; the
@@ -778,6 +789,16 @@ class ExecuteRequest extends Message {
       // NULL signaled by a zero-length indicator byte.
       buffer.writeUint8(0);
       return;
+    }
+    if (_isRowidType(bind.oraType) && value is! String) {
+      // A ROWID / UROWID bind is the rowid's text (written by the VARCHAR
+      // case below); fail loud rather than with a cast error mid-encode.
+      throw OracleException(
+        errorCode: oraBindTypeError,
+        message:
+            '${bind.oraType == oraTypeRowid ? 'ROWID' : 'UROWID'} bind '
+            'requires a String (got ${value.runtimeType})',
+      );
     }
     switch (oraType) {
       case oraTypeNumber:
@@ -926,8 +947,14 @@ class ExecuteRequest extends Message {
     // Normalize VARCHAR2 (9) to VARCHAR (1) for wire (Oracle accepts both but
     // node-oracledb sends type 1 / DB_TYPE_VARCHAR).
     if (bind.oraType == oraTypeVarchar2) return oraTypeVarchar;
+    // A ROWID / UROWID bind travels as VARCHAR text, IN and OUT alike
+    // (node-oracledb writeColumnMetadata / writeBindParamsColumn).
+    if (_isRowidType(bind.oraType)) return oraTypeVarchar;
     return bind.oraType;
   }
+
+  static bool _isRowidType(int oraType) =>
+      oraType == oraTypeRowid || oraType == oraTypeURowid;
 
   /// Wire buffer size for a CLOB/BLOB bind: the locator allocation, matching
   /// node-oracledb's `DB_TYPE_CLOB`/`DB_TYPE_BLOB` bufferSizeFactor. The
@@ -949,6 +976,12 @@ class ExecuteRequest extends Message {
     if (wireType == oraTypeCursor) {
       // node-oracledb DB_TYPE_CURSOR bufferSizeFactor = 4.
       return 4;
+    }
+    if (_isRowidType(bind.oraType)) {
+      // node-oracledb writeColumnMetadata: a ROWID / UROWID bind always
+      // declares TNS_MAX_UROWID_LENGTH, whatever maxSize the variable holds,
+      // so an OUT buffer fits a physical rowid or a long logical one.
+      return tnsMaxUrowidLength;
     }
     if (bind.isNChar && wireType == oraTypeVarchar) {
       // NVARCHAR2 / NCHAR travels UTF-16BE: 2 wire bytes per UTF-16 code unit.
@@ -1001,6 +1034,10 @@ class ExecuteRequest extends Message {
   /// national type (NVARCHAR2/NCHAR/NCLOB) and [ttcCsfrmImplicit] otherwise;
   /// non-character types carry 0.
   static int _csfrmFor(BindVariable bind) {
+    // node-oracledb DB_TYPE_ROWID / DB_TYPE_UROWID carry no charset form, and
+    // writeColumnMetadata keeps it (and the charset field) 0 even though the
+    // value travels as VARCHAR text.
+    if (_isRowidType(bind.oraType)) return 0;
     switch (_wireTypeFor(bind)) {
       case oraTypeVarchar:
       case oraTypeString:
@@ -2213,6 +2250,12 @@ List<Object?> _decodeReturningRow(ReadBuffer buf, _DecodeState s) {
 /// the OUT-bind decode path. Used by JSON (type 119) to enforce the declared
 /// OSON byte bound on returned documents; CLOB/BLOB enforce theirs later in
 /// the transport's materialize step, and other types are bounded server-side.
+///
+/// [inFetch] is true for a SELECT column value (node-oracledb `inFetch`) and
+/// false for an OUT bind / DML RETURNING value. Two types decode differently
+/// by it: a ROWID / UROWID column arrives in its binary fetch shape while a
+/// returned one is VARCHAR text, and a cursor column with server cursor id 0
+/// is a NULL nested cursor while an OUT cursor bind with id 0 is an error.
 Object? _decodeValueByOraType(
   ReadBuffer buf,
   int oraType, {
@@ -2224,7 +2267,7 @@ Object? _decodeValueByOraType(
   String nationalCharset = 'AL16UTF16',
   int? outMaxSize,
   int ttcFieldVersion = 24,
-  bool isColumnCursor = false,
+  bool inFetch = false,
 }) {
   switch (oraType) {
     case oraTypeLong:
@@ -2343,6 +2386,38 @@ Object? _decodeValueByOraType(
       if (bytes.isEmpty) return null;
       if (!strict) return null; // probe pass: bytes consumed, value unused
       return dt.decodeIntervalYM(bytes);
+    case oraTypeRowid:
+    case oraTypeURowid:
+      if (!inFetch) {
+        // OUT bind / DML RETURNING value: the bind travels as VARCHAR, so the
+        // server returns the rowid's text (node-oracledb processColumnData
+        // `!inFetch` → readStr(CSFRM_IMPLICIT)).
+        final bytes = buf.readBytesWithLength();
+        if (bytes.isEmpty) return null;
+        if (!strict) return null; // probe pass: bytes consumed, value unused
+        return utf8.decode(bytes, allowMalformed: true);
+      }
+      if (oraType == oraTypeRowid) {
+        // node-oracledb processColumnData ROWID fetch branch: a one-byte
+        // length (0 / 0xFF = SQL NULL), then the physical-rowid fields
+        // (readRowID), encoded into the 18-character text (encodeRowID).
+        final numBytes = buf.readUint8();
+        if (numBytes == 0 || numBytes == ttcNullLengthIndicator) return null;
+        // The length byte is not the size of the fields that follow (they
+        // are variable-length UB integers; the server sends 14 for every
+        // rowid, verified on 23ai and 21c), so like node-oracledb the decoder
+        // reads the fields themselves and does not check it.
+        final fields = dt.readRowidFields(buf);
+        if (!strict) return null; // probe pass: bytes consumed, value unused
+        return dt.encodeRowid(fields);
+      }
+      // node-oracledb readURowID: a length-prefixed field (null = SQL NULL),
+      // then the rowid bytes, length-prefixed. The decoder fails loud on a
+      // malformed rowid, so the probe pass stops after consuming the bytes.
+      if (buf.readBytesWithLength().isEmpty) return null;
+      final rowidBytes = buf.readBytesWithLength();
+      if (!strict) return null; // probe pass: bytes consumed, value unused
+      return dt.decodeUrowid(rowidBytes);
     case oraTypeClob:
     case oraTypeBlob:
     case oraTypeBfile:
@@ -2470,7 +2545,7 @@ Object? _decodeValueByOraType(
         // nested cursor, e.g. an outer join with no matching rows). Treat it
         // as a NULL column value, same as a null-length numBytes — only the
         // OUT bind path treats id 0 as a programming error.
-        if (isColumnCursor) return null;
+        if (inFetch) return null;
         throw const OracleException(
           errorCode: oraProtocolError,
           message:
@@ -2664,6 +2739,8 @@ bool _isSupportedRefCursorColumn(ColumnMetadata col) {
     case oraTypeTimestampTz:
     case oraTypeIntervalDS:
     case oraTypeIntervalYM:
+    case oraTypeRowid:
+    case oraTypeURowid:
     case oraTypeBlob:
     case oraTypeJson:
       return true;
@@ -2723,10 +2800,11 @@ Object? _decodeColumnValue(
   // mis-parses the embedded describe on pre-23 servers (Oracle 21c), shearing
   // the row stream — the OUT-bind decode path already threads this through.
   ttcFieldVersion: ttcFieldVersion,
-  // SELECT column decode: a cursor-typed column with server cursor id 0 is a
-  // NULL nested cursor, not the OUT-bind "block never opened the cursor"
-  // programming error.
-  isColumnCursor: true,
+  // SELECT column decode (node-oracledb `inFetch`): a ROWID / UROWID column
+  // arrives in its binary fetch shape, and a cursor-typed column with server
+  // cursor id 0 is a NULL nested cursor, not the OUT-bind "block never opened
+  // the cursor" programming error.
+  inFetch: true,
 );
 
 void _processBitVector(ReadBuffer buf, _DecodeState s) {

@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:oracledb/src/errors.dart';
@@ -1773,6 +1774,186 @@ void main() {
         () => decodeIntervalYM(bytes([0x80, 0, 0, 2, 59])),
         throwsA(isA<OracleException>()),
       );
+    });
+  });
+
+  group('ROWID / UROWID codec (Story 15.3)', () {
+    Uint8List bytes(List<int> b) => Uint8List.fromList(b);
+
+    Matcher protocolError(String fragment) => throwsA(
+      isA<OracleException>()
+          .having((e) => e.errorCode, 'errorCode', oraProtocolError)
+          .having((e) => e.message, 'message', contains(fragment)),
+    );
+
+    // Wire vectors captured live (23ai and 21c) next to the server's own
+    // ROWIDTOCHAR / CAST(... AS VARCHAR2) text for the same rowid.
+    final physical = <String, (RowidFields, String)>{
+      '23ai heap row 0': (
+        (rba: 298172, partitionId: 0, blockNum: 46073, slotNum: 0),
+        'AABIy8AAAAAALP5AAA',
+      ),
+      '23ai heap row 1': (
+        (rba: 298172, partitionId: 0, blockNum: 46073, slotNum: 1),
+        'AABIy8AAAAAALP5AAB',
+      ),
+      '21c heap row 0 (relative file 1)': (
+        (rba: 514471, partitionId: 1, blockNum: 51425, slotNum: 0),
+        'AAB9mnAABAAAMjhAAA',
+      ),
+      "CHARTOROWID('AAAR3sAAEAAAACXAAA')": (
+        (rba: 73196, partitionId: 4, blockNum: 151, slotNum: 0),
+        'AAAR3sAAEAAAACXAAA',
+      ),
+      'every component at its wire maximum': (
+        (
+          rba: 0xFFFFFFFF,
+          partitionId: 0xFFFF,
+          blockNum: 0xFFFFFFFF,
+          slotNum: 0xFFFF,
+        ),
+        // Unsigned: the 36-bit / 18-bit digit groups carry leading zero
+        // bits, so the first digit of each 32-bit component is 'D'.
+        'D/////P//D/////P//',
+      ),
+    };
+
+    test('encodeRowid renders the server text (node encodeRowID)', () {
+      for (final MapEntry(key: label, value: (fields, text))
+          in physical.entries) {
+        final encoded = encodeRowid(fields);
+        expect(encoded, equals(text), reason: label);
+        expect(encoded, hasLength(tnsMaxRowidLength), reason: label);
+      }
+    });
+
+    test('encodeRowid returns null for the all-zero rowid (node parity)', () {
+      expect(
+        encodeRowid((rba: 0, partitionId: 0, blockNum: 0, slotNum: 0)),
+        isNull,
+      );
+      // Any one non-zero component makes it a real rowid.
+      expect(
+        encodeRowid((rba: 0, partitionId: 0, blockNum: 0, slotNum: 1)),
+        equals('AAAAAAAAAAAAAAAAAB'),
+      );
+    });
+
+    test('encodeRowid rejects a component outside its wire width', () {
+      for (final fields in <RowidFields>[
+        (rba: -1, partitionId: 0, blockNum: 0, slotNum: 0),
+        (rba: 0x100000000, partitionId: 0, blockNum: 0, slotNum: 0),
+        (rba: 1, partitionId: 0x10000, blockNum: 0, slotNum: 0),
+        (rba: 1, partitionId: 0, blockNum: 0x100000000, slotNum: 0),
+        (rba: 1, partitionId: 0, blockNum: 0, slotNum: 0x10000),
+      ]) {
+        expect(
+          () => encodeRowid(fields),
+          throwsA(isA<ArgumentError>()),
+          reason: '$fields',
+        );
+      }
+    });
+
+    test('readRowidFields reads UB4 rba, UB2 partition, a skipped byte, UB4 '
+        'block, UB2 slot (node readRowID)', () {
+      // The live 23ai heap row 0 fields as the server encodes them, followed
+      // by a sentinel the reader must not touch.
+      final buffer = ReadBuffer(
+        bytes([3, 0x04, 0x8C, 0xBC, 0, 0x55, 2, 0xB3, 0xF9, 0, 0xEE]),
+      );
+      expect(
+        readRowidFields(buffer),
+        equals((rba: 298172, partitionId: 0, blockNum: 46073, slotNum: 0)),
+      );
+      expect(buffer.position, equals(10));
+      expect(buffer.readUint8(), equals(0xEE));
+    });
+
+    test('readRowidFields surfaces a truncated stream as an underflow', () {
+      expect(
+        () => readRowidFields(ReadBuffer(bytes([3, 0x04, 0x8C, 0xBC, 0]))),
+        throwsA(isA<BufferUnderflowException>()),
+      );
+    });
+
+    test('decodeUrowid decodes a physical rowid (first byte 1)', () {
+      // Live: a heap rowid stored in a UROWID column (23ai, then 21c).
+      expect(
+        decodeUrowid(bytes([1, 0, 4, 140, 194, 0, 0, 0, 0, 179, 249, 0, 0])),
+        equals('AABIzCAAAAAALP5AAA'),
+      );
+      expect(
+        decodeUrowid(bytes([1, 0, 7, 217, 167, 0, 1, 0, 0, 200, 225, 0, 1])),
+        equals('AAB9mnAABAAAMjhAAB'),
+      );
+      // The all-zero physical rowid is null, as node's encodeRowID makes it.
+      expect(decodeUrowid(bytes([1, ...List.filled(12, 0)])), isNull);
+    });
+
+    test('decodeUrowid decodes logical rowids with every remainder '
+        '(live IOT vectors)', () {
+      final logical = <String, (List<int>, String)>{
+        // 11 bytes after the type byte: a 2-byte tail → 3 digits.
+        '23ai, 12 bytes': (
+          [2, 4, 0, 0, 180, 9, 2, 193, 2, 1, 120, 254],
+          '*BAAAtAkCwQIBeP4',
+        ),
+        // 12 bytes after the type byte: whole groups only.
+        '23ai, 13 bytes': (
+          [2, 4, 0, 0, 180, 9, 2, 193, 3, 2, 121, 121, 254],
+          '*BAAAtAkCwQMCeXn+',
+        ),
+        // 13 bytes after the type byte: a 1-byte tail → 2 digits.
+        '23ai, 14 bytes': (
+          [2, 4, 0, 0, 180, 9, 2, 193, 4, 3, 122, 122, 122, 254],
+          '*BAAAtAkCwQQDenp6/g',
+        ),
+        '23ai, 35 bytes (long primary key)': (
+          [
+            2, 4, 0, 0, 180, 9, 4, 195, 13, 35, 57, 22, 97, 32, 108, 111, //
+            110, 103, 32, 107, 101, 121, 32, 118, 97, 108, 117, 101, 32, //
+            104, 101, 114, 101, 33, 254,
+          ],
+          '*BAAAtAkEww0jORZhIGxvbmcga2V5IHZhbHVlIGhlcmUh/g',
+        ),
+        '21c, 12 bytes': (
+          [2, 4, 0, 64, 200, 241, 2, 193, 2, 1, 120, 254],
+          '*BABAyPECwQIBeP4',
+        ),
+      };
+      for (final MapEntry(key: label, value: (wire, text)) in logical.entries) {
+        expect(decodeUrowid(bytes(wire)), equals(text), reason: label);
+      }
+    });
+
+    test('decodeUrowid logical text is unpadded standard base64 of the bytes '
+        'after the first, for every length', () {
+      for (var length = 1; length <= 64; length++) {
+        final wire = bytes([
+          2,
+          for (var i = 1; i < length; i++) (i * 37 + length * 11) & 0xFF,
+        ]);
+        final expected =
+            '*${base64Encode(wire.sublist(1)).replaceAll('=', '')}';
+        expect(decodeUrowid(wire), equals(expected), reason: 'length $length');
+      }
+      // node's readURowID on a lone type byte yields just the marker.
+      expect(decodeUrowid(bytes([2])), equals('*'));
+      // Any first byte other than 1 is logical (or foreign): node parity.
+      expect(decodeUrowid(bytes([0, 0xFF])), equals('*/w'));
+      expect(decodeUrowid(bytes([3, 0xFB, 0xEF])), equals('*++8'));
+    });
+
+    test('decodeUrowid fails loud on a malformed value', () {
+      expect(() => decodeUrowid(Uint8List(0)), protocolError('no rowid'));
+      for (final length in [1, 2, 12, 14, 20]) {
+        expect(
+          () => decodeUrowid(bytes([1, ...List.filled(length - 1, 7)])),
+          protocolError('$length bytes (expected 13)'),
+          reason: 'physical rowid of $length bytes',
+        );
+      }
     });
   });
 }

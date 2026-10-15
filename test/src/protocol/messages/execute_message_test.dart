@@ -7033,6 +7033,498 @@ void main() {
       expect(result.columns.single.oracleType, equals(oraTypeIntervalYM));
     });
   });
+
+  group('ROWID / UROWID (types 11 / 208, Story 15.3)', () {
+    const rowidText = 'AABIy8AAAAAALP5AAA';
+    // Live 23ai fetch shape of `rowidText`: the length byte the server always
+    // sends (14), then UB4 rba 298172, UB2 partition 0, one skipped byte,
+    // UB4 block 46073, UB2 slot 0 (node-oracledb readRowID).
+    const rowidWire = [14, 3, 0x04, 0x8C, 0xBC, 0, 0, 2, 0xB3, 0xF9, 0];
+    // Live UROWID inner bytes: a heap rowid stored in a UROWID column, and an
+    // index-organized table's logical rowid.
+    const physicalUrowid = [1, 0, 4, 140, 194, 0, 0, 0, 0, 179, 249, 0, 0];
+    const physicalText = 'AABIzCAAAAAALP5AAA';
+    const logicalUrowid = [
+      2,
+      4,
+      0,
+      0,
+      180,
+      9,
+      2,
+      193,
+      4,
+      3,
+      122,
+      122,
+      122,
+      254,
+    ];
+    const logicalText = '*BAAAtAkCwQQDenp6/g';
+
+    /// The UROWID fetch shape: a length-prefixed field (the server sends
+    /// the rowid length in it), then the length-prefixed rowid bytes.
+    List<int> urowidWire(List<int> inner) => [
+      ..._bytesWithLength([inner.length]),
+      ..._bytesWithLength(inner),
+    ];
+
+    /// Bind / define metadata of a ROWID / UROWID slot: VARCHAR with the
+    /// 3950-byte rowid buffer and no charset form (node-oracledb
+    /// writeColumnMetadata for DB_TYPE_ROWID / DB_TYPE_UROWID).
+    const rowidMetadata = [
+      oraTypeVarchar, ttcBindUseIndicators, 0, 0,
+      2, 0x0F, 0x6E, // UB4 buffer size = 3950
+      0, // max num elements
+      0, // contFlag
+      0, // OID
+      0, // version
+      0, // UB2 charset = 0
+      0, // csfrm = 0
+      0, // prefetch length
+      0, // oaccolid
+    ];
+
+    const n5 = ColumnMetadata(
+      name: 'N',
+      oracleType: oraTypeNumber,
+      maxLength: 0,
+    );
+
+    Matcher protocolError() => throwsA(
+      isA<OracleException>().having(
+        (e) => e.errorCode,
+        'errorCode',
+        oraProtocolError,
+      ),
+    );
+
+    List<int> endOfFetch() => [
+      ..._errorMessage(errorNum: 1403),
+      ttcMsgTypeStatus,
+      ..._ub4(0),
+      ..._ub2(0),
+    ];
+
+    test('a String still infers VARCHAR (no rowid inference)', () {
+      expect(BindVariable(value: rowidText).oraType, equals(oraTypeVarchar));
+    });
+
+    for (final oraType in [oraTypeRowid, oraTypeURowid]) {
+      test('a type-$oraType OUT bind declares VARCHAR with the 3950-byte '
+          'buffer, whatever its maxSize', () {
+        for (final maxSize in [null, 18, 8000]) {
+          final bytes = ExecuteRequest(
+            sql: 'BEGIN p(:1); END;',
+            isQuery: false,
+            isPlSql: true,
+            bindValues: [
+              BindVariable(
+                value: null,
+                oraType: oraType,
+                maxSize: maxSize,
+                dir: BindDir.output,
+              ),
+            ],
+          ).toBytes();
+          expect(
+            _indexOfSub(bytes, rowidMetadata),
+            greaterThanOrEqualTo(0),
+            reason: 'maxSize $maxSize',
+          );
+        }
+      });
+
+      test('a type-$oraType IN OUT value travels as its UTF-8 text', () {
+        final bytes = ExecuteRequest(
+          sql: 'BEGIN p(:1); END;',
+          isQuery: false,
+          isPlSql: true,
+          bindValues: [
+            BindVariable(
+              value: logicalText,
+              oraType: oraType,
+              dir: BindDir.inputOutput,
+            ),
+          ],
+        ).toBytes();
+        expect(_indexOfSub(bytes, rowidMetadata), greaterThanOrEqualTo(0));
+        expect(
+          _indexOfSub(bytes, [
+            ttcMsgTypeRowData,
+            ..._bytesWithLength(utf8.encode(logicalText)),
+          ]),
+          greaterThanOrEqualTo(0),
+        );
+      });
+
+      test('a non-String value under type $oraType fails loud', () {
+        for (final (value, typeName) in <(Object, String)>[
+          (42, 'int'),
+          (Uint8List.fromList([1]), 'Uint8List'),
+        ]) {
+          final req = ExecuteRequest(
+            sql: 'BEGIN p(:1); END;',
+            isQuery: false,
+            isPlSql: true,
+            bindValues: [
+              BindVariable(
+                value: value,
+                oraType: oraType,
+                dir: BindDir.inputOutput,
+              ),
+            ],
+          );
+          expect(
+            req.toBytes,
+            throwsA(
+              isA<OracleException>()
+                  .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+                  .having(
+                    (e) => e.message,
+                    'message',
+                    allOf(
+                      contains(oraType == oraTypeRowid ? 'ROWID' : 'UROWID'),
+                      contains('requires a String'),
+                      contains(typeName),
+                    ),
+                  ),
+            ),
+            reason: typeName,
+          );
+        }
+      });
+
+      test('a type-$oraType IN slot (executeMany template) writes the text '
+          'and a NULL writes the null indicator', () {
+        final bytes = ExecuteRequest(
+          sql: 'INSERT INTO t (r) VALUES (:1)',
+          isQuery: false,
+          bindValues: [BindVariable(value: null, oraType: oraType)],
+          bulkRows: [
+            [rowidText],
+            [null],
+          ],
+        ).toBytes();
+        expect(_indexOfSub(bytes, rowidMetadata), greaterThanOrEqualTo(0));
+        expect(
+          _indexOfSub(bytes, [
+            ttcMsgTypeRowData,
+            ..._bytesWithLength(utf8.encode(rowidText)),
+            ttcMsgTypeRowData,
+            0, // NULL indicator
+          ]),
+          greaterThanOrEqualTo(0),
+        );
+      });
+    }
+
+    test('a ROWID column decodes to the 18-character text and the row stays '
+        'in sync', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ...rowidWire,
+          ..._bytesWithLength(_oracleNumberFiveBytes()), // N = 5 after it
+        ],
+        endOfFetch(),
+      ]);
+      const columns = [
+        ColumnMetadata(name: 'ROWID', oracleType: oraTypeRowid, maxLength: 0),
+        n5,
+      ];
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: columns,
+      );
+      expect(r.rows.single, equals([rowidText, 5]));
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+    });
+
+    test('a NULL ROWID column (length byte 0 or 0xFF) decodes to null', () {
+      for (final nullByte in [0, ttcNullLengthIndicator]) {
+        final payload = _buildPayload([
+          _rowHeader(),
+          [
+            ttcMsgTypeRowData,
+            nullByte,
+            ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ],
+          endOfFetch(),
+        ]);
+        final r = decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: const [
+            ColumnMetadata(name: 'R', oracleType: oraTypeRowid, maxLength: 0),
+            n5,
+          ],
+        );
+        expect(r.rows.single, equals([null, 5]), reason: 'byte $nullByte');
+      }
+    });
+
+    test('an all-zero ROWID decodes to null (node encodeRowID parity)', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          14,
+          0,
+          0,
+          0,
+          0,
+          0,
+          ..._bytesWithLength([0xC1, 6]),
+        ],
+        endOfFetch(),
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: const [
+          ColumnMetadata(name: 'R', oracleType: oraTypeRowid, maxLength: 0),
+          n5,
+        ],
+      );
+      expect(r.rows.single, equals([null, 5]));
+    });
+
+    test('UROWID columns decode physical, logical and NULL values with the '
+        'row in sync', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ...urowidWire(physicalUrowid),
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+        ],
+        [
+          ttcMsgTypeRowData,
+          ...urowidWire(logicalUrowid),
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+        ],
+        [ttcMsgTypeRowData, 0, ..._bytesWithLength(_oracleNumberFiveBytes())],
+        endOfFetch(),
+      ]);
+      const columns = [
+        ColumnMetadata(name: 'U', oracleType: oraTypeURowid, maxLength: 0),
+        n5,
+      ];
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: columns,
+      );
+      expect(
+        r.rows,
+        equals([
+          [physicalText, 5],
+          [logicalText, 5],
+          [null, 5],
+        ]),
+      );
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+    });
+
+    test('a duplicate-column ROWID is copied from the prior row', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ...rowidWire,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+        ],
+        // Row 2: column 0 duplicated (bit clear), column 1 on the wire.
+        _bitVector(2, [0x02]),
+        [ttcMsgTypeRowData, ..._bytesWithLength(_oracleNumberFiveBytes())],
+        endOfFetch(),
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: const [
+          ColumnMetadata(name: 'R', oracleType: oraTypeRowid, maxLength: 0),
+          n5,
+        ],
+      );
+      expect(
+        r.rows,
+        equals([
+          [rowidText, 5],
+          [rowidText, 5],
+        ]),
+      );
+    });
+
+    test('a malformed UROWID fails loud only in the strict pass', () {
+      final malformed = <String, List<int>>{
+        'physical rowid of 12 bytes': urowidWire(physicalUrowid.sublist(0, 12)),
+        'physical rowid of 14 bytes': urowidWire([...physicalUrowid, 0]),
+        'no rowid bytes after a non-NULL field': [
+          ..._bytesWithLength([13]),
+          0,
+        ],
+      };
+      const columns = [
+        ColumnMetadata(name: 'U', oracleType: oraTypeURowid, maxLength: 0),
+      ];
+      for (final MapEntry(key: label, value: wire) in malformed.entries) {
+        final payload = _buildPayload([
+          _rowHeader(),
+          [ttcMsgTypeRowData, ...wire],
+          endOfFetch(),
+        ]);
+        // The probe consumes the bytes and reaches the terminal message; the
+        // strict decode rejects the value instead of guessing.
+        expect(
+          ttcStreamIsComplete(payload, expectedColumns: columns),
+          isTrue,
+          reason: label,
+        );
+        expect(
+          () => decodeExecuteResponse(
+            payload,
+            isQuery: true,
+            expectedColumns: columns,
+          ),
+          protocolError(),
+          reason: label,
+        );
+      }
+    });
+
+    test('a truncated ROWID needs more packets in the probe and fails loud '
+        'in the strict pass', () {
+      // The stream ends inside the rowid fields.
+      final payload = _buildPayload([
+        _rowHeader(),
+        [ttcMsgTypeRowData, ...rowidWire.sublist(0, 6)],
+      ]);
+      const columns = [
+        ColumnMetadata(name: 'R', oracleType: oraTypeRowid, maxLength: 0),
+      ];
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isFalse);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: columns,
+        ),
+        protocolError(),
+      );
+    });
+
+    for (final oraType in [oraTypeRowid, oraTypeURowid]) {
+      test('a type-$oraType OUT bind decodes the returned text', () {
+        final payload = _buildPayload([
+          _ioVector([tnsBindDirOutput, tnsBindDirOutput]),
+          [
+            ttcMsgTypeRowData,
+            ..._bytesWithLength(utf8.encode(logicalText)),
+            ..._ub4(0), // SB4 actualNumBytes trailer
+            0, // NULL
+            ..._ub4(0),
+          ],
+          _errorMessage(errorNum: 0),
+          [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+        ]);
+        final bindMetadata = [
+          BindMetadata(oraType: oraType, dir: BindDir.output),
+          BindMetadata(oraType: oraType, dir: BindDir.output),
+        ];
+        final r = decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: bindMetadata,
+        );
+        expect(r.outBindValues, equals([logicalText, null]));
+        expect(
+          ttcStreamIsComplete(payload, bindMetadata: bindMetadata),
+          isTrue,
+        );
+      });
+
+      test(
+        'a type-$oraType DML RETURNING target decodes the returned text',
+        () {
+          final payload = _buildPayload([
+            [
+              ttcMsgTypeRowData,
+              ..._ub4(2),
+              ..._bytesWithLength(utf8.encode(rowidText)),
+              ..._ub4(0),
+              ..._bytesWithLength(utf8.encode(physicalText)),
+              ..._ub4(0),
+            ],
+            _errorMessage(errorNum: 0, rowCount: 2),
+            [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+          ]);
+          final r = decodeExecuteResponse(
+            payload,
+            isQuery: false,
+            bindMetadata: [BindMetadata(oraType: oraType, dir: BindDir.output)],
+            dmlReturning: true,
+            presetOutBindIndices: const [0],
+          );
+          expect(
+            r.outBindRows,
+            equals([
+              [
+                [rowidText, physicalText],
+              ],
+            ]),
+          );
+        },
+      );
+    }
+
+    test('a define block declares ROWID / UROWID columns as VARCHAR with the '
+        '3950-byte buffer', () {
+      final bytes = ExecuteRequest(
+        sql: 'SELECT r, u, c FROM t',
+        isQuery: true,
+        cursorId: 9,
+        defineColumns: const [
+          ColumnMetadata(name: 'R', oracleType: oraTypeRowid, maxLength: 0),
+          ColumnMetadata(name: 'U', oracleType: oraTypeURowid, maxLength: 0),
+          ColumnMetadata(name: 'C', oracleType: oraTypeClob, maxLength: 0),
+        ],
+      ).toBytes();
+      final first = _indexOfSub(bytes, rowidMetadata);
+      expect(first, greaterThanOrEqualTo(0));
+      expect(
+        _indexOfSub(bytes.sublist(first + rowidMetadata.length), rowidMetadata),
+        equals(0),
+        reason: 'the UROWID define follows the ROWID define',
+      );
+    });
+
+    test('an embedded cursor describe accepts ROWID and UROWID columns', () {
+      final payload = _buildPayload([
+        _implicitResultSet([
+          (
+            columns: [
+              _columnInfo(name: 'R', oraType: oraTypeRowid, maxSize: 0),
+              _columnInfo(name: 'U', oraType: oraTypeURowid, maxSize: 0),
+            ],
+            cursorId: 614,
+          ),
+        ]),
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      final r = decodeExecuteResponse(payload, isQuery: false);
+      final result = r.implicitResults.single;
+      expect(result.cursorId, equals(614));
+      expect(
+        result.columns.map((c) => c.oracleType),
+        equals([oraTypeRowid, oraTypeURowid]),
+      );
+    });
+  });
 }
 
 /// Reads only the execute-options word (the UB4 right after the function
