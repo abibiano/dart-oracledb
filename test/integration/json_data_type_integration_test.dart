@@ -16,6 +16,7 @@
 @Tags(['integration'])
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -23,6 +24,11 @@ import 'package:oracledb/oracledb.dart';
 import 'package:test/test.dart';
 
 import 'test_helper.dart';
+
+class _UnprintableError implements Exception {
+  @override
+  String toString() => throw StateError('diagnostic formatting failed');
+}
 
 /// A document holding every Oracle-specific scalar kind the driver binds
 /// (Story 13.3), nested at several depths alongside standard members. NaN /
@@ -65,6 +71,57 @@ Map<String, Object?> _oracleScalarDoc({bool nonFinite = false}) =>
         ],
       },
     };
+
+/// Runs the data-setup phase of a fetch-continuation test and, on any failure,
+/// logs everything needed to root-cause it before rethrowing unchanged
+/// (DW-14: an intermittent ORA-03125 in this setup was once seen on 23ai and
+/// its output never captured). Logged: the full [OracleException] (code,
+/// message, offset, cause, sql), the setup [statement], the connection state
+/// and the stack trace.
+Future<T> captureSetupFailure<T>(
+  OracleConnection connection,
+  String statement,
+  Future<T> Function() setup,
+) async {
+  try {
+    return await setup();
+  } catch (e, st) {
+    // Diagnostics must never replace the setup error, including when an
+    // arbitrary error (or an OracleException cause) cannot be stringified.
+    try {
+      final out = StringBuffer(
+        '[DW-14 setup failure capture]\n'
+        '  statement: $statement\n'
+        '  error: $e\n',
+      );
+      if (e is OracleException) {
+        out.write(
+          '  errorCode: ${e.code}  offset: ${e.offset}\n'
+          '  message: ${e.message}\n'
+          '  cause: ${e.cause}\n'
+          '  sql: ${e.sql}\n',
+        );
+      }
+      out.write(
+        '  connection: isConnected=${connection.isConnected} '
+        'isHealthy=${connection.isHealthy} '
+        'isExecuting=${connection.isExecuting} '
+        'sequence=${connection.debugSequence} '
+        'cacheSize=${connection.debugCacheSize} '
+        'pendingCloses=${connection.debugPendingCloseCount} '
+        'fullParses=${connection.debugFullParseExecutes} '
+        'reuses=${connection.debugReuseExecutes}\n'
+        '  stack:\n$st',
+      );
+      // The test runner captures print output on failure.
+      // ignore: avoid_print
+      print(out);
+    } catch (_) {
+      // Preserve the original setup failure if diagnostics cannot be written.
+    }
+    rethrow;
+  }
+}
 
 void main() {
   group(
@@ -152,6 +209,60 @@ void main() {
             'SELECT doc FROM $testTable WHERE id = $id',
           );
           expect(result.rows.single['DOC'], isNull);
+        });
+
+        test(
+          'setup failure logs diagnostics and rethrows the same error',
+          () async {
+            const failure = OracleException(
+              errorCode: 3125,
+              message: 'test setup failure',
+              sql: 'SELECT 1 FROM DUAL',
+            );
+            final output = <String>[];
+            await runZoned(
+              () async {
+                await expectLater(
+                  captureSetupFailure(
+                    connection,
+                    'test setup statement',
+                    () async => throw failure,
+                  ),
+                  throwsA(same(failure)),
+                );
+              },
+              zoneSpecification: ZoneSpecification(
+                print: (self, parent, zone, line) => output.add(line),
+              ),
+            );
+            final log = output.join('\n');
+            expect(log, contains('test setup statement'));
+            expect(log, contains('ORA-03125'));
+            expect(log, contains('connection: isConnected='));
+            expect(log, contains('stack:'));
+          },
+        );
+
+        test('253-byte SQL uses valid long framing against Oracle', () async {
+          const prefix = 'SELECT 1 AS VALUE FROM DUAL /*';
+          const suffix = '*/';
+          final sql =
+              '$prefix${'x' * (253 - prefix.length - suffix.length)}$suffix';
+          expect(utf8.encode(sql), hasLength(253));
+          final result = await connection.execute(sql);
+          expect(result.rows.single['VALUE'], equals(1));
+        });
+
+        test('diagnostic formatting cannot replace the setup error', () async {
+          final failure = _UnprintableError();
+          await expectLater(
+            captureSetupFailure(
+              connection,
+              'test setup statement',
+              () async => throw failure,
+            ),
+            throwsA(same(failure)),
+          );
         });
 
         test('empty object and empty array decode distinctly', () async {
@@ -582,17 +693,34 @@ void main() {
           if (skipWithoutNativeJson()) return;
           const rowCount = 60; // default prefetch window is 50
           final baseId = nextTestId();
-          for (var i = 0; i < rowCount; i++) {
-            // Two alternating shapes — adjacent identical-shape rows give
-            // the server's duplicate-column optimization a chance to fire.
-            final doc = i.isEven
-                ? <String, Object?>{'row': i, 'shape': 'even'}
-                : <String, Object?>{'row': i, 'shape': 'odd'};
-            await connection.execute(
-              'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
-              [baseId + i, doc],
-            );
-          }
+          await captureSetupFailure(
+            connection,
+            'INSERT INTO $testTable (id, doc) VALUES (:1, :2) x $rowCount',
+            () async {
+              for (var i = 0; i < rowCount; i++) {
+                // Two alternating shapes — adjacent identical-shape rows
+                // give the server's duplicate-column optimization a chance
+                // to fire.
+                final doc = i.isEven
+                    ? <String, Object?>{'row': i, 'shape': 'even'}
+                    : <String, Object?>{'row': i, 'shape': 'odd'};
+                try {
+                  await connection.execute(
+                    'INSERT INTO $testTable (id, doc) VALUES (:1, :2)',
+                    [baseId + i, doc],
+                  );
+                } catch (_) {
+                  try {
+                    // ignore: avoid_print
+                    print('failed JSON setup row=$i id=${baseId + i} doc=$doc');
+                  } catch (_) {
+                    // Preserve the insert error if diagnostics cannot print.
+                  }
+                  rethrow;
+                }
+              }
+            },
+          );
           final result = await connection.execute(
             'SELECT id, doc FROM $testTable '
             'WHERE id BETWEEN $baseId AND ${baseId + rowCount - 1} '
@@ -2266,14 +2394,20 @@ void main() {
             'continuation FETCH rounds', () async {
           const rowCount = 7;
           final base = nextTestId() * 100;
-          await connection.execute('''
+          final setupSql =
+              '''
             BEGIN
               FOR i IN 1..$rowCount LOOP
                 INSERT INTO $testTable (id, doc) VALUES ($base + i,
                   UTL_RAW.CAST_TO_RAW('{"row":' || i || ',"tag":"streamed"}'));
               END LOOP;
             END;
-          ''');
+          ''';
+          await captureSetupFailure(
+            connection,
+            setupSql,
+            () => connection.execute(setupSql),
+          );
           final result = await connection.execute(
             'SELECT id, doc FROM $testTable '
             'WHERE id BETWEEN $base + 1 AND $base + $rowCount ORDER BY id',
@@ -2307,14 +2441,20 @@ void main() {
             'row across FETCH rounds', () async {
           const rowCount = 60; // default prefetch window is 50
           final base = nextTestId() * 100;
-          await connection.execute('''
+          final setupSql =
+              '''
             BEGIN
               FOR i IN 1..$rowCount LOOP
                 INSERT INTO $testTable (id, doc) VALUES ($base + i,
                   UTL_RAW.CAST_TO_RAW('[' || i || ',"eager"]'));
               END LOOP;
             END;
-          ''');
+          ''';
+          await captureSetupFailure(
+            connection,
+            setupSql,
+            () => connection.execute(setupSql),
+          );
           final result = await connection.execute(
             'SELECT doc FROM $testTable '
             'WHERE id BETWEEN $base + 1 AND $base + $rowCount ORDER BY id',
@@ -2337,14 +2477,20 @@ void main() {
             'eager and lazy, across FETCH rounds', () async {
           const rowCount = 60; // > the default prefetch window (50)
           final base = nextTestId() * 100;
-          await connection.execute('''
+          final setupSql =
+              '''
             BEGIN
               FOR i IN 1..$rowCount LOOP
                 INSERT INTO $testTable (id, doc) VALUES ($base + i,
                   UTL_RAW.CAST_TO_RAW('{"implicit":' || i || '}'));
               END LOOP;
             END;
-          ''');
+          ''';
+          await captureSetupFailure(
+            connection,
+            setupSql,
+            () => connection.execute(setupSql),
+          );
           final block =
               '''
             DECLARE
@@ -2576,7 +2722,8 @@ void main() {
         /// Returns `base`.
         Future<int> insertNumberedDocs(int rowCount) async {
           final base = nextTestId() * 100;
-          await connection.execute('''
+          final setupSql =
+              '''
             BEGIN
               FOR i IN 1..$rowCount LOOP
                 INSERT INTO $testTable (id, doc) VALUES ($base + i,
@@ -2585,7 +2732,12 @@ void main() {
                     ELSE '{"row":' || i || '}' END));
               END LOOP;
             END;
-          ''');
+          ''';
+          await captureSetupFailure(
+            connection,
+            setupSql,
+            () => connection.execute(setupSql),
+          );
           return base;
         }
 

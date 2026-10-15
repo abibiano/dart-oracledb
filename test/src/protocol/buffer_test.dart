@@ -655,4 +655,31 @@ void main() {
       expect(readBuffer.readUint8(), equals(0xFF));
     });
   });
+
+  // DW-14: a 253-byte payload was written with a plain 0xFD length prefix,
+  // which Oracle rejects with ORA-03125. node-oracledb's
+  // TNS_MAX_SHORT_LENGTH is 252; longer payloads use the 0xFE chunked form.
+  group('WriteBuffer.writeBytesWithLength short/long boundary', () {
+    test('252 bytes use a plain one-byte length', () {
+      final buffer = WriteBuffer()..writeBytesWithLength(Uint8List(252));
+      final out = buffer.toBytes();
+      expect(out, hasLength(253));
+      expect(out[0], equals(252));
+    });
+
+    for (final n in [253, 254, 255]) {
+      test('$n bytes use the 0xFE chunked form', () {
+        final bytes = Uint8List.fromList(List.generate(n, (i) => i % 256));
+        final buffer = WriteBuffer()..writeBytesWithLength(bytes);
+        final out = buffer.toBytes();
+        expect(out[0], equals(254));
+        // Chunk: UB4 length (1 length byte + 1 value byte for n < 256),
+        // n data bytes, then the UB4 0 terminator (single 0 byte).
+        expect(out, hasLength(1 + 2 + n + 1));
+        expect(out.sublist(1, 3), equals([1, n]));
+        expect(out.sublist(3, 3 + n), equals(bytes));
+        expect(out.last, equals(0));
+      });
+    }
+  });
 }

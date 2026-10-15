@@ -128,7 +128,9 @@ origin: code review of epic-13 retrospective, 2026-10-09 (epic-13-retro-2026-10-
 location: test/integration/json_data_type_integration_test.dart
 severity: medium
 reason: Retro action 8 (F1). Recorded only in the 13-2 story notes (lines 161, 174); seen once again during the epic-13 retro, then 6 clean reruns. Find the cause or capture the failing output.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-json-itest-failure-capture
+resolution-undo: 43bb199fdf358b7081d41e4affbf3e79e842d28ae6183177bdf94cdb676d3262 2026-10-15 7374617475733a206f70656e
 decision: 2026-10-15 Add failure-output capture in the eager-continuation test setup — In test/integration/json_data_type_integration_test.dart, wrap the eager-continuation setup so any failure logs the full OracleException, statement and connection state, then repeatedly rerun the suite on 23ai to try to reproduce and root-cause ORA-03125.
 decision: 2026-10-14 Keep open until it recurs
 

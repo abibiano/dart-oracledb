@@ -454,12 +454,15 @@ class WriteBuffer {
 
   /// Writes bytes with a single-byte length prefix.
   ///
-  /// For short data (<= 253 bytes), writes [length, ...data].
+  /// For short data (<= 252 bytes), writes [length, ...data].
   /// For longer data, uses chunked encoding with 0xFE long-length indicator.
   void writeBytesWithLength(Uint8List bytes) {
     final numBytes = bytes.length;
-    if (numBytes <= 253) {
-      // 0xFE (254) is the long-length indicator; must not be used as a plain length
+    if (numBytes <= 252) {
+      // node-oracledb TNS_MAX_SHORT_LENGTH is 252: 0xFD (253) is reserved and
+      // 0xFE (254) is the long-length indicator, so neither may be a plain
+      // length. A 253-byte payload sent as a short length drew a server
+      // ORA-03125 (DW-14).
       writeUint8(numBytes);
       if (numBytes > 0) {
         writeBytes(bytes);
