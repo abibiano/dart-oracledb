@@ -1025,7 +1025,9 @@ location: lib/src/transport/transport.dart _materializeLobValues
 source_spec: `spec-temp-lob-free-queue-measure.md`
 severity: medium
 reason: DW-128's fix queues only the locator a maxSize guard rejects. Locators later in the same response (a second LOB OUT bind after an oversized first one, remaining rows after a failed read or a BLOB IS JSON decode failure, or any locator when resolveOutBindMaxSize throws its index-misalignment error) are discarded unqueued and hold session temp-LOB space until session end. Since DW-122 every server-expression LOB is in scope, so a multi-row TO_CLOB query whose Nth read fails would leave the remaining rows' abstract LOBs behind. Fix: on failure with wrapLob == null, sweep the response's not-yet-materialized LobLocators through _queueMaterializedTempLobToFree (ownership-aware and deduped).
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-temp-lob-materialize-sweep
+resolution-undo: eab93d8f1cc3e30cbc159bb16801b14b38cf20538f5b0f96e2b4552d3b0a2222 2026-10-15 7374617475733a206f70656e
 
 ### DW-133: Expression-LOB frees from a fetchLobs:false streaming result set accumulate client-side until the next execute, and large expression-LOB queries now log the pending-free warning.
 origin: spec-deferred 9f8e7bcdaafa
@@ -1041,4 +1043,13 @@ origin: spec-deferred f4d7cc88c460
 location: lib/src/protocol/lob_locator.dart isTemporary
 source_spec: `spec-temp-lob-free-queue-measure.md`
 reason: Unverified. If a value-based abstract locator ever reached materializeLobs or wrapLob, a FREE_TEMP would be queued for an inline value. The full integration suites (including JSON) passed on 23ai and 21c, and python-oracledb free_lob uses the same rule, so no reachable path is known. Settle it by fetching a JSON/VECTOR column with rawJsonBlobs and fetchLobs variants and checking the pending free count.
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-temp-lob-materialize-sweep
+resolution-undo: eab93d8f1cc3e30cbc159bb16801b14b38cf20538f5b0f96e2b4552d3b0a2222 2026-10-15 7374617475733a206f70656e
+
+### DW-135: A failed fetchLobs wrap or malformed OUT-bind index may leave response locators without a registered handle or queued free.
+origin: spec-deferred 0ef98a82d6b9
+location: lib/src/transport/transport.dart:2364
+source_spec: `bmad-build-auto-result-temp-lob-materialize-sweep.md`
+reason: The wrap path skips the new materialize sweep. A deliberately throwing test callback demonstrates a claim without a handle, but the production _registerLob callback is synchronous and documented as nonthrowing. Confirm whether a production response can fail after wrapping has begun, then account for registered and unvisited locators together.
 status: open

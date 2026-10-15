@@ -1448,6 +1448,153 @@ void main() {
   });
 
   // -------------------------------------------------------------------------
+  // DW-132 — a throw inside the materialize pass must not strand the
+  // not-yet-visited temporary/abstract locators of the same response.
+  // -------------------------------------------------------------------------
+  group('DW-132: a failed materialize pass sweeps unvisited temp locators', () {
+    test('multi-row abstract LOBs: the Nth read fails, ALL are queued once, '
+        'a plain locator is not', () async {
+      // Row 1 reads fine; row 2's read returns no data and throws; rows 3-4
+      // are never visited by the loop.
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([7]), amount: 1),
+      ]);
+      final rows = <List<Object?>>[
+        for (var i = 1; i <= 3; i++)
+          [_fetchedAbstractLocator(oracleType: oraTypeBlob, length: 1, tag: i)],
+        [_fetchedPlainLocator(oracleType: oraTypeBlob, length: 1)],
+      ];
+      await expectLater(
+        t.materializeLobs(ExecuteResponse(isSuccess: true, rows: rows)),
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.requests, hasLength(2), reason: 'rows 3-4 are never read');
+      expect(
+        t.debugPendingTempLobCount,
+        equals(3),
+        reason: 'three abstract LOBs queued exactly once; plain one skipped',
+      );
+    });
+
+    test(
+      'a second OUT LOB after an oversized first one is queued too',
+      () async {
+        final t = _ChunkedReadTransport([]);
+        final first = _fetchedTempLocator(
+          oracleType: oraTypeBlob,
+          length: 5,
+          tag: 1,
+        );
+        final second = _fetchedTempLocator(
+          oracleType: oraTypeBlob,
+          length: 1,
+          tag: 2,
+        );
+        await expectLater(
+          t.materializeLobs(
+            ExecuteResponse(
+              isSuccess: true,
+              outBindValues: [first, second],
+              outBindIndices: const [0, 1],
+            ),
+            bindMetadata: const [
+              BindMetadata(
+                oraType: oraTypeBlob,
+                dir: BindDir.output,
+                maxSize: 1,
+              ),
+              BindMetadata(
+                oraType: oraTypeBlob,
+                dir: BindDir.output,
+                maxSize: 1,
+              ),
+            ],
+          ),
+          throwsA(isA<OracleException>()),
+        );
+        expect(t.requests, isEmpty);
+        expect(t.debugPendingTempLobCount, equals(2));
+        expect(t.debugTempLobSkippedDuplicateCount, equals(0));
+      },
+    );
+
+    test('an OUT-bind index misalignment queues every temp locator', () async {
+      final t = _ChunkedReadTransport([]);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            outBindValues: [
+              _fetchedTempLocator(oracleType: oraTypeBlob, length: 1, tag: 1),
+              _fetchedTempLocator(oracleType: oraTypeBlob, length: 1, tag: 2),
+            ],
+            outBindIndices: const [],
+          ),
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeBlob, dir: BindDir.output, maxSize: 9),
+          ],
+        ),
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.debugPendingTempLobCount, equals(2));
+    });
+
+    test('executeMany / DML RETURNING cells are swept as well', () async {
+      final t = _ChunkedReadTransport([]);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            outBindRows: [
+              [
+                [
+                  _fetchedTempLocator(
+                    oracleType: oraTypeBlob,
+                    length: 5,
+                    tag: 1,
+                  ),
+                  _fetchedTempLocator(
+                    oracleType: oraTypeBlob,
+                    length: 1,
+                    tag: 2,
+                  ),
+                ],
+              ],
+            ],
+            outBindIndices: const [0],
+          ),
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeBlob, dir: BindDir.output, maxSize: 1),
+          ],
+          dmlReturning: true,
+        ),
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.debugPendingTempLobCount, equals(2));
+    });
+
+    test('a locator owned by an open handle is not swept', () async {
+      final t = _ChunkedReadTransport([]);
+      final owned = _fetchedTempLocator(oracleType: oraTypeBlob, length: 1);
+      t.claimTempLobOwnership(owned.locator);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            outBindValues: [owned],
+            outBindIndices: const [],
+          ),
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeBlob, dir: BindDir.output, maxSize: 9),
+          ],
+        ),
+        throwsA(isA<OracleException>()),
+      );
+      expect(t.debugPendingTempLobCount, equals(0));
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // DW-129 — two DISTINCT open handles for ONE temporary identity.
   //
   // MEASURED on 23ai AND 21c: a `createTemporaryClob()` handle bound as a plain

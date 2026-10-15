@@ -2329,8 +2329,69 @@ class Transport {
   /// read still fails the whole operation rather than returning a half-populated
   /// result — but the bracket that holds the connection is the caller's, and on
   /// the streaming path the enclosing round trip is a FETCH, not an execute.
+  ///
+  /// DW-132 — when materialization throws on the materialize path
+  /// (`wrapLob == null`: the maxSize guards, a failed read, a BLOB IS JSON
+  /// decode failure, an OUT-bind index misalignment), every temporary locator
+  /// in [response] that was not yet visited is queued for free before the
+  /// exception propagates. They are discarded with the response, so nothing
+  /// else can ever free them. The sweep goes through
+  /// [_queueMaterializedTempLobToFree], so it stays ownership-aware and
+  /// deduped. Under `fetchLobs` the handles own their locators and nothing is
+  /// swept.
   Future<ExecuteResponse> _materializeLobValues(
     ExecuteResponse response, {
+    List<BindMetadata>? bindMetadata,
+    List<ColumnMetadata>? columns,
+    bool dmlReturning = false,
+    Duration? timeout,
+    Object Function(LobLocator locator)? wrapLob,
+    bool rawJsonBlobs = false,
+  }) async {
+    final visited = <LobLocator>{};
+    try {
+      return await _materializeLobValuesInner(
+        response,
+        visited,
+        bindMetadata: bindMetadata,
+        columns: columns,
+        dmlReturning: dmlReturning,
+        timeout: timeout,
+        wrapLob: wrapLob,
+        rawJsonBlobs: rawJsonBlobs,
+      );
+    } catch (_) {
+      if (wrapLob == null) _sweepUnvisitedTempLobs(response, visited);
+      rethrow;
+    }
+  }
+
+  /// DW-132 sweep: queues every temporary [LobLocator] reachable from
+  /// [response] (rows, OUT binds, executeMany OUT rows, DML RETURNING cells)
+  /// that [visited] does not contain. A visited locator was already queued by
+  /// the read's `finally` or by `rejectOversized`.
+  void _sweepUnvisitedTempLobs(
+    ExecuteResponse response,
+    Set<LobLocator> visited,
+  ) {
+    void sweep(Object? value) {
+      if (value is LobLocator) {
+        if (value.isTemporary && visited.add(value)) {
+          _queueMaterializedTempLobToFree(value.locator);
+        }
+      } else if (value is List) {
+        value.forEach(sweep);
+      }
+    }
+
+    response.rows.forEach(sweep);
+    response.outBindValues.forEach(sweep);
+    response.outBindRows.forEach(sweep);
+  }
+
+  Future<ExecuteResponse> _materializeLobValuesInner(
+    ExecuteResponse response,
+    Set<LobLocator> visited, {
     List<BindMetadata>? bindMetadata,
     List<ColumnMetadata>? columns,
     bool dmlReturning = false,
@@ -2364,6 +2425,7 @@ class Transport {
     Future<Object> readLocator(LobLocator locator) async {
       final existing = materialized[locator];
       if (existing != null) return existing;
+      visited.add(locator);
       final Object value;
       if (wrapLob != null) {
         // fetchLobs: true — the handle owns the locator and frees it itself on
@@ -2493,7 +2555,7 @@ class Transport {
     // the wrap path), so the materialize path is the owner, exactly as for a
     // read that fails.
     OracleException rejectOversized(LobLocator value, OracleException error) {
-      if (value.isTemporary && !materialized.containsKey(value)) {
+      if (value.isTemporary && visited.add(value)) {
         _queueMaterializedTempLobToFree(value.locator);
       }
       return error;
