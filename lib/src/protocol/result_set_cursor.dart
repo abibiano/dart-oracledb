@@ -48,9 +48,10 @@ class ResultSetCursor {
   /// over the fully-drained result (the eager `execute()` path, preserving
   /// result-wide locator dedup).
   ///
-  /// When [requiresFullExecute] is true, the FIRST fetch round is issued as a
-  /// full EXECUTE (OAL8) on the open cursor id rather than a plain OFETCH; every
-  /// continuation round is a plain OFETCH. This is node-oracledb's
+  /// When [requiresFullExecute] is true, the first row-bearing fetch round is
+  /// issued as a full EXECUTE (OAL8) on the open cursor id rather than a plain
+  /// OFETCH; continuation rounds are plain OFETCH. Empty rounds that report
+  /// more rows pending retain the requirement. This is node-oracledb's
   /// `requiresFullExecute` (`reference/node-oracledb/lib/thin/resultSet.js`,
   /// set by `withData.js createCursorFromDescribe`): a describe-created cursor
   /// whose rows carry nested `CURSOR()` (Oracle type 102) columns needs it on
@@ -61,8 +62,9 @@ class ResultSetCursor {
   /// "S0 RECONCILIATION".
   ///
   /// When [requiresDefine] is true, the FIRST fetch round is a DEFINE call
-  /// (`Transport.defineCursor`) instead of an OFETCH or a full EXECUTE; every
-  /// later round is a plain OFETCH. This is node-oracledb's `requiresDefine`
+  /// (`Transport.defineCursor`) instead of an OFETCH or a full EXECUTE; later
+  /// rounds use the full EXECUTE when a nested describe remains pending, then
+  /// plain OFETCH. This is node-oracledb's `requiresDefine`
   /// for a describe-created cursor carrying a CLOB / NCLOB / BLOB / JSON column
   /// (`withData.js` `postProcess`): the defines announce the LOB-prefetch
   /// shape, without which the server ships those values as bare locators the
@@ -215,11 +217,10 @@ class ResultSetCursor {
   /// fetched so far. Once false, no further FETCH is ever issued.
   bool _serverHasMoreRows;
 
-  /// Whether the FIRST fetch must be a full EXECUTE (OAL8) instead of a plain
-  /// OFETCH. Cleared after that first fetch — continuation rounds always OFETCH
-  /// (node-oracledb clears `requiresFullExecute` after `_fetchMoreRows` picks
-  /// the ExecuteMessage once). See the constructor doc and CHANGE 1 in
-  /// `spec-nested-cursor-materialization.md` "S0 RECONCILIATION".
+  /// Whether a nested describe still requires a full EXECUTE (OAL8) instead of
+  /// OFETCH. Retained through empty responses that report more rows pending;
+  /// cleared when rows arrive or the cursor ends. See the constructor doc and
+  /// CHANGE 1 in `spec-nested-cursor-materialization.md` "S0 RECONCILIATION".
   bool _requiresFullExecute;
 
   /// Whether the FIRST fetch must be a DEFINE call (node-oracledb
@@ -485,17 +486,17 @@ class ResultSetCursor {
     // true, cursorId: nonzero)`. Because no SQL travels, that OAL8 carries the
     // FETCH option but NOT the EXECUTE/PARSE bits (node-oracledb gates EXECUTE on
     // `stmt.sql`; see ExecuteRequest.encode's `hasSql` branch), which is exactly
-    // the describe-created-cursor first fetch node sends. Continuation rounds use
-    // plain OFETCH (we clear the flag below, matching node-oracledb clearing
-    // `requiresFullExecute` after the first `_fetchMoreRows`). The full-EXECUTE
-    // ExecuteResponse has the same shape (rows + moreRowsToFetch) as a fetch
-    // response, so all downstream handling is identical. 23ai is tolerant
-    // (inline describe even on OFETCH). See
+    // the describe-created-cursor first fetch node sends. Continuation rounds
+    // use plain OFETCH once a row-bearing response has supplied the describe.
+    // Empty responses with more pending retain the full-EXECUTE requirement.
+    // The full-EXECUTE response has the same shape (rows + moreRowsToFetch) as
+    // a fetch response, so all downstream handling is identical. 23ai accepts
+    // OFETCH here (it carries the inline describe). See
     // `spec-nested-cursor-materialization.md` "S0 RECONCILIATION".
     //
-    // Pre-23 note: only the FIRST fetch is a full EXECUTE. A LOB-carrying outer
-    // cursor with nested `CURSOR()` columns returning MORE rows than
-    // `prefetchRows` was verified live on 21c and 23ai (implicit result, 60 rows
+    // Pre-23 note: after the first row-bearing round, continuation uses OFETCH.
+    // A LOB-carrying outer cursor with nested `CURSOR()` columns returning more
+    // rows than `prefetchRows` was verified live on 21c and 23ai (60 rows
     // over a 50-row prefetch): the DEFINE round delivers the first batch and
     // continuation OFETCH rounds still decode the nested cursors.
     //
@@ -504,6 +505,9 @@ class ResultSetCursor {
     // 23ai and 21c, its response already carries the first batch (up to
     // `prefetchRows` rows) and an accurate end-of-fetch, exactly like the
     // top-level LOB query's define in `Transport.sendExecute`.
+    // Remember whether this fetch owes a nested describe: a zero-row DEFINE
+    // answer still owes the round that actually delivers rows (DW-125).
+    final nestedDescribePending = _requiresFullExecute;
     var fetched = _requiresDefine
         ? await _transport.defineCursor(
             _cursorId,
@@ -530,26 +534,49 @@ class ResultSetCursor {
             preserveTimestampTimeZone: _preserveTimestampTimeZone,
             previousRoundLastRow: _previousRoundLastRow,
           );
-    _requiresFullExecute = false; // first fetch only; continuation uses OFETCH
     if (_requiresDefine) {
       _requiresDefine = false; // once: the defines persist on the cursor
       // Defensive: should a server answer the DEFINE without rows yet report
       // more pending (node-oracledb's `noPrefetch` reading of the call), fetch
       // them now. A zero-row batch here would otherwise read as end-of-data to
       // `nextRowData` and silently drop the whole result.
+      //
+      // DW-125: when the cursor also carries nested `CURSOR()` columns, that
+      // round is the first one to deliver rows, so on 21c it must be the full
+      // EXECUTE that ships each nested value's describe inline (a plain OFETCH
+      // yields the id-only value the decoder shears on). Without nested cursor
+      // columns a plain OFETCH is enough.
       if (fetched.isSuccess &&
           fetched.rows.isEmpty &&
           fetched.moreRowsToFetch) {
-        fetched = await _transport.fetchRows(
-          _cursorId,
-          _prefetchRows,
-          columns: _columns,
-          timeout: _fetchTimeout,
-          preserveTimestampTimeZone: _preserveTimestampTimeZone,
-          previousRoundLastRow: _previousRoundLastRow,
-        );
+        fetched = nestedDescribePending
+            ? await _transport.sendExecute(
+                '',
+                isQuery: true,
+                cursorId: _cursorId,
+                expectedColumns: _columns,
+                prefetchRows: _prefetchRows,
+                timeout: _fetchTimeout,
+                preserveTimestampTimeZone: _preserveTimestampTimeZone,
+              )
+            : await _transport.fetchRows(
+                _cursorId,
+                _prefetchRows,
+                columns: _columns,
+                timeout: _fetchTimeout,
+                preserveTimestampTimeZone: _preserveTimestampTimeZone,
+                previousRoundLastRow: _previousRoundLastRow,
+              );
       }
     }
+    // The first response that carries rows supplies the nested describe. If
+    // DEFINE and one or more full EXECUTEs are empty while reporting more,
+    // keep using full EXECUTE until a row-bearing or final response arrives.
+    _requiresFullExecute =
+        nestedDescribePending &&
+        fetched.isSuccess &&
+        fetched.rows.isEmpty &&
+        fetched.moreRowsToFetch;
     if (!fetched.isSuccess) {
       _fetchFailure = fetched;
       _failed = true;

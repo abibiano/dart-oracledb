@@ -943,14 +943,18 @@ location: lib/src/protocol/result_set_cursor.dart:466
 source_spec: `spec-refcursor-lob-json-define.md`
 severity: medium
 reason: ResultSetCursor uses full EXECUTE or DEFINE only on the first fetch and OFETCH for continuation. The existing comment at lib/src/protocol/result_set_cursor.dart describes id-only nested cursor values on 21c continuation. The new tests verify multi-batch inner LOB rows, but the outer cursor has one row; this limitation predates this change and needs an independent protocol fix.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-nested-cursor-continuation-proof
+resolution-undo: c3d2a01ce0555fc75f146daa20b764c441935cfdf13fa4929117238b7b96a4b2 2026-10-15 7374617475733a206f70656e
 
 ### DW-125: A no-row DEFINE response for a cursor with both LOB and nested cursor columns may fall back to OFETCH without the nested describe on Oracle 21c.
 origin: spec-deferred dcbbadeeba7c
 location: lib/src/protocol/result_set_cursor.dart:507
 source_spec: `spec-refcursor-lob-json-define.md`
 reason: ResultSetCursor._fetchNextBatch falls back to fetchRows when DEFINE returns zero rows with moreRowsToFetch, after clearing requiresFullExecute. A test transport that produces this response, or a reproducible Oracle server response, is needed to determine whether the nested cursor value then lacks its describe. The live combined-shape cases returned rows in the DEFINE response and passed.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-nested-cursor-continuation-proof
+resolution-undo: c3d2a01ce0555fc75f146daa20b764c441935cfdf13fa4929117238b7b96a4b2 2026-10-15 7374617475733a206f70656e
 
 ### DW-126: queryStream()/executeStream()/executeMany() have no way to opt out of BLOB IS JSON decode, and the decode error hint names options those entry points cannot take.
 origin: spec-deferred 2ec3429dcef9

@@ -252,6 +252,78 @@ void main() {
         expect(next.rows.single['V'], equals(2));
       });
 
+      // DW-124: an outer describe-created cursor with MORE rows than the
+      // prefetch batch, every row carrying a nested CURSOR() column. Rows past
+      // the first batch arrive on continuation rounds, which must still decode
+      // the nested cursor value (21c ships its describe inline only on a full
+      // EXECUTE). Covered with and without a LOB column (DEFINE vs full EXECUTE
+      // first fetch) and across the REF CURSOR, nested and resultSet shapes.
+      for (final withLob in [false, true]) {
+        test('multi-batch outer cursor with a nested CURSOR() column '
+            '(${withLob ? 'with' : 'without'} a LOB column)', () async {
+          await connection.execute(
+            'INSERT INTO $table (id, c, n, b) '
+            "SELECT level + 1, TO_CLOB('later'), TO_NCLOB('later'), "
+            "UTL_RAW.CAST_TO_RAW('more') FROM dual CONNECT BY level <= 119",
+          );
+          final lobCol = withLob ? ', t.c' : '';
+          final innerSql =
+              'SELECT t.id$lobCol, '
+              'CURSOR(SELECT s.id FROM $table s WHERE s.id = t.id) AS deep '
+              'FROM $table t ORDER BY t.id';
+
+          void expectAll(List<OracleRow> rows) {
+            expect(rows, hasLength(120));
+            for (var i = 0; i < rows.length; i++) {
+              expect(rows[i]['ID'], equals(i + 1), reason: 'row $i');
+              if (withLob) {
+                expect(
+                  rows[i]['C'],
+                  equals(i == 0 ? 'hello clob' : 'later'),
+                  reason: 'row $i',
+                );
+              }
+              final deep = rows[i]['DEEP'] as List<OracleRow>;
+              expect(deep, hasLength(1), reason: 'row $i');
+              expect(deep.single['ID'], equals(i + 1), reason: 'row $i');
+            }
+          }
+
+          final proc = uniqueObjectName('pcurnest');
+          await connection.execute(
+            'CREATE OR REPLACE PROCEDURE $proc (rc OUT SYS_REFCURSOR) IS '
+            'BEGIN OPEN rc FOR $innerSql; END;',
+          );
+          try {
+            final refResult = await connection.execute(
+              'BEGIN $proc(:c); END;',
+              {'c': OracleBind.out(type: OracleDbType.cursor)},
+            );
+            final rs = refResult.outBinds['c'] as OracleResultSet;
+            final refRows = await rs.getRows();
+            await rs.close();
+            expectAll(refRows);
+          } finally {
+            await connection.execute('DROP PROCEDURE $proc');
+          }
+
+          final result = await connection.execute(
+            'SELECT CURSOR($innerSql) AS n FROM $outer',
+          );
+          expectAll(result.rows.single['N'] as List<OracleRow>);
+
+          final streamed = await connection.openResultSet(
+            'SELECT CURSOR($innerSql) AS n FROM $outer',
+          );
+          final outerRow = await streamed.getRow();
+          expectAll(outerRow!['N'] as List<OracleRow>);
+          await streamed.close();
+
+          final next = await connection.execute('SELECT 2 AS v FROM dual');
+          expect(next.rows.single['V'], equals(2));
+        });
+      }
+
       test('fetchLobs: true still rejects a cursor-embedded LOB and the '
           'connection stays usable', () async {
         await expectLater(
