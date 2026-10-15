@@ -98,6 +98,14 @@ void main() {
       expect(vectorFormatInt8, equals(4));
       expect(vectorFormatBinary, equals(5));
     });
+
+    test('recognised-but-unsupported types match node-oracledb '
+        '(Story 15.5)', () {
+      // TNS_DATA_TYPE_INT_NAMED (XMLTYPE, ANYDATA, objects, collections) and
+      // TNS_DATA_TYPE_BOOLEAN (constants.js): both fail loud on decode.
+      expect(oraTypeIntNamed, equals(109));
+      expect(oraTypeBoolean, equals(252));
+    });
   });
 
   group('Protocol Capability Flags', () {

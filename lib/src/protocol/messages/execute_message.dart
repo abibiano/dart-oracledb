@@ -1619,8 +1619,9 @@ bool ttcStreamIsComplete(
     endOfRequestSupport: endOfRequestSupport,
     arrayDmlRowCounts: dmlRowCounts,
     // The probe only needs to locate the terminal message; decode unsupported
-    // types leniently here so an unsupported LONG column cannot make the probe
-    // throw (the real decode pass raises the clear error).
+    // types leniently here so an unsupported column (LONG, BOOLEAN, an object
+    // type, an unrecognised wire type) cannot make the probe throw (the real
+    // decode pass raises the clear error).
     strictTypes: false,
     // Byte accuracy requires the probe to consume EVERY per-iteration OUT
     // ROW_DATA on a PL/SQL executeMany response, not just the first.
@@ -1810,11 +1811,12 @@ class _DecodeState {
   final bool preserveTimestampTimeZone;
 
   /// When true (the real [decodeExecuteResponse] pass), decoding an
-  /// unsupported column/bind type — currently LONG and LONG RAW — raises a
-  /// clear [OracleException]. When false (the [ttcStreamIsComplete]
-  /// completion probe), the same bytes are consumed leniently so the probe can
-  /// still locate the terminal message; the real decode pass surfaces the
-  /// unsupported error afterwards.
+  /// unsupported column/bind type — LONG, LONG RAW, BFILE, SQL BOOLEAN,
+  /// object types, and any wire type the decoder does not recognise — raises
+  /// a clear [OracleException] ([oraUnsupportedType]). When false (the
+  /// [ttcStreamIsComplete] completion probe), the same bytes are consumed
+  /// leniently so the probe can still locate the terminal message; the real
+  /// decode pass surfaces the unsupported error afterwards.
   final bool strictTypes;
   final List<BindMetadata> bindMetadata;
   final List<int> outBindIndices = [];
@@ -2302,6 +2304,14 @@ List<Object?> _decodeReturningRow(ReadBuffer buf, _DecodeState s) {
 /// by it: a ROWID / UROWID column arrives in its binary fetch shape while a
 /// returned one is VARCHAR text, and a cursor column with server cursor id 0
 /// is a NULL nested cursor while an OUT cursor bind with id 0 is an error.
+///
+/// Fail loud, never a silent `null` (Epic 15): a known type decodes; a
+/// recognised-but-unsupported type (LONG / LONG RAW, BFILE, SQL BOOLEAN,
+/// object types) and any wire type this switch does not recognise raise
+/// [OracleException] ([oraUnsupportedType]) in the [strict] pass, naming the
+/// numeric type but never the value. With [strict] false (the completion
+/// probe) such values are only consumed, so the probe can still reach the
+/// terminal message before the strict pass raises.
 Object? _decodeValueByOraType(
   ReadBuffer buf,
   int oraType, {
@@ -2619,10 +2629,66 @@ Object? _decodeValueByOraType(
         );
       }
       return DecodedCursorResult(columns: describe.columns, cursorId: cursorId);
+    case oraTypeIntNamed:
+      // Object types (XMLTYPE, ANYDATA, user-defined objects, collections)
+      // are recognised but not supported: fail loud in the strict pass. The
+      // value is NOT one length-prefixed field, so the completion probe walks
+      // the object image (node-oracledb `readDbObject`) — the generic
+      // catch-all read below shears the stream on it (measured before this
+      // case existed: ORA-12547 "Unknown TTC message type" on 23ai and 21c,
+      // and a poisoned transport on 21c, where every response goes through
+      // the probe).
+      if (strict) throw _unsupportedTypeException(oraType);
+      _skipDbObject(buf);
+      return null;
     default:
+      // Fail loud (Epic 15): a wire type this driver does not decode must
+      // never surface as a silent `null`. The strict (real) pass throws
+      // before reading the value — a NULL of an unsupported type fails the
+      // same way, as its null shape is not knowable either. The lenient
+      // completion probe still consumes the bytes as the length-prefixed
+      // field most scalar types use (SQL BOOLEAN included) so it can reach
+      // the terminal message and the strict pass can raise this error with
+      // the stream in sync.
+      if (strict) throw _unsupportedTypeException(oraType);
       buf.readBytesWithLength();
       return null;
   }
+}
+
+/// The fail-loud error for a value of wire type [oraType] that
+/// [_decodeValueByOraType] does not decode. Names the numeric type (and, for
+/// a recognised-but-unsupported type, what it is), never the value.
+OracleException _unsupportedTypeException(int oraType) {
+  final kind = switch (oraType) {
+    oraTypeBoolean => ' (BOOLEAN)',
+    oraTypeIntNamed =>
+      ' (an object type: XMLTYPE, ANYDATA, a user-defined object or a '
+          'collection)',
+    _ => '',
+  };
+  return OracleException(
+    errorCode: oraUnsupportedType,
+    message:
+        'Unsupported Oracle data type $oraType$kind: this driver cannot '
+        'decode its values. Convert it to a supported type in SQL (for '
+        'example TO_CHAR(...), or XMLSERIALIZE(...) for XMLTYPE).',
+  );
+}
+
+/// Consumes one object-type value (node-oracledb `readDbObject`) without
+/// decoding it: UB4 TOID length (then the TOID when > 0), UB4 OID length
+/// (then the OID), UB4 snapshot length (then the snapshot), UB2 version, UB4
+/// packed-data length, UB2 flags, then the packed data when its length > 0.
+/// A NULL object carries the same fields with zero lengths.
+void _skipDbObject(ReadBuffer buf) {
+  if (buf.readUB4() > 0) buf.skipBytesChunked(); // TOID
+  if (buf.readUB4() > 0) buf.skipBytesChunked(); // OID
+  if (buf.readUB4() > 0) buf.skipBytesChunked(); // snapshot
+  buf.skipUB2(); // version
+  final packedLength = buf.readUB4();
+  buf.skipUB2(); // flags
+  if (packedLength > 0) buf.skipBytesChunked(); // packed data
 }
 
 /// Outcome of reading one embedded cursor-describe block: the decoded

@@ -228,7 +228,7 @@ development_status:
   15-2-interval-year-to-month: done
   15-3-rowid-urowid: done
   15-4-vector: done
-  15-5-dual-env-integration-tests: backlog
+  15-5-dual-env-integration-tests: done
   epic-15-retrospective: optional
 
 # ==========================================================================

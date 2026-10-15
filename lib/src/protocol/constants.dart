@@ -223,6 +223,21 @@ const int oraTypeChar = 96;
 /// for OUT binds. Buffer-size factor = 4 (node-oracledb DB_TYPE_CURSOR).
 const int oraTypeCursor = 102;
 
+/// Named (object) type (node-oracledb `TNS_DATA_TYPE_INT_NAMED`): `XMLTYPE`,
+/// `ANYDATA`, user-defined object types and collections (VARRAY / nested
+/// table) all describe as this code. Recognised but NOT supported: a value of
+/// this type fails loud with [oraUnsupportedType]. Its wire value is a
+/// multi-field object image (node-oracledb `readDbObject`), not a single
+/// length-prefixed field, which the lenient completion probe walks so the
+/// response stream stays in sync.
+const int oraTypeIntNamed = 109;
+
+/// SQL `BOOLEAN` data type (Oracle 23ai; node-oracledb
+/// `TNS_DATA_TYPE_BOOLEAN`). Recognised but NOT decoded by this driver: a
+/// value of this type fails loud with [oraUnsupportedType] instead of
+/// decoding to a silent `null`.
+const int oraTypeBoolean = 252;
+
 /// BINARY_FLOAT data type (4-byte IEEE 754, byte-comparable form).
 const int oraTypeBinaryFloat = 100;
 

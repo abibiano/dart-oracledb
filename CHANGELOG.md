@@ -217,6 +217,26 @@
   CLOB are not supported. Deviation from node-oracledb: a sparse `BINARY`
   vector decodes (one byte per listed dimension, the form the server stores)
   where node-oracledb fails.
+- **Behavior change: column types the driver cannot decode fail loud.** The
+  decoder used to consume a value of an unknown type and return `null`
+  silently. Fetching such a column now throws `OracleException`
+  (`oraUnsupportedType`, ORA-03115) naming the Oracle type code, never the
+  value, and the connection stays usable. This affects SQL `BOOLEAN` on
+  Oracle 23ai (type 252; previously a silent `null`, `NULL` included), object
+  types — `XMLTYPE`, `ANYDATA`, user-defined objects and collections (type
+  109; previously a sheared stream failing with ORA-12547 "Unknown TTC message
+  type", which on Oracle 21c also poisoned the connection) — and any
+  unrecognised type code. INTERVAL DAY TO SECOND, INTERVAL YEAR TO MONTH,
+  ROWID / UROWID and VECTOR, which used to decode silently to `null`, now
+  decode (entries above). A query that returns no rows does not raise.
+  Convert such a column in SQL to fetch it, e.g.
+  `XMLSERIALIZE(CONTENT x AS CLOB)` or `TO_CHAR(b)`. `BFILE` keeps its
+  existing fail-loud error; so do `LONG` / `LONG RAW` on Oracle 23ai, while on
+  Oracle 21c a `LONG` column currently times out (ORA-12170) instead
+  (pre-existing, known limitation). Validated against Oracle
+  23ai and Oracle 21c, alongside a cross-type suite that fetches, binds,
+  returns and cursor-embeds every new type in the same rows (VECTOR on 23ai
+  only; on 21c those cases skip with the ORA-00902 reason).
 
 ## 1.5.0
 

@@ -8054,6 +8054,299 @@ void main() {
       expect(result.columns.first.maxLength, equals(8200));
     });
   });
+
+  // Story 15.5: the decode-by-type catch-all no longer consumes an
+  // unrecognised value and returns a silent null. The strict (real) pass
+  // raises oraUnsupportedType naming the numeric type, never the value; the
+  // lenient completion probe still consumes the bytes so it reaches the
+  // terminal message with the stream in sync.
+  group('unrecognised wire types fail loud (Story 15.5)', () {
+    const secret = 'secret-cell-value';
+    const n5 = ColumnMetadata(
+      name: 'N',
+      oracleType: oraTypeNumber,
+      maxLength: 0,
+    );
+
+    ColumnMetadata column(int oraType) =>
+        ColumnMetadata(name: 'X', oracleType: oraType, maxLength: 20);
+
+    List<int> endOfFetch() => [
+      ..._errorMessage(errorNum: 1403),
+      ttcMsgTypeStatus,
+      ..._ub4(0),
+      ..._ub2(0),
+    ];
+
+    /// Two rows of `[value, 5]`: the second proves the probe is still
+    /// byte-aligned after the first unrecognised value.
+    Uint8List twoRows(List<int> value) => _buildPayload([
+      _rowHeader(),
+      [
+        ttcMsgTypeRowData,
+        ...value,
+        ..._bytesWithLength(_oracleNumberFiveBytes()),
+      ],
+      [
+        ttcMsgTypeRowData,
+        ...value,
+        ..._bytesWithLength(_oracleNumberFiveBytes()),
+      ],
+      endOfFetch(),
+    ]);
+
+    Matcher unsupported(int oraType, {String? naming}) => throwsA(
+      isA<OracleException>()
+          .having((e) => e.errorCode, 'errorCode', oraUnsupportedType)
+          .having(
+            (e) => e.message,
+            'message',
+            allOf([
+              contains('data type $oraType'),
+              if (naming != null) contains(naming),
+              isNot(contains(secret)),
+            ]),
+          ),
+    );
+
+    // Codes no case of `_decodeValueByOraType` handles: SQL BOOLEAN (23ai),
+    // codes the data type negotiation maps elsewhere (7 PDN, 233 UB8), the
+    // REF code (111) and codes Oracle never assigns.
+    const unrecognised = [oraTypeBoolean, 0, 7, 99, 111, 233, 255];
+
+    for (final oraType in unrecognised) {
+      test('a type-$oraType column fails loud in the strict pass without '
+          'echoing the value; the probe stays in sync', () {
+        final payload = twoRows(_bytesWithLength(utf8.encode(secret)));
+        final columns = [column(oraType), n5];
+        expect(
+          () => decodeExecuteResponse(
+            payload,
+            isQuery: true,
+            expectedColumns: columns,
+          ),
+          unsupported(
+            oraType,
+            naming: oraType == oraTypeBoolean ? 'BOOLEAN' : null,
+          ),
+        );
+        expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+      });
+    }
+
+    test('a query returning no rows does not raise: the describe alone '
+        'carries no value to decode', () {
+      for (final oraType in [oraTypeBoolean, oraTypeIntNamed, 99]) {
+        final payload = _buildPayload([
+          _describeInfo([
+            _columnInfo(name: 'X', oraType: oraType, maxSize: 20),
+            _columnInfo(name: 'N', oraType: oraTypeNumber, maxSize: 22),
+          ]),
+          endOfFetch(),
+        ]);
+        final r = decodeExecuteResponse(payload, isQuery: true);
+        expect(r.isSuccess, isTrue, reason: 'type $oraType');
+        expect(r.rows, isEmpty, reason: 'type $oraType');
+        expect(r.columnMetadata.first.oracleType, equals(oraType));
+        expect(ttcStreamIsComplete(payload), isTrue, reason: 'type $oraType');
+      }
+    });
+
+    test('a NULL of an unrecognised type fails loud too (no silent null)', () {
+      // The null shape of an unknown type is not knowable, so the strict pass
+      // throws before reading; the probe consumes the zero length.
+      final payload = twoRows([0]);
+      final columns = [column(99), n5];
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: columns,
+        ),
+        unsupported(99),
+      );
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+    });
+
+    test('the probe consumes a long (chunked) unrecognised value and needs '
+        'more packets for a truncated one', () {
+      final long = List<int>.generate(600, (i) => i % 251);
+      final chunked = [
+        0xFE,
+        ..._ub4(300),
+        ...long.sublist(0, 300),
+        ..._ub4(300),
+        ...long.sublist(300),
+        0,
+      ];
+      final columns = [column(99), n5];
+      final payload = twoRows(chunked);
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: columns,
+        ),
+        unsupported(99),
+      );
+      final truncated = _buildPayload([
+        _rowHeader(),
+        [ttcMsgTypeRowData, ...chunked.sublist(0, 200)],
+      ]);
+      expect(ttcStreamIsComplete(truncated, expectedColumns: columns), isFalse);
+    });
+
+    test('an unrecognised type after known columns fails the row and the '
+        'probe stays in sync', () {
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._bytesWithLength(utf8.encode('text')),
+          ..._bytesWithLength([1]),
+        ],
+        endOfFetch(),
+      ]);
+      final columns = [
+        n5,
+        const ColumnMetadata(
+          name: 'S',
+          oracleType: oraTypeVarchar,
+          maxLength: 10,
+        ),
+        column(oraTypeBoolean),
+      ];
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: columns,
+        ),
+        unsupported(oraTypeBoolean, naming: 'BOOLEAN'),
+      );
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+    });
+
+    test('an unrecognised OUT bind type fails loud; the probe consumes the '
+        'value and its SB4 trailer', () {
+      final payload = _buildPayload([
+        _ioVector([tnsBindDirOutput, tnsBindDirOutput]),
+        [
+          ttcMsgTypeRowData,
+          ..._bytesWithLength(utf8.encode(secret)),
+          ..._ub4(0), // SB4 actualNumBytes trailer
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ..._ub4(0),
+        ],
+        _errorMessage(errorNum: 0),
+        [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
+      ]);
+      const bindMetadata = [
+        BindMetadata(oraType: 99, dir: BindDir.output),
+        BindMetadata(oraType: oraTypeNumber, dir: BindDir.output),
+      ];
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: false,
+          bindMetadata: bindMetadata,
+        ),
+        unsupported(99),
+      );
+      expect(ttcStreamIsComplete(payload, bindMetadata: bindMetadata), isTrue);
+    });
+
+    test('an object-type (109) column fails loud; the probe walks the '
+        'object image, NULL and chunked packed data included', () {
+      // node-oracledb readDbObject: UB4 TOID length + TOID, UB4 OID length
+      // (+ OID), UB4 snapshot length (+ snapshot), UB2 version, UB4 packed
+      // length, UB2 flags, packed data.
+      final toid = List<int>.generate(16, (i) => 0xA0 + i);
+      List<int> object(List<int> packed) => [
+        ..._ub4(toid.length),
+        ..._bytesWithLength(toid),
+        ..._ub4(0), // no OID
+        ..._ub4(0), // no snapshot
+        ..._ub2(1), // version
+        ..._ub4(packed.length),
+        ..._ub2(0x0B), // flags
+        if (packed.length < 0xFE)
+          ..._bytesWithLength(packed)
+        else ...[
+          0xFE,
+          ..._ub4(packed.length),
+          ...packed,
+          0,
+        ],
+      ];
+      // A NULL object: every length zero.
+      final nullObject = [0, 0, 0, 0, 0, 0];
+      final packed = utf8.encode('<$secret/>');
+      final big = List<int>.generate(400, (i) => i % 7);
+      final payload = _buildPayload([
+        _rowHeader(),
+        for (final value in [object(packed), nullObject, object(big)])
+          [
+            ttcMsgTypeRowData,
+            ...value,
+            ..._bytesWithLength(_oracleNumberFiveBytes()),
+          ],
+        endOfFetch(),
+      ]);
+      final columns = [column(oraTypeIntNamed), n5];
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+      expect(
+        () => decodeExecuteResponse(
+          payload,
+          isQuery: true,
+          expectedColumns: columns,
+        ),
+        unsupported(oraTypeIntNamed, naming: 'XMLTYPE'),
+      );
+    });
+
+    test('every decoded type reads a NULL without reaching the catch-all '
+        '(Stories 15.1-15.4 types included)', () {
+      // Each of these decodes a single zero byte as SQL NULL: a zero length
+      // prefix, a zero LOB / JSON / VECTOR locator length, or a zero ROWID /
+      // cursor length byte. A type reaching the fail-loud default would throw.
+      const decoded = [
+        oraTypeVarchar, oraTypeNumber, oraTypeInteger, oraTypeFloat, //
+        oraTypeString, oraTypeVarnum, oraTypeVarchar2, oraTypeRowid,
+        oraTypeDate, oraTypeRaw, oraTypeChar, oraTypeBinaryFloat,
+        oraTypeBinaryDouble, oraTypeCursor, oraTypeURowid, oraTypeClob,
+        oraTypeBlob, oraTypeJson, oraTypeVector, oraTypeTimestamp,
+        oraTypeTimestampTz, oraTypeIntervalYM, oraTypeIntervalDS,
+        oraTypeTimestampLtz,
+      ];
+      final columns = [
+        for (final (i, oraType) in decoded.indexed)
+          ColumnMetadata(name: 'C$i', oracleType: oraType, maxLength: 20),
+        n5,
+      ];
+      final payload = _buildPayload([
+        _rowHeader(),
+        [
+          ttcMsgTypeRowData,
+          ...List<int>.filled(decoded.length, 0),
+          ..._bytesWithLength(_oracleNumberFiveBytes()),
+        ],
+        endOfFetch(),
+      ]);
+      final r = decodeExecuteResponse(
+        payload,
+        isQuery: true,
+        expectedColumns: columns,
+      );
+      expect(
+        r.rows.single,
+        equals([...List<Object?>.filled(decoded.length, null), 5]),
+      );
+      expect(ttcStreamIsComplete(payload, expectedColumns: columns), isTrue);
+    });
+  });
 }
 
 /// Reads only the execute-options word (the UB4 right after the function

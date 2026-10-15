@@ -34,6 +34,7 @@ A pure Dart driver for Oracle Database. It speaks the thin-mode TNS/TTC wire pro
 - **INTERVAL YEAR TO MONTH** — decoded as `OracleIntervalYM` (signed years and months); binds from `OracleIntervalYM`
 - **ROWID / UROWID** — decoded as the rowid's `String` text (`ROWIDTOCHAR` for a physical rowid; an index-organized table's logical rowid starts with `*` and matches `CAST(rowid AS VARCHAR2(4000))`); a fetched rowid binds back as a plain `String` (`WHERE rowid = :1`)
 - **VECTOR (Oracle 23ai)** — dense vectors decode to `Float32List` / `Float64List` / `Int8List` / `Uint8List` (BINARY) by storage format and sparse vectors to `OracleSparseVector`; a `Float32List`, `Float64List`, `Int8List` or `OracleSparseVector` binds as a vector (e.g. for `VECTOR_DISTANCE`), while a `Uint8List` (BINARY) still binds as RAW unless declared `OracleDbType.vector`; see [VECTOR support](#vector-support)
+- **Fail-loud decoding** — a column type the driver cannot decode (23ai `BOOLEAN`, `XMLTYPE` and other object types, any unrecognised type code) raises `OracleException` instead of decoding to a silent `null`; see [Unsupported types fail loud](#unsupported-types-fail-loud)
 - **Dates as strings** — `OracleExecuteOptions(fetchAsString: {...})` returns DATE / TIMESTAMP / TIMESTAMP WITH (LOCAL) TIME ZONE columns as `String` (node-oracledb `fetchAsString` parity; see [Fetching dates and timestamps as strings](#fetching-dates-and-timestamps-as-strings))
 - **Per-column fetch converters** — `OracleExecuteOptions(fetchTypeHandler: ...)` picks a converter per result column (e.g. a NUMBER as `String`, your own date format) applied to every fetched value (node-oracledb `fetchTypeHandler` converter parity; see [Fetch type handlers](#fetch-type-handlers-per-column-converters))
 - **Statement caching** — transparent prepared-statement cache
@@ -660,6 +661,29 @@ final isAlive = await connection.ping();
 | VECTOR (23ai)             | `Float32List` (FLOAT32), `Float64List` (FLOAT64), `Int8List` (INT8), `Uint8List` (BINARY, 8 dimensions per byte), `OracleSparseVector` (sparse); `Float32List` / `Float64List` / `Int8List` / `OracleSparseVector` bind as vectors, a `Uint8List` binds as RAW unless declared `OracleDbType.vector` (see [VECTOR support](#vector-support)) |
 | CURSOR / REF CURSOR       | `OracleResultSet` (OUT bind) / `List<OracleRow>` (nested `CURSOR()` column) — cursor-embedded CLOB/NCLOB/BLOB columns decode as materialized values; `fetchLobs: true` cannot wrap them as handles (see [Result Sets & Streaming](#result-sets--streaming), [Known Limitations](#known-limitations)) |
 | NULL                      | `null`                                                                           |
+
+### Unsupported types fail loud
+
+Every type above decodes; anything else raises an error instead of returning a
+silent `null`. Fetching a column of a type the driver cannot decode throws
+`OracleException` with `oraUnsupportedType` (ORA-03115); the message names the
+Oracle type code, never the value. This covers:
+
+- SQL `BOOLEAN` (Oracle 23ai, type 252), a `NULL` included;
+- object types (type 109): `XMLTYPE`, `ANYDATA`, user-defined objects and
+  collections (`VARRAY`, nested tables);
+- any other type code the driver does not recognise.
+
+The connection stays usable after the error: verified live for object types on
+Oracle 23ai and 21c and for `BOOLEAN` on 23ai (the only server with SQL
+`BOOLEAN`); other unrecognised codes are covered by unit tests only. `BFILE`
+columns fail loud with their own `oraUnsupportedType` message, as before;
+`LONG` / `LONG RAW` columns do too on Oracle 23ai. On Oracle 21c, a `LONG`
+column was observed to time out (ORA-12170) instead (see
+[Known Limitations](#known-limitations)). Convert such a column in SQL to fetch
+it, for example `XMLSERIALIZE(CONTENT x AS CLOB)` for `XMLTYPE`, or
+`TO_CHAR(b)` / `CASE WHEN b THEN 1 ELSE 0 END` for a 23ai `BOOLEAN`. A query
+that returns no rows does not raise, as there is no value to decode.
 
 ### Region-id time zones
 
@@ -1733,6 +1757,7 @@ This package implements a subset of the full Oracle driver feature set. Below is
 | Character set support (`AL32UTF8` + non-`AL32UTF8` databases, national types) | ✅ Done |
 | Bulk DML (`executeMany()` — array DML, RETURNING, bulk PL/SQL, batch errors) | ✅ Done |
 | LOB streaming & temporary LOBs (`OracleLob`, chunked read/write, `textStream`/`byteStream`/`writeStream`, `createTemporary*`) | ✅ Done |
+| Extended data types (INTERVAL DAY TO SECOND / YEAR TO MONTH, ROWID / UROWID, 23ai VECTOR; unsupported types fail loud) | ✅ Done |
 
 ### Planned After 1.0
 
@@ -1787,6 +1812,8 @@ RUN_INTEGRATION_TESTS=true RUN_NON_AL32UTF8_TESTS=true \
 - **Statement cache and external DDL** — top-level DDL executed on the same connection clears the statement cache, but DDL issued from another session (or inside a PL/SQL block) can leave stale cached SELECT metadata. This matches node-oracledb thin-mode behavior.
 - **CLOB/BLOB/JSON/VECTOR cursor re-parse** — result cursors for queries selecting CLOB, BLOB, native JSON or VECTOR columns are always re-parsed, never blind-reused from the statement cache (fresh defines are required to keep the LOB-prefetch metadata); RAW queries keep normal cursor reuse.
 - **NUMBER beyond 2⁵³** — integer-valued NUMBERs larger than 2⁵³ decode to `double` and lose precision (Dart `double` limit; matches node-oracledb).
+- **No SQL `BOOLEAN` or object types** — a 23ai `BOOLEAN` column and object-type columns (`XMLTYPE`, `ANYDATA`, user-defined objects, collections) are not decoded: fetching one raises `OracleException` (`oraUnsupportedType`) and leaves the connection usable. Convert them in SQL. See [Unsupported types fail loud](#unsupported-types-fail-loud).
+- **`LONG` on Oracle 21c** — fetching a `LONG` column was observed to time out (ORA-12170) instead of failing fast with `oraUnsupportedType` as it does on 23ai (pre-existing). `LONG RAW` was not checked on 21c.
 - **Nested `CURSOR()` / REF CURSOR rows carrying a LOB with `fetchLobs: true`** — a `CLOB`/`NCLOB`/`BLOB` column projected by a nested `CURSOR(...)` column or a `SYS_REFCURSOR` OUT bind is **not** wrapped as an `OracleLob` handle: with `fetchLobs: true` the call fails loud with an `OracleException` (the cursor-embedded handle lifecycle is not built), after the execute round trip and leaving the connection usable. Without `fetchLobs` these rows decode normally on Oracle 23ai and 21c — LOBs materialize as `String` / `Uint8List`, and native `JSON` (and, on 23ai, `VECTOR`) columns decode to their Dart values (the driver sends a DEFINE call before the cursor's first FETCH, as node-oracledb does). **Workaround for a handle:** project the LOB column outside the cursor (join it into the outer SELECT, or return its key from the cursor and read the LOB in a second statement). `DBMS_SQL.RETURN_RESULT` implicit result sets behave the same way: their LOB / JSON / VECTOR columns decode normally.
 - **One operation per connection** — a connection supports one in-flight operation; overlapping `execute()` calls throw. Use a connection pool (`OraclePool`) or separate connections for concurrent work. As of 1.4 an **open fetched `OracleLob`** (from `fetchLobs: true`) also holds that slot — for the handle's whole lifetime, not just during a round trip, and including handles a streaming result set prefetched but you never asked for — so an unclosed LOB handle is the most likely cause of a concurrent-operation error; a **created-temporary** handle (`createTemporaryClob()` and friends) is deliberately exempt and can be read, written, and bound while open. See [Incremental LOB access with `fetchLobs`](#incremental-lob-access-with-fetchlobs).
 - **Pre-12c authentication** — password-verifier paths used by pre-12c servers are untested; the validated matrix is Oracle 21c (classical auth) and 23ai (FAST_AUTH).

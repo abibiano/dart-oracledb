@@ -262,6 +262,19 @@ row.toList(); row.toMap();
 **Oracle NULL convention:** an empty `VARCHAR2` (`''`) round-trips as `null`, not
 a zero-length string (`'' IS NULL` in Oracle).
 
+**Undecodable column types fail loud:** the native decoder does not return
+`null` for an unsupported column type. Oracle also treats an empty `VARCHAR2`
+as SQL `NULL`, and a caller's `fetchTypeHandler` may convert a value to `null`.
+Fetching a column whose type the driver does not decode — SQL `BOOLEAN`
+(Oracle 23ai, type code 252), object types (`XMLTYPE`, `ANYDATA`, user-defined
+objects, collections; type code 109) or any unrecognised type code — throws
+`OracleException` with `oraUnsupportedType` (ORA-03115) naming the type code,
+never the value, and the connection stays usable. `BFILE` columns also raise
+`oraUnsupportedType`, with their own message; so do `LONG` / `LONG RAW` on
+Oracle 23ai, while on Oracle 21c a `LONG` column currently times out
+(ORA-12170) instead (pre-existing, known limitation).
+Convert such a column in SQL (`XMLSERIALIZE(CONTENT x AS CLOB)`, `TO_CHAR(b)`).
+
 ## Binds — `OracleBind`, `OracleDbType`, `OracleOutBinds`
 
 ```dart
@@ -318,7 +331,9 @@ String get code;           // 'ORA-01017' (5-digit pad floor); negative → 'ORA
 `oraTlsHandshakeFailed` (28860), `oraTlsCertificateError` (28862),
 `oraBindMismatch` (1008), `oraBindTypeError` (6502); plus protocol codes
 `oraMalformedPacket`, `oraProtocolViolation`, `oraUnsupportedType`,
-`oraDataTypeNotSupported`.
+`oraDataTypeNotSupported`. `oraUnsupportedType` (3115) is what a fetch of an
+undecodable column type raises (see
+[`OracleResult` / `OracleRow`](#oracleresult--oraclerow)).
 
 ## `OracleTimestampTz`
 
