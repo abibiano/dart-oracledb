@@ -567,7 +567,13 @@ class ResultSetCursor {
     // fetched handle makes every later operation on the connection fail.
     final wrappedThisBatch = <Object>[];
     final wrap = _wrapLob;
+    // Start this batch's delivered set BEFORE anything can wrap or fail, so
+    // `_reapBatchHandles` in the catch below only ever consults the set it is
+    // documented to (this batch's, seeded from the previous round's last row) and
+    // never the previous batch's. An empty batch leaves the set equal to its
+    // seed, which a later non-empty batch re-derives identically.
     try {
+      _resetDeliveredForNewBatch();
       final batch = _materializePerBatch
           ? await _transport.materializeLobs(
               fetched,
@@ -602,13 +608,6 @@ class ResultSetCursor {
         await onBatch(batch.rows);
       }
       if (batch.rows.isNotEmpty) {
-        // A new batch starts a new delivered set, keeping the retained set
-        // bounded by one batch. It is SEEDED from the previous round's last row,
-        // which was necessarily delivered (the buffer is empty before a
-        // continuation FETCH) and which Oracle's duplicate-column optimization
-        // may have copied into this batch's first row — reaping such a carried
-        // alias would close a handle the caller already owns.
-        _resetDeliveredForNewBatch();
         _buffer.addAll(batch.rows);
         _previousRoundLastRow = batch.rows.last;
       }
@@ -630,9 +629,13 @@ class ResultSetCursor {
     }
   }
 
-  /// Starts a fresh per-batch delivered set, carrying over the handles of
-  /// [_previousRoundLastRow] (an already-delivered row Oracle may alias into the
-  /// new batch's first row). No-op unless this cursor wraps handles.
+  /// Starts a fresh per-batch delivered set (called before a batch is wrapped),
+  /// keeping the retained set bounded by one batch. It is SEEDED from the
+  /// previous round's last row, which was necessarily delivered (the buffer is
+  /// empty before a continuation FETCH) and which Oracle's duplicate-column
+  /// optimization may have copied into this batch's first row — reaping such a
+  /// carried alias would close a handle the caller already owns. No-op unless
+  /// this cursor wraps handles.
   void _resetDeliveredForNewBatch() {
     if (_isLobHandle == null) return;
     _deliveredHandles = LinkedHashSet<Object>.identity();

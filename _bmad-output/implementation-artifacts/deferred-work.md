@@ -913,7 +913,9 @@ resolution-undo: 9713e5d55bac6c010ee49249bdcac6a538905292c21031a6bfb7a5bea2bb31e
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 iteration 2 (2026-07-26)"), 2026-10-09
 location: lib/src/protocol/result_set_cursor.dart
 reason: **`ResultSetCursor._reapBatchHandles` consults the PREVIOUS batch's `_deliveredHandles` set for the batch it is reaping.** `_resetDeliveredForNewBatch()` runs AFTER `materializeLobs` / `onBatchDecoded` succeed, inside the `try`; when the wrap-time collection added by the epic-review iteration-1 fix (`wrappedThisBatch`) fails INSIDE that block — the exact case the fix was built for — the `catch` calls `_reapBatchHandles(wrappedThisBatch)` while `_deliveredHandles` still holds the previous batch's delivered set. Harmless today only because a freshly wrapped handle is always a new object identity that cannot collide with the previous batch's entries, but the behaviour does not match the "delivered set … is otherwise per batch" scoping the constructor doc asserts, and nothing pins the invariant (no test delivers a row and then makes materialisation fail on a LATER row of the same batch). Fix: reset the delivered set before the wrap (or state the identity argument in the doc), plus the pinning test. target: Epic 12 follow-up (streamed handle lifecycle). [lib/src/protocol/result_set_cursor.dart:548 `_reapBatchHandles`, `_resetDeliveredForNewBatch`]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-result-set-lob-reap-hardening
+resolution-undo: 7fc38201b547d106847b8c21277868201c1e62c3aa7b507deb1a5b33f8a86538 2026-10-15 7374617475733a206f70656e
 
 ### DW-122: The inline-VARCHAR sibling of the fixed temp-LOB leak is asserted away rather than measured.
 
@@ -927,7 +929,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 iteration 2 (2026-07-26)"), 2026-10-09
 location: lib/src/connection.dart
 reason: **`_openLobs` grows unbounded across a long `fetchLobs` result-set iteration when the caller never closes each delivered handle.** Under `resultSet: true + fetchLobs: true` every delivered row contributes one registered handle, and `OracleResultSet.close()` reaps only the UNdelivered ones — deliberately, so the "collect the rows, close the result set, then read the LOBs" pattern works. A caller that iterates a million rows and closes nothing therefore accumulates a million registered handles plus the O(n) `_openLobs` sweeps every concurrency guard performs, with no warning threshold and no diagnostic pointing at the close obligation. Blast radius is bounded (an open fetched handle already blocks `execute()`, so the growth is confined to the iteration) and it is entirely caller-driven, hence a follow-up. Fix: a one-shot `_log.warning` once `_openLobs` passes a threshold, naming the per-handle close obligation. target: Epic 12 follow-up (API ergonomics / diagnostics). [lib/src/connection.dart:4681 `_registerLob`, `_openLobs`]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-result-set-lob-reap-hardening
+resolution-undo: 7fc38201b547d106847b8c21277868201c1e62c3aa7b507deb1a5b33f8a86538 2026-10-15 7374617475733a206f70656e
 
 ### DW-124: Nested cursor columns in outer cursor rows beyond the first prefetch batch may lack inline describes on Oracle 21c.
 origin: spec-deferred 3bf1ee72b11c

@@ -57,6 +57,7 @@ ResultSetCursor build({
 );
 
 void main() {
+  _failedBatchReapTests();
   group('ResultSetCursor lazy-LOB-handle callbacks are all-or-nothing', () {
     test('all three supplied constructs successfully (positive control)', () {
       expect(
@@ -153,5 +154,105 @@ void main() {
     );
     expect(_isHandle(null), isFalse);
     expect(_closeHandles(const <Object>[]), isA<Future<void>>());
+  });
+}
+
+/// A failed batch's reap protects the previous round's last-row alias and
+/// closes new handles that were never delivered.
+class _FailingMaterializeTransport extends Transport {
+  _FailingMaterializeTransport(this.locatorsToWrap);
+
+  final List<LobLocator> locatorsToWrap;
+
+  @override
+  bool get isConnected => true;
+
+  @override
+  bool get isCorrupted => false;
+
+  @override
+  Future<void> disconnect() async {}
+
+  @override
+  Future<ExecuteResponse> fetchRows(
+    int cursorId,
+    int numRows, {
+    List<ColumnMetadata>? columns,
+    Duration? timeout = const Duration(minutes: 2),
+    bool preserveTimestampTimeZone = false,
+    List<Object?>? previousRoundLastRow,
+  }) async => ExecuteResponse(
+    isSuccess: true,
+    rows: const [
+      <Object?>[1],
+    ],
+    moreRowsToFetch: false,
+  );
+
+  @override
+  Future<ExecuteResponse> materializeLobs(
+    ExecuteResponse response, {
+    List<BindMetadata>? bindMetadata,
+    List<ColumnMetadata>? columns,
+    bool dmlReturning = false,
+    Duration? timeout = const Duration(minutes: 2),
+    Object Function(LobLocator locator)? wrapLob,
+    bool rawJsonBlobs = false,
+  }) async {
+    for (final locator in locatorsToWrap) {
+      wrapLob!(locator);
+    }
+    throw StateError('materialize failed after wrapping');
+  }
+}
+
+void _failedBatchReapTests() {
+  group('ResultSetCursor failed-batch reap uses the current batch set', () {
+    LobLocator locator() => LobLocator(
+      locator: Uint8List(40),
+      oracleType: 113,
+      length: 0,
+      chunkSize: 0,
+    );
+
+    test(
+      'a carried last-row alias is kept while a new handle is reaped',
+      () async {
+        final h1 = Object();
+        final h2 = Object();
+        final fresh = Object();
+        final l2 = locator(), l3 = locator();
+        // The previous round's last row may be aliased into this fetch's first
+        // row by Oracle's duplicate-column optimization.
+        final byLocator = <LobLocator, Object>{l2: h2, l3: fresh};
+        final closed = <Object>[];
+        final cursor = ResultSetCursor(
+          transport: _FailingMaterializeTransport([l2, l3]),
+          cursorId: 7,
+          columns: [_col('N')],
+          firstBatch: [
+            <Object?>[h1],
+            <Object?>[h2],
+          ],
+          serverHasMoreRows: true,
+          prefetchRows: 50,
+          preserveTimestampTimeZone: false,
+          materializePerBatch: true,
+          wrapLob: (loc) => byLocator[loc]!,
+          isLobHandle: (v) => v is Object && byLocator.containsValue(v),
+          closeLobHandles: (handles) async => closed.addAll(handles),
+        );
+
+        // Deliver both rows of batch 1; h2 is the previous round's last row.
+        expect(await cursor.nextRowData(), [h1]);
+        expect(await cursor.nextRowData(), [h2]);
+        // Batch 2 wraps the carried h2 alias and a fresh handle, then fails.
+        await expectLater(cursor.nextRowData(), throwsA(isA<StateError>()));
+
+        expect(closed, [fresh]);
+        expect(closed, isNot(contains(h1)));
+        expect(closed, isNot(contains(h2)));
+      },
+    );
   });
 }

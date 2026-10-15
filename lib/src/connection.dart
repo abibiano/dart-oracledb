@@ -458,6 +458,14 @@ class OracleConnection {
   /// preserved so a force-close reaps deterministically.
   final Set<OracleLob> _openLobs = <OracleLob>{};
 
+  /// Fetched handles in [_openLobs]; caller-created temporary handles do not
+  /// contribute to the fetched-handle warning.
+  int _openFetchedLobs = 0;
+
+  /// Whether the open-handle warning in [_registerLob] has fired (one-shot per
+  /// connection, so a long iteration logs it once rather than per row).
+  bool _warnedOpenLobsThreshold = false;
+
   /// The configured statement cache size for this connection.
   int get statementCacheSize => _cache.maxSize;
 
@@ -5001,8 +5009,41 @@ class OracleConnection {
   OracleLob _registerLob(LobLocator locator) {
     final lob = OracleLob.fromLocator(connection: this, locator: locator);
     _openLobs.add(lob);
+    _openFetchedLobs++;
+    if (!_warnedOpenLobsThreshold && _openFetchedLobs > openLobsWarnThreshold) {
+      _warnedOpenLobsThreshold = true;
+      _log.warning(
+        'More than $openLobsWarnThreshold fetched OracleLob handles are open '
+        'on this connection. Under fetchLobs: true each delivered handle must '
+        'be closed by the caller (OracleLob.close()); closing the result set '
+        'only reaps handles that were never delivered. Open handles also '
+        'block execute() on this connection.',
+      );
+    }
     return lob;
   }
+
+  /// Test seam for [_registerLob] (the `fetchLobs` wrap callback). Not public API.
+  @visibleForTesting
+  OracleLob debugRegisterLob(
+    LobLocator locator, {
+    bool createdTemporary = false,
+  }) {
+    if (!createdTemporary) return _registerLob(locator);
+    final lob = OracleLob.fromLocator(
+      connection: this,
+      locator: locator,
+      createdTemporary: true,
+    );
+    _openLobs.add(lob);
+    return lob;
+  }
+
+  /// Number of simultaneously open fetched [OracleLob] handles past which
+  /// [_registerLob] logs a one-shot warning about the per-handle close
+  /// obligation. A diagnostic only; nothing is enforced.
+  @visibleForTesting
+  static const int openLobsWarnThreshold = 10000;
 
   /// Removes [lob] from the open-LOB set when it closes, freeing the
   /// connection's in-flight slot once no fetched LOB (and no result set) remains
@@ -5018,7 +5059,7 @@ class OracleConnection {
   /// deliberately never imports the transport.
   @internal
   void releaseLob(OracleLob lob) {
-    _openLobs.remove(lob);
+    if (_openLobs.remove(lob) && !lob.isTemporary) _openFetchedLobs--;
     if (!lob.isTemporary) return;
     // A dead session has already lost its temporary LOBs (the server frees
     // session-duration temp LOBs at teardown) and there will be no next execute
@@ -5751,6 +5792,7 @@ class OracleConnection {
     // (`releaseLob` also skips the queue once the connection is not connected,
     // so a late close() on an abandoned temp handle stays a silent no-op.)
     _openLobs.clear();
+    _openFetchedLobs = 0;
 
     // Clear cache state locally; per node-oracledb reference, cached cursors
     // are only ever closed via piggyback on a subsequent execute. On close
