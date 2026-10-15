@@ -1036,6 +1036,70 @@ void main() {
           expect(after.rows.single['ONE'], equals(1));
         });
 
+        test('a LONG / LONG RAW column raises oraUnsupportedType (no ORA-12170 '
+            'timeout on 21c), and the connection stays usable', () async {
+          // Oracle allows one LONG-family column per table.
+          final cases = <(String, String, Object, Object)>[
+            ('DW141_LONG_PROBE', 'LONG', 'long text', 'x' * 255),
+            (
+              'DW141_LONGRAW_PROBE',
+              'LONG RAW',
+              Uint8List.fromList([1, 2, 3]),
+              Uint8List.fromList(List.filled(255, 0x61)),
+            ),
+          ];
+          for (final (table, type, shortValue, longValue) in cases) {
+            try {
+              await connection.execute('DROP TABLE $table PURGE');
+            } on OracleException catch (_) {
+              // Table did not exist.
+            }
+            await connection.execute(
+              'CREATE TABLE $table (id NUMBER, v $type)',
+            );
+            try {
+              await connection.execute('INSERT INTO $table VALUES (1, :1)', [
+                shortValue,
+              ]);
+              await connection.execute('INSERT INTO $table VALUES (2, :1)', [
+                longValue,
+              ]);
+              await connection.execute('INSERT INTO $table VALUES (3, NULL)');
+              await connection.commit();
+              for (final id in [1, 2, 3]) {
+                // Twice: the second run re-executes the cached statement.
+                for (var round = 0; round < 2; round++) {
+                  await expectLater(
+                    connection
+                        .execute('SELECT v FROM $table WHERE id = $id')
+                        .timeout(const Duration(seconds: 30)),
+                    throwsA(
+                      isA<OracleException>()
+                          .having(
+                            (e) => e.errorCode,
+                            'errorCode',
+                            oraUnsupportedType,
+                          )
+                          .having(
+                            (e) => e.message,
+                            'message',
+                            contains('LONG'),
+                          ),
+                    ),
+                    reason: '$type (id $id, round $round)',
+                  );
+                  final after = await connection.execute(
+                    'SELECT 1 AS one FROM dual',
+                  );
+                  expect(after.rows.single['ONE'], equals(1));
+                }
+              }
+            } finally {
+              await connection.execute('DROP TABLE $table PURGE');
+            }
+          }
+        });
+
         test('an object-type query returning no rows does not raise, and the '
             'connection stays usable', () async {
           final empty = await connection.execute(

@@ -1119,4 +1119,14 @@ location: lib/src/protocol/messages/execute_message.dart (_decodeValueByOraType 
 source_spec: `15-5-dual-env-integration-tests.md`
 severity: medium
 reason: Found while checking the catch-all flip; a temporary patch skipping both fields fixed it (reverted). Pre-existing, 23ai unaffected, documented in README Known Limitations.
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-long-probe-skip-21c
+resolution-undo: a8dc2befe2e459e9bf3f83ed20319469c52728309f355bfc10a105d3b733f9bd 2026-10-15 7374617475733a206f70656e
+
+### DW-142: Avoid materializing discarded chunked LONG values in the completion probe.
+origin: spec-deferred e99ac6ca6340
+location: lib/src/protocol/messages/execute_message.dart:2351
+source_spec: `bmad-build-auto-result-long-probe-skip-21c.md`
+severity: medium
+reason: readBytesWithLength() collects chunk views and allocates a combined Uint8List for chunked payloads. The completion probe discards the result, so a very large unsupported LONG value can use avoidable memory. This allocation path predates the reviewed change.
 status: open

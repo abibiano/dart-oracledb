@@ -2334,7 +2334,11 @@ Object? _decodeValueByOraType(
       // length-prefix path (which treats a 0xFF prefix as null) would silently
       // corrupt a 255-byte LONG payload, so fail loud with a clear unsupported
       // error instead. The completion probe (strict == false) still consumes
-      // the bytes so it can reach the terminal message.
+      // the bytes so it can reach the terminal message: a fetched LONG value
+      // is followed by an SB4 null indicator and a UB4 return code
+      // (node-oracledb withData.js processColumnData). Leaving them unread
+      // misaligns the probe on 21c, which never sees the terminal message
+      // and times out (ORA-12170) instead of raising oraUnsupportedType.
       if (strict) {
         throw OracleException(
           errorCode: oraUnsupportedType,
@@ -2345,6 +2349,10 @@ Object? _decodeValueByOraType(
         );
       }
       buf.readBytesWithLength();
+      if (inFetch) {
+        buf.skipSB4(); // null indicator
+        buf.skipUB4(); // return code
+      }
       return null;
     case oraTypeVarchar:
     case oraTypeVarchar2:

@@ -911,10 +911,28 @@ void main() {
   // unsupported-type error, not silently corrupt via the 0xFF-as-null length
   // heuristic.
   group('LONG / LONG RAW unsupported', () {
-    Uint8List longColumnResponse(int oraType) => _buildPayload([
+    Uint8List longColumnResponse(
+      int oraType, {
+      List<int>? value,
+    }) => _buildPayload([
       _describeInfo([_columnInfo(name: 'BODY', oraType: oraType, maxSize: 0)]),
       _rowHeader(),
-      [ttcMsgTypeRowData, ..._bytesWithLength('payload'.codeUnits)],
+      [
+        ttcMsgTypeRowData,
+        if (value == null)
+          0xff
+        else if (value.length > 253) ...[
+          0xfe,
+          ..._ub4(value.length),
+          ...value,
+          ..._ub4(0),
+        ] else
+          ..._bytesWithLength(value),
+        // A fetched LONG value trails an SB4 null indicator and a UB4 return
+        // code (0 encodes as a single zero byte for both).
+        ..._ub4(0),
+        ..._ub4(0),
+      ],
       _errorMessage(errorNum: 1403),
       [ttcMsgTypeStatus, ..._ub4(0), ..._ub2(0)],
     ]);
@@ -956,8 +974,31 @@ void main() {
       // The completion probe must NOT throw on an unsupported type — it decodes
       // leniently so it can locate the terminal STATUS. (The real decode pass
       // raises the error, asserted above.)
-      final payload = longColumnResponse(oraTypeLong);
+      final payload = longColumnResponse(
+        oraTypeLong,
+        value: 'payload'.codeUnits,
+      );
       expect(ttcStreamIsComplete(payload), isTrue);
+      // Byte-accurate: without the trailing SB4/UB4 consumed the probe would
+      // read them as the next message type and never reach the terminal.
+      expect(
+        ttcStreamIsComplete(
+          longColumnResponse(oraTypeLongRaw, value: 'payload'.codeUnits),
+        ),
+        isTrue,
+      );
+    });
+
+    test('the probe consumes chunked and null LONG-family values', () {
+      for (final oraType in [oraTypeLong, oraTypeLongRaw]) {
+        expect(
+          ttcStreamIsComplete(
+            longColumnResponse(oraType, value: List.filled(255, 0x61)),
+          ),
+          isTrue,
+        );
+        expect(ttcStreamIsComplete(longColumnResponse(oraType)), isTrue);
+      }
     });
   });
 

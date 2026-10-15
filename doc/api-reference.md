@@ -271,8 +271,7 @@ objects, collections; type code 109) or any unrecognised type code — throws
 `OracleException` with `oraUnsupportedType` (ORA-03115) naming the type code,
 never the value, and the connection stays usable. `BFILE` columns also raise
 `oraUnsupportedType`, with their own message; so do `LONG` / `LONG RAW` on
-Oracle 23ai, while on Oracle 21c a `LONG` column currently times out
-(ORA-12170) instead (pre-existing, known limitation).
+Oracle 23ai and 21c.
 Convert such a column in SQL (`XMLSERIALIZE(CONTENT x AS CLOB)`, `TO_CHAR(b)`).
 
 ## Binds — `OracleBind`, `OracleDbType`, `OracleOutBinds`
