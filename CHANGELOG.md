@@ -1,8 +1,17 @@
 # Changelog
 
-## Unreleased
+## 1.5.0
 
 ### Features
+
+- **A plain `execute()` of an INSERT/UPDATE/DELETE with `RETURNING ... INTO`
+  now accepts `OracleBind.out(...)` specs** for the INTO targets, on the same
+  wire path as `executeMany()` (one iteration). Each OUT bind yields a `List`
+  of the returned values, one per affected row (empty when no row matched).
+  `OracleBind` specs on any other non-PL/SQL statement are still rejected.
+  `MERGE ... RETURNING` works on Oracle 23ai only. The streamed-LOB insert
+  idiom no longer needs a PL/SQL wrapper. Validated against Oracle 23ai and
+  Oracle 21c.
 
 - **Oracle-specific scalars inside native `JSON` values now decode** instead of
   failing the whole row. A JSON document (or scalar JSON value, e.g.

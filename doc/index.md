@@ -5,7 +5,7 @@
 > PRD / story workflows at this file.
 >
 > **Scope note:** the deep-dive pages below (architecture, API reference, source
-> tree, development guide) reflect the 2026-06-12 scan and predate the 1.1–1.4
+> tree, development guide) reflect the 2026-06-12 scan and predate the 1.1–1.5
 > API surface (result sets & streaming, server cursors, character sets, bulk DML,
 > `OracleLob`). The layer model and protocol internals they describe are still
 > accurate; for the current public API, **`README.md` and the dartdoc on pub.dev
@@ -14,7 +14,7 @@
 ## Project Overview
 
 - **Type:** Monolith — single-part **Dart library** (pure-Dart Oracle Database driver)
-- **Package:** `oracledb` · **Version:** `1.4.0`
+- **Package:** `oracledb` · **Version:** `1.5.0`
 - **Primary language:** Dart `^3.12.0` (pure Dart, no FFI, no web)
 - **Architecture:** Three-layer protocol stack — public API → `protocol/` (TTC messages + codecs + OSON) → `transport/` (TNS + sockets/TLS) → `dart:io`
 - **What it is:** Implements Oracle's thin-mode TNS/TTC wire protocol directly; **no Oracle Client required**. Mirrors the node-oracledb thin driver structure.
