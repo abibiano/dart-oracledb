@@ -538,7 +538,7 @@ class Transport {
   /// standalone RPC — node-oracledb frees them via a `TNS_FUNC_LOB_OP`
   /// piggyback (`FREE_TEMP | ARRAY`) prepended to the next message
   /// (base.js `writeCloseTempLobsPiggyback`). Locators queue here after the
-  /// execute that bound them and ride the next [sendExecute]; any remainder
+  /// execute that bound them and ride the next [sendExecute] or FETCH; any remainder
   /// at session end is reaped by the server at teardown, like cached cursors.
   final List<Uint8List> _tempLobsToClose = [];
   int _tempLobsTotalSize = 0;
@@ -750,10 +750,10 @@ class Transport {
   /// `createTemporary*` handles between two executes.
   ///
   /// **When the server-side free lands.** Queueing issues no wire traffic: the
-  /// free rides the next [sendExecute] only. `createTemporary*()`, `commit()`,
+  /// free rides the next [sendExecute] or continuation FETCH. `createTemporary*()`, `commit()`,
   /// `rollback()` and `ping()` do not flush it, so a loop that creates, writes
   /// and closes temporary LOBs without running a statement keeps every one of
-  /// them alive on the server until the next `execute()` (or session end). A
+  /// them alive on the server until the next `execute()`, FETCH, or session end. A
   /// warning is logged once per drain cycle when the pending depth reaches
   /// [_tempLobQueueWarnDepth]. No count/size-triggered flush is implemented: a
   /// standalone FREE_TEMP is not part of the protocol surface this driver
@@ -806,7 +806,7 @@ class Transport {
       _tempLobQueueWarned = true;
       _log.warning(
         '${_tempLobsToClose.length} temporary LOB frees are pending: they are '
-        'only sent with the next execute(), so run a statement to release '
+        'only sent with the next execute() or fetch, so run a statement to release '
         'the server-side temporary LOBs',
       );
     }
@@ -824,6 +824,33 @@ class Transport {
       (owners) => owners + 1,
       ifAbsent: () => 1,
     );
+  }
+
+  /// Takes every pending temp-LOB free off the queue (list, size and key index
+  /// together) for a free-temp piggyback, and re-arms the once-per-cycle depth
+  /// warning. Callers: [sendExecute] and [_sendFetch], so a streaming result
+  /// set drains the queue during iteration (DW-133) instead of waiting for the
+  /// next execute.
+  (List<Uint8List>, int) _drainTempLobsToFree() {
+    final lobs = List<Uint8List>.of(_tempLobsToClose);
+    final size = _tempLobsTotalSize;
+    _tempLobsToClose.clear();
+    _tempLobsTotalSize = 0;
+    // Lockstep with the list (see _tempLobKeysToClose): once these locators are
+    // no longer pending, a re-created locator with the same bytes must be
+    // queueable again.
+    _tempLobKeysToClose.clear();
+    _tempLobQueueWarned = false;
+    return (lobs, size);
+  }
+
+  /// Puts locators taken by [_drainTempLobsToFree] back (list, size and key
+  /// index together) when the message that would have carried them never went
+  /// out.
+  void _restoreDrainedTempLobs(List<Uint8List> lobs, int size) {
+    _tempLobsToClose.insertAll(0, lobs);
+    _tempLobsTotalSize += size;
+    _tempLobKeysToClose.addAll(lobs.map(_tempLobKey));
   }
 
   /// The materialize path's counterpart of [queueTempLobToFree]: queues a
@@ -1069,15 +1096,7 @@ class Transport {
     // Drain the temp-LOB free list BEFORE creating this call's
     // temp LOBs, so a locator bound by this execute can never be freed by
     // its own piggyback.
-    final lobsToFree = List<Uint8List>.of(_tempLobsToClose);
-    final lobsToFreeSize = _tempLobsTotalSize;
-    _tempLobsToClose.clear();
-    _tempLobsTotalSize = 0;
-    // Lockstep with the list (see _tempLobKeysToClose): once these locators are
-    // no longer pending, a re-created locator with the same bytes must be
-    // queueable again.
-    _tempLobKeysToClose.clear();
-    _tempLobQueueWarned = false;
+    final (lobsToFree, lobsToFreeSize) = _drainTempLobsToFree();
 
     // CLOB-typed String binds, BLOB-typed Uint8List binds
     // (and PL/SQL strings beyond the 32767-byte VARCHAR limit) travel as
@@ -1114,9 +1133,7 @@ class Transport {
         // locator this failed call already queued in a create helper's `finally`
         // is on the list (and in the key set) too; `addAll` is idempotent, so a
         // restored locator that is somehow already keyed stays single-entry.
-        _tempLobsToClose.insertAll(0, lobsToFree);
-        _tempLobsTotalSize += lobsToFreeSize;
-        _tempLobKeysToClose.addAll(lobsToFree.map(_tempLobKey));
+        _restoreDrainedTempLobs(lobsToFree, lobsToFreeSize);
         rethrow;
       }
     }
@@ -3096,7 +3113,26 @@ class Transport {
       ttcFieldVersion: _ttcFieldVersion,
       sequence: nextSequence(),
     );
-    await sendData(fetch.toBytes());
+    // Free-temp piggyback (DW-133): pending expression-LOB / handle frees ride
+    // this FETCH exactly as they ride an EXECUTE, so a fetchLobs:false
+    // streaming iteration releases locators as it goes.
+    final (lobsToFree, lobsToFreeSize) = _drainTempLobsToFree();
+    try {
+      final Uint8List fetchData;
+      if (lobsToFree.isEmpty) {
+        fetchData = fetch.toBytes();
+      } else {
+        fetchData =
+            (BytesBuilder(copy: false)
+                  ..add(_buildFreeTempLobsPiggyback(lobsToFree, lobsToFreeSize))
+                  ..add(fetch.toBytes()))
+                .toBytes();
+      }
+      await sendData(fetchData);
+    } catch (_) {
+      _restoreDrainedTempLobs(lobsToFree, lobsToFreeSize);
+      rethrow;
+    }
     final payload = await _receiveDataWithTimeout(
       timeout,
       expectedColumns: expectedColumns,

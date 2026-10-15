@@ -177,6 +177,20 @@ class _ChunkedReadTransport extends Transport {
 }
 
 void main() {
+  test(
+    'FETCH restores pending temporary LOB frees when sending fails',
+    () async {
+      final transport = _ChunkedReadTransport([]);
+      final locator = Uint8List(tnsLobLocatorBufferSize)..[0] = 7;
+      transport.queueTempLobToFree(locator);
+
+      await expectLater(transport.fetchRows(1, 10), throwsStateError);
+      expect(transport.debugPendingTempLobCount, equals(1));
+      transport.queueTempLobToFree(locator);
+      expect(transport.debugPendingTempLobCount, equals(1));
+    },
+  );
+
   group('materializeLobs wrapLob threading', () {
     late Transport transport;
     late List<LobLocator> wrapped;

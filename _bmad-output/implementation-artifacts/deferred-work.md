@@ -1039,7 +1039,9 @@ location: lib/src/transport/transport.dart queueTempLobToFree, _tempLobQueueWarn
 source_spec: `spec-temp-lob-free-queue-measure.md`
 severity: low
 reason: Since DW-122 every abstract (server-expression) LOB a materialize pass reads is queued. The queue drains only on sendExecute, so a resultSet: true / fetchLobs: false iteration over a TO_CLOB(...) column holds one 40-byte locator plus one key per row until the first execute after the result set closes (previously these leaked server-side until session end). Any single execute that materializes 1,000 or more expression LOBs also trips the once-per-drain-cycle WARNING added for DW-120. Possible follow-ups: piggyback FREE_TEMP on FETCH messages, or exempt materialize-path bulk queueing from the warning.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-decision-dw-133
+resolution-undo: 0bb8cb0125d9aa7a1dedaf195caccb31e14c2274daad8af80969b9d5143bc3cc 2026-10-15 7374617475733a206f70656e
 decision: 2026-10-15 Piggyback FREE_TEMP on FETCH messages — Drain the temp-free queue on FETCH messages as well as EXECUTE so streaming result sets release expression-LOB locators during iteration, with dual-env integration tests on 23ai and 21c.
 
 ### DW-134: LobLocator.isTemporary now honors the ABSTRACT bit without excluding value-based (JSON/VECTOR) locators.

@@ -1278,7 +1278,7 @@ class OracleLob {
   ///   local bookkeeping only, with zero wire effect.
   /// * **Temporary handle** ([isTemporary] `true`): the locator is queued for
   ///   the driver's free-temporary-LOB piggyback. **The free is deferred to the
-  ///   next `execute()` on that session** — Oracle's temp-LOB release travels as
+  ///   next `execute()` or continuation FETCH on that session** — Oracle's temp-LOB release travels as
   ///   a piggyback on another message (node-oracledb's model), never as a
   ///   standalone round trip. So `close()` followed only by
   ///   `connection.close()` relies on session teardown to reclaim the space

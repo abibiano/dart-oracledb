@@ -10,6 +10,10 @@
 ///     wrap paths, so `LobLocator.isTemporary` needs no JSON/VECTOR exclusion.
 ///     (The driver has no VECTOR type; only JSON is reachable.)
 ///
+///   * DW-133 — a `resultSet: true` / `fetchLobs: false` iteration over a
+///     `TO_CLOB(...)` column drains the free queue on each continuation FETCH,
+///     so pending frees stay bounded by one batch instead of growing per row.
+///
 /// Must pass on Oracle 23ai (FREEPDB1) and Oracle 21c (XEPDB1).
 ///
 ///   RUN_INTEGRATION_TESTS=true dart test test/integration/lob_temp_sweep_integration_test.dart --no-color
@@ -69,6 +73,62 @@ void main() {
         }
         final after = await tempLobCount(connection);
         expect(connection.debugPendingTempLobCount, equals(0));
+        if (baseline != null && after != null) {
+          expect(after, equals(baseline), reason: 'no leaked temp LOBs');
+        }
+      });
+
+      test('DW-133: a streaming TO_CLOB result set drains pending frees on '
+          'each FETCH instead of accumulating per row', () async {
+        final baseline = await tempLobCount(connection);
+        const rows = 120;
+        const fetchSize = 10;
+        final result = await connection.execute(
+          "SELECT TO_CLOB('r' || LEVEL) AS C FROM dual "
+          'CONNECT BY LEVEL <= $rows',
+          null,
+          const OracleExecuteOptions(
+            resultSet: true,
+            fetchLobs: false,
+            fetchSize: fetchSize,
+          ),
+        );
+        final rs = result.resultSet!;
+        var maxPending = 0;
+        var seen = 0;
+        for (
+          var row = await rs.getRow();
+          row != null;
+          row = await rs.getRow()
+        ) {
+          seen++;
+          final pending = connection.debugPendingTempLobCount;
+          if (pending > maxPending) maxPending = pending;
+          // The first DEFINE prefetch can materialize 50 rows. Each later
+          // FETCH must drain those frees before queuing its own 10-row batch.
+          if (seen > 50) {
+            expect(
+              pending,
+              lessThanOrEqualTo(fetchSize),
+              reason: 'FETCH must drain frees from the preceding batch',
+            );
+          }
+        }
+        await rs.close();
+        expect(seen, equals(rows));
+        // Each materialized batch queues at most one batch worth of locators
+        // (the DEFINE batch may be the larger prefetch); the next FETCH drains
+        // them. Without the piggyback every row would pile up to [rows].
+        expect(
+          maxPending,
+          lessThanOrEqualTo(50),
+          reason: 'pending frees must stay within the initial prefetch batch',
+        );
+        expect(connection.debugTempLobMaterializeQueuedCount, equals(rows));
+
+        await connection.execute('SELECT 1 FROM dual');
+        expect(connection.debugPendingTempLobCount, equals(0));
+        final after = await tempLobCount(connection);
         if (baseline != null && after != null) {
           expect(after, equals(baseline), reason: 'no leaked temp LOBs');
         }

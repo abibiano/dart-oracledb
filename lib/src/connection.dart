@@ -548,7 +548,7 @@ class OracleConnection {
       _transport.debugLobReadPieceUnits = units;
 
   /// Number of temporary-LOB locators queued for the free-temp piggyback on
-  /// the next execute.
+  /// the next execute or continuation FETCH.
   ///
   /// Instrumentation for the temp-LOB lifecycle integration tests: proves the
   /// queue drains to zero after the execute that follows a temp-LOB release —
