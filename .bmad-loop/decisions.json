@@ -7,5 +7,14 @@
     "key": "2",
     "label": "Only fix the hint text",
     "resolution": ""
+  },
+  "DW-14": {
+    "answered_at": "2026-10-15",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "In test/integration/json_data_type_integration_test.dart, wrap the eager-continuation setup so any failure logs the full OracleException, statement and connection state, then repeatedly rerun the suite on 23ai to try to reproduce and root-cause ORA-03125.",
+    "key": "1",
+    "label": "Add failure-output capture in the eager-continuation test setup",
+    "resolution": ""
   }
 }
