@@ -249,21 +249,30 @@ class OracleLob {
   ///
   /// `true` for every handle from `OracleConnection.createTemporaryClob()` /
   /// `createTemporaryNClob()` / `createTemporaryBlob()`, and also for a FETCHED
-  /// locator whose bytes carry the server's temporary flag.
+  /// locator whose bytes carry the server's temporary flag or its abstract
+  /// (server-expression) LOB flag.
   ///
-  /// Which fetched shapes carry that flag is measured, not guessable — "a PL/SQL
+  /// Which fetched shapes are temporary is measured, not guessable — "a PL/SQL
   /// LOB OUT bind" is not one answer, because how the OUT value was produced
   /// decides. On both Oracle 23ai and 21c: a plain table-row locator, a
-  /// `SELECT ... FOR UPDATE` locator, a `SELECT TO_CLOB('x') FROM dual`
-  /// expression and an OUT locator the PL/SQL body fills from a `TO_CLOB`
-  /// **literal** all report `false` (no flag, no session temp-LOB space). An OUT
-  /// locator the body assigns from a **temporary** input LOB (`p_out := p_in`,
-  /// where `p_in` arrived as the driver's temporary LOB for a `String` /
-  /// `Uint8List` bind) and an `IN OUT` bind's returned locator both report
-  /// `true`, and the driver queues their server-side free.
+  /// `SELECT ... FOR UPDATE` locator and an `EMPTY_CLOB()` / `EMPTY_BLOB()`
+  /// locator report `false` (they allocate no session temp-LOB space). Every
+  /// server **expression** LOB reports `true` — a `SELECT TO_CLOB('x') FROM
+  /// dual` / `TO_BLOB(...)` value, a CLOB concatenation, and an OUT locator the
+  /// PL/SQL body fills from a `VARCHAR2` / `RAW` value or a `TO_CLOB`
+  /// **literal**: each holds one `V$TEMPORARY_LOBS.ABSTRACT_LOBS` entry until
+  /// it is freed (before this was recognized they were held until session
+  /// end). An OUT locator the body assigns from a **temporary** input LOB
+  /// (`p_out := p_in`) and an `IN OUT` bind's returned locator report `true`
+  /// too. The driver queues the server-side free of every such locator it
+  /// reads and discards under `fetchLobs: false`.
   ///
   /// When `true`, [close] queues the LOB's server-side release; when `false`,
-  /// [close] is local bookkeeping only. See [close].
+  /// [close] is local bookkeeping only. See [close]. When two open handles
+  /// reference the SAME server LOB — a created temporary LOB bound as a plain
+  /// IN into a block that returns it as an OUT value under `fetchLobs: true` —
+  /// the release is queued when the LAST of them closes, so closing one never
+  /// destroys the LOB under the other.
   ///
   /// For a `true` handle:
   ///
@@ -1275,7 +1284,9 @@ class OracleLob {
   ///   (Oracle frees session-duration temp LOBs when the session ends), and on a
   ///   pooled connection the queue is flushed by the next borrower's first
   ///   execute. `commit()` / `rollback()` / `ping()` do **not** flush it in this
-  ///   release.
+  ///   release. If another open handle references the same server LOB (see
+  ///   [isTemporary]), nothing is queued yet: the last of them to close queues
+  ///   the free.
   ///
   /// Closing a temporary handle when the owning connection is already closed or
   /// broken skips the queue silently and still throws nothing: the session (and

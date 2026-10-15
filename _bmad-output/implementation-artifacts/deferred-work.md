@@ -924,7 +924,9 @@ resolution-undo: 7fc38201b547d106847b8c21277868201c1e62c3aa7b507deb1a5b33f8a8653
 origin: migrated from legacy ledger ("Deferred from: epic review of epic-12 iteration 2 (2026-07-26)"), 2026-10-09
 location: test/integration/clob_integration_test.dart
 reason: **The inline-VARCHAR sibling of the fixed temp-LOB leak is asserted away rather than measured.** In the `copyProc(p_in IN CLOB, p_out OUT CLOB)` cases the 32,767-byte (inline VARCHAR) shape asserts `debugPendingTempLobCount == 0` while the 32,768-byte shape asserts `2` — i.e. a PL/SQL `OUT CLOB` assigned from an IMPLICITLY converted VARCHAR yields an OUT locator with no TEMP flag. Since the whole Story 12.4 fix is flag-driven, that shape leaks exactly as before IF the server did allocate session temp space for it, and nothing measures `V$TEMPORARY_LOBS` across repeated calls of that shape. The claim that non-flagged locators "allocate no session temp-LOB space" is measured for the `TO_CLOB`-literal / table-row / `FOR UPDATE` shapes and merely assumed for the one shape adjacent to the bug the epic set out to fix. Fix: add a baseline/after `tempLobCount` assertion around a repeat loop of the inline-VARCHAR OUT shape, on both fixtures. target: Epic 12 follow-up (measurement / test coverage). [test/integration/clob_integration_test.dart; test/integration/blob_integration_test.dart]
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-temp-lob-free-queue-measure
+resolution-undo: a32d7c0427f5521a55bccec1d2161f973b556e0849542ff41a69b5c9b05b5221 2026-10-15 7374617475733a206f70656e
 
 ### DW-123: `_openLobs` grows unbounded across a long `fetchLobs` result-set iteration when the caller never closes each delivered handle.
 
@@ -976,21 +978,27 @@ location: lib/src/transport/transport.dart:2362
 source_spec: `bmad-build-auto-result-lob-free-queue-hardening.md`
 severity: medium
 reason: The scalar, bulk, and DML RETURNING maxSize checks throw before readLocator reaches its finally block. These checks and their ordering predate this hardening change. A live server-side leak measurement on an oversized temporary OUT locator would settle the impact.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-temp-lob-free-queue-measure
+resolution-undo: a32d7c0427f5521a55bccec1d2161f973b556e0849542ff41a69b5c9b05b5221 2026-10-15 7374617475733a206f70656e
 
 ### DW-129: Multiple distinct open handles for one temporary locator identity may outlive the ownership set's single claim.
 origin: spec-deferred 5dbcf3a60cfd
 location: lib/src/transport/transport.dart:590
 source_spec: `bmad-build-auto-result-lob-free-queue-hardening.md`
 reason: claimTempLobOwnership stores one set key and queueTempLobToFree removes it on one close. The response-local materialized map shares one handle for aliased LobLocator instances; a reachable path producing two independent handles with the same identity has not been established. A live or decoder-level reproducer would settle this.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-temp-lob-free-queue-measure
+resolution-undo: a32d7c0427f5521a55bccec1d2161f973b556e0849542ff41a69b5c9b05b5221 2026-10-15 7374617475733a206f70656e
 
 ### DW-130: Distinct temporary LOB identities might collide after enough allocations or across LOB types.
 origin: spec-deferred 24f4fd4346d6
 location: lib/src/transport/transport.dart:561
 source_spec: `bmad-build-auto-result-lob-free-queue-hardening.md`
 reason: The 12-byte identity range was measured on two temporary CLOBs. A live sequence of many CLOB, BLOB, and NCLOB allocations on both Oracle versions, with distinct-identity and post-free server-count checks, would settle whether the range remains unique.
-status: open
+status: done 2026-10-15
+resolution: resolved by sweep bundle dw-temp-lob-free-queue-measure
+resolution-undo: a32d7c0427f5521a55bccec1d2161f973b556e0849542ff41a69b5c9b05b5221 2026-10-15 7374617475733a206f70656e
 
 ### DW-131: Update project context to name ttcDmlOptionRowCounts after the constant rename.
 origin: spec-deferred 425ea5a1f2dd
@@ -998,4 +1006,27 @@ location: _bmad-output/project-context.md:298
 source_spec: `bmad-build-auto-result-executemany-test-naming-hygiene.md`
 severity: low
 reason: _bmad-output/project-context.md:298 still names ttcExecOptionDmlRowCounts, which no longer exists. Future agents following that guidance would search for a nonexistent symbol. The review workflow routes agent-context edits to deferred work.
+status: open
+
+### DW-132: After any throw inside _materializeLobValues, temporary or abstract locators in the same response that were not yet visited are never queued for freeing.
+origin: spec-deferred 9b17d4af9889
+location: lib/src/transport/transport.dart _materializeLobValues
+source_spec: `spec-temp-lob-free-queue-measure.md`
+severity: medium
+reason: DW-128's fix queues only the locator a maxSize guard rejects. Locators later in the same response (a second LOB OUT bind after an oversized first one, remaining rows after a failed read or a BLOB IS JSON decode failure, or any locator when resolveOutBindMaxSize throws its index-misalignment error) are discarded unqueued and hold session temp-LOB space until session end. Since DW-122 every server-expression LOB is in scope, so a multi-row TO_CLOB query whose Nth read fails would leave the remaining rows' abstract LOBs behind. Fix: on failure with wrapLob == null, sweep the response's not-yet-materialized LobLocators through _queueMaterializedTempLobToFree (ownership-aware and deduped).
+status: open
+
+### DW-133: Expression-LOB frees from a fetchLobs:false streaming result set accumulate client-side until the next execute, and large expression-LOB queries now log the pending-free warning.
+origin: spec-deferred 9f8e7bcdaafa
+location: lib/src/transport/transport.dart queueTempLobToFree, _tempLobQueueWarnDepth
+source_spec: `spec-temp-lob-free-queue-measure.md`
+severity: low
+reason: Since DW-122 every abstract (server-expression) LOB a materialize pass reads is queued. The queue drains only on sendExecute, so a resultSet: true / fetchLobs: false iteration over a TO_CLOB(...) column holds one 40-byte locator plus one key per row until the first execute after the result set closes (previously these leaked server-side until session end). Any single execute that materializes 1,000 or more expression LOBs also trips the once-per-drain-cycle WARNING added for DW-120. Possible follow-ups: piggyback FREE_TEMP on FETCH messages, or exempt materialize-path bulk queueing from the warning.
+status: open
+
+### DW-134: LobLocator.isTemporary now honors the ABSTRACT bit without excluding value-based (JSON/VECTOR) locators.
+origin: spec-deferred f4d7cc88c460
+location: lib/src/protocol/lob_locator.dart isTemporary
+source_spec: `spec-temp-lob-free-queue-measure.md`
+reason: Unverified. If a value-based abstract locator ever reached materializeLobs or wrapLob, a FREE_TEMP would be queued for an inline value. The full integration suites (including JSON) passed on 23ai and 21c, and python-oracledb free_lob uses the same rule, so no reachable path is known. Settle it by fetching a JSON/VECTOR column with rawJsonBlobs and fetchLobs variants and checking the pending free count.
 status: open

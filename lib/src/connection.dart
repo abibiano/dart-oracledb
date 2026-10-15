@@ -5072,7 +5072,12 @@ class OracleConnection {
   /// deliberately never imports the transport.
   @internal
   void releaseLob(OracleLob lob) {
-    if (_openLobs.remove(lob) && !lob.isTemporary) _openFetchedLobs--;
+    // Mirror [_registerLob]'s increment, which counts every FETCHED handle —
+    // including one whose locator is temporary (an `IN OUT` replacement LOB, or
+    // since DW-122 any ABSTRACT expression LOB). Keying the decrement on the
+    // handle CATEGORY rather than `isTemporary` keeps the warning counter from
+    // drifting upward with every temporary fetched handle.
+    if (_openLobs.remove(lob) && !lob.isCreatedTemporary) _openFetchedLobs--;
     if (!lob.isTemporary) return;
     // A dead session has already lost its temporary LOBs (the server frees
     // session-duration temp LOBs at teardown) and there will be no next execute

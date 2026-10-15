@@ -67,6 +67,33 @@ LobLocator _fetchedTempLocator({
   return loc;
 }
 
+/// A FETCHED server-EXPRESSION locator: flag byte 1 carries the ABSTRACT bit
+/// (`0xC2` for a CLOB, `0xC1` for a BLOB — the exact bytes dumped live on
+/// Oracle 23ai and 21c for `SELECT TO_CLOB(...)` and an inline-VARCHAR PL/SQL
+/// CLOB OUT bind) and flag byte 4 has NO TEMP bit (DW-122).
+LobLocator _fetchedAbstractLocator({
+  required int oracleType,
+  required int length,
+  int? tag,
+}) {
+  final bytes = Uint8List(tnsLobLocatorBufferSize);
+  bytes[tnsLobLocOffsetFlag1] = oracleType == oraTypeBlob ? 0xC1 : 0xC2;
+  if (tag != null) bytes[19] = tag;
+  final loc = LobLocator(
+    locator: bytes,
+    oracleType: oracleType,
+    length: length,
+    chunkSize: 0,
+  );
+  expect(bytes[tnsLobLocOffsetFlag4] & tnsLobLocFlagsTemp, equals(0));
+  expect(
+    loc.isTemporary,
+    isTrue,
+    reason: 'an ABSTRACT locator holds session temp-LOB space (DW-122)',
+  );
+  return loc;
+}
+
 /// A FETCHED locator with no flag bits set (a plain table row locator — measured
 /// non-temporary on both fixtures).
 LobLocator _fetchedPlainLocator({
@@ -1192,6 +1219,483 @@ void main() {
         }
       },
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // DW-128 — the OUT-bind maxSize guards throw BEFORE `readLocator`, so its
+  // `finally` (the materialize path's queue point) never ran for the locator
+  // they reject: a temporary OUT locator larger than maxSize was discarded
+  // unqueued and held its session temp-LOB space until session end (measured
+  // live on 23ai and 21c: one leaked LOB per rejected `IN OUT` call). Every
+  // guard shape must queue the rejected TEMPORARY locator exactly once, issue
+  // no READ, and still queue nothing for a persistent locator. Each test here
+  // fails without `rejectOversized` in `_materializeLobValues`.
+  // -------------------------------------------------------------------------
+  group('DW-128: a maxSize guard queues the temporary locator it rejects', () {
+    const tinyClob = [
+      BindMetadata(oraType: oraTypeClob, dir: BindDir.output, maxSize: 1),
+    ];
+    const tinyBlob = [
+      BindMetadata(oraType: oraTypeBlob, dir: BindDir.output, maxSize: 1),
+    ];
+
+    Matcher throwsMaxSize(String shape) => throwsA(
+      isA<OracleException>()
+          .having((e) => e.errorCode, 'errorCode', oraBindTypeError)
+          .having(
+            (e) => e.message,
+            'message',
+            allOf(contains('maxSize'), contains(shape)),
+          ),
+    );
+
+    test('scalar OUT bind (execute)', () async {
+      // No canned replies: a rejected locator must never be READ.
+      final t = _ChunkedReadTransport([]);
+      final loc = _fetchedTempLocator(oracleType: oraTypeClob, length: 999);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            outBindValues: [loc],
+            outBindIndices: const [0],
+          ),
+          bindMetadata: tinyClob,
+        ),
+        throwsMaxSize('OracleBind maxSize is 1'),
+      );
+      expect(t.requests, isEmpty, reason: 'the guard rejects before any READ');
+      expect(
+        t.debugPendingTempLobCount,
+        equals(1),
+        reason:
+            'the rejected temporary LOB exists server-side; without the '
+            'queue it is held until session end',
+      );
+      expect(t.debugTempLobMaterializeQueuedCount, equals(1));
+      expect(t.debugTempLobQueuedCount, equals(1));
+    });
+
+    test('PL/SQL executeMany scalar shape (outBindRows)', () async {
+      final t = _ChunkedReadTransport([]);
+      final loc = _fetchedTempLocator(oracleType: oraTypeBlob, length: 50);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            outBindRows: [
+              [loc],
+            ],
+            outBindIndices: const [0],
+          ),
+          bindMetadata: tinyBlob,
+        ),
+        throwsMaxSize('executeMany iteration'),
+      );
+      expect(t.requests, isEmpty);
+      expect(t.debugPendingTempLobCount, equals(1));
+      expect(t.debugTempLobMaterializeQueuedCount, equals(1));
+    });
+
+    test('DML RETURNING nested shape', () async {
+      final t = _ChunkedReadTransport([]);
+      final loc = _fetchedTempLocator(oracleType: oraTypeClob, length: 7);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            outBindRows: [
+              [
+                [loc],
+              ],
+            ],
+            outBindIndices: const [0],
+          ),
+          bindMetadata: tinyClob,
+          dmlReturning: true,
+        ),
+        throwsMaxSize('executeMany iteration'),
+      );
+      expect(t.requests, isEmpty);
+      expect(t.debugPendingTempLobCount, equals(1));
+    });
+
+    test(
+      'an ABSTRACT (server-expression) OUT locator is queued too — the '
+      'guard follows LobLocator.isTemporary, not just the TEMP bit',
+      () async {
+        final t = _ChunkedReadTransport([]);
+        final loc = _fetchedAbstractLocator(
+          oracleType: oraTypeClob,
+          length: 40,
+        );
+        await expectLater(
+          t.materializeLobs(
+            ExecuteResponse(
+              isSuccess: true,
+              outBindValues: [loc],
+              outBindIndices: const [0],
+            ),
+            bindMetadata: tinyClob,
+          ),
+          throwsMaxSize('OracleBind maxSize is 1'),
+        );
+        expect(t.debugPendingTempLobCount, equals(1));
+      },
+    );
+
+    test('a NON-temporary rejected locator queues nothing (never FREE_TEMP a '
+        'persistent LOB)', () async {
+      final t = _ChunkedReadTransport([]);
+      final loc = _fetchedPlainLocator(oracleType: oraTypeClob, length: 999);
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            outBindValues: [loc],
+            outBindIndices: const [0],
+          ),
+          bindMetadata: tinyClob,
+        ),
+        throwsMaxSize('OracleBind maxSize is 1'),
+      );
+      expect(t.debugPendingTempLobCount, equals(0));
+      expect(t.debugTempLobQueuedCount, equals(0));
+    });
+
+    test('a rejected identity an open handle owns is NOT queued (the handle '
+        'frees it on close)', () async {
+      final t = _ChunkedReadTransport([]);
+      final loc = _fetchedTempLocator(
+        oracleType: oraTypeClob,
+        length: 999,
+        tag: 4,
+      );
+      t.claimTempLobOwnership(Uint8List.fromList(loc.locator));
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            outBindValues: [loc],
+            outBindIndices: const [0],
+          ),
+          bindMetadata: tinyClob,
+        ),
+        throwsMaxSize('OracleBind maxSize is 1'),
+      );
+      expect(t.debugPendingTempLobCount, equals(0));
+      expect(t.debugTempLobMaterializeSkippedOwnedCount, equals(1));
+    });
+
+    test('a rejected locator that is ALREADY pending (the p := p echo of the '
+        "driver's input temp LOB) stays queued exactly once", () async {
+      final t = _ChunkedReadTransport([]);
+      final loc = _fetchedTempLocator(
+        oracleType: oraTypeBlob,
+        length: 64,
+        tag: 9,
+      );
+      // Stand in for `_createTempBlob` having queued the INPUT temp locator.
+      t.queueTempLobToFree(Uint8List.fromList(loc.locator));
+      expect(t.debugPendingTempLobCount, equals(1));
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            outBindValues: [loc],
+            outBindIndices: const [0],
+          ),
+          bindMetadata: tinyBlob,
+        ),
+        throwsMaxSize('OracleBind maxSize is 1'),
+      );
+      expect(t.debugPendingTempLobCount, equals(1), reason: 'no double free');
+      expect(t.debugTempLobSkippedDuplicateCount, equals(1));
+    });
+
+    test('an earlier OUT value that fit is read and queued, and the later '
+        'rejected one is queued as well', () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([7]), amount: 1),
+      ]);
+      final fits = _fetchedTempLocator(
+        oracleType: oraTypeBlob,
+        length: 1,
+        tag: 1,
+      );
+      final tooBig = _fetchedTempLocator(
+        oracleType: oraTypeBlob,
+        length: 5,
+        tag: 2,
+      );
+      await expectLater(
+        t.materializeLobs(
+          ExecuteResponse(
+            isSuccess: true,
+            outBindValues: [fits, tooBig],
+            outBindIndices: const [0, 1],
+          ),
+          bindMetadata: const [
+            BindMetadata(oraType: oraTypeBlob, dir: BindDir.output, maxSize: 1),
+            BindMetadata(oraType: oraTypeBlob, dir: BindDir.output, maxSize: 1),
+          ],
+        ),
+        throwsMaxSize('OracleBind maxSize is 1'),
+      );
+      expect(t.requests, hasLength(1), reason: 'only the fitting value');
+      expect(t.debugPendingTempLobCount, equals(2));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // DW-129 — two DISTINCT open handles for ONE temporary identity.
+  //
+  // MEASURED on 23ai AND 21c: a `createTemporaryClob()` handle bound as a plain
+  // IN to `p_out := p_in` under `fetchLobs: true` returns a SECOND handle whose
+  // TEMP-flagged locator has the same identity subrange (only flag byte 1
+  // differs: 0x82 vs 0x02). With one set entry per identity, closing the
+  // fetched handle dropped the claim AND queued the free; the next execute
+  // freed the LOB and the created handle's next read raised ORA-22922.
+  // Ownership is now reference-counted: only the LAST owner's release queues.
+  // Each test fails against the single-claim set.
+  // -------------------------------------------------------------------------
+  group('DW-129: two open handles sharing one temporary identity', () {
+    /// The created handle's locator (flag byte 1 0x82) and the fetched
+    /// `p_out := p_in` echo (0x02): same identity, distinct buffers.
+    (Uint8List, LobLocator) createdAndEcho(int tag) {
+      final created = Uint8List(tnsLobLocatorBufferSize)
+        ..[tnsLobLocOffsetFlag1] = 0x82
+        ..[tnsLobLocOffsetFlag4] = 0x03
+        ..[19] = tag;
+      final echo = LobLocator(
+        locator: Uint8List.fromList(created)..[tnsLobLocOffsetFlag1] = 0x02,
+        oracleType: oraTypeClob,
+        length: 3,
+        chunkSize: 0,
+      );
+      expect(echo.isTemporary, isTrue);
+      return (created, echo);
+    }
+
+    test('closing the FETCHED handle first neither frees the LOB nor drops '
+        "the created handle's claim — even across a drain", () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([1, 2, 3]), amount: 3),
+      ]);
+      final (created, echo) = createdAndEcho(7);
+      // OracleConnection._createTemporaryLob claims the created handle.
+      t.claimTempLobOwnership(created);
+      // The fetchLobs: true OUT value wraps into a SECOND handle (and claims).
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindValues: [echo],
+          outBindIndices: const [0],
+        ),
+        wrapLob: _WrapMarker.new,
+      );
+      expect(out.outBindValues.single, isA<_WrapMarker>());
+
+      // The fetched handle closes first (OracleConnection.releaseLob).
+      t.queueTempLobToFree(echo.locator);
+      expect(
+        t.debugPendingTempLobCount,
+        equals(0),
+        reason:
+            'freeing now would destroy the LOB under the still-open '
+            'created handle on the next execute (ORA-22922)',
+      );
+      expect(t.debugTempLobSkippedSharedCount, equals(1));
+
+      // An execute drains the queue (the fake stops at the wire boundary,
+      // after the drain) — the created handle's LOB must not be on it.
+      await expectLater(
+        t.sendExecute('SELECT 1 FROM dual', isQuery: true),
+        throwsA(isA<StateError>()),
+      );
+      expect(t.debugPendingTempLobCount, equals(0));
+
+      // The claim survived: the materialize path still treats it as owned.
+      final again = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindValues: [
+            LobLocator(
+              locator: Uint8List.fromList(echo.locator),
+              oracleType: oraTypeClob,
+              length: 3,
+              chunkSize: 0,
+            ),
+          ],
+          outBindIndices: const [0],
+        ),
+      );
+      expect(again.outBindValues.single, equals('\u0001\u0002\u0003'));
+      expect(t.debugPendingTempLobCount, equals(0));
+      expect(t.debugTempLobMaterializeSkippedOwnedCount, equals(1));
+
+      // The LAST owner's close queues the free, exactly once.
+      t.queueTempLobToFree(created);
+      expect(t.debugPendingTempLobCount, equals(1));
+      expect(t.debugTempLobQueuedCount, equals(1));
+    });
+
+    test('closing the CREATED handle first defers the free to the fetched '
+        "handle's close", () async {
+      final t = _ChunkedReadTransport([]);
+      final (created, echo) = createdAndEcho(8);
+      t.claimTempLobOwnership(created);
+      await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindValues: [echo],
+          outBindIndices: const [0],
+        ),
+        wrapLob: _WrapMarker.new,
+      );
+      t.queueTempLobToFree(created);
+      expect(t.debugPendingTempLobCount, equals(0));
+      t.queueTempLobToFree(echo.locator);
+      expect(t.debugPendingTempLobCount, equals(1));
+      expect(t.debugTempLobQueuedCount, equals(1));
+      expect(t.debugTempLobSkippedSharedCount, equals(1));
+    });
+
+    test('decoder-level: two DISTINCT locator instances with one identity in '
+        'ONE response become two handles, and only the second close '
+        'queues', () async {
+      // The per-response `materialized` map is keyed by INSTANCE, so two
+      // byte-identical locators that are not the same object are two handles.
+      final t = _ChunkedReadTransport([]);
+      final a = _fetchedTempLocator(oracleType: oraTypeClob, length: 3, tag: 5);
+      final b = LobLocator(
+        locator: Uint8List.fromList(a.locator),
+        oracleType: oraTypeClob,
+        length: 3,
+        chunkSize: 0,
+      );
+      final wrapped = <LobLocator>[];
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          rows: [
+            [a],
+            [b],
+          ],
+        ),
+        wrapLob: (l) {
+          wrapped.add(l);
+          return _WrapMarker(l);
+        },
+      );
+      expect(wrapped, hasLength(2), reason: 'two independent handles');
+      expect(identical(out.rows[0][0], out.rows[1][0]), isFalse);
+      t.queueTempLobToFree(a.locator);
+      expect(t.debugPendingTempLobCount, equals(0));
+      t.queueTempLobToFree(b.locator);
+      expect(t.debugPendingTempLobCount, equals(1));
+    });
+
+    test('a single owner still queues on its first release (the common path '
+        'is unchanged)', () {
+      final t = _ChunkedReadTransport([]);
+      final (created, _) = createdAndEcho(9);
+      t.claimTempLobOwnership(created);
+      t.queueTempLobToFree(created);
+      expect(t.debugPendingTempLobCount, equals(1));
+      expect(t.debugTempLobSkippedSharedCount, equals(0));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // DW-122 — a server-EXPRESSION ("abstract") locator holds session temp-LOB
+  // space: MEASURED on 23ai AND 21c, every inline-VARCHAR PL/SQL CLOB OUT bind,
+  // `SELECT TO_CLOB(...)` cell and `TO_BLOB(...)` value grew
+  // V$TEMPORARY_LOBS.ABSTRACT_LOBS by one, never freed until session end. Its
+  // locator carries flag byte 1 0xC2/0xC1 and NO TEMP bit, so the TEMP-only
+  // decision never queued it. Each test fails without the ABSTRACT clause in
+  // `LobLocator.isTemporary`.
+  // -------------------------------------------------------------------------
+  group('DW-122: ABSTRACT expression locators are freed', () {
+    test('the materialize path queues an ABSTRACT OUT locator (the '
+        'inline-VARCHAR `p_out := p_in` shape)', () async {
+      const text = 'inline';
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList(text.codeUnits), amount: text.length),
+      ]);
+      final loc = _fetchedAbstractLocator(
+        oracleType: oraTypeClob,
+        length: text.length,
+      );
+      final out = await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          outBindValues: [loc],
+          outBindIndices: const [0],
+        ),
+      );
+      expect(out.outBindValues.single, equals(text));
+      expect(t.debugPendingTempLobCount, equals(1));
+      expect(t.debugTempLobMaterializeQueuedCount, equals(1));
+    });
+
+    test('ABSTRACT row cells (SELECT TO_CLOB / TO_BLOB) are each queued once; '
+        'a table-row locator in the same row is not', () async {
+      final t = _ChunkedReadTransport([
+        (data: Uint8List.fromList([1]), amount: 1),
+        (data: Uint8List.fromList([2]), amount: 1),
+        (data: Uint8List.fromList([3]), amount: 1),
+      ]);
+      final exprA = _fetchedAbstractLocator(
+        oracleType: oraTypeBlob,
+        length: 1,
+        tag: 1,
+      );
+      final exprB = _fetchedAbstractLocator(
+        oracleType: oraTypeBlob,
+        length: 1,
+        tag: 2,
+      );
+      final table = LobLocator(
+        locator: Uint8List(tnsLobLocatorBufferSize)
+          ..[tnsLobLocOffsetFlag1] = tnsLobLocFlagsBlob
+          ..[19] = 3,
+        oracleType: oraTypeBlob,
+        length: 1,
+        chunkSize: 0,
+      );
+      expect(table.isTemporary, isFalse);
+      await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          rows: [
+            [exprA, table],
+            [exprB, exprB], // aliased: read and queued once
+          ],
+        ),
+      );
+      expect(t.requests, hasLength(3));
+      expect(t.debugPendingTempLobCount, equals(2));
+    });
+
+    test('the WRAP path claims an ABSTRACT locator instead of queueing it; '
+        'the handle frees it on close', () async {
+      final t = _ChunkedReadTransport([]);
+      final loc = _fetchedAbstractLocator(oracleType: oraTypeClob, length: 4);
+      await t.materializeLobs(
+        ExecuteResponse(
+          isSuccess: true,
+          rows: [
+            [loc],
+          ],
+        ),
+        wrapLob: _WrapMarker.new,
+      );
+      expect(t.debugPendingTempLobCount, equals(0));
+      // Owned: the materialize path would skip this identity now.
+      t.queueTempLobToFree(loc.locator); // the handle's close()
+      expect(t.debugPendingTempLobCount, equals(1));
+    });
   });
 
   // -------------------------------------------------------------------------

@@ -144,6 +144,33 @@
   only for the remaining budget; once it is spent the connection is poisoned
   and `oraConnectTimeout` is thrown, as for any timed-out call.
 
+- **Server-expression LOBs no longer leak session temp-LOB space.** A CLOB /
+  BLOB produced by an expression — `SELECT TO_CLOB(...)` / `TO_BLOB(...)`, a
+  CLOB concatenation, or a PL/SQL OUT bind the block fills from a `VARCHAR2` /
+  `RAW` value or a literal — is an "abstract" LOB that holds one
+  `V$TEMPORARY_LOBS.ABSTRACT_LOBS` entry until it is freed. The driver never
+  freed them, so each such value stayed allocated until the session ended (a
+  1,500-row `TO_CLOB` query left 1,500 behind). The driver now frees them like
+  temporary LOBs (python-oracledb parity): automatically when it materializes
+  the value, and on `close()` for a `fetchLobs: true` handle. The free rides
+  the next `execute()`, as for every temporary LOB.
+  **Behavior change:** `OracleLob.isTemporary` now reports `true` for such a
+  handle. Table-row, `FOR UPDATE` and `EMPTY_CLOB()` locators are unaffected.
+- **A temporary LOB OUT value rejected by its `maxSize` is freed.** When an
+  OUT / `IN OUT` CLOB or BLOB bind (including `executeMany()` and DML
+  `RETURNING` shapes) returned a temporary LOB longer than its declared
+  `maxSize`, the error was raised before the LOB was queued for freeing, so
+  each such call held one session temporary LOB until the session ended.
+- **Closing one of two handles to the same temporary LOB no longer frees it
+  under the other.** A created temporary LOB bound as a plain IN into a block
+  that returns it as an OUT value (`p_out := p_in`) under `fetchLobs: true`
+  yields a second handle on the same server LOB; closing that returned handle
+  used to free the LOB on the next `execute()`, so a later read of the created
+  handle failed with `ORA-22922`. The free is now queued when the last of them
+  closes.
+
+  Validated against Oracle 23ai and Oracle 21c.
+
 - **Streaming LOB text diagnostics.** A byte that can never begin a UTF-8
   sequence in a `textStream` now fails as malformed UTF-8 data instead of being
   reported as a truncated stream, and a READ reply that omits its unit count

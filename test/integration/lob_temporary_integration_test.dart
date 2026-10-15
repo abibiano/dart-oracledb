@@ -21,8 +21,12 @@
 ///   * a created temp LOB survives `commit()` (session, not transaction,
 ///     duration);
 ///   * `SELECT TO_CLOB(...)` / a PL/SQL CLOB OUT bind — the measured
-///     `isTemporary` reality for FETCHED locators — behaves per AC2/AC3 and never
-///     poisons the next unrelated `execute()`;
+///     `isTemporary` reality for FETCHED locators (ABSTRACT expression LOBs,
+///     DW-122) — frees its server LOB on `close()` and never poisons the next
+///     unrelated `execute()`;
+///   * two open handles on ONE temporary LOB free it only when the last closes
+///     (DW-129), and hundreds of simultaneously open CLOB / BLOB / NCLOB /
+///     expression LOBs keep distinct free-queue identities (DW-130);
 ///   * pool reclaim of a connection with an open created-temp handle frees the
 ///     LOB, reuses the session, and gives the stale handle the pool-reclaim
 ///     error.
@@ -759,8 +763,9 @@ void main() {
       // AC2 / AC9: FETCHED locator temp-flag measurement
       // ---------------------------------------------------------------
 
-      test('a FETCHED server-expression locator (TO_CLOB) matches the measured '
-          'isTemporary reality, and the next execute still succeeds', () async {
+      test('a FETCHED server-expression locator (TO_CLOB) is temporary: its '
+          'close() frees the server LOB and the next execute still '
+          'succeeds (DW-122)', () async {
         final baseline = await tempLobCount(connection);
         final r = await connection.execute(
           "SELECT TO_CLOB('reclaim me') AS DOC FROM dual",
@@ -768,44 +773,193 @@ void main() {
           const OracleExecuteOptions(fetchLobs: true),
         );
         final lob = r.rows.single['DOC'] as OracleLob;
-        // MEASURED on 23ai and 21c (Story 12.2 Dev Agent Record): Oracle does
-        // NOT set the locator TEMP flag for a server-expression LOB, and
-        // V$TEMPORARY_LOBS shows no session temporary LOB for it. So the handle
-        // reports false, close() queues nothing, and there is nothing to leak.
-        expect(lob.isTemporary, isFalse);
+        // MEASURED on 23ai and 21c (DW-122): Oracle sets no TEMP flag on a
+        // server-expression LOB, but it does set the ABSTRACT flag, and the
+        // value holds one V$TEMPORARY_LOBS.ABSTRACT_LOBS entry. Story 12.2
+        // recorded this shape as non-temporary because its probe summed only
+        // CACHE_LOBS + NOCACHE_LOBS; before DW-122 closing the handle queued
+        // nothing and the entry stayed until session end.
+        expect(lob.isTemporary, isTrue);
         expect(await lob.read(), equals('reclaim me'));
         await lob.close();
         expect(
           connection.debugPendingTempLobCount,
-          equals(0),
-          reason:
-              'a non-temporary fetched locator must never be queued for '
-              'FREE_TEMP — the piggyback rides an unrelated statement',
+          equals(1),
+          reason: 'close() queues the expression LOB for FREE_TEMP',
         );
 
-        // The piggyback-poisoning guard: the next unrelated execute is intact.
+        // The piggyback-poisoning guard: the next unrelated execute carries
+        // the free and is intact.
         final ok = await connection.execute('SELECT 8 AS V FROM dual');
         expect(ok.rows.single['V'], equals(8));
+        expect(connection.debugPendingTempLobCount, equals(0));
         final after = await tempLobCount(connection);
         if (baseline != null && after != null) {
           expect(after, equals(baseline));
         }
       });
 
-      test('a FETCHED PL/SQL CLOB OUT-bind locator matches the measured '
-          'isTemporary reality, and the next execute still succeeds', () async {
+      test('a FETCHED PL/SQL CLOB OUT-bind locator filled from a VARCHAR2 is '
+          'temporary: its close() frees the server LOB and the next execute '
+          'still succeeds (DW-122)', () async {
+        final baseline = await tempLobCount(connection);
         final r = await connection.execute('BEGIN :ret := :src; END;', {
           'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 4000),
           'src': 'out bind measurement',
         }, const OracleExecuteOptions(fetchLobs: true));
         final lob = r.outBinds['ret'] as OracleLob;
-        expect(lob.isTemporary, isFalse); // measured on 23ai and 21c
+        // Measured on 23ai and 21c: an ABSTRACT expression LOB (see above).
+        expect(lob.isTemporary, isTrue);
         expect(await lob.read(), equals('out bind measurement'));
         await lob.close();
-        expect(connection.debugPendingTempLobCount, equals(0));
+        expect(connection.debugPendingTempLobCount, equals(1));
         final ok = await connection.execute('SELECT 9 AS V FROM dual');
         expect(ok.rows.single['V'], equals(9));
+        expect(connection.debugPendingTempLobCount, equals(0));
+        final after = await tempLobCount(connection);
+        if (baseline != null && after != null) {
+          expect(after, equals(baseline));
+        }
       });
+
+      // ---------------------------------------------------------------
+      // DW-129: two open handles on ONE temporary LOB
+      // ---------------------------------------------------------------
+      //
+      // MEASURED on 23ai AND 21c: a created temp handle bound as a plain IN to
+      // `:ret := :src` under fetchLobs: true comes back as a SECOND handle whose
+      // TEMP-flagged locator has the same identity — the same server LOB. Before
+      // the fix, closing that returned handle queued the free on its own, the
+      // next execute freed the LOB, and the created handle's read() raised
+      // ORA-22922. Ownership is now reference-counted: the LOB is freed when the
+      // LAST of the two handles closes.
+
+      for (final returnedFirst in const [true, false]) {
+        test('two handles on one temporary LOB: closing the '
+            '${returnedFirst ? 'RETURNED' : 'CREATED'} handle first frees '
+            'nothing until the other closes too (DW-129)', () async {
+          const text = 'shared by two handles';
+          final baseline = await tempLobCount(connection);
+          final created = await connection.createTemporaryClob();
+          await created.write(1, text);
+          final r = await connection.execute('BEGIN :ret := :src; END;', {
+            'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 4000),
+            'src': created,
+          }, const OracleExecuteOptions(fetchLobs: true));
+          final returned = r.outBinds['ret'] as OracleLob;
+          expect(identical(returned, created), isFalse);
+          expect(returned.isTemporary, isTrue);
+          expect(await returned.read(), equals(text));
+
+          final first = returnedFirst ? returned : created;
+          final last = returnedFirst ? created : returned;
+          await first.close();
+          expect(
+            connection.debugPendingTempLobCount,
+            equals(0),
+            reason: 'the other handle still references the LOB',
+          );
+          if (returnedFirst) {
+            // Only possible with the returned (fetched) handle closed: a
+            // statement now runs, and must NOT free the created handle's LOB.
+            final ok = await connection.execute('SELECT 14 AS V FROM dual');
+            expect(ok.rows.single['V'], equals(14));
+          }
+          expect(
+            await last.read(),
+            equals(text),
+            reason: 'before the fix this read raised ORA-22922',
+          );
+          await last.close();
+          expect(
+            connection.debugPendingTempLobCount,
+            equals(1),
+            reason: 'the last close queues the shared LOB exactly once',
+          );
+          final after = await tempLobCount(connection);
+          expect(connection.debugPendingTempLobCount, equals(0));
+          if (baseline != null && after != null) {
+            expect(after, equals(baseline));
+          }
+        });
+      }
+
+      // ---------------------------------------------------------------
+      // DW-130: identity uniqueness across many allocations and types
+      // ---------------------------------------------------------------
+      //
+      // The free queue dedupes by a 12-byte identity subrange of the locator
+      // (`Transport._tempLobKey`), previously measured on two temporary CLOBs
+      // only. Measured live here: the per-session LOB counter is a big-endian
+      // field ending at locator byte 19 that ONE sequence shares across CLOB,
+      // BLOB, NCLOB and ABSTRACT expression LOBs, so it crosses the one-byte
+      // boundary (byte 18 becomes non-zero) after 255 LOBs. Every handle below
+      // is open at the same time, so any key collision would be swallowed as a
+      // "duplicate" by the dedupe and leak server-side.
+      test('many CLOB / BLOB / NCLOB allocations plus ABSTRACT expression '
+          'handles keep distinct identities, and all free back to the '
+          'baseline (DW-130)', () async {
+        final nchar = nationalCharsetSupported(connection);
+        const perType = 200; // 600 created LOBs: past 255 twice
+        const expressionRows = 100; // 300 more ABSTRACT handles
+        final baseline = await tempLobCount(connection);
+        final skippedBefore = connection.debugTempLobSkippedDuplicateCount;
+
+        final created = <OracleLob>[];
+        for (var i = 0; i < perType; i++) {
+          created.add(await connection.createTemporaryClob());
+          created.add(await connection.createTemporaryBlob());
+          created.add(
+            nchar
+                ? await connection.createTemporaryNClob()
+                : await connection.createTemporaryClob(),
+          );
+        }
+        // Created handles leave the connection free, so the server's own count
+        // is readable while they are open.
+        final whileOpen = await tempLobCount(connection);
+        if (baseline != null && whileOpen != null) {
+          expect(
+            whileOpen,
+            equals(baseline + created.length),
+            reason: 'the server holds ${created.length} distinct LOBs',
+          );
+        }
+
+        final r = await connection.execute(
+          'SELECT TO_CLOB(LEVEL) AS C, '
+          "TO_BLOB(HEXTORAW('AB')) AS B, "
+          '${nchar ? 'TO_NCLOB(LEVEL)' : 'TO_CLOB(LEVEL)'} AS N '
+          'FROM dual CONNECT BY LEVEL <= $expressionRows',
+          null,
+          const OracleExecuteOptions(fetchLobs: true),
+        );
+        final fetched = <OracleLob>[
+          for (final row in r.rows)
+            for (final v in row.toList())
+              if (v is OracleLob) v,
+        ];
+        expect(fetched, hasLength(3 * expressionRows));
+        expect(fetched.every((l) => l.isTemporary), isTrue);
+
+        for (final lob in [...fetched, ...created]) {
+          await lob.close();
+        }
+        final total = created.length + fetched.length;
+        expect(
+          connection.debugTempLobSkippedDuplicateCount - skippedBefore,
+          equals(0),
+          reason: 'no two of the $total identities may collide',
+        );
+        expect(connection.debugPendingTempLobCount, equals(total));
+
+        // ONE execute carries all $total frees (a ~36 KB piggyback).
+        final after = await tempLobCount(connection);
+        expect(connection.debugPendingTempLobCount, equals(0));
+        if (baseline != null && after != null) {
+          expect(after, equals(baseline));
+        }
+      }, timeout: const Timeout(Duration(minutes: 5)));
 
       test('a FETCHED table CLOB / BLOB locator is never temporary', () async {
         final id = nextTestId();

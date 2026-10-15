@@ -148,8 +148,12 @@ const int tnsLobLocFlagsBlob = 0x01;
 /// Locator flag byte 1: value-based locator (TNS_LOB_LOC_FLAGS_VALUE_BASED).
 const int tnsLobLocFlagsValueBased = 0x20;
 
-/// Locator flag byte 1: abstract LOB (TNS_LOB_LOC_FLAGS_ABSTRACT) — used for
-/// JSON/VECTOR payloads that travel inline rather than via LOB operations.
+/// Locator flag byte 1: abstract LOB (TNS_LOB_LOC_FLAGS_ABSTRACT) — written
+/// by the driver on the value-based JSON/VECTOR QLocators it binds, and set by
+/// the server on every FETCHED server-expression LOB locator (`TO_CLOB(...)`,
+/// a PL/SQL OUT CLOB filled from a VARCHAR2). Such a fetched locator occupies a
+/// session `V$TEMPORARY_LOBS.ABSTRACT_LOBS` entry until freed, so
+/// `LobLocator.isTemporary` honors this bit (DW-122).
 const int tnsLobLocFlagsAbstract = 0x40;
 
 /// Locator flag byte 2: initialized (TNS_LOB_LOC_FLAGS_INIT).

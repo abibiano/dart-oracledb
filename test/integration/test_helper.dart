@@ -282,8 +282,13 @@ bool nationalCharsetSupported(
 
 /// Session-scoped temporary-LOB count from `V$TEMPORARY_LOBS`.
 ///
-/// The fixtures connect as `system`, so the view is readable. `ABSTRACT_LOBS`
-/// is deliberately NOT summed (it does not exist on every supported line).
+/// The fixtures connect as `system`, so the view is readable. ALL THREE
+/// columns are summed: `CACHE_LOBS` + `NOCACHE_LOBS` (created and `IN OUT`
+/// replacement temporary LOBs) and `ABSTRACT_LOBS` (server-expression LOBs —
+/// `TO_CLOB(...)`, an inline-VARCHAR PL/SQL CLOB OUT bind). `ABSTRACT_LOBS` was
+/// once excluded on the belief that it did not exist on every supported line;
+/// measured present on Oracle 23ai AND 21c, and excluding it is what hid the
+/// DW-122 leak (one abstract LOB per expression value, never freed).
 ///
 /// Note this reads the CURRENT session's SID via `SYS_CONTEXT`, so it cannot be
 /// used to observe another session's count — and it cannot run while a fetched
@@ -293,8 +298,8 @@ bool nationalCharsetSupported(
 /// only when a test genuinely has to read the count while a slot is held, and
 /// then pass the SID explicitly).
 const String tempLobCountSql =
-    'SELECT NVL(SUM(CACHE_LOBS + NOCACHE_LOBS), 0) AS N FROM V\$TEMPORARY_LOBS '
-    "WHERE SID = SYS_CONTEXT('USERENV','SID')";
+    'SELECT NVL(SUM(CACHE_LOBS + NOCACHE_LOBS + ABSTRACT_LOBS), 0) AS N '
+    "FROM V\$TEMPORARY_LOBS WHERE SID = SYS_CONTEXT('USERENV','SID')";
 
 /// Oracle errors that mean `V$TEMPORARY_LOBS` is simply not usable on this
 /// fixture (missing view / no privilege). Anything else is a real failure and is
@@ -343,6 +348,20 @@ Future<int?> tempLobCount(OracleConnection connection) async {
     return null;
   }
 }
+
+/// Free-queue entries [connection] accepted from anything OTHER than the
+/// `fetchLobs: false` materialize path, cumulative for the session.
+///
+/// Take the delta across ONE statement to read the driver's inline-bind vs
+/// temporary-LOB-conversion routing decision: in a statement that closes no
+/// handle it counts exactly the temp LOBs the bind conversion created (an
+/// echoed OUT locator of the same LOB is deduped, not counted twice). Since
+/// DW-122 `debugPendingTempLobCount` alone can no longer tell the two routes
+/// apart, because an inline-VARCHAR / inline-RAW PL/SQL CLOB/BLOB OUT bind
+/// returns an ABSTRACT locator that the materialize path queues too.
+int bindConversionQueuedTempLobs(OracleConnection connection) =>
+    connection.debugTempLobQueuedCount -
+    connection.debugTempLobMaterializeQueuedCount;
 
 /// Null-safe tearDown cleanup.
 ///

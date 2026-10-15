@@ -1158,12 +1158,16 @@ void main() {
       );
 
       test(
-        'the shapes measured NON-temporary still queue nothing (a table row '
-        'locator, a TO_CLOB expression, a TO_CLOB-literal PL/SQL OUT bind)',
+        'a table row locator queues nothing, while a TO_CLOB expression and a '
+        'TO_CLOB-literal PL/SQL OUT bind (ABSTRACT expression LOBs) are freed',
         () async {
           // The fix is content-driven off LobLocator.isTemporary, so a locator
-          // the server did NOT flag temporary must be completely unaffected.
-          // Each of these was measured non-allocating on both fixtures.
+          // the server did NOT flag must be completely unaffected: a table row
+          // locator was measured non-allocating on both fixtures. The two
+          // expression shapes were once recorded here as non-temporary too, but
+          // that measurement summed only CACHE_LOBS + NOCACHE_LOBS: they are
+          // ABSTRACT-flagged and each held a V$TEMPORARY_LOBS.ABSTRACT_LOBS
+          // entry until session end (DW-122), so they are now queued.
           final table = uniqueTableName('lob4_row');
           await connection.execute(
             'CREATE TABLE $table (id NUMBER PRIMARY KEY, doc CLOB)',
@@ -1190,8 +1194,10 @@ void main() {
             expect(expr.rows.single['C'], equals('expression lob'));
             expect(
               connection.debugPendingTempLobCount,
-              equals(0),
-              reason: 'a TO_CLOB expression locator is not temporary',
+              equals(1),
+              reason:
+                  'a TO_CLOB expression locator is an ABSTRACT LOB: '
+                  'materialized, then queued for freeing',
             );
 
             final outOnly = await connection.execute(
@@ -1199,19 +1205,19 @@ void main() {
               {'p': OracleBind.out(type: OracleDbType.clob, maxSize: 4000)},
             );
             expect(outOnly.outBinds['p'], equals('plain out'));
-            // NARROW, because it is shape-dependent: an OUT locator the body
-            // fills from a TO_CLOB LITERAL is not TEMP-flagged. An OUT locator
-            // the body assigns from a TEMPORARY input LOB (`p_out := p_in` where
-            // p_in arrived as the driver's temp CLOB — see the copyProc cases in
-            // clob_integration_test.dart / blob_integration_test.dart) IS
-            // TEMP-flagged and does queue a free. "A plain OUT bind" is not one
-            // answer; how the OUT value was produced decides.
+            // Shape-dependent: an OUT locator the body fills from a TO_CLOB
+            // LITERAL is ABSTRACT-flagged (no TEMP bit); one the body assigns
+            // from a TEMPORARY input LOB (`p_out := p_in` where p_in arrived as
+            // the driver's temp CLOB — see the copyProc cases in
+            // clob_integration_test.dart / blob_integration_test.dart) is
+            // TEMP-flagged. Both hold session temp-LOB space and both are
+            // queued. The expression free above rode THIS execute.
             expect(
               connection.debugPendingTempLobCount,
-              equals(0),
+              equals(1),
               reason:
-                  'a TO_CLOB-literal PL/SQL OUT locator is not '
-                  'TEMP-flagged, so nothing is queued for it',
+                  'the TO_CLOB-literal OUT locator is queued; the previous '
+                  "statement's expression LOB was freed by this execute",
             );
 
             final blob = await connection.execute('BEGIN $blobProc(:p); END;', {

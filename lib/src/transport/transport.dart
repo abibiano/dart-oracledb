@@ -575,7 +575,12 @@ class Transport {
   /// bytes `[10, 22)` hold the LOB's server-side identity (the per-database
   /// prefix plus the per-session LOB counter, byte 19, which is the one byte that
   /// differs between two temporary LOBs of one session). The remaining tail was
-  /// identical for every LOB of the session. The flag bytes are what a server
+  /// identical for every LOB of the session. DW-130 re-measured it at scale on
+  /// both versions: the counter is a big-endian field ENDING at byte 19 (byte
+  /// 18 becomes `0x01` at the 256th LOB), ONE sequence shared by CLOB, BLOB,
+  /// NCLOB and ABSTRACT expression LOBs, and 900 simultaneously open LOBs of
+  /// all four kinds produced 900 distinct keys. Bytes 20-21 carry the charset
+  /// id (`0x0369` CLOB, `0x07D0` NCLOB, `0` BLOB). The flag bytes are what a server
   /// echo is allowed to rewrite, so they are excluded: the key therefore does not
   /// depend on whether [copyBackLocator] has already mutated the live buffer, and
   /// two echoes of one LOB taken at different points of its life compare equal
@@ -591,20 +596,31 @@ class Transport {
         )
       : String.fromCharCodes(locator);
 
-  /// Identity keys of temporary locators currently owned by an open `OracleLob`
-  /// handle (claimed by [claimTempLobOwnership], released when the handle's
+  /// Identity keys of temporary locators currently owned by open `OracleLob`
+  /// handles, each mapped to the NUMBER of open handles that own it (claimed by
+  /// [claimTempLobOwnership], released one at a time when each handle's
   /// `close()` reaches [queueTempLobToFree]).
   ///
-  /// The materialize path ([queueMaterializedTempLobToFree]) consults it so it
+  /// The materialize path ([_queueMaterializedTempLobToFree]) consults it so it
   /// never queues a locator whose handle will queue it itself on `close()` —
   /// the pending-only dedupe cannot see that case once an earlier free has
   /// already drained off [_tempLobsToClose] (DW-109).
-  final Set<String> _handleOwnedTempLobKeys = <String>{};
+  ///
+  /// **Why a count, not a set (DW-129).** Two DISTINCT open handles can own
+  /// one server LOB. MEASURED on Oracle 23ai and 21c: a `createTemporaryClob()`
+  /// handle bound as a plain IN to `p_out := p_in` under `fetchLobs: true`
+  /// returns a second, TEMP-flagged handle whose locator has the SAME identity
+  /// subrange (only flag byte 1 differs). With a single set entry the first
+  /// `close()` dropped the claim AND queued the free, so the next execute
+  /// freed the LOB under the still-open other handle (`ORA-22922` on its next
+  /// read). With a count, only the LAST owner's `close()` queues the free.
+  final Map<String, int> _handleOwnedTempLobKeys = <String, int>{};
 
   /// Free-queue decision counters, exposed for tests and diagnostics through
   /// `OracleConnection.debugTempLobQueuedCount` and friends; not public API.
   int _tempLobQueuedCount = 0;
   int _tempLobSkippedDuplicateCount = 0;
+  int _tempLobSkippedSharedCount = 0;
   int _tempLobMaterializeQueuedCount = 0;
   int _tempLobMaterializeSkippedOwnedCount = 0;
 
@@ -623,8 +639,12 @@ class Transport {
   /// LOB whose public `OracleLob.close()` released it (queued via
   /// [queueTempLobToFree]); and since Story 12.4, a **server-allocated**
   /// temporary locator the `fetchLobs`-off materialize path read and discarded
-  /// ([_materializeLobValues], the `IN OUT` LOB-bind OUT locator). Either way the
-  /// count drains to zero on the next [sendExecute].
+  /// ([_materializeLobValues]: the `IN OUT` LOB-bind OUT locator, and since
+  /// DW-122 every server-EXPRESSION ("abstract") locator such as a
+  /// `SELECT TO_CLOB(...)` cell or an inline-VARCHAR PL/SQL CLOB OUT bind —
+  /// see `LobLocator.isTemporary`), including one the OUT-bind `maxSize` guard
+  /// rejected before reading it (DW-128). Either way the count drains to zero on
+  /// the next [sendExecute].
   int get debugPendingTempLobCount => _tempLobsToClose.length;
 
   /// Locators accepted onto the free queue since this transport was created.
@@ -632,6 +652,10 @@ class Transport {
 
   /// Queue attempts skipped because the same identity was already pending.
   int get debugTempLobSkippedDuplicateCount => _tempLobSkippedDuplicateCount;
+
+  /// Handle releases that queued nothing because another open handle still
+  /// owns the same identity (DW-129); the last owner's release queues it.
+  int get debugTempLobSkippedSharedCount => _tempLobSkippedSharedCount;
 
   /// Locators the `fetchLobs: false` materialize path queued.
   int get debugTempLobMaterializeQueuedCount => _tempLobMaterializeQueuedCount;
@@ -667,11 +691,14 @@ class Transport {
   ///
   /// 1. **An `OracleLob` handle** (`wrapLob != null`, i.e. `fetchLobs: true`, and
   ///    every `createTemporary*` handle). `OracleLob.close()` is idempotent — it
-  ///    queues only on the first call, via `OracleConnection.releaseLob` — so a
-  ///    double free is impossible. Every created-temporary handle owns a locator
-  ///    freshly returned by [createTemporaryLob], and the only FETCHED shape
-  ///    measured to carry the TEMP flag is an `IN OUT` bind's returned OUT
-  ///    locator, which is wrapped exactly once.
+  ///    releases only on the first call, via `OracleConnection.releaseLob` — so
+  ///    one handle can never free twice. Every created-temporary handle owns a
+  ///    locator freshly returned by [createTemporaryLob]. Several DISTINCT
+  ///    handles can own ONE server LOB, though (DW-129, measured: a created
+  ///    handle bound IN to `p_out := p_in` under `fetchLobs: true` comes back
+  ///    as a second handle with the same identity), so ownership is
+  ///    REFERENCE-COUNTED ([claimTempLobOwnership]): each handle's release
+  ///    drops one claim, and only the LAST owner's release queues the free.
   /// 2. **The materialize path** (`wrapLob == null`, i.e. `fetchLobs: false`),
   ///    since Story 12.4: there is no handle at all, so `_materializeLobValues`
   ///    queues the locator itself right after reading it. It runs behind that
@@ -733,14 +760,31 @@ class Transport {
   /// mirrors, and running any statement drains the queue.
   ///
   /// Every decision is logged at `fine` and counted
-  /// ([debugTempLobQueuedCount], [debugTempLobSkippedDuplicateCount]).
+  /// ([debugTempLobQueuedCount], [debugTempLobSkippedDuplicateCount],
+  /// [debugTempLobSkippedSharedCount]).
   ///
-  /// This is also the handle-release path: it drops the locator's
-  /// [_handleOwnedTempLobKeys] claim, since the handle is now closing.
+  /// This is also the handle-release path: it drops ONE of the locator's
+  /// [_handleOwnedTempLobKeys] claims, since a handle is now closing. When
+  /// another open handle still holds a claim on the same identity, nothing is
+  /// queued — freeing now would destroy that handle's LOB on the next execute
+  /// (DW-129); its own release will queue the free. Non-handle callers
+  /// ([_createTempClob], [_createTempBlob], [createTemporaryLob]'s cleanup and
+  /// [_queueMaterializedTempLobToFree]) never present a claimed identity: the
+  /// first three queue a LOB they just created, and the last checks ownership
+  /// first.
   @internal
   void queueTempLobToFree(Uint8List locator) {
     final key = _tempLobKey(locator);
-    _handleOwnedTempLobKeys.remove(key);
+    final owners = _handleOwnedTempLobKeys.remove(key);
+    if (owners != null && owners > 1) {
+      _handleOwnedTempLobKeys[key] = owners - 1;
+      _tempLobSkippedSharedCount++;
+      _log.fine(
+        'Temp LOB free deferred: ${owners - 1} other open handle(s) still own '
+        'this identity (skippedShared=$_tempLobSkippedSharedCount)',
+      );
+      return;
+    }
     if (!_tempLobKeysToClose.add(key)) {
       _tempLobSkippedDuplicateCount++;
       _log.fine(
@@ -768,19 +812,25 @@ class Transport {
     }
   }
 
-  /// Records that an open `OracleLob` handle owns the temporary [locator], so
-  /// the materialize path never queues it (see [_handleOwnedTempLobKeys]). The
-  /// claim is released by the handle's `close()` via [queueTempLobToFree].
+  /// Records that ONE more open `OracleLob` handle owns the temporary
+  /// [locator], so the materialize path never queues it and an earlier-closing
+  /// co-owner does not free it (see [_handleOwnedTempLobKeys]). Call exactly
+  /// once per handle; each handle's `close()` releases its claim via
+  /// [queueTempLobToFree].
   @internal
   void claimTempLobOwnership(Uint8List locator) {
-    _handleOwnedTempLobKeys.add(_tempLobKey(locator));
+    _handleOwnedTempLobKeys.update(
+      _tempLobKey(locator),
+      (owners) => owners + 1,
+      ifAbsent: () => 1,
+    );
   }
 
   /// The materialize path's counterpart of [queueTempLobToFree]: queues a
   /// temporary locator that was read and discarded, unless an open handle
   /// already owns that identity (its `close()` will queue it).
   void _queueMaterializedTempLobToFree(Uint8List locator) {
-    if (_handleOwnedTempLobKeys.contains(_tempLobKey(locator))) {
+    if (_handleOwnedTempLobKeys.containsKey(_tempLobKey(locator))) {
       _tempLobMaterializeSkippedOwnedCount++;
       _log.fine(
         'Materialized temp LOB not queued: owned by an open handle '
@@ -2333,15 +2383,18 @@ class Transport {
         // count 0 -> 1 -> 2 -> 3, exactly one per call, until session end.
         //
         // The decision is CONTENT-driven, never shape- or version-driven: the
-        // locator's own TEMP flag bit (LobLocator.isTemporary, flag byte 4 bit
-        // 0x01) is the only input. Every shape measured non-temporary — a plain
-        // table row locator, `SELECT TO_CLOB(...)`, a `FOR UPDATE` locator, and a
-        // PL/SQL CLOB OUT bind the body fills from a TO_CLOB LITERAL — therefore
-        // keeps queueing nothing and is byte-for-byte unaffected. ("A PL/SQL LOB
-        // OUT bind" is NOT one answer: an OUT locator the body assigns from a
-        // TEMPORARY input LOB, `p_out := p_in`, IS flagged and IS queued.) Only
-        // the free-temp queue ACCOUNTING changes; the materialized value the
-        // caller receives is untouched.
+        // locator's own flag bits (LobLocator.isTemporary — TEMP, flag byte 4
+        // bit 0x01, or ABSTRACT, flag byte 1 bit 0x40) are the only input. A
+        // plain table row locator, a `FOR UPDATE` locator and an `EMPTY_CLOB()`
+        // locator carry neither and keep queueing nothing. Since DW-122 a
+        // server-EXPRESSION locator — `SELECT TO_CLOB(...)`, or a PL/SQL CLOB OUT
+        // bind the body fills from a VARCHAR2 / TO_CLOB literal — IS queued: it
+        // is ABSTRACT-flagged and was measured on 23ai and 21c to hold one
+        // V$TEMPORARY_LOBS.ABSTRACT_LOBS entry per value until session end. ("A
+        // PL/SQL LOB OUT bind" is NOT one answer: an OUT locator the body
+        // assigns from a TEMPORARY input LOB, `p_out := p_in`, is TEMP-flagged
+        // instead.) Only the free-temp queue ACCOUNTING changes; the
+        // materialized value the caller receives is untouched.
         //
         // At most once per locator per response: this closure runs behind the
         // `materialized` dedup map above, so an aliased locator (Oracle's
@@ -2354,14 +2407,18 @@ class Transport {
         // handle, and created-temporary handles are exempt from the in-flight
         // slot rule, so such a handle can be open and can queue its own locator
         // on close(). What holds the at-most-once contract there is not the
-        // absence of a handle but a MEASURED locator distinctness: Oracle
-        // REPLACES the LOB behind an `IN OUT` bind, so the materialized OUT
-        // locator is a DIFFERENT temporary LOB from the one the caller's handle
-        // owns, and `p_out := p_in` deep-copies. Pinned live on 23ai and 21c by
+        // absence of a handle. For an `IN OUT` bind it is a MEASURED locator
+        // distinctness: Oracle REPLACES the LOB behind the bind, so the
+        // materialized OUT locator is a DIFFERENT temporary LOB from the one the
+        // caller's handle owns — pinned live on 23ai and 21c by
         // `test/integration/lob_temporary_integration_test.dart` (the IN OUT
         // temp-handle case asserting pending 1 -> 2 as two DISTINCT entries,
         // then proving the carrier statement and the session survive both
-        // frees). Empirical, not structural — a story that changes IN OUT
+        // frees). For a plain IN bound into `p_out := p_in` the OUT locator is
+        // the SAME LOB (same identity, measured — DW-129), and what holds the
+        // contract is the handle's ownership claim, which
+        // `_queueMaterializedTempLobToFree` honors by skipping an owned
+        // identity. Empirical, not structural — a story that changes IN OUT
         // handling must re-measure it rather than trust this paragraph.
         //
         // The queued free rides the NEXT sendExecute's FREE_TEMP piggyback, and a
@@ -2405,9 +2462,10 @@ class Transport {
         // back). That is deliberate and matches node-oracledb, which frees its
         // own copy-back-updated `_locator`; the echo of a temporary LOB stays
         // temporary and keeps the same identity, and the dangerous direction
-        // would be a persistent locator whose echo flipped flag-4 bit 0 on,
-        // which is unobserved on both fixtures. See `queueTempLobToFree`'s
-        // dedupe-backstop note for the companion in-place-mutation caveat.
+        // would be a persistent locator whose echo flipped flag-4 bit 0 (or
+        // flag-1 bit 0x40) on, which is unobserved on both fixtures. See
+        // `queueTempLobToFree`'s dedupe-backstop note for the companion
+        // in-place-mutation caveat.
         try {
           value = locator.oracleType == oraTypeBlob
               ? await _readBlobAsBytes(locator, timeout)
@@ -2420,6 +2478,25 @@ class Transport {
       }
       materialized[locator] = value;
       return value;
+    }
+
+    // DW-128 — the OUT-bind maxSize guards below throw BEFORE `readLocator`,
+    // so its `finally` never runs for the locator they reject: a temporary
+    // (TEMP- or ABSTRACT-flagged) OUT locator larger than maxSize used to be
+    // discarded unqueued and held its session temp-LOB space until session end
+    // (measured on 23ai and 21c: one leaked LOB per rejected `IN OUT` call).
+    // Every guard therefore routes its exception through here, which queues a
+    // rejected temporary locator first — through the same ownership-aware,
+    // deduping path the read uses, so the locator is queued at most once and
+    // never while an open handle owns it. A non-temporary locator queues
+    // nothing. Only reached with `wrapLob == null` (the guards do not apply to
+    // the wrap path), so the materialize path is the owner, exactly as for a
+    // read that fails.
+    OracleException rejectOversized(LobLocator value, OracleException error) {
+      if (value.isTemporary && !materialized.containsKey(value)) {
+        _queueMaterializedTempLobToFree(value.locator);
+      }
+      return error;
     }
 
     // Story 13.2 — JSON stored the Oracle 12c way: a BLOB column whose
@@ -2513,13 +2590,16 @@ class Transport {
         // does not apply when wrapping.
         if (wrapLob == null && maxSize != null && value.length > maxSize) {
           final isBlob = value.oracleType == oraTypeBlob;
-          throw OracleException(
-            errorCode: oraBindTypeError,
-            message:
-                '${isBlob ? 'BLOB' : 'CLOB'} OUT bind returned '
-                '${value.length} ${isBlob ? 'bytes' : 'characters'} but '
-                'OracleBind maxSize is $maxSize — increase maxSize to at '
-                'least the largest value the block can return',
+          throw rejectOversized(
+            value,
+            OracleException(
+              errorCode: oraBindTypeError,
+              message:
+                  '${isBlob ? 'BLOB' : 'CLOB'} OUT bind returned '
+                  '${value.length} ${isBlob ? 'bytes' : 'characters'} but '
+                  'OracleBind maxSize is $maxSize — increase maxSize to at '
+                  'least the largest value the block can return',
+            ),
           );
         }
         newOut[i] = await readLocator(value);
@@ -2533,16 +2613,21 @@ class Transport {
       // it, exactly like the single-execute OUT path above. Position j of each
       // row maps to bindMetadata[outBindIndices[j]], so the guard resolution is
       // shared across all executeMany shapes.
+      // Both executeMany shapes throw through rejectOversized (DW-128), so a
+      // rejected temporary locator is queued before the error propagates.
       OracleException tooLarge(LobLocator value, int maxSize) {
         final isBlob = value.oracleType == oraTypeBlob;
-        return OracleException(
-          errorCode: oraBindTypeError,
-          message:
-              '${isBlob ? 'BLOB' : 'CLOB'} OUT bind returned '
-              '${value.length} ${isBlob ? 'bytes' : 'characters'} in an '
-              'executeMany iteration but OracleBindDef maxSize is $maxSize — '
-              'increase maxSize to at least the largest value the block can '
-              'return',
+        return rejectOversized(
+          value,
+          OracleException(
+            errorCode: oraBindTypeError,
+            message:
+                '${isBlob ? 'BLOB' : 'CLOB'} OUT bind returned '
+                '${value.length} ${isBlob ? 'bytes' : 'characters'} in an '
+                'executeMany iteration but OracleBindDef maxSize is '
+                '$maxSize — increase maxSize to at least the largest value the '
+                'block can return',
+          ),
         );
       }
 

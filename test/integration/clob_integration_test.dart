@@ -466,6 +466,73 @@ void main() {
         );
       });
 
+      // DW-128 — the maxSize guard throws BEFORE the value is read, so the
+      // materialize path's read-time queue never ran for the rejected locator.
+      // appendProc's IN OUT returns a NEW server temporary LOB ('hello world',
+      // 11 chars) larger than maxSize 5. Measured on 23ai AND 21c before the
+      // fix: each call left one session temporary LOB behind (0 -> 3).
+      test('a TEMPORARY OUT LOB beyond maxSize fails loud AND is freed: '
+          'V\$TEMPORARY_LOBS returns to its baseline (DW-128)', () async {
+        final baseline = await tempLobCount(connection);
+        const calls = 3;
+        for (var call = 1; call <= calls; call++) {
+          final materializeBefore =
+              connection.debugTempLobMaterializeQueuedCount;
+          final readsBefore = connection.debugLobReadOps;
+          await expectLater(
+            connection.execute('BEGIN $appendProc(:p); END;', {
+              'p': OracleBind.inOut(
+                value: 'hello',
+                type: OracleDbType.clob,
+                maxSize: 5,
+              ),
+            }),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.message,
+                'message',
+                allOf(contains('11 characters'), contains('maxSize is 5')),
+              ),
+            ),
+          );
+          expect(
+            connection.debugLobReadOps,
+            equals(readsBefore),
+            reason: 'the guard rejects before any LOB READ',
+          );
+          expect(
+            connection.debugTempLobMaterializeQueuedCount - materializeBefore,
+            equals(1),
+            reason: 'call $call: the rejected OUT LOB is queued exactly once',
+          );
+          expect(
+            connection.debugPendingTempLobCount,
+            equals(2),
+            reason:
+                'call $call: the driver input temp CLOB plus the rejected '
+                'server replacement LOB',
+          );
+        }
+        final after = await tempLobCount(connection);
+        expect(connection.debugPendingTempLobCount, equals(0));
+        if (baseline != null && after != null) {
+          expect(
+            after,
+            equals(baseline),
+            reason: 'before the fix this read baseline + $calls',
+          );
+        }
+        // And the connection is healthy for the fitting call.
+        final ok = await connection.execute('BEGIN $appendProc(:p); END;', {
+          'p': OracleBind.inOut(
+            value: 'hello',
+            type: OracleDbType.clob,
+            maxSize: 50,
+          ),
+        });
+        expect(ok.outBinds['p'], equals('hello world'));
+      });
+
       test('multibyte 40k-char temp-CLOB IN OUT round-trips exactly', () async {
         // Non-ASCII including supplementary-plane emoji, sized so the IN
         // side travels through an internal temporary CLOB and exercises the
@@ -541,17 +608,24 @@ void main() {
       // Inline-bind -> temp-LOB routing edge: the conversion threshold is
       // `utf8.encode(value).length > ttcMaxVarcharBindBytes` (32,767), so
       // exactly 32,767 UTF-8 bytes must stay an inline VARCHAR bind and
-      // 32,768 must convert. `debugPendingTempLobCount` distinguishes the
-      // two paths: the free-temp queue drains at the start of each execute
-      // and only this execute's temp LOBs remain queued afterwards.
+      // 32,768 must convert. `bindConversionQueuedTempLobs` (delta across the
+      // one execute) distinguishes the two paths: 0 inline, 1 converted.
+      // `debugPendingTempLobCount` no longer can — since DW-122 the inline
+      // shape's OUT locator is an ABSTRACT expression LOB that the materialize
+      // path queues too, so BOTH routes leave exactly one free pending.
+
+      /// 32,767 ASCII characters = 32,767 UTF-8 bytes: the largest value that
+      /// still travels as an inline VARCHAR bind.
+      String inlineLimitText() => List.generate(
+        3277,
+        (i) => 'inl${i.toString().padLeft(7, '0')}',
+      ).join().substring(0, 32767);
 
       test('exactly 32,767 UTF-8 bytes stays an inline VARCHAR bind '
           '(no temp CLOB)', () async {
-        final text = List.generate(
-          3277,
-          (i) => 'inl${i.toString().padLeft(7, '0')}',
-        ).join().substring(0, 32767);
+        final text = inlineLimitText();
         expect(utf8.encode(text).length, equals(32767));
+        final convBefore = bindConversionQueuedTempLobs(connection);
         final result = await connection.execute(
           'BEGIN $copyProc(:src, :ret); END;',
           {
@@ -560,13 +634,95 @@ void main() {
           },
         );
         expect(
-          connection.debugPendingTempLobCount,
+          bindConversionQueuedTempLobs(connection) - convBefore,
           equals(0),
           reason:
               'a 32,767-byte value must take the inline VARCHAR '
               'path and create no temp CLOB',
         );
+        expect(
+          connection.debugPendingTempLobCount,
+          equals(1),
+          reason:
+              'DW-122: the OUT value is an ABSTRACT expression LOB, queued '
+              'for freeing by the materialize path',
+        );
         expect(result.outBinds['ret'], equals(text));
+      });
+
+      // DW-122 — the inline-VARCHAR sibling of the Story 12.4 leak, MEASURED.
+      // The OUT locator of this shape carries no TEMP flag, so the 12.4 fix
+      // (TEMP-flag driven) never freed it, and the old helper summed only
+      // CACHE_LOBS + NOCACHE_LOBS — which is why it looked clean. Measured on
+      // 23ai AND 21c before the fix: every call added one
+      // V$TEMPORARY_LOBS.ABSTRACT_LOBS entry (0 -> 5 for 5 calls), held until
+      // session end. The locator is ABSTRACT-flagged, now honored by
+      // LobLocator.isTemporary.
+      test('the inline-VARCHAR OUT CLOB shape repeated N times leaves '
+          'V\$TEMPORARY_LOBS at its baseline after the next execute '
+          '(DW-122)', () async {
+        final baseline = await tempLobCount(connection);
+        final values = [inlineLimitText(), 'a short inline value'];
+        const rounds = 3;
+        for (var round = 1; round <= rounds; round++) {
+          for (final value in values) {
+            final convBefore = bindConversionQueuedTempLobs(connection);
+            final r = await connection.execute(
+              'BEGIN $copyProc(:src, :ret); END;',
+              {
+                'src': value,
+                'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
+              },
+            );
+            expect(r.outBinds['ret'], equals(value));
+            expect(
+              bindConversionQueuedTempLobs(connection) - convBefore,
+              equals(0),
+              reason: 'still the inline VARCHAR route (no driver temp CLOB)',
+            );
+            expect(
+              connection.debugPendingTempLobCount,
+              equals(1),
+              reason:
+                  "round $round: this call's ABSTRACT OUT LOB is queued; the "
+                  "previous call's rode this execute's piggyback",
+            );
+          }
+        }
+        // The probe is the "next execute": it carries the last pending free.
+        final after = await tempLobCount(connection);
+        expect(connection.debugPendingTempLobCount, equals(0));
+        if (baseline != null && after != null) {
+          expect(
+            after,
+            equals(baseline),
+            reason:
+                'before the fix this read baseline + '
+                '${rounds * values.length} (one ABSTRACT_LOBS entry per call)',
+          );
+        }
+      });
+
+      test('a multi-row SELECT TO_CLOB(...) frees every expression LOB on the '
+          'next execute (DW-122)', () async {
+        // Same root cause, at scale: each row's value is an ABSTRACT LOB.
+        // Measured before the fix: a 1,500-row query left 1,500 behind. 300
+        // rows also make the next execute carry a ~12 KB FREE_TEMP piggyback
+        // (one 40-byte locator per row), more than one SDU.
+        const rows = 300;
+        final baseline = await tempLobCount(connection);
+        final r = await connection.execute(
+          'SELECT TO_CLOB(LEVEL) AS D FROM dual CONNECT BY LEVEL <= $rows',
+        );
+        expect(r.rows, hasLength(rows));
+        expect(r.rows.first['D'], equals('1'));
+        expect(r.rows.last['D'], equals('$rows'));
+        expect(connection.debugPendingTempLobCount, equals(rows));
+        final after = await tempLobCount(connection);
+        expect(connection.debugPendingTempLobCount, equals(0));
+        if (baseline != null && after != null) {
+          expect(after, equals(baseline));
+        }
       });
 
       test('32,768 UTF-8 bytes converts to a temp CLOB', () async {
@@ -576,6 +732,7 @@ void main() {
           (i) => 'cnv${i.toString().padLeft(7, '0')}',
         ).join().substring(0, 32768);
         expect(utf8.encode(text).length, equals(32768));
+        final convBefore = bindConversionQueuedTempLobs(connection);
         final result = await connection.execute(
           'BEGIN $copyProc(:src, :ret); END;',
           {
@@ -583,11 +740,13 @@ void main() {
             'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
           },
         );
+        expect(
+          bindConversionQueuedTempLobs(connection) - convBefore,
+          equals(1),
+          reason: 'one byte over the limit must convert to a temp CLOB',
+        );
         // One free is pending: the driver's INPUT temp LOB and the echoed
-        // OUT locator share an identity and are queued only once. The ROUTING
-        // signal this test cares about — that the value
-        // converted rather than travelling inline — is `> 0` vs `0`; the inline
-        // sibling above still asserts exactly `0`.
+        // OUT locator share an identity and are queued only once.
         expect(
           connection.debugPendingTempLobCount,
           equals(1),
@@ -613,6 +772,7 @@ void main() {
         // convert this value, and no other test would notice.
         final text = '${patternLatin1Text(16383, seed: 7)}x';
         expect(utf8.encode(text).length, equals(32767));
+        final convBefore = bindConversionQueuedTempLobs(connection);
         final result = await connection.execute(
           'BEGIN $copyProc(:src, :ret); END;',
           {
@@ -621,7 +781,7 @@ void main() {
           },
         );
         expect(
-          connection.debugPendingTempLobCount,
+          bindConversionQueuedTempLobs(connection) - convBefore,
           equals(0),
           reason:
               'exactly 32,767 UTF-8 bytes must stay inline even '
@@ -638,6 +798,7 @@ void main() {
         // routing check would send this through the inline path.
         final text = patternLatin1Text(16384, seed: 42);
         expect(utf8.encode(text).length, equals(32768));
+        final convBefore = bindConversionQueuedTempLobs(connection);
         final result = await connection.execute(
           'BEGIN $copyProc(:src, :ret); END;',
           {
@@ -645,17 +806,21 @@ void main() {
             'ret': OracleBind.out(type: OracleDbType.clob, maxSize: 40000),
           },
         );
+        expect(
+          bindConversionQueuedTempLobs(connection) - convBefore,
+          equals(1),
+          reason:
+              'the threshold must be measured in UTF-8 bytes, '
+              'not characters',
+        );
         // One free is pending: the driver's INPUT temp LOB and the echoed
-        // OUT locator share an identity and are queued only once. The ROUTING
-        // signal this test cares about — that the value
-        // converted rather than travelling inline — is `> 0` vs `0`; the inline
-        // sibling above still asserts exactly `0`.
+        // OUT locator share an identity and are queued only once.
         expect(
           connection.debugPendingTempLobCount,
           equals(1),
           reason:
-              'the threshold must be measured in UTF-8 bytes, '
-              'not characters (the OUT locator is the same LOB as the input temp CLOB, deduped by identity)',
+              'the OUT locator is the same LOB as the input temp CLOB, '
+              'deduped by identity',
         );
         expect(result.outBinds['ret'], equals(text));
       });

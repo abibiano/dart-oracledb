@@ -121,36 +121,53 @@ class LobLocator {
   final bool _createdTemporary;
 
   /// Whether this locator references a **temporary** LOB — one occupying
-  /// session temp-LOB space that must be explicitly freed (via the transport's
-  /// `FREE_TEMP | ARRAY` piggyback) rather than a persistent, table-backed
-  /// value the server reclaims on its own.
+  /// session temp-LOB space (a `V$TEMPORARY_LOBS` `CACHE_LOBS` /
+  /// `NOCACHE_LOBS` **or** `ABSTRACT_LOBS` entry) that must be explicitly freed
+  /// (via the transport's `FREE_TEMP | ARRAY` piggyback) rather than a
+  /// persistent, table-backed value the server reclaims on its own.
   ///
-  /// True either because the driver created the LOB itself (the constructor's
-  /// `isTemporary` flag — `Transport.createTemporaryLob`) or because a FETCHED
-  /// locator's flag byte 4 carries [tnsLobLocFlagsTemp]. The flag read is
-  /// bounds-guarded exactly like [usesVarLengthCharset]: a locator shorter than
-  /// the flag offset simply reports `false`.
+  /// True when ANY of:
   ///
-  /// **Deliberate node-oracledb divergence.** `thin/lob.js init()` marks a
-  /// fetched locator temporary when EITHER
-  /// `locator[FLAG_4] & TNS_LOB_LOC_FLAGS_TEMP === TNS_LOB_LOC_FLAGS_TEMP` OR
-  /// `locator[FLAG_1] & TNS_LOB_LOC_FLAGS_ABSTRACT === TNS_LOB_LOC_FLAGS_ABSTRACT`.
-  /// Only the FIRST clause is ported here. JavaScript's `===` binds tighter
-  /// than `&`, so each clause actually evaluates as `byte & (X === X)` →
-  /// `byte & 1`; the second clause therefore does not test ABSTRACT (0x40) at
-  /// all — it tests bit 0x01 of flag byte 1, which is
-  /// [tnsLobLocFlagsBlob], marking EVERY fetched BLOB "temporary". Porting
-  /// node's effective behavior would queue every fetched BLOB locator for
-  /// FREE_TEMP, and since that free rides an unrelated statement's piggyback it
-  /// would corrupt innocent executes. Porting node's *intended* behavior
-  /// (`& 0x40`) would capture value-based abstract JSON/VECTOR locators, which
-  /// never reach `OracleLob` in this driver (native JSON has its own OSON decode
-  /// path and never becomes a LOB handle). So only the TEMP bit — where node's
-  /// effective behavior and the intended semantics agree — is honored.
+  /// * the driver created the LOB itself (the constructor's `isTemporary` flag
+  ///   — `Transport.createTemporaryLob`);
+  /// * a FETCHED locator's flag byte 4 carries [tnsLobLocFlagsTemp] (an
+  ///   `IN OUT` bind's replacement LOB, or an OUT locator the PL/SQL body
+  ///   assigned from a temporary input LOB);
+  /// * a FETCHED locator's flag byte 1 carries [tnsLobLocFlagsAbstract] — a
+  ///   server-EXPRESSION ("abstract") LOB.
+  ///
+  /// Each flag read is bounds-guarded exactly like [usesVarLengthCharset]: a
+  /// locator too short to carry a flag byte simply does not report that flag.
+  ///
+  /// **The ABSTRACT clause (DW-122).** MEASURED on Oracle 23ai and 21c: every
+  /// server-expression LOB — `SELECT TO_CLOB(...)` / `TO_BLOB(...)`, a CLOB
+  /// concatenation, and a PL/SQL CLOB/BLOB OUT bind the body assigns from a
+  /// VARCHAR2 / RAW value or a `TO_CLOB` literal (including the inline-VARCHAR
+  /// `p_out := p_in` shape) — arrives with flag byte 1 = `0xC2` (CLOB) /
+  /// `0xC1` (BLOB): ABSTRACT set, TEMP clear. Each such value grows the
+  /// session's `V$TEMPORARY_LOBS.ABSTRACT_LOBS` by one and stays there until
+  /// session end unless freed — 1,500 for one 1,500-row `TO_CLOB` query. A
+  /// `FREE_TEMP` of the abstract locator returns the count to its baseline,
+  /// leaves the carrier statement intact, and a duplicate free of an
+  /// already-freed abstract locator is harmless. A table-row locator (flag
+  /// byte 1 = `0x01` / `0x02`, storage-kind bits only) and an `EMPTY_CLOB()`
+  /// locator (`0x00`) carry neither bit and allocate nothing.
+  ///
+  /// This is python-oracledb thin's rule (`ThinLobImpl.free_lob` frees a
+  /// locator when `flags1 & TNS_LOB_LOC_FLAGS_ABSTRACT or flags4 &
+  /// TNS_LOB_LOC_FLAGS_TEMP`) and node-oracledb's INTENDED rule. node's
+  /// EFFECTIVE rule differs and is deliberately not ported: in `thin/lob.js
+  /// init()` JavaScript's `===` binds tighter than `&`, so each clause evaluates
+  /// as `byte & 1`, and the second one tests [tnsLobLocFlagsBlob] (0x01 of flag
+  /// byte 1) instead of ABSTRACT (0x40) — marking EVERY fetched BLOB,
+  /// table-backed ones included, "temporary". This getter masks 0x40, so a
+  /// table BLOB stays non-temporary.
   bool get isTemporary =>
       _createdTemporary ||
       (locator.length > tnsLobLocOffsetFlag4 &&
-          (locator[tnsLobLocOffsetFlag4] & tnsLobLocFlagsTemp) != 0);
+          (locator[tnsLobLocOffsetFlag4] & tnsLobLocFlagsTemp) != 0) ||
+      (locator.length > tnsLobLocOffsetFlag1 &&
+          (locator[tnsLobLocOffsetFlag1] & tnsLobLocFlagsAbstract) != 0);
 
   @override
   String toString() =>

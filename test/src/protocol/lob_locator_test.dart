@@ -1,10 +1,13 @@
-/// Unit tests for [LobLocator]'s flag-byte decoding (Story 12.2 AC2).
+/// Unit tests for [LobLocator]'s flag-byte decoding (Story 12.2 AC2, DW-122).
 ///
-/// The temporary-LOB bit drives whether `OracleLob.close()` queues the locator
-/// for the transport's `FREE_TEMP | ARRAY` piggyback, and that piggyback rides
-/// an unrelated statement's message — so a false positive corrupts an innocent
-/// execute. These tests pin the decode exactly: only bit 0x01 of flag byte 4,
-/// bounds-guarded, plus the explicit driver-created override.
+/// The temporary-LOB decision drives whether `OracleLob.close()` and the
+/// materialize path queue the locator for the transport's `FREE_TEMP | ARRAY`
+/// piggyback, and that piggyback rides an unrelated statement's message. These
+/// tests pin the decode exactly: bit 0x01 of flag byte 4 (TEMP) OR bit 0x40 of
+/// flag byte 1 (ABSTRACT — a server-expression LOB, DW-122), each
+/// bounds-guarded, plus the explicit driver-created override. The BLOB
+/// storage bit (0x01 of flag byte 1, which node-oracledb's precedence bug
+/// effectively tests) never counts.
 library;
 
 import 'dart:typed_data';
@@ -52,12 +55,41 @@ void main() {
       expect(_clobFrom(bytes).isTemporary, isFalse);
     });
 
-    test('the ABSTRACT bit at flag byte 1 does NOT make a locator temporary '
-        "(node's JS operator-precedence clause deliberately not ported)", () {
+    test('the ABSTRACT bit at flag byte 1 makes a locator temporary (DW-122, '
+        'python-oracledb free_lob parity)', () {
       final bytes = _locatorBytes({
         tnsLobLocOffsetFlag1: tnsLobLocFlagsAbstract,
       });
-      expect(_clobFrom(bytes).isTemporary, isFalse);
+      expect(_clobFrom(bytes).isTemporary, isTrue);
+    });
+
+    test('the MEASURED server-expression flag bytes are temporary and the '
+        'measured table-row / EMPTY_CLOB bytes are not', () {
+      // Flag byte 1 / flag byte 4 exactly as dumped live on Oracle 23ai AND
+      // 21c (DW-122). Each expression value held one
+      // V$TEMPORARY_LOBS.ABSTRACT_LOBS entry until freed; the others held none.
+      const cases = <(String, int, int, int, bool)>[
+        ('TO_CLOB / inline-VARCHAR CLOB OUT', oraTypeClob, 0xC2, 0x00, true),
+        ('TO_BLOB / inline-RAW BLOB OUT', oraTypeBlob, 0xC1, 0x00, true),
+        ('TO_NCLOB expression', oraTypeClob, 0xC4, 0x00, true),
+        ('created temporary CLOB (23ai echo)', oraTypeClob, 0x82, 0x03, true),
+        ('p_out := p_in echo of a temp LOB', oraTypeClob, 0x02, 0x03, true),
+        ('table-row CLOB', oraTypeClob, 0x02, 0x00, false),
+        ('table-row BLOB', oraTypeBlob, 0x01, 0x00, false),
+        ('EMPTY_CLOB() value', oraTypeClob, 0x00, 0x00, false),
+      ];
+      for (final (name, type, flag1, flag4, expected) in cases) {
+        final loc = LobLocator(
+          locator: _locatorBytes({
+            tnsLobLocOffsetFlag1: flag1,
+            tnsLobLocOffsetFlag4: flag4,
+          }),
+          oracleType: type,
+          length: 1,
+          chunkSize: 0,
+        );
+        expect(loc.isTemporary, expected, reason: name);
+      }
     });
 
     test('the BLOB bit at flag byte 1 does NOT make a locator temporary '
@@ -78,20 +110,40 @@ void main() {
       );
     });
 
-    test('a locator shorter than the flag-4 offset reports false (bounds '
-        'guard, never a range error)', () {
-      for (var len = 0; len <= tnsLobLocOffsetFlag4; len++) {
+    test('each flag read is bounds-guarded independently (never a range '
+        'error)', () {
+      // Too short for EITHER flag byte: false even with every bit set.
+      for (var len = 0; len <= tnsLobLocOffsetFlag1; len++) {
         final short = Uint8List(len);
-        if (len > 0) short.fillRange(0, len, 0xFF); // every bit set
+        if (len > 0) short.fillRange(0, len, 0xFF);
         expect(
           _clobFrom(short).isTemporary,
+          isFalse,
+          reason: 'a $len-byte locator carries neither flag byte',
+        );
+      }
+      // Long enough for flag byte 1 but not flag byte 4: only ABSTRACT counts.
+      for (
+        var len = tnsLobLocOffsetFlag1 + 1;
+        len <= tnsLobLocOffsetFlag4;
+        len++
+      ) {
+        final abstractOnly = Uint8List(len)
+          ..[tnsLobLocOffsetFlag1] = tnsLobLocFlagsAbstract;
+        expect(_clobFrom(abstractOnly).isTemporary, isTrue, reason: '$len');
+        // Every bit EXCEPT 0x40 of flag byte 1 set, and flag byte 4 absent.
+        final noAbstract = Uint8List(len)
+          ..fillRange(0, len, 0xFF)
+          ..[tnsLobLocOffsetFlag1] = 0xFF & ~tnsLobLocFlagsAbstract;
+        expect(
+          _clobFrom(noAbstract).isTemporary,
           isFalse,
           reason: 'a $len-byte locator cannot carry flag byte 4',
         );
       }
-      // One byte longer: the flag byte now exists and is honored.
+      // One byte longer: flag byte 4 now exists and its TEMP bit is honored.
       final justLongEnough = Uint8List(tnsLobLocOffsetFlag4 + 1)
-        ..fillRange(0, tnsLobLocOffsetFlag4 + 1, 0xFF);
+        ..[tnsLobLocOffsetFlag4] = tnsLobLocFlagsTemp;
       expect(_clobFrom(justLongEnough).isTemporary, isTrue);
     });
 

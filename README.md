@@ -999,16 +999,22 @@ try {
 
 `OracleLob.isTemporary` reports whether a handle references a temporary LOB —
 always `true` for a created one, and `true` for a fetched locator that carries
-the server's temporary flag. Measured on 23ai and 21c: a plain table LOB, a
-`SELECT ... FOR UPDATE` locator, a `SELECT TO_CLOB(...)` expression and a PL/SQL
-CLOB OUT bind the body fills from a `TO_CLOB` **literal** all report `false`
-(their locators carry no temporary flag and allocate no session temp-LOB space).
-"A PL/SQL LOB OUT bind" is not one answer, though — **how the OUT value was
-produced decides**: an OUT locator the body assigns from a *temporary* input LOB
-(`p_out := p_in`, where `p_in` arrived as the driver's temporary LOB for a
-`String` / `Uint8List` bind) **is** TEMP-flagged, and the driver queues its free.
-An `IN OUT` bind's returned locator likewise reports `true` and frees itself on
-`close()`.
+the server's temporary flag or its abstract (server-expression) LOB flag.
+Measured on 23ai and 21c: a plain table LOB, a `SELECT ... FOR UPDATE` locator
+and an `EMPTY_CLOB()` value report `false` (they allocate no session temp-LOB
+space). Every server **expression** LOB reports `true` — a `SELECT TO_CLOB(...)`
+/ `TO_BLOB(...)` value, a CLOB concatenation, and a PL/SQL CLOB/BLOB OUT bind
+the body fills from a `VARCHAR2` / `RAW` value or a `TO_CLOB` literal: each one
+holds a `V$TEMPORARY_LOBS.ABSTRACT_LOBS` entry until freed. The driver frees
+them for you when it materializes the value (`fetchLobs: false`), and a fetched
+handle frees its LOB on `close()`. An OUT locator the body assigns from a
+*temporary* input LOB (`p_out := p_in`) and an `IN OUT` bind's returned locator
+report `true` as well.
+
+If two open handles reference the **same** server LOB — a created temporary LOB
+bound as a plain IN into a block that returns it as an OUT value
+(`p_out := p_in`) under `fetchLobs: true` — the free is queued only when the
+**last** of them closes, so closing one never destroys the LOB under the other.
 
 ### JSON support
 

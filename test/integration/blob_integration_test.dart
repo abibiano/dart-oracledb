@@ -495,6 +495,10 @@ void main() {
       // Inline-bind -> temp-LOB routing edge: the conversion threshold is
       // `bytes.length > ttcMaxRawBindBytes` (32,767), so exactly 32,767
       // bytes must stay an inline RAW bind and 32,768 must convert.
+      // `bindConversionQueuedTempLobs` (delta across the one execute) is the
+      // routing signal: since DW-122 the inline shape's OUT locator is an
+      // ABSTRACT expression LOB the materialize path queues, so
+      // `debugPendingTempLobCount` reads 1 on BOTH routes.
 
       test(
         'exactly 32,767 bytes stays an inline RAW bind (no temp BLOB)',
@@ -503,25 +507,82 @@ void main() {
           // happens before encoding, independent of the SQL text) from
           // server-version-dependent implicit RAW->BLOB conversion rules.
           final bytes = patternBytes(32767, seed: 21);
+          final convBefore = bindConversionQueuedTempLobs(connection);
           final result = await connection
               .execute('BEGIN $copyProc(TO_BLOB(:src), :ret); END;', {
                 'src': bytes,
                 'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 40000),
               });
           expect(
-            connection.debugPendingTempLobCount,
+            bindConversionQueuedTempLobs(connection) - convBefore,
             equals(0),
             reason:
                 'a 32,767-byte value must take the inline RAW path '
                 'and create no temp BLOB',
           );
+          expect(
+            connection.debugPendingTempLobCount,
+            equals(1),
+            reason:
+                'DW-122: the OUT value is an ABSTRACT expression LOB, queued '
+                'for freeing by the materialize path',
+          );
           expect(result.outBinds['ret'], equals(bytes));
         },
       );
 
+      // DW-122 — the inline-RAW sibling, MEASURED. Measured on 23ai AND 21c
+      // before the fix: both inline shapes below (explicit TO_BLOB and the
+      // implicit RAW -> BLOB parameter conversion) added one
+      // V$TEMPORARY_LOBS.ABSTRACT_LOBS entry per call, held until session end;
+      // the OUT locator carries the ABSTRACT flag and no TEMP flag.
+      test('the inline-RAW OUT BLOB shape repeated N times leaves '
+          'V\$TEMPORARY_LOBS at its baseline after the next execute '
+          '(DW-122)', () async {
+        final baseline = await tempLobCount(connection);
+        final bytes = patternBytes(32767, seed: 23);
+        final shapes = [
+          'BEGIN $copyProc(TO_BLOB(:src), :ret); END;',
+          'BEGIN $copyProc(:src, :ret); END;',
+        ];
+        const rounds = 3;
+        for (var round = 1; round <= rounds; round++) {
+          for (final sql in shapes) {
+            final convBefore = bindConversionQueuedTempLobs(connection);
+            final r = await connection.execute(sql, {
+              'src': bytes,
+              'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 40000),
+            });
+            expect(r.outBinds['ret'], equals(bytes));
+            expect(
+              bindConversionQueuedTempLobs(connection) - convBefore,
+              equals(0),
+              reason: 'still the inline RAW route (no driver temp BLOB)',
+            );
+            expect(
+              connection.debugPendingTempLobCount,
+              equals(1),
+              reason: "round $round: this call's ABSTRACT OUT LOB is queued",
+            );
+          }
+        }
+        final after = await tempLobCount(connection);
+        expect(connection.debugPendingTempLobCount, equals(0));
+        if (baseline != null && after != null) {
+          expect(
+            after,
+            equals(baseline),
+            reason:
+                'before the fix this read baseline + '
+                '${rounds * shapes.length}',
+          );
+        }
+      });
+
       test('32,768 bytes converts to a temp BLOB', () async {
         final baselineTempLobs = await tempLobCount(connection);
         final bytes = patternBytes(32768, seed: 22);
+        final convBefore = bindConversionQueuedTempLobs(connection);
         final result = await connection.execute(
           'BEGIN $copyProc(:src, :ret); END;',
           {
@@ -529,11 +590,13 @@ void main() {
             'ret': OracleBind.out(type: OracleDbType.blob, maxSize: 40000),
           },
         );
+        expect(
+          bindConversionQueuedTempLobs(connection) - convBefore,
+          equals(1),
+          reason: 'one byte over the limit must convert to a temp BLOB',
+        );
         // One free is pending: the driver's INPUT temp LOB and the echoed
-        // OUT locator share an identity and are queued only once. The ROUTING
-        // signal this test cares about — that the value
-        // converted rather than travelling inline — is `> 0` vs `0`; the inline
-        // sibling above still asserts exactly `0`.
+        // OUT locator share an identity and are queued only once.
         expect(
           connection.debugPendingTempLobCount,
           equals(1),
@@ -616,6 +679,57 @@ void main() {
             ),
           ),
         );
+      });
+
+      // DW-128 — flipProc's IN OUT returns a NEW server temporary BLOB (input
+      // + 0xCAFE = 4 bytes) larger than maxSize 3, rejected before the read.
+      // Measured on 23ai AND 21c before the fix: one leaked session temporary
+      // LOB per call (0 -> 3).
+      test('a TEMPORARY OUT BLOB beyond maxSize fails loud AND is freed: '
+          'V\$TEMPORARY_LOBS returns to its baseline (DW-128)', () async {
+        final baseline = await tempLobCount(connection);
+        const calls = 3;
+        for (var call = 1; call <= calls; call++) {
+          final materializeBefore =
+              connection.debugTempLobMaterializeQueuedCount;
+          await expectLater(
+            connection.execute('BEGIN $flipProc(:p); END;', {
+              'p': OracleBind.inOut(
+                value: Uint8List.fromList([0x01, 0x02]),
+                type: OracleDbType.blob,
+                maxSize: 3,
+              ),
+            }),
+            throwsA(
+              isA<OracleException>().having(
+                (e) => e.message,
+                'message',
+                allOf(contains('4 bytes'), contains('maxSize is 3')),
+              ),
+            ),
+          );
+          expect(
+            connection.debugTempLobMaterializeQueuedCount - materializeBefore,
+            equals(1),
+            reason: 'call $call: the rejected OUT LOB is queued exactly once',
+          );
+          expect(
+            connection.debugPendingTempLobCount,
+            equals(2),
+            reason:
+                'call $call: the driver input temp BLOB plus the rejected '
+                'server replacement LOB',
+          );
+        }
+        final after = await tempLobCount(connection);
+        expect(connection.debugPendingTempLobCount, equals(0));
+        if (baseline != null && after != null) {
+          expect(
+            after,
+            equals(baseline),
+            reason: 'before the fix this read baseline + $calls',
+          );
+        }
       });
 
       // ---------------------------------------------------------------
