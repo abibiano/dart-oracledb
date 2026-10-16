@@ -1,4 +1,13 @@
 {
+  "DW-116": {
+    "answered_at": "2026-10-16",
+    "bundle_name": "",
+    "effect": "keep-open",
+    "intent": "",
+    "key": "1",
+    "label": "Keep open until measured",
+    "resolution": ""
+  },
   "DW-18": {
     "answered_at": "2026-10-16",
     "bundle_name": "",
