@@ -169,6 +169,7 @@ location: n/a
 severity: medium
 reason: Retro action 12, a PROCESS decision for the operator: run an epic-boundary review for every epic, and run one for Epic 13 before Epic 14 starts. Not code work for a sweep bundle.
 status: open
+decision: 2026-10-16 Keep open until boundary review runs
 decision: 2026-10-16 Keep open
 decision: 2026-10-15 Keep open until the Epic 13 boundary review is run
 decision: 2026-10-15 Keep open until the boundary review is run
