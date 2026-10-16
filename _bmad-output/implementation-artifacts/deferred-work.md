@@ -1114,6 +1114,7 @@ source_spec: `15-4-vector.md`
 severity: low
 reason: OracleBind has only out/inOut (rejected outside PL/SQL and RETURNING targets) and executeMany bindDefs are rejected for non-RETURNING DML. Live 23ai: a RAW bind into VECTOR(16, BINARY) fails ORA-00932. Workarounds documented: PL/SQL OracleBind.inOut, executeMany bindDefs (PL/SQL or DML RETURNING), TO_VECTOR text. A plain List<double> works via the server's JSON-to-VECTOR conversion.
 status: open
+decision: 2026-10-16 Keep open
 decision: 2026-10-15 Keep open
 
 ### DW-141: On Oracle 21c a LONG / LONG RAW column fetch times out with ORA-12170 instead of raising oraUnsupportedType, because the probe pass does not skip the trailing SB4/UB4 fields.
