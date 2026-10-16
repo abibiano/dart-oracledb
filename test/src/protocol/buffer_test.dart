@@ -4,6 +4,76 @@ import 'package:oracledb/src/protocol/buffer.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('ReadBuffer.skipBytesChunked', () {
+    // UB4 encoding: length byte followed by big-endian value bytes; 0 -> 0x00.
+    const sentinel = 0x7A;
+
+    test('null/zero indicators consume exactly one byte', () {
+      for (final indicator in [0x00, 0xFF]) {
+        final buf = ReadBuffer(Uint8List.fromList([indicator, sentinel]));
+        buf.skipBytesChunked();
+        expect(buf.readUint8(), equals(sentinel));
+      }
+    });
+
+    test('short form skips the length-prefixed payload', () {
+      final buf = ReadBuffer(Uint8List.fromList([3, 1, 2, 3, sentinel]));
+      buf.skipBytesChunked();
+      expect(buf.readUint8(), equals(sentinel));
+    });
+
+    test('chunked form skips all chunks and the terminator', () {
+      final buf = ReadBuffer(
+        Uint8List.fromList([
+          0xFE,
+          1, 2, 0xAA, 0xBB, // chunk of 2 bytes
+          1, 3, 1, 2, 3, // chunk of 3 bytes
+          0, // terminator
+          sentinel,
+        ]),
+      );
+      buf.skipBytesChunked();
+      expect(buf.readUint8(), equals(sentinel));
+      expect(buf.hasRemaining, isFalse);
+    });
+
+    test('chunked form with immediate terminator skips cleanly', () {
+      final buf = ReadBuffer(Uint8List.fromList([0xFE, 0, sentinel]));
+      buf.skipBytesChunked();
+      expect(buf.readUint8(), equals(sentinel));
+    });
+
+    test('large multi-byte chunk size leaves stream aligned', () {
+      const payload = 300;
+      final data = BytesBuilder()
+        ..add([0xFE, 2, 0x01, 0x2C]) // chunk size 300
+        ..add(Uint8List(payload))
+        ..add([0, sentinel]);
+      final buf = ReadBuffer(data.toBytes());
+      buf.skipBytesChunked();
+      expect(buf.readUint8(), equals(sentinel));
+    });
+
+    test('matches readBytesWithLength position for every form', () {
+      final forms = <List<int>>[
+        [0, sentinel],
+        [0xFF, sentinel],
+        [2, 9, 9, sentinel],
+        [0xFE, 1, 1, 5, 0, sentinel],
+      ];
+      for (final f in forms) {
+        final a = ReadBuffer(Uint8List.fromList(f))..skipBytesChunked();
+        final b = ReadBuffer(Uint8List.fromList(f))..readBytesWithLength();
+        expect(a.position, equals(b.position));
+      }
+    });
+
+    test('truncated chunk throws BufferException', () {
+      final buf = ReadBuffer(Uint8List.fromList([0xFE, 1, 5, 1, 2]));
+      expect(() => buf.skipBytesChunked(), throwsA(isA<BufferException>()));
+    });
+  });
+
   group('ReadBuffer', () {
     group('readUint8', () {
       test('reads single byte', () {

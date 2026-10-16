@@ -263,8 +263,22 @@ class ReadBuffer {
   }
 
   /// Skips a length-prefixed (possibly chunked) byte sequence.
+  ///
+  /// Mirrors [readBytesWithLength] framing (0/0xFF null, short, or 0xFE
+  /// chunked) but only advances the read position: chunk payloads are never
+  /// collected or combined, so skipping a huge value allocates nothing.
   void skipBytesChunked() {
-    readBytesWithLength();
+    final numBytes = readUint8();
+    if (numBytes == 0 || numBytes == _tnsNullLengthIndicator) return;
+    if (numBytes != _tnsLongLengthIndicator) {
+      skip(numBytes);
+      return;
+    }
+    while (true) {
+      final chunkSize = readUB4();
+      if (chunkSize == 0) break;
+      skip(chunkSize);
+    }
   }
 
   /// Long length indicator for chunked encoding (TNS_LONG_LENGTH_INDICATOR).

@@ -2348,7 +2348,7 @@ Object? _decodeValueByOraType(
               'streaming); until then these columns cannot be fetched.',
         );
       }
-      buf.readBytesWithLength();
+      buf.skipBytesChunked();
       if (inFetch) {
         buf.skipSB4(); // null indicator
         buf.skipUB4(); // return code
