@@ -914,6 +914,7 @@ void main() {
     Uint8List longColumnResponse(
       int oraType, {
       List<int>? value,
+      int? firstChunkSize,
     }) => _buildPayload([
       _describeInfo([_columnInfo(name: 'BODY', oraType: oraType, maxSize: 0)]),
       _rowHeader(),
@@ -923,8 +924,15 @@ void main() {
           0xff
         else if (value.length > 253) ...[
           0xfe,
-          ..._ub4(value.length),
-          ...value,
+          if (firstChunkSize == null) ...[
+            ..._ub4(value.length),
+            ...value,
+          ] else ...[
+            ..._ub4(firstChunkSize),
+            ...value.take(firstChunkSize),
+            ..._ub4(value.length - firstChunkSize),
+            ...value.skip(firstChunkSize),
+          ],
           ..._ub4(0),
         ] else
           ..._bytesWithLength(value),
@@ -999,6 +1007,66 @@ void main() {
         );
         expect(ttcStreamIsComplete(longColumnResponse(oraType)), isTrue);
       }
+    });
+
+    test('the probe consumes multiple LONG-family chunks and trailers', () {
+      for (final oraType in [oraTypeLong, oraTypeLongRaw]) {
+        final payload = longColumnResponse(
+          oraType,
+          value: List.filled(300, 0x61),
+          firstChunkSize: 127,
+        );
+        expect(ttcStreamIsComplete(payload), isTrue);
+      }
+    });
+
+    test('partial chunk headers, payloads, and terminators need more data', () {
+      final payload = longColumnResponse(
+        oraTypeLong,
+        value: List.filled(300, 0x61),
+        firstChunkSize: 100,
+      );
+      var chunkStart = -1;
+      for (var i = 0; i < payload.length - 4; i++) {
+        if (payload[i] == 0xfe &&
+            payload[i + 1] == 1 &&
+            payload[i + 2] == 100 &&
+            payload[i + 3] == 0x61) {
+          chunkStart = i;
+          break;
+        }
+      }
+      expect(chunkStart, isNonNegative);
+      for (final end in [
+        chunkStart + 2, // incomplete first UB4 size
+        chunkStart + 3 + 50, // incomplete first payload
+        chunkStart + 3 + 100 + 2 + 200, // before chunk terminator
+      ]) {
+        expect(ttcStreamIsComplete(payload.sublist(0, end)), isFalse);
+      }
+      expect(ttcStreamIsComplete(payload), isTrue);
+    });
+
+    test('large chunked LONG completion probes remain cheap', () {
+      final payload = longColumnResponse(
+        oraTypeLong,
+        value: List.filled(8 * 1024 * 1024, 0x61),
+        firstChunkSize: 4 * 1024 * 1024,
+      );
+      expect(ttcStreamIsComplete(payload), isTrue);
+      const scans = 200;
+      final sw = Stopwatch()..start();
+      for (var i = 0; i < scans; i++) {
+        expect(ttcStreamIsComplete(payload), isTrue);
+      }
+      sw.stop();
+      expect(
+        sw.elapsedMilliseconds,
+        lessThan(150),
+        reason:
+            'Repeated completion probes must skip LONG payloads without '
+            'copying them; took ${sw.elapsedMilliseconds}ms for $scans scans',
+      );
     });
   });
 

@@ -36,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2025-12-16
-last_updated: 10-09-2026 12:08 # Epic 12 retrospective complete: epic-12-retrospective -> done; epic-11 action items reconciled; epic-12 action items added (draft PR non-convergence flagged)
+last_updated: 10-16-2026 12:00 # Epic 12 retrospective complete: epic-12-retrospective -> done; epic-11 action items reconciled; epic-12 action items added (draft PR non-convergence flagged)
 project: dart-oracledb
 project_key: NOKEY
 tracking_system: file-system
@@ -229,7 +229,7 @@ development_status:
   15-3-rowid-urowid: done
   15-4-vector: done
   15-5-dual-env-integration-tests: done
-  epic-15-retrospective: optional
+  epic-15-retrospective: done
 
 # ==========================================================================
 # ACTION ITEMS — created by epic retrospectives
@@ -404,3 +404,61 @@ action_items:
     owner: "Abibiano"
     status: open
     ref: "_bmad-output/implementation-artifacts/epic-13-retro-2026-10-09.md"
+  - id: "epic-15-retro-item-27-split-data_types-dart-and-execute_messag"
+    epic: 15
+    action: "Split data_types.dart and execute_message.dart type switches into per-type
+      codecs before the next type epic (data_types.dart 1610 lines, execute_message.dart
+      3422)"
+    owner: "Winston + Amelia"
+    status: open
+    ref: "/Users/abibiano/Projects/Flutter/dart-oracledb/_bmad-output/implementation-artifacts/epic-15-retro-2026-10-16.md"
+  - id: "epic-15-retro-item-28-tag-readme-changelog-api-reference-claim"
+    epic: 15
+    action: "Tag README/CHANGELOG/api-reference claims with the live measurement that
+      supports them (create-story/review checklist); every Epic 15 story needed a
+      review round to fix overclaims"
+    owner: "Amelia"
+    status: open
+    ref: "/Users/abibiano/Projects/Flutter/dart-oracledb/_bmad-output/implementation-artifacts/epic-15-retro-2026-10-16.md"
+  - id: "epic-15-retro-item-29-exclude-orchestrator-owned-sprint-status"
+    epic: 15
+    action: "Exclude orchestrator-owned sprint-status.yaml and deferred-work.md from
+      review diffs (about 8 false findings in Epic 15 reviews)"
+    owner: "Abibiano"
+    status: open
+    ref: "/Users/abibiano/Projects/Flutter/dart-oracledb/_bmad-output/implementation-artifacts/epic-15-retro-2026-10-16.md"
+  - id: "epic-15-retro-item-30-decide-whether-an-unsupported-type-null"
+    epic: 15
+    action: "Decide whether an unsupported-type NULL, or an opt-in escape hatch, should
+      fail the whole query under the fail-loud catch-all"
+    owner: "Abibiano + Winston"
+    status: open
+    ref: "/Users/abibiano/Projects/Flutter/dart-oracledb/_bmad-output/implementation-artifacts/epic-15-retro-2026-10-16.md"
+  - id: "epic-15-retro-item-31-call-out-the-typed-list-vector-inference"
+    epic: 15
+    action: "Call out the typed-list VECTOR inference change (Float32List/Float64List/Int8List
+      now infer VECTOR, not JSON) as a behavior change when choosing the release version"
+    owner: "Abibiano"
+    status: open
+    ref: "/Users/abibiano/Projects/Flutter/dart-oracledb/_bmad-output/implementation-artifacts/epic-15-retro-2026-10-16.md"
+  - id: "epic-15-retro-item-32-add-a-deferred-work-entry-for-reusing-in"
+    epic: 15
+    action: "Add a deferred-work entry for reusing interval/VECTOR codecs in the OSON
+      decoder (still fail-loud) with a target epic"
+    owner: "Amelia"
+    status: open
+    ref: "/Users/abibiano/Projects/Flutter/dart-oracledb/_bmad-output/implementation-artifacts/epic-15-retro-2026-10-16.md"
+  - id: "epic-15-retro-item-33-reconcile-epic-14-and-epic-15-sprint-sta"
+    epic: 15
+    action: "Reconcile epic-14 and epic-15 sprint-status entries (backlog although
+      all stories done) via sprint tooling"
+    owner: "Abibiano"
+    status: open
+    ref: "/Users/abibiano/Projects/Flutter/dart-oracledb/_bmad-output/implementation-artifacts/epic-15-retro-2026-10-16.md"
+  - id: "epic-15-retro-item-34-run-an-epic-boundary-review-tea-gate-for"
+    epic: 15
+    action: "Run an epic-boundary review/TEA gate for Epic 15 or record it as waived
+      (repeats Epic 13 item 26)"
+    owner: "Abibiano"
+    status: open
+    ref: "/Users/abibiano/Projects/Flutter/dart-oracledb/_bmad-output/implementation-artifacts/epic-15-retro-2026-10-16.md"

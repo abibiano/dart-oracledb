@@ -1133,4 +1133,6 @@ location: lib/src/protocol/messages/execute_message.dart:2351
 source_spec: `bmad-build-auto-result-long-probe-skip-21c.md`
 severity: medium
 reason: readBytesWithLength() collects chunk views and allocates a combined Uint8List for chunked payloads. The completion probe discards the result, so a very large unsupported LONG value can use avoidable memory. This allocation path predates the reviewed change.
-status: open
+status: done 2026-10-16
+resolution: resolved by sweep bundle dw-long-probe-skip-chunked
+resolution-undo: 3356e68a4c2690c84dbb2db07f18f8265e293c82dd5d9369b6ca68df7bdd82ca 2026-10-16 7374617475733a206f70656e
