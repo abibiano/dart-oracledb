@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.6.0
 
 ### Fixes
 
+- Fetching a `LONG` / `LONG RAW` column on Oracle 21c now raises
+  `OracleException` (`oraUnsupportedType`) and keeps the connection usable,
+  instead of timing out with ORA-12170. The driver consumes the LONG value's
+  trailer and skips chunked payloads without allocating them.
 - SQL `NULL` values in REF CURSOR OUT binds, nested `CURSOR()` rows and
   implicit results now fetch on Oracle 21c without ORA-01405, including when
   no LOB or JSON column is present. Describe-created cursors start with a full
@@ -231,9 +235,8 @@
   decode (entries above). A query that returns no rows does not raise.
   Convert such a column in SQL to fetch it, e.g.
   `XMLSERIALIZE(CONTENT x AS CLOB)` or `TO_CHAR(b)`. `BFILE` keeps its
-  existing fail-loud error; so do `LONG` / `LONG RAW` on Oracle 23ai, while on
-  Oracle 21c a `LONG` column currently times out (ORA-12170) instead
-  (pre-existing, known limitation). Validated against Oracle
+  existing fail-loud error; so do `LONG` / `LONG RAW` on Oracle 23ai and
+  Oracle 21c. Validated against Oracle
   23ai and Oracle 21c, alongside a cross-type suite that fetches, binds,
   returns and cursor-embeds every new type in the same rows (VECTOR on 23ai
   only; on 21c those cases skip with the ORA-00902 reason).

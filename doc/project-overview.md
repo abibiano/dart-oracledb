@@ -16,7 +16,7 @@ the port maintainable and to allow upstream behaviour to be cross-checked
 file-by-file (see `reference/` and the architecture doc).
 
 - **Package name:** `oracledb` (repo `dart-oracledb`)
-- **Version:** `1.5.0` (see [Project Status](#project-status))
+- **Version:** `1.6.0` (see [Project Status](#project-status))
 - **License:** see `LICENSE`
 - **Repository:** https://github.com/abibiano/dart-oracledb
 
@@ -112,7 +112,7 @@ See [source-tree-analysis.md](./source-tree-analysis.md) for the annotated tree.
 
 ## Project Status
 
-Stable (`1.5.0`), semantically versioned. Core connectivity, query/DML/transaction,
+Stable (`1.6.0`), semantically versioned. Core connectivity, query/DML/transaction,
 PL/SQL, the full scalar + LOB + JSON data-type surface, connection pooling, result-set
 streaming, server cursors, non-`AL32UTF8` character sets, bulk DML, and `OracleLob`
 handles are implemented and validated against both Oracle 23ai and 21c. Remaining

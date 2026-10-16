@@ -2,7 +2,7 @@
 
 A pure Dart driver for Oracle Database. It speaks the thin-mode TNS/TTC wire protocol directly, so there is no Oracle Client, no FFI and no native code to install.
 
-[![Pub Version](https://img.shields.io/badge/pub-v1.5.0-orange)](https://pub.dev/packages/oracledb)
+[![Pub Version](https://img.shields.io/badge/pub-v1.6.0-orange)](https://pub.dev/packages/oracledb)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Dart SDK](https://img.shields.io/badge/dart-%3E%3D3.12.0-blue)](https://dart.dev)
 
@@ -69,7 +69,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  oracledb: ^1.5.0
+  oracledb: ^1.6.0
 ```
 
 Then run:
@@ -1733,31 +1733,20 @@ UTF-8 wire path regardless of the national character set.
   database-charset conversion.
 - **One national character set is supported:** `AL16UTF16`.
 
-## Project Status
+## Roadmap
 
-This package implements a subset of the full Oracle driver feature set. Below is the current roadmap:
+The 1.x line is feature-complete for the core driver: connections, pooling, queries, DML, bulk DML, transactions, PL/SQL, result-set streaming, LOBs, native JSON, and the extended data types are all covered (see [Features](#features)).
 
-| Epic                                            | Status         |
-| ----------------------------------------------- | -------------- |
-| Core connection & authentication                | ✅ Done        |
-| Query execution & transactions                  | ✅ Done        |
-| PL/SQL execution (stored procedures, functions) | ✅ Done        |
-| Advanced data types (CLOB, BLOB, RAW, JSON)     | ✅ Done        |
-| Connection pooling                              | ✅ Done        |
-| Result sets, streaming, REF CURSOR & implicit results | ✅ Done  |
-| Character set support (`AL32UTF8` + non-`AL32UTF8` databases, national types) | ✅ Done |
-| Bulk DML (`executeMany()` — array DML, RETURNING, bulk PL/SQL, batch errors) | ✅ Done |
-| LOB streaming & temporary LOBs (`OracleLob`, chunked read/write, `textStream`/`byteStream`/`writeStream`, `createTemporary*`) | ✅ Done |
-| Extended data types (INTERVAL DAY TO SECOND / YEAR TO MONTH, ROWID / UROWID, 23ai VECTOR; unsupported types fail loud) | ✅ Done |
+**Version 2** will focus on closing the remaining gaps with node-oracledb thin mode. These items are planned, not committed, and may change as the APIs are designed and validated against Oracle 23ai and 21c:
 
-### Planned After 1.0
+- **Connectivity** — Easy Connect Plus, full `(DESCRIPTION=...)` descriptors, `tnsnames.ora` aliases, multi-address failover and load balancing, retry/timeout parameters, HTTPS proxy
+- **TLS, wallets & authentication** — PEM wallets / mTLS, server DN matching, `SYSDBA` and other privileges, password change, proxy users, edition-based redefinition, token (OCI IAM / OAuth 2.0) and MFA authentication, DRCP
+- **Connection API & session attributes** — call timeout, statement `break()`, `module` / `action` / `clientId` / `currentSchema`, application context, server and session info, `getStatementInfo`
+- **Execute options & fetch parity** — `autoCommit`, `prefetchRows`, `outFormat`, `extendedMetaData`, `fetchAsString` / `fetchAsBuffer` for more types, DEFINE-based `fetchTypeHandler` with `type`, `fetchInfo`, IN OUT cursor binds
+- **Remaining data types** — SQL `BOOLEAN`, `LONG` / `LONG RAW`, `XMLType`, `BFILE`, database object types and collections, PL/SQL index-by tables, LOB handles inside nested cursors
+- **Pool parity** — pool growth and session lifetime, ping-based health checks, queue limits, statistics, `reconfigure()`, pool alias registry
 
-After the 1.0 release, the project roadmap includes larger API and compatibility work. These items are planned candidates and may change as the APIs are designed and validated:
-
-| Priority | Planned enhancement                                                                       |
-| -------- | ----------------------------------------------------------------------------------------- |
-| 1        | Extended JSON / OSON parity (interval/VECTOR/`JsonId` JSON scalars, OSON-in-BLOB helpers) |
-| 2        | Optional temporal fetch formatting (fetch-as-string, fetch type handlers); region-id values already decode to the correct instant and their region names resolve through `timeZoneRegionName` |
+Feedback on what to prioritise is welcome — open an issue on [GitHub](https://github.com/abibiano/dart-oracledb/issues).
 
 ## Tests
 
