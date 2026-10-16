@@ -1104,6 +1104,7 @@ source_spec: `15-3-rowid-urowid.md`
 severity: medium
 reason: Pre-existing: affects NUMBER and VARCHAR columns too and node-oracledb fails identically; 23ai gives ORA-12547, 21c poisons the transport with "Unknown TTC message type 1". Not caused by 15.3.
 status: open
+decision: 2026-10-16 Keep open
 decision: 2026-10-15 Keep open
 
 ### DW-140: A single execute() cannot declare an IN bind's type, so a dense BINARY vector (Uint8List, which infers RAW) or a declared List<double> cannot be bound in plain SQL.
