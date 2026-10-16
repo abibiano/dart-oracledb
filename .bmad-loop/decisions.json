@@ -8,6 +8,15 @@
     "label": "Keep open until measured",
     "resolution": ""
   },
+  "DW-139": {
+    "answered_at": "2026-10-16",
+    "bundle_name": "",
+    "effect": "keep-open",
+    "intent": "",
+    "key": "3",
+    "label": "Keep open",
+    "resolution": ""
+  },
   "DW-18": {
     "answered_at": "2026-10-16",
     "bundle_name": "",
