@@ -1,5 +1,5 @@
 ---
-status: done
+status: blocked
 review_loop_iteration: 0
 followup_review_recommended: false
 ---
@@ -20,7 +20,14 @@ followup_review_recommended: false
 
 ## Auto Run Result
 
-Status: done
+Status: blocked
+
+Blocking condition: finalization left repository dirty. The unrelated,
+untracked `_bmad-output/implementation-artifacts/epic-15-retro-2026-10-16.md`
+appeared during this run and was not created or reviewed by this build-auto
+pass. The reviewed change and orchestrator bookkeeping were committed as
+`afd0216e2dcf173224f13e597479557748808cd3`; the retrospective remains
+for its owner to finalize.
 
 DW-142 skips chunked LONG and LONG RAW values in the completion probe without
 collecting payload chunks. This follow-up review added checks for multi-chunk
