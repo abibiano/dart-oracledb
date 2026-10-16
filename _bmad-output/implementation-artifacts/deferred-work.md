@@ -1105,6 +1105,7 @@ source_spec: `15-3-rowid-urowid.md`
 severity: medium
 reason: Pre-existing: affects NUMBER and VARCHAR columns too and node-oracledb fails identically; 23ai gives ORA-12547, 21c poisons the transport with "Unknown TTC message type 1". Not caused by 15.3.
 status: open
+decision: 2026-10-16 Keep open (server-side parity)
 decision: 2026-10-16 Keep open
 decision: 2026-10-15 Keep open
 
