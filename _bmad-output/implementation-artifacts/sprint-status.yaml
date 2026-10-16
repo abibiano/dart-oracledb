@@ -220,7 +220,7 @@ development_status:
   14-3-fetch-as-string: done
   14-4-fetch-type-handler-hooks: done
   14-5-dual-env-integration-tests: done
-  epic-14-retrospective: optional
+  epic-14-retrospective: done
 
   # Epic 15: Extended Data Type Completeness
   epic-15: backlog
@@ -462,3 +462,54 @@ action_items:
     owner: "Abibiano"
     status: open
     ref: "/Users/abibiano/Projects/Flutter/dart-oracledb/_bmad-output/implementation-artifacts/epic-15-retro-2026-10-16.md"
+  - id: "epic-14-retro-item-35-keep-first-canonical-region-name-on-regi"
+    epic: 14
+    action: "Keep first/canonical region name on region-id alias collision in _loadTimeZoneRegionNames
+      (connection.dart:3932) instead of throwing; add alias-fixture unit test"
+    owner: "Amelia"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-14-retro-2026-10-16.md"
+  - id: "epic-14-retro-item-36-add-unit-tests-for-_loadtimezoneregionna"
+    epic: 14
+    action: "Add unit tests for _loadTimeZoneRegionNames non-942/1031 pass-through
+      (e.g. ORA-3113) and ORA-1031 hint arm; decide whether to widen the V$TIMEZONE_NAMES
+      hint set"
+    owner: "Amelia"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-14-retro-2026-10-16.md"
+  - id: "epic-14-retro-item-37-document-fetchtypehandler-contract-sync"
+    epic: 14
+    action: "Document fetchTypeHandler contract (sync converters, no connection calls
+      inside converter, eager-path timing after drain, do-not-mutate-input); consider
+      sync preloaded region-name snapshot"
+    owner: "Amelia + Winston"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-14-retro-2026-10-16.md"
+  - id: "epic-14-retro-item-38-verify-and-fix-cleanup-failure-masking-t"
+    epic: 14
+    action: "Verify and fix cleanup failure masking the caller converter exception
+      in _executeGuarded/_openResultSetGuarded; add regression test"
+    owner: "Amelia"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-14-retro-2026-10-16.md"
+  - id: "epic-14-retro-item-39-decide-stable-string-format-for-tstz-und"
+    epic: 14
+    action: "Decide stable string format for TSTZ under fetchAsString with preserveTimestampTimeZone
+      (currently OracleTimestampTz.toString debug form)"
+    owner: "Winston"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-14-retro-2026-10-16.md"
+  - id: "epic-14-retro-item-40-reconcile-sprint-status-epic-14-entry-ba"
+    epic: 14
+    action: "Reconcile sprint-status epic-14 entry (backlog although all stories done)
+      via sprint tooling"
+    owner: "Abibiano"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-14-retro-2026-10-16.md"
+  - id: "epic-14-retro-item-41-run-an-epic-boundary-review-for-every-ep"
+    epic: 14
+    action: "Run an epic-boundary review for every epic; Epic 13 and Epic 14 had none
+      and this retro review found cross-story defects"
+    owner: "Abibiano"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-14-retro-2026-10-16.md"
