@@ -5,7 +5,7 @@ inputDocuments:
   - '_bmad-output/planning-artifacts/architecture.md'
   - '_bmad-output/planning-artifacts/test-architecture-dart-oracledb.md'
   - '_bmad-output/implementation-artifacts/deferred-work.md'
-lastUpdated: '2026-05-22'
+lastUpdated: '2026-10-16'
 deferredWorkEpic: 'Epic 7'
 deferredWorkStoryCount: 9
 ---
@@ -164,6 +164,13 @@ No UX Design document was found. No UX design requirements were extracted.
 - **Epic 13: JSON / OSON Parity** _(post-1.0)_
 - **Epic 14: Temporal Compatibility & Fetch Type Handlers** _(post-1.0)_
 - **Epic 15: Extended Data Type Completeness** _(post-1.0)_
+- **Epic 16: Connectivity — Connect Strings, Descriptors & Failover** _(parity, post-1.5)_
+- **Epic 17: TLS, Wallets & Authentication** _(parity, post-1.5)_
+- **Epic 18: Connection API & Session Attributes** _(parity, post-1.5)_
+- **Epic 19: Execute Options & Fetch Parity** _(parity, post-1.5)_
+- **Epic 20: Remaining Data Types** _(parity, post-1.5)_
+- **Epic 21: Pool Parity** _(parity, post-1.5)_
+- **Epic 22: Advanced Features (optional, low priority)** _(parity, post-1.5)_
 
 > **Post-1.0 epics (8–15)** were added 2026-06-13 via the Correct Course workflow.
 > See `sprint-change-proposal-2026-06-13.md` for the impact analysis and rationale.
@@ -843,3 +850,197 @@ JSON-as-BLOB).
 - **15.5 Dual-env integration tests** — 23ai + 21c.
 
 <!-- End Epic 15 / Post-1.0 Epics -->
+
+---
+
+# Parity Epics (16–22): node-oracledb 7.0.1 Thin-Mode Gap Closure
+
+Added 2026-10-16. Source: gap analysis of `reference/node-oracledb` **7.0.1**
+(thin-mode column of `doc/src/user_guide/appendix_a.rst`, `api_manual/connection.rst`,
+`api_manual/pool.rst`) against the shipped 1.5.0 driver. Epics 1–15 are closed;
+these close the remaining thin-mode parity gaps.
+
+**Non-goals (thick-only or unsupported in node thin mode):** SODA, CQN,
+Kerberos/Radius/PKI, Native Network Encryption, Application Continuity,
+Client Result Cache, LDAP, bequeath connections, sharding, pool session tagging
+heuristics, heterogeneous pools, database startup/shutdown, OOB break.
+
+**Definition of Done (applies to every story in Epics 16–22):** same as Epics 8–15
+(analyzer clean; integration tests via `test_helper.dart`; pass on **Oracle 23ai**
+and **Oracle 21c** per `CLAUDE.md`). Where a feature **cannot be exercised on the
+two local databases** (IAM/OAuth tokens, DRCP, Autonomous/mTLS, 26ai-only
+features, RAC/failover targets), the story must instead ship (a) unit/wire-byte
+tests against node-oracledb captured bytes (see the node wire-capture technique),
+(b) a fake-server or fixture-based integration test where feasible, and
+(c) an explicit "not validated on a live server" note in README. Those stories
+are tagged **[LOCAL-DB-LIMITED]** below.
+
+**Verified against `lib/` while writing (corrections to the earlier gap list):**
+- `OracleConnection.isHealthy` **already exists** (`connection.dart:836`) — not a gap.
+- `ttcAuthModeSysdba/Sysoper/ChangePassword` exist only as **unused constants**
+  (`protocol/constants.dart:666-672`); no connect-path wiring.
+- `driverName` is **hard-coded** (`fast_auth_message.dart:60`); `AUTH_TERMINAL` /
+  `AUTH_PROGRAM_NM` are sent from `ClientInfo` but not user-configurable.
+- No `callTimeout`, proxy-user, edition, `ecid`, `appContext` support exists.
+- Pool already has an internal drain path (`pool.dart:183`); no `drainTime` API.
+- Sessionless transactions: only the TTC5 capability flag is set
+  (`transport.dart:4608`); no message support.
+
+**Suggested delivery order:** 16 → 17 → 18 → 19 → 20 → 21 → 22 (22 optional).
+
+## Epic 16: Connectivity — Connect Strings, Descriptors & Failover
+
+**Goal:** Connect to real-world deployments (RAC, Autonomous DB, tnsnames aliases)
+instead of only `host[:port]/service`.
+
+**Depends on:** none (extends Epic 1 / FR1).
+
+**Reference:** `lib/thin/sqlnet/ezConnectResolver.js`, `connStrategy.js`,
+`nvStrToNvPair.js`, `paramParser.js`; `doc/src/user_guide/connection_handling.rst`.
+Current gap: `lib/src/transport/connect_string.dart` (`parseEZConnect`).
+
+**Stories:**
+
+- **16.1 Easy Connect Plus parser** — `protocol://host:port/service:server/instance?key=value` with parameter parsing; unknown settings ignored like node thin; typed `ConnectionInfo` carrying parsed params.
+- **16.2 Full `(DESCRIPTION=...)` descriptor strings** — nested name-value parser, `ADDRESS_LIST`, `ADDRESS`, `CONNECT_DATA` (SERVICE_NAME, SID, SERVER, INSTANCE_NAME), `SECURITY`.
+- **16.3 `tnsnames.ora` alias resolution** — `configDir` / `TNS_ADMIN` lookup, alias parsing incl. comments and `IFILE`; clear errors for unresolved alias (ORA-12154).
+- **16.4 Multi-address connect strategy** — iterate ADDRESS entries with `FAILOVER`, `LOAD_BALANCE`, `SOURCE_ROUTE` rules; per-address connect timeout. **[LOCAL-DB-LIMITED]** (simulate with unreachable + reachable addresses).
+- **16.5 Retry & timeout parameters** — `retry_count`, `retry_delay`, `connect_timeout`, `transport_connect_timeout`, `expire_time` (dead-connection keepalive), `sdu`.
+- **16.6 HTTPS proxy support** — `https_proxy` / `https_proxy_port` tunnelling. **[LOCAL-DB-LIMITED]**
+- **16.7 Dual-env integration tests** — descriptor/Easy Connect/tnsnames against 23ai + 21c.
+
+## Epic 17: TLS, Wallets & Authentication
+
+**Goal:** Authenticate and secure connections the way node thin does for cloud and
+enterprise deployments.
+
+**Depends on:** Epic 16 (connect-string parameters carry TLS/auth settings).
+
+**Reference:** `lib/thin/sqlnet/ntTcp.js`, `lib/thin/protocol/messages/auth.js`,
+`fastAuth.js`; `doc/src/user_guide/authentication_methods.rst`,
+`connection_handling.rst`; Oracle 7.0.1 notes (SYSTEM wallet keyword).
+
+**Stories:**
+
+- **17.1 PEM wallet / mTLS** — `walletLocation` + `walletPassword` (PEM `ewallet.pem`), client cert + key into `SecurityContext`. **[LOCAL-DB-LIMITED]**
+- **17.2 SYSTEM trust store & server DN matching** — `walletLocation=SYSTEM`, `ssl_server_dn_match`, `ssl_server_cert_dn`, `ssl_allow_weak_dn_match`, `tcps` protocol. **[LOCAL-DB-LIMITED]**
+- **17.3 Connection privileges** — wire `SYSDBA`, `SYSOPER`, `SYSASM`, `SYSBACKUP`, `SYSDG`, `SYSKM`, `SYSRAC` auth modes (constants exist, unused); both FAST_AUTH and classical paths.
+- **17.4 Password change** — `newPassword` on connect and `connection.changePassword(user, old, new)` (`ttcAuthModeChangePassword`).
+- **17.5 Proxy users** — `user[proxy]` syntax and explicit proxy auth.
+- **17.6 Edition-based redefinition & driver identity** — `edition` connect param/pool param; configurable `driverName`, `program`, `terminal`, `osUser`, `machine` (currently hard-coded).
+- **17.7 Token authentication** — OCI IAM and OAuth 2.0 access tokens (static + callback), `setAccessToken`. **[LOCAL-DB-LIMITED]**
+- **17.8 MFA passcode** — `passcode` / `passcodeMetadata` auth params. **[LOCAL-DB-LIMITED]**
+- **17.9 DRCP / PRCP connection class & purity** — `cclass`, `purity`, `:pooled` server type, session release message; 26ai implicit pooling. **[LOCAL-DB-LIMITED]**
+- **17.10 File configuration provider** — node `lib/configProviders/file.js` parity (JSON config file → connect settings).
+- **17.11 Dual-env integration tests** — SYSDBA, password change, proxy, edition on 23ai + 21c; limited items documented.
+
+## Epic 18: Connection API & Session Attributes
+
+**Goal:** Expose node-oracledb's connection-level methods and attributes.
+
+**Depends on:** none (17.4 shares `changePassword` plumbing but is independent).
+
+**Reference:** `doc/src/api_manual/connection.rst` attributes/methods;
+`lib/connection.js`; 7.0.0 release notes (`appContext`, `pdbName`, `dbUniqueName`,
+SQL-name helpers).
+
+**Stories:**
+
+- **18.1 Call timeout** — `callTimeout` applied to every round trip with proper ORA-03156 error mapping and connection reusability.
+- **18.2 Statement break** — `break()` cancels an in-flight statement via in-band reset/marker (no OOB), parity with node thin; connection stays usable.
+- **18.3 Session tagging attributes** — `module`, `action`, `clientId`, `clientInfo`, `dbOp`, `ecid`, `currentSchema` setters via piggyback (+ readback).
+- **18.4 Application context** — `appContext(namespace, keyValues)` and `clearAppContext(namespace)`, `NJS-005`-style validation of null `keyValues`.
+- **18.5 Server/session info attributes** — `oracleServerVersion(String)`, `serviceName`, `instanceName`, `dbName`, `dbDomain`, `dbUniqueName`, `pdbName`, `hostName`, `maxOpenCursors`, `maxIdentifierLength`, `ltxid`, `transactionInProgress`, `stmtCacheSize`, `warning` (non-fatal ORA codes surfaced on result).
+- **18.6 getStatementInfo** — `getStatementInfo(sql)` returning bind names, metadata and statement type without executing.
+- **18.7 SQL-name helpers** — `isSimpleSqlName`, `isQualifiedSqlName`, `enquoteLiteral`, `enquoteName` (pure functions, node 7.0 semantics).
+- **18.8 End-user security context** — `setEndUserSecurityContext` / `clearEndUserSecurityContext` (26ai Deep Data Security). **[LOCAL-DB-LIMITED]**
+- **18.9 Dual-env integration tests** — 23ai + 21c.
+
+## Epic 19: Execute Options & Fetch Parity
+
+**Goal:** Reach `connection.execute()` option parity.
+
+**Depends on:** Epic 14 (builds on `fetchAsString` / `fetchTypeHandler`).
+
+**Reference:** `doc/src/api_manual/connection.rst` (execute options);
+`doc/src/user_guide/sql_execution.rst`; `lib/connection.js`.
+Current options: `resultSet, fetchSize, maxRows, fetchLobs, rawJsonBlobs, fetchAsString, fetchTypeHandler`.
+
+**Stories:**
+
+- **19.1 `autoCommit` option** — per-call and connection-level default.
+- **19.2 `prefetchRows`** — first-execute row prefetch control distinct from `fetchSize`.
+- **19.3 `outFormat` / object rows** — name-keyed rows, case handling; keep current row type as default.
+- **19.4 `extendedMetaData` & `keepInStmtCache`** — richer column metadata (precision, scale, byteSize, nullable, dbTypeName); per-statement cache opt-out.
+- **19.5 `fetchAsString` for NUMBER / CLOB / RAW / JSON / VECTOR and `fetchAsBuffer`** — extend the type set and add buffer conversion for LOB/RAW.
+- **19.6 `fetchInfo` and DEFINE-based `fetchTypeHandler` with `type`** — request a different fetch type with DEFINE; connection-level and global defaults; support in `executeMany`, `executeStream`, `queryStream`, REF CURSOR, nested and implicit results.
+- **19.7 IN OUT cursor binds** — lift the current "IN OUT cursor binds unsupported" limit.
+- **19.8 `suspendOnSuccess`** — sessionless-transaction hook (ships with 22.2 or stubbed fail-loud until then).
+- **19.9 Dual-env integration tests** — 23ai + 21c.
+
+## Epic 20: Remaining Data Types
+
+**Goal:** Remove the last fail-loud (`oraUnsupportedType`) column and bind types.
+
+**Depends on:** none (20.4 benefits from Epic 12 LOB handles).
+
+**Reference:** `appendix_a.rst` data-type rows; `doc/src/user_guide/objects.rst`,
+`xml_data_type.rst`, `lob_data.rst`, `json_data_type.rst`; `lib/dbObject.js`,
+`lib/thin/dbObject.js`.
+
+**Stories:**
+
+- **20.1 SQL BOOLEAN and PL/SQL BOOLEAN binds** — 23ai SQL `BOOLEAN` column decode/bind; PL/SQL BOOLEAN IN/OUT binds. **[23ai-only; 21c must fail loud with a clear message]**
+- **20.2 LONG / LONG RAW** — fetch support (currently documented unsupported).
+- **20.3 XMLType** — fetch as `String` (CLOB-backed) and bind from `String`.
+- **20.4 BFILE** — locator decode, read-only handle via `OracleLob`-style API, `DIRECTORY` alias/name metadata.
+- **20.5 Database object types and collections** — `getDbObjectClass`, object/collection decode and bind, attribute metadata, nested objects.
+- **20.6 PL/SQL index-by tables** — array-interface binds for scalar collection types.
+- **20.7 LOB handles inside nested cursors / REF CURSORs with `fetchLobs`** — lift the documented fail-loud limit (cursor-embedded handle lifecycle).
+- **20.8 JSON-Relational Duality Views** — fetch/bind verification and docs. **[26ai-only; LOCAL-DB-LIMITED]**
+- **20.9 Dual-env integration tests** — 23ai + 21c (version-gated where applicable).
+
+## Epic 21: Pool Parity
+
+**Goal:** Match node-oracledb pool configuration, observability and lifecycle.
+
+**Depends on:** Epic 18.5 (shared attributes), Epic 17.6 (`edition`).
+
+**Reference:** `doc/src/api_manual/pool.rst`, `doc/src/api_manual/oracledb.rst`;
+`lib/pool.js`, `lib/thin/pool.js`, `lib/poolStatistics.js`.
+Current pool: `minConnections, maxConnections, acquireTimeout, idleTimeout, sessionCallback`.
+
+**Stories:**
+
+- **21.1 Growth & lifetime** — `poolIncrement`, `maxLifetimeSession`.
+- **21.2 Health checking** — `poolPingInterval`, `poolPingTimeout` before handing out a connection.
+- **21.3 Queue control** — `queueMax` (NJS-076 parity) alongside existing acquire timeout.
+- **21.4 Statistics** — `enableStatistics`, `getStatistics()`, `logStatistics()`, `connectionsInUse` / `connectionsOpen`.
+- **21.5 Status & reconfigure** — `status` (open/draining/closed), `reconfigure()` for supported settings.
+- **21.6 Pool alias registry** — `poolAlias`, `getPool(alias)`.
+- **21.7 Drain on close** — `close(drainTime)` wired to the existing internal drain path.
+- **21.8 Pool-level auth passthrough** — `edition`, token refresh (`setAccessToken`), `externalAuth` rejection documented.
+- **21.9 Dual-env integration tests** — 23ai + 21c.
+
+## Epic 22: Advanced Features (optional, low priority)
+
+**Goal:** Large-surface thin features; build only on concrete demand.
+
+**Depends on:** Epics 17–18 (auth/session plumbing); 22.2 and 19.8 together.
+
+**Reference:** `lib/thin/protocol/messages/transactionChangeState.js`,
+`transactionSwitch.js`, `endPipeline.js`, `directPath*.js`, `aq*.js`;
+`doc/src/user_guide/two_phase_commit.rst`, `pipeline.rst`, `aq.rst`.
+
+**Stories:**
+
+- **22.1 Two-phase commit** — `tpcBegin/End/Prepare/Commit/Rollback/Forget/Recover` with `Xid`.
+- **22.2 Sessionless transactions** — begin / suspend / resume (26ai). **[26ai-only; LOCAL-DB-LIMITED]**
+- **22.3 Pipelining** — `runPipeline` batching (26ai). **[26ai-only; LOCAL-DB-LIMITED]**
+- **22.4 Direct path load** — `directPathLoad`. **[LOCAL-DB-LIMITED]**
+- **22.5 AQ / TxEventQ** — queues, enqueue/dequeue options, payload types. _(previously deferred by decision; confirm before starting)_
+- **22.6 Tracing hooks** — `connectTraceConfig` / trace handler equivalent.
+- **22.7 Dual-env integration tests** — 23ai + 21c where server support exists.
+
+<!-- End Epic 22 / Parity Epics -->
+

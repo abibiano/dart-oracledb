@@ -214,7 +214,7 @@ development_status:
   epic-13-retrospective: done
 
   # Epic 14: Temporal Compatibility & Fetch Type Handlers [extends Epic 4 / Story 7.9]
-  epic-14: backlog
+  epic-14: done
   14-1-tstz-region-name-decode: done
   14-2-region-name-preservation: done
   14-3-fetch-as-string: done
@@ -223,13 +223,102 @@ development_status:
   epic-14-retrospective: done
 
   # Epic 15: Extended Data Type Completeness
-  epic-15: backlog
+  epic-15: done
   15-1-interval-day-to-second: done
   15-2-interval-year-to-month: done
   15-3-rowid-urowid: done
   15-4-vector: done
   15-5-dual-env-integration-tests: done
   epic-15-retrospective: done
+
+  # Epic 16: Connectivity — Connect Strings, Descriptors & Failover [parity, node-oracledb 7.0.1]
+  epic-16: backlog
+  16-1-easy-connect-plus-parser: backlog
+  16-2-full-description-descriptor-strings: backlog
+  16-3-tnsnames-ora-alias-resolution: backlog
+  16-4-multi-address-connect-strategy: backlog
+  16-5-retry-and-timeout-parameters: backlog
+  16-6-https-proxy-support: backlog
+  16-7-dual-env-integration-tests: backlog
+  epic-16-retrospective: optional
+
+  # Epic 17: TLS, Wallets & Authentication [parity, node-oracledb 7.0.1]
+  epic-17: backlog
+  17-1-pem-wallet-mtls: backlog
+  17-2-system-trust-store-and-server-dn-matching: backlog
+  17-3-connection-privileges: backlog
+  17-4-password-change: backlog
+  17-5-proxy-users: backlog
+  17-6-edition-based-redefinition-and-driver-identity: backlog
+  17-7-token-authentication: backlog
+  17-8-mfa-passcode: backlog
+  17-9-drcp-prcp-connection-class-and-purity: backlog
+  17-10-file-configuration-provider: backlog
+  17-11-dual-env-integration-tests: backlog
+  epic-17-retrospective: optional
+
+  # Epic 18: Connection API & Session Attributes [parity, node-oracledb 7.0.1]
+  epic-18: backlog
+  18-1-call-timeout: backlog
+  18-2-statement-break: backlog
+  18-3-session-tagging-attributes: backlog
+  18-4-application-context: backlog
+  18-5-server-session-info-attributes: backlog
+  18-6-getstatementinfo: backlog
+  18-7-sql-name-helpers: backlog
+  18-8-end-user-security-context: backlog
+  18-9-dual-env-integration-tests: backlog
+  epic-18-retrospective: optional
+
+  # Epic 19: Execute Options & Fetch Parity [parity, node-oracledb 7.0.1]
+  epic-19: backlog
+  19-1-autocommit-option: backlog
+  19-2-prefetchrows: backlog
+  19-3-outformat-object-rows: backlog
+  19-4-extendedmetadata-and-keepinstmtcache: backlog
+  19-5-fetchasstring-more-types-and-fetchasbuffer: backlog
+  19-6-fetchinfo-and-define-fetchtypehandler: backlog
+  19-7-in-out-cursor-binds: backlog
+  19-8-suspendonsuccess: backlog
+  19-9-dual-env-integration-tests: backlog
+  epic-19-retrospective: optional
+
+  # Epic 20: Remaining Data Types [parity, node-oracledb 7.0.1]
+  epic-20: backlog
+  20-1-sql-boolean-and-pl-sql-boolean-binds: backlog
+  20-2-long-long-raw: backlog
+  20-3-xmltype: backlog
+  20-4-bfile: backlog
+  20-5-database-object-types-and-collections: backlog
+  20-6-pl-sql-index-by-tables: backlog
+  20-7-lob-handles-in-nested-cursors: backlog
+  20-8-json-relational-duality-views: backlog
+  20-9-dual-env-integration-tests: backlog
+  epic-20-retrospective: optional
+
+  # Epic 21: Pool Parity [parity, node-oracledb 7.0.1]
+  epic-21: backlog
+  21-1-growth-and-lifetime: backlog
+  21-2-health-checking: backlog
+  21-3-queue-control: backlog
+  21-4-statistics: backlog
+  21-5-status-and-reconfigure: backlog
+  21-6-pool-alias-registry: backlog
+  21-7-drain-on-close: backlog
+  21-8-pool-level-auth-passthrough: backlog
+  21-9-dual-env-integration-tests: backlog
+  epic-21-retrospective: optional
+
+  # Epic 22: Advanced Features (optional, low priority) [OPTIONAL / low priority]
+  epic-22: backlog
+  22-1-two-phase-commit: backlog
+  22-2-sessionless-transactions: backlog
+  22-3-pipelining: backlog
+  22-4-direct-path-load: backlog
+  22-5-aq-txeventq: backlog
+  22-6-tracing-hooks: backlog
+  22-7-dual-env-integration-tests: backlog
+  epic-22-retrospective: optional
 
 # ==========================================================================
 # ACTION ITEMS — created by epic retrospectives
